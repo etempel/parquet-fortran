@@ -4171,6 +4171,18 @@ program error_scenarios
         call scenario_kde_grid_cell_width()
     case ("kde_grid_bandwidth")
         call scenario_kde_grid_bandwidth()
+    case ("kde_grid_bandwidth_subnormal")
+        call scenario_kde_grid_bandwidth_subnormal()
+    case ("kde_grid_bandwidth_unusable")
+        call scenario_kde_grid_bandwidth_unusable()
+    case ("kde_grid_query_unfinished")
+        call scenario_kde_grid_query_unfinished()
+    case ("kde_grid_add_after_finish")
+        call scenario_kde_grid_add_after_finish()
+    case ("kde_grid_merge_after_finish")
+        call scenario_kde_grid_merge_after_finish()
+    case ("kde_grid_pilot_unfinished")
+        call scenario_kde_grid_pilot_unfinished()
     case ("kde_grid_unknown_kernel")
         call scenario_kde_grid_unknown_kernel()
     case ("kde_grid_boundary_without_bound")
@@ -35163,6 +35175,91 @@ contains
         call g%init(4, 0.0_real64, 1.0_real64, 0.0_real64)
         print '(a)', "accepted a zero bandwidth"
     end subroutine scenario_kde_grid_bandwidth
+
+    !> `pf_kde_grid%init` refuses a SUBNORMAL bandwidth: its kernel's whole support lies inside the
+    !! gap between two neighbouring numbers, so the density would be zero wherever it is asked for
+    !! while the distribution function still stepped from 0 to 1. The control is the smallest
+    !! normal number, which is admissible.
+    subroutine scenario_kde_grid_bandwidth_subnormal()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, tiny(1.0_real64))
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.5_real64*tiny(1.0_real64))
+        print '(a)', "accepted a subnormal bandwidth"
+    end subroutine scenario_kde_grid_bandwidth_subnormal
+
+    !> `pf_kde_grid%init` refuses a bandwidth whose kernel reach is not finite: the kernel's radius
+    !! times it overflows, so no window around a query point can be formed. The control is a
+    !! bandwidth a whole radius below that, which is admissible.
+    subroutine scenario_kde_grid_bandwidth_unusable()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64*huge(1.0_real64))
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(4, 0.0_real64, 1.0_real64, 0.5_real64*huge(1.0_real64))
+        print '(a)', "accepted a bandwidth whose kernel reach overflows"
+    end subroutine scenario_kde_grid_bandwidth_unusable
+
+    !> A query before `%finish` aborts: a grid has no `%fit` to be the seam between filling it and
+    !! reading it, so the seam is named, and reading a half-filled accumulation is a mistake rather
+    !! than a partial answer. The control is the same query on the same grid, finished.
+    subroutine scenario_kde_grid_query_unfinished()
+        type(pf_kde_grid) :: g, ok
+        real(real64) :: f(4)
+
+        call ok%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call ok%add([0.5_real64], finish=.true.)
+        call ok%density(f)
+        print '(a, es22.15)', "kde control queried: ", f(1)
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        call g%density(f)
+        print '(a)', "queried a grid that was never finished"
+    end subroutine scenario_kde_grid_query_unfinished
+
+    !> `%add` after `%finish` aborts, naming `%clear` as the way back. The control is the same
+    !! `%add` before it.
+    subroutine scenario_kde_grid_add_after_finish()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.5_real64])
+        print '(a, i0)', "kde control added: ", g%n()
+        call g%finish()
+        call g%add([0.25_real64])
+        print '(a)', "added to a finished grid"
+    end subroutine scenario_kde_grid_add_after_finish
+
+    !> `%merge` after `%finish` aborts for the same reason as `%add`. The control is the same
+    !! `%merge` before it.
+    subroutine scenario_kde_grid_merge_after_finish()
+        type(pf_kde_grid) :: g, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call other%add([0.5_real64])
+        call g%merge(other)
+        print '(a, i0)', "kde control merged: ", g%n()
+        call g%finish()
+        call g%merge(other)
+        print '(a)', "merged into a finished grid"
+    end subroutine scenario_kde_grid_merge_after_finish
+
+    !> `%init(pilot=)` refuses a pilot that was never finished: its table would be read off a
+    !! half-filled accumulation. The control is the same pilot, finished.
+    subroutine scenario_kde_grid_pilot_unfinished()
+        type(pf_kde_grid) :: pilot, open_pilot, g
+
+        call pilot%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call pilot%add([0.2_real64, 0.5_real64, 0.8_real64], finish=.true.)
+        call g%init(8, 0.0_real64, 1.0_real64, 0.1_real64, pilot=pilot)
+        print '(a, i0)', "kde control initialised: ", g%ncells()
+        call open_pilot%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
+        call open_pilot%add([0.2_real64, 0.5_real64, 0.8_real64])
+        call g%init(8, 0.0_real64, 1.0_real64, 0.1_real64, pilot=open_pilot)
+        print '(a)', "accepted a pilot that was never finished"
+    end subroutine scenario_kde_grid_pilot_unfinished
     !
     !> Proves that pf_kde_grid%init refuses an unknown kernel.
     subroutine scenario_kde_grid_unknown_kernel()
@@ -35282,6 +35379,7 @@ contains
 
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.5_real64])
+        call g%finish()
         call g%density(f4)
         print '(a, es22.15)', "kde control density: ", f4(2)
         call g%density(f3)
@@ -35295,6 +35393,7 @@ contains
 
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.5_real64])
+        call g%finish()
         call g%density(f4, x=x4)
         print '(a, es22.15)', "kde control density: ", x4(2)
         call g%density(f4, x=x5)
@@ -35321,6 +35420,7 @@ contains
         t = [0.2_real64, 0.5_real64, 0.8_real64]
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.5_real64])
+        call g%finish()
         call g%pdf(t, f3)
         print '(a, es22.15)', "kde control density: ", f3(2)
         call g%pdf(t, f2)
@@ -35335,6 +35435,7 @@ contains
         t = [0.2_real64, 0.5_real64, 0.8_real64]
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.5_real64])
+        call g%finish()
         call g%cdf(t, p3)
         print '(a, es22.15)', "kde control probability: ", p3(2)
         call g%cdf(t, p2)
@@ -35349,6 +35450,7 @@ contains
         p = [0.2_real64, 0.5_real64, 0.8_real64]
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.5_real64])
+        call g%finish()
         call g%quantile(p, q3)
         print '(a, es22.15)', "kde control quantile: ", q3(2)
         call g%quantile(p, q2)
@@ -35362,6 +35464,7 @@ contains
 
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.5_real64])
+        call g%finish()
         call g%quantile(1.0_real64, q)
         print '(a, es22.15)', "kde control quantile: ", q
         call g%quantile(1.5_real64, q)
@@ -35375,6 +35478,7 @@ contains
 
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.5_real64])
+        call g%finish()
         call g%pdf(0.5_real64, f)
         print '(a, es22.15)', "kde control density: ", f
         call fresh%pdf(0.5_real64, f)
@@ -35475,7 +35579,9 @@ contains
         call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
         call g%merge(same)
         print '(a, i0)', "kde control merged: ", g%n()
-        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64, boundary="reflect")
+        ! `g` took the default correction, which is `"reflect"`; `other` names another, so that the
+        ! two differ however the default moves.
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64, boundary="renormalise")
         call g%merge(other)
         print '(a)', "merged grids with a different boundary correction"
     end subroutine scenario_kde_grid_merge_boundary
@@ -35596,6 +35702,7 @@ contains
 
         call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64)
         print '(a, l1)', "kde control initialised: ", g%is_adaptive()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, alpha=0.5_real64)
@@ -35608,6 +35715,7 @@ contains
 
         call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, bandwidth_max=0.2_real64)
         print '(a, l1)', "kde control initialised: ", g%is_adaptive()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, bandwidth_max=0.2_real64)
@@ -35620,6 +35728,7 @@ contains
 
         call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, alpha=0.0_real64)
         print '(a, l1)', "kde control initialised: ", g%is_adaptive()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, alpha=-0.1_real64)
@@ -35633,6 +35742,7 @@ contains
 
         call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, bandwidth_max=0.2_real64)
         print '(a, l1)', "kde control initialised: ", g%is_adaptive()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, bandwidth_max=ieee_value(1.0_real64, ieee_quiet_nan))
@@ -35645,6 +35755,7 @@ contains
 
         call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         print '(a, l1)', "kde control initialised: ", g%is_adaptive()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=fresh)
@@ -35657,6 +35768,7 @@ contains
 
         call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         print '(a, l1)', "kde control initialised: ", g%is_adaptive()
         call g%init(4, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p)
@@ -35671,10 +35783,12 @@ contains
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
         call q%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call q%add([0.5_real64, 0.6_real64, 0.7_real64, 0.8_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         call g%merge(same)
         print '(a, i0)', "kde control merged: ", g%n()
+        call q%finish()
         call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=q)
         call g%merge(other)
         print '(a)', "merged grids read from different pilots"
@@ -35688,6 +35802,7 @@ contains
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
         call q%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call q%add([0.5_real64, 0.6_real64, 0.7_real64, 0.8_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         call g%merge(same)
@@ -35705,6 +35820,7 @@ contains
         call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
         call q%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call q%add([0.5_real64, 0.6_real64, 0.7_real64, 0.8_real64])
+        call p%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
         call g%merge(same)
@@ -35799,6 +35915,7 @@ contains
 
         call g%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.2_real64, 0.4_real64, 0.6_real64])
+        call g%finish()
         call g%sample(v, 1_int64, threads=1)
         print '(a, es22.15)', "kde control draw: ", v(1)
         call g%sample(v, 1_int64, threads=0)
@@ -35812,6 +35929,7 @@ contains
 
         call g%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call g%add([0.2_real64, 0.4_real64, 0.6_real64])
+        call g%finish()
         call g%sample(v, 1_int64)
         print '(a, es22.15)', "kde control draw: ", v(1)
         call fresh%sample(v, 1_int64)

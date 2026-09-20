@@ -75,7 +75,7 @@ contains
         a%wt = pilot%w_total
         a%unreadable = grid_poisoned(pilot)
         allocate(a%acc(pilot%nc))
-        if (pilot%boundary_code == KDE_BOUNDARY_LINEAR) then
+        if (kde_is_corrected(pilot%boundary_code)) then
             ! Under `"linear"` the pilot's cells can be negative and its mass is not its weight:
             ! the table takes the CLIPPED, normalised densities, which is what `%density` answers
             ! there, so the adaptive rule never reads a negative cell.
@@ -93,6 +93,13 @@ contains
                 a%acc(i) = pilot%acc(i)
             end do
         end if
+        ! A position-weighted checksum: two tables holding the same values in a different order
+        ! differ in it, which a plain sum would not. Formed before the early return, so that even an
+        ! unreadable table carries one.
+        a%digest = 0.0_real64
+        do i = 1, a%nc
+            a%digest = a%digest + a%acc(i)*real(i, real64)
+        end do
         a%logg = 0.0_real64
         a%pmin = 0.0_real64
         if (a%unreadable) return
@@ -127,9 +134,14 @@ contains
     module procedure kde_adapt_bandwidths
 
         integer(int64) :: i
+        real(real64) :: elim
 
+        ! The exponent above which `h*exp(e)` would overflow: two logarithms of loop-invariant
+        ! values, so they are formed once here rather than per point. The same number, so the
+        ! same bandwidths.
+        elim = log(huge(1.0_real64)) - log(h) - 1.0_real64
         do i = 1_int64, size(x, kind=int64)
-            hb(i) = rule_bandwidth(a, h, x(i))
+            hb(i) = rule_bandwidth(a, h, elim, x(i))
         end do
 
     end procedure kde_adapt_bandwidths
@@ -195,6 +207,9 @@ contains
             one(1) = 1.0_real64
             call deposit(g, x, one, .false., hb, 0_int64, m, threads, pilot_parts(g, m))
         end if
+        ! The pilot is read as a density from here on -- by `kde_adapt_set`, and by any caller who
+        ! takes a copy through `pf_kde%pilot` -- so it leaves this procedure closed.
+        call grid_finish(g)
         ok = .true.
 
     end procedure kde_build_pilot
@@ -225,6 +240,11 @@ contains
         if (.not. kde_positive_finite(bandwidth)) &
             call kde_abort(EP, "bandwidth must be a finite, positive number")
         call kde_resolve_setup(EP, kernel, lower, upper, boundary, kcode, has_lo, lo, has_hi, hi, bcode)
+        ! The module's one admission rule, which `pf_kde%fit` applies to every bandwidth a rule or a
+        ! caller produces: normal, and reaching a finite distance. A grid's bandwidth is always a
+        ! number the caller passed, so failing it is a caller's mistake and aborts.
+        if (.not. kde_bandwidth_usable(kcode, bandwidth)) call kde_abort(EP, &
+            "bandwidth must be a normal positive number whose kernel reach is finite")
         ! Every cell centre inside the support, so that no cell can hold weight the support
         ! excludes and the queries never straddle a bound.
         if (has_lo) then
@@ -233,24 +253,27 @@ contains
         if (has_hi) then
             if (xmax > hi) call kde_abort(EP, "the grid's range must lie inside the support")
         end if
-        ! Under `"linear"` weight beyond the range is counted by the PLAIN kernel's mass there, which
-        ! is exact only where the correction is not acting. Two rules keep that true, at the cost of
-        ! refusing two configurations the other corrections accept.
+        ! Under `"linear"` weight beyond the range is counted by the PLAIN kernel's mass there,
+        ! which is exact only where the correction is not acting. Two rules keep that true, at the
+        ! cost of refusing two configurations the other corrections accept. `"renormalise"` needs
+        ! neither: its beyond-range weight is the CORRECTED term's own integral (`deposit_corrected`),
+        ! so a range anywhere inside the support counts exactly.
         if (bcode == KDE_BOUNDARY_LINEAR) then
             ! R1: a bounded side's edge is the bound itself, so a zone lies wholly inside the range.
             if (has_lo) then
-                if (xmin /= lo) call kde_abort(EP, &
-                    'under boundary="linear" the grid''s range must start at lower and end at upper')
+                if (xmin /= lo) call kde_abort(EP, 'under boundary="' // trim(boundary_token(bcode)) // &
+                    '" the grid''s range must start at lower and end at upper')
             end if
             if (has_hi) then
-                if (xmax /= hi) call kde_abort(EP, &
-                    'under boundary="linear" the grid''s range must start at lower and end at upper')
+                if (xmax /= hi) call kde_abort(EP, 'under boundary="' // trim(boundary_token(bcode)) // &
+                    '" the grid''s range must start at lower and end at upper')
             end if
             ! R2: with a FREE edge, the range is at least one reach wide, so that edge lies outside
             ! the bound's zone. With both bounds no edge is free and the rule does not apply.
             if (has_lo .neqv. has_hi) then
                 if (xmax - xmin < KDE_RADIUS(kcode)*bandwidth) call kde_abort(EP, &
-                    'under boundary="linear" the grid must be at least one kernel reach wide')
+                    'under boundary="' // trim(boundary_token(bcode)) // &
+                    '" the grid must be at least one kernel reach wide')
             end if
         end if
 
@@ -264,6 +287,7 @@ contains
             ! pilot that was never built there. What it holds is data: one with no density to read,
             ! a kept NaN or nothing in its cells, makes this grid answer NaN, quietly.
             if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid")
+            if (.not. pilot%finished) call kde_abort(EP, "pilot must be a finished grid; call %finish on it")
             if (pilot%x0 > xmin .or. pilot%x1 < xmax) call kde_abort(EP, "the pilot must cover this grid's range")
             ! The table is read out of the pilot before this grid is touched.
             call kde_adapt_set(rule, pilot, a_alpha, present(bandwidth_max), a_bmax)
@@ -279,11 +303,12 @@ contains
 
         character(len=*), parameter :: EP = "pf_kde_grid%add"
         real(real64), allocatable :: keep_x(:), keep_w(:), hb(:)
-        real(real64) :: one(1), v, wsum
+        real(real64) :: one(1), v, wsum, hj
         integer(int64) :: nv, nnull, nnan, nout, m, i, stride
         logical :: saw_nan, weighted
 
         call require_initialised(self, EP)
+        call require_unfinished(self, EP)
         if (present(threads)) then
             if (threads < 1) call kde_abort(EP, "threads must be positive")
         end if
@@ -327,7 +352,10 @@ contains
         self%w_total = self%w_total + wsum
         if (saw_nan) self%poisoned = .true.
         ! A poisoned grid answers NaN whatever arrives later, so nothing more is deposited.
-        if (self%poisoned .or. m == 0_int64) return
+        if (self%poisoned .or. m == 0_int64) then
+            call close_if_asked(self, finish)
+            return
+        end if
 
         ! ---- each point's bandwidth: its own when adaptive, the one for all otherwise ----
         if (self%adapt%on) then
@@ -338,6 +366,7 @@ contains
             do i = 1_int64, m
                 if (.not. kde_bandwidth_usable(self%kernel_code, hb(i))) then
                     self%poisoned = .true.
+                    call close_if_asked(self, finish)
                     return
                 end if
             end do
@@ -349,6 +378,7 @@ contains
                 do i = 1_int64, m
                     if (KDE_RADIUS(self%kernel_code)*hb(i) > self%x1 - self%x0) then
                         self%reach_poisoned = .true.
+                        call close_if_asked(self, finish)
                         return
                     end if
                 end do
@@ -360,6 +390,26 @@ contains
             stride = 0_int64
         end if
 
+        ! ---- a per-point divisor that underflowed ----
+        ! A kernel far wider than a two-sided support keeps a mass that underflows to zero, and the
+        ! deposit divides the point's shares by it: the grid poisons itself rather than spread a NaN
+        ! over its cells and return having deposited nothing while counting the point as valid.
+        ! `"reflect"` is the only correction with a per-point divisor, and only where a kernel is
+        ! wider than the range between the bounds -- the case the doubly reflected terms omit mass
+        ! in. Checked here, serially, rather than inside the threaded deposit.
+        if (self%boundary_code == KDE_BOUNDARY_REFLECT .and. self%has_lower .and. self%has_upper) then
+            do i = 1_int64, m
+                hj = hb(1_int64 + (i - 1_int64)*stride)
+                if (KDE_RADIUS(self%kernel_code)*hj <= self%hi - self%lo) cycle
+                if (.not. kde_positive_finite(images_cdf(self, keep_x(i), hj, self%hi) &
+                        - images_cdf(self, keep_x(i), hj, self%lo))) then
+                    self%poisoned = .true.
+                    call close_if_asked(self, finish)
+                    return
+                end if
+            end do
+        end if
+
         ! ---- the deposit ----
         if (weighted) then
             call deposit(self, keep_x, keep_w, .true., hb, stride, m, threads)
@@ -367,6 +417,7 @@ contains
             one(1) = 1.0_real64
             call deposit(self, keep_x, one, .false., hb, stride, m, threads)
         end if
+        call close_if_asked(self, finish)
 
     end procedure grid_add_f64_r1
 
@@ -387,7 +438,7 @@ contains
             allocate(ws(1))
             ws(1) = weights
         end if
-        call grid_add_f64_r1(self, xs, vs, ws, skipnan, n_null, n_nan, n_outside)
+        call grid_add_f64_r1(self, xs, vs, ws, skipnan, n_null, n_nan, n_outside, finish=finish)
 
     end procedure grid_add_f64_r0
 
@@ -397,7 +448,7 @@ contains
 
         allocate(xw(size(x, kind=int64)))
         xw = real(x, real64)
-        call grid_add_f64_r1(self, xw, is_valid, weights, skipnan, n_null, n_nan, n_outside, threads)
+        call grid_add_f64_r1(self, xw, is_valid, weights, skipnan, n_null, n_nan, n_outside, threads, finish)
 
     end procedure grid_add_f32_r1
 
@@ -408,13 +459,13 @@ contains
 
         ! The column's validity becomes `is_valid`: unallocated when it has no null, and so absent.
         call kde_widen_column("pf_kde_grid%add", x, is_valid, wide, mask)
-        call grid_add_f64_r1(self, wide, mask, weights, skipnan, n_null, n_nan, n_outside, threads)
+        call grid_add_f64_r1(self, wide, mask, weights, skipnan, n_null, n_nan, n_outside, threads, finish)
 
     end procedure grid_add_col
 
     module procedure grid_add_f32_r0
 
-        call grid_add_f64_r0(self, real(x, real64), is_valid, weights, skipnan, n_null, n_nan, n_outside)
+        call grid_add_f64_r0(self, real(x, real64), is_valid, weights, skipnan, n_null, n_nan, n_outside, finish)
 
     end procedure grid_add_f32_r0
 
@@ -424,6 +475,7 @@ contains
         integer :: i
 
         call require_initialised(self, EP)
+        call require_unfinished(self, EP)
         if (.not. other%initialised) call kde_abort(EP, "the other grid has not been initialised")
         if (self%nc /= other%nc) call kde_abort(EP, "the two grids differ in cells")
         if (self%x0 /= other%x0 .or. self%x1 /= other%x1) call kde_abort(EP, "the two grids differ in range")
@@ -446,8 +498,29 @@ contains
         self%cnt_out = self%cnt_out + other%cnt_out
         self%poisoned = self%poisoned .or. other%poisoned
         self%reach_poisoned = self%reach_poisoned .or. other%reach_poisoned
+        call close_if_asked(self, finish)
 
     end procedure grid_merge
+
+    module procedure grid_finish
+
+        call require_initialised(self, "pf_kde_grid%finish")
+        ! A second `%finish` is a no-op: a caller who cannot tell whether a helper already closed
+        ! the grid may call it again.
+        if (self%finished) return
+        ! Everything a query would otherwise rebuild per call, computed once here. The grid cannot
+        ! change between `%finish` and a query -- `%add` and `%merge` are shut, and `%clear` is what
+        ! reopens it -- so the stored values are always current. This is what turns `%density` from
+        ! `O(cells**2)` into `O(cells)` and a bulk query from `O(cells)` a point into a constant.
+        self%mass_total = accumulated_mass(self)
+        call fill_running_mass(self)
+        self%finished = .true.
+
+    end procedure grid_finish
+
+    module procedure grid_is_finished
+        res = self%finished
+    end procedure grid_is_finished
 
     ! ==========================================================================================
     ! Queries
@@ -459,7 +532,7 @@ contains
         logical :: norm
         integer :: i
 
-        call require_initialised(self, EP)
+        call require_finished(self, EP)
         if (size(f, kind=int64) /= int(self%nc, int64)) call kde_abort(EP, "f must have one element per cell")
         if (present(x)) then
             if (size(x, kind=int64) /= int(self%nc, int64)) call kde_abort(EP, "x must have one element per cell")
@@ -488,75 +561,112 @@ contains
 
     module procedure grid_pdf_r0
 
-        call require_initialised(self, "pf_kde_grid%pdf")
+        call require_finished(self, "pf_kde_grid%pdf")
         f = pdf_value(self, x)
 
     end procedure grid_pdf_r0
 
     module procedure grid_pdf_r1
 
-        integer(int64) :: i
+        character(len=*), parameter :: EP = "pf_kde_grid%pdf"
+        integer(int64) :: i, n
+        integer :: team
 
-        call require_initialised(self, "pf_kde_grid%pdf")
-        if (size(f, kind=int64) /= size(x, kind=int64)) &
-            call kde_abort("pf_kde_grid%pdf", "f must have one element per point of x")
-        do i = 1_int64, size(x, kind=int64)
+        call require_finished(self, EP)
+        n = size(x, kind=int64)
+        if (size(f, kind=int64) /= n) call kde_abort(EP, "f must have one element per point of x")
+        call kde_query_team(EP, threads, n, KDE_GRID_QUERY_WORK, team)
+        if (team <= 1) then
+            kde_team_used = 1
+            do i = 1_int64, n
+                f(i) = pdf_value(self, x(i))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(i)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do i = 1_int64, n
             f(i) = pdf_value(self, x(i))
         end do
+        !$omp end do
+        !$omp end parallel
 
     end procedure grid_pdf_r1
 
     module procedure grid_cdf_r0
 
-        real(real64), allocatable :: q(:)
-
-        call require_initialised(self, "pf_kde_grid%cdf")
-        call running_mass(self, q)
-        p = cdf_value(self, q, x)
+        call require_finished(self, "pf_kde_grid%cdf")
+        p = cdf_value(self, x)
 
     end procedure grid_cdf_r0
 
     module procedure grid_cdf_r1
 
-        real(real64), allocatable :: q(:)
-        integer(int64) :: i
+        character(len=*), parameter :: EP = "pf_kde_grid%cdf"
+        integer(int64) :: i, n
+        integer :: team
 
-        call require_initialised(self, "pf_kde_grid%cdf")
-        if (size(p, kind=int64) /= size(x, kind=int64)) &
-            call kde_abort("pf_kde_grid%cdf", "p must have one element per point of x")
-        call running_mass(self, q)
-        do i = 1_int64, size(x, kind=int64)
-            p(i) = cdf_value(self, q, x(i))
+        call require_finished(self, EP)
+        n = size(x, kind=int64)
+        if (size(p, kind=int64) /= n) call kde_abort(EP, "p must have one element per point of x")
+        call kde_query_team(EP, threads, n, KDE_GRID_QUERY_WORK, team)
+        if (team <= 1) then
+            kde_team_used = 1
+            do i = 1_int64, n
+                p(i) = cdf_value(self, x(i))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(i)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do i = 1_int64, n
+            p(i) = cdf_value(self, x(i))
         end do
+        !$omp end do
+        !$omp end parallel
 
     end procedure grid_cdf_r1
 
     module procedure grid_quantile_r0
 
-        real(real64), allocatable :: q(:)
-
-        call require_initialised(self, "pf_kde_grid%quantile")
+        call require_finished(self, "pf_kde_grid%quantile")
         call check_probability(p)
-        call running_mass(self, q)
-        x = quantile_value(self, q, p)
+        x = quantile_value(self, p)
 
     end procedure grid_quantile_r0
 
     module procedure grid_quantile_r1
 
-        real(real64), allocatable :: q(:)
-        integer(int64) :: i
+        character(len=*), parameter :: EP = "pf_kde_grid%quantile"
+        integer(int64) :: i, n
+        integer :: team
 
-        call require_initialised(self, "pf_kde_grid%quantile")
-        if (size(x, kind=int64) /= size(p, kind=int64)) &
-            call kde_abort("pf_kde_grid%quantile", "x must have one element per element of p")
-        do i = 1_int64, size(p, kind=int64)
+        call require_finished(self, EP)
+        n = size(p, kind=int64)
+        if (size(x, kind=int64) /= n) call kde_abort(EP, "x must have one element per element of p")
+        call kde_query_team(EP, threads, n, KDE_GRID_QUERY_WORK, team)
+        ! Every probability is checked before any is answered, and serially, so that an abort is
+        ! taken outside the team.
+        do i = 1_int64, n
             call check_probability(p(i))
         end do
-        call running_mass(self, q)
-        do i = 1_int64, size(p, kind=int64)
-            x(i) = quantile_value(self, q, p(i))
+        if (team <= 1) then
+            kde_team_used = 1
+            do i = 1_int64, n
+                x(i) = quantile_value(self, p(i))
+            end do
+            return
+        end if
+        !$omp parallel num_threads(team) default(shared) private(i)
+        call kde_record_team()
+        !$omp do schedule(static)
+        do i = 1_int64, n
+            x(i) = quantile_value(self, p(i))
         end do
+        !$omp end do
+        !$omp end parallel
 
     end procedure grid_quantile_r1
 
@@ -678,6 +788,11 @@ contains
         end if
         write(u, '(a)') "pf_kde_grid"
         ! Every row's label in the one thirteen-character column, `kde_label`'s.
+        if (self%finished) then
+            write(u, '(2x,a,a)') kde_label("state"), "finished (the queries answer)"
+        else
+            write(u, '(2x,a,a)') kde_label("state"), "accumulating (%finish before querying)"
+        end if
         write(u, '(2x,a,i0)') kde_label("cells"), self%nc
         write(u, '(2x,a,es24.16e3)') kde_label("xmin"), self%x0
         write(u, '(2x,a,es24.16e3)') kde_label("xmax"), self%x1
@@ -693,14 +808,7 @@ contains
         write(u, '(2x,a,es24.16e3)') kde_label("sum_weights"), self%w_total
         if (self%has_lower) write(u, '(2x,a,es24.16e3)') kde_label("lower"), self%lo
         if (self%has_upper) write(u, '(2x,a,es24.16e3)') kde_label("upper"), self%hi
-        select case (self%boundary_code)
-        case (KDE_BOUNDARY_RENORMALISE)
-            write(u, '(2x,a,a)') kde_label("boundary"), "renormalise"
-        case (KDE_BOUNDARY_REFLECT)
-            write(u, '(2x,a,a)') kde_label("boundary"), "reflect"
-        case default
-            write(u, '(2x,a,a)') kde_label("boundary"), "none (unbounded)"
-        end select
+        write(u, '(2x,a,a)') kde_label("boundary"), trim(boundary_token(self%boundary_code))
         if (self%adapt%on) then
             write(u, '(2x,a,es24.16e3)') kde_label("alpha"), self%adapt%alpha
             if (self%adapt%has_bmax) write(u, '(2x,a,es24.16e3)') kde_label("bandwidth_max"), self%adapt%bmax
@@ -741,6 +849,39 @@ contains
 
     end subroutine require_initialised
 
+    !> Aborts unless the grid is still accumulating: `%add` and `%merge` are shut after `%finish`,
+    !! and `%clear` is what reopens them. Impure deliberately, like every guard here.
+    subroutine require_unfinished(self, entry)
+        class(pf_kde_grid), intent(in) :: self  !! the grid
+        character(len=*), intent(in)   :: entry !! the binding, for the message
+
+        if (self%finished) call kde_abort(entry, &
+            "the grid has been finished; call %clear to accumulate into it again")
+
+    end subroutine require_unfinished
+
+    !> Aborts unless the grid has been finished, which is when the queries open.
+    subroutine require_finished(self, entry)
+        class(pf_kde_grid), intent(in) :: self  !! the grid
+        character(len=*), intent(in)   :: entry !! the binding, for the message
+
+        call require_initialised(self, entry)
+        if (.not. self%finished) call kde_abort(entry, &
+            "the grid has not been finished; call %finish before querying it")
+
+    end subroutine require_finished
+
+    !> Closes the accumulation when the caller asked for it with `finish=.true.`, which is the
+    !! one-line form of `%finish` on the last `%add` or `%merge`.
+    subroutine close_if_asked(self, finish)
+        class(pf_kde_grid), intent(inout) :: self   !! the grid
+        logical, intent(in), optional     :: finish !! the caller's request
+
+        if (.not. present(finish)) return
+        if (finish) call grid_finish(self)
+
+    end subroutine close_if_asked
+
     !> Aborts unless `p` is a probability. The NaN is screened first, as its own test.
     subroutine check_probability(p)
         real(real64), intent(in) :: p !! the caller's probability
@@ -756,6 +897,9 @@ contains
         class(pf_kde_grid), intent(inout) :: self !! the grid, initialised
 
         self%acc = 0.0_real64
+        self%finished = .false.
+        self%mass_total = 0.0_real64
+        if (allocated(self%cum)) deallocate(self%cum)
         self%poisoned = self%adapt%on .and. self%adapt%unreadable
         self%reach_poisoned = .false.
         self%w_total = 0.0_real64
@@ -768,6 +912,26 @@ contains
         self%cnt_out = 0_int64
 
     end subroutine empty_grid
+
+    !> A boundary correction's own token, as `%init` took it: the one spelling `%print` reports and
+    !! the refusals name, so that a message and a printed row cannot drift from each other or from
+    !! `kde_resolve_boundary`'s vocabulary.
+    pure function boundary_token(bcode) result(name)
+        integer, intent(in) :: bcode !! the correction's code
+        character(len=16)   :: name  !! its token, blank-padded
+
+        select case (bcode)
+        case (KDE_BOUNDARY_RENORMALISE)
+            name = "renormalise"
+        case (KDE_BOUNDARY_REFLECT)
+            name = "reflect"
+        case (KDE_BOUNDARY_LINEAR)
+            name = "linear"
+        case default
+            name = "none (unbounded)"
+        end select
+
+    end function boundary_token
 
     !> `.true.` when two grids have the same support: the same bounds given, at the same values.
     pure function same_support(a, b) result(res)
@@ -802,6 +966,9 @@ contains
         end if
         if (a%nc /= b%nc .or. a%x0 /= b%x0 .or. a%x1 /= b%x1 .or. a%wt /= b%wt) return
         if (a%unreadable .neqv. b%unreadable) return
+        ! Two tables that differ almost always differ here, and then no cell is looked at. A match
+        ! is not trusted: a checksum can collide, so the cells are still walked.
+        if (a%digest /= b%digest) return
         do i = 1, a%nc
             if (a%acc(i) /= b%acc(i)) return
         end do
@@ -885,6 +1052,7 @@ contains
         to%unreadable = from%unreadable
         to%logg = from%logg
         to%pmin = from%pmin
+        to%digest = from%digest
         if (allocated(from%acc)) call move_alloc(from%acc, to%acc)
 
     end subroutine move_adapt
@@ -1067,10 +1235,25 @@ contains
         real(real64), intent(inout)    :: above    !! the weight above `xmax`
 
         real(real64), allocatable :: z(:), k(:), k2(:)
-        real(real64) :: wj
+        real(real64) :: wj, hmax, span
         integer(int64) :: j
+        integer :: nw
 
-        allocate(z(self%nc), k(self%nc), k2(self%nc))
+        ! The work rows hold the cells ONE kernel reaches, not the whole grid. Cell `ilo` is
+        ! `ceiling(tl)` and cell `ihi` is `floor(th)` with `th - tl = 2*R*h_j/dx`, so no point of
+        ! this range can touch more than `floor(2*R*hmax/dx) + 1` of them; the bound is formed from
+        ! the widest bandwidth in the range, and falls back to the whole grid wherever the quotient
+        ! is too large to be an `integer`.
+        hmax = hb(1)
+        if (hstride /= 0_int64) then
+            do j = jlo, jhi
+                if (hb(j) > hmax) hmax = hb(j)
+            end do
+        end if
+        span = 2.0_real64*KDE_RADIUS(self%kernel_code)*hmax/self%dx
+        nw = self%nc
+        if (span < real(self%nc, real64)) nw = min(self%nc, int(span) + 2)
+        allocate(z(nw), k(nw), k2(nw))
         wj = 1.0_real64
         do j = jlo, jhi
             if (weighted) wj = w(j)
@@ -1198,12 +1381,12 @@ contains
 
         ! ---- under `"linear"`, a corrected point deposits its boundary weights as they are ----
         ! A point clear of every zone takes the plain path below, so it costs what it costs today.
-        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
+        if (kde_is_corrected(self%boundary_code)) then
             need_mass = .false.
             if (self%has_lower) need_mass = xj - reach < self%lo + reach
             if (self%has_upper) need_mass = need_mass .or. xj + reach > self%hi - reach
             if (need_mass) then
-                call deposit_linear(self, xj, wj, hj, reach, z, k, acc, below, above)
+                call deposit_corrected(self, xj, wj, hj, reach, z, k, acc, below, above)
                 return
             end if
         end if
@@ -1214,9 +1397,6 @@ contains
         ! for no distribution function at all.
         need_mass = .false.
         select case (self%boundary_code)
-        case (KDE_BOUNDARY_RENORMALISE)
-            if (self%has_lower) need_mass = xj - reach < self%lo
-            if (self%has_upper) need_mass = need_mass .or. xj + reach > self%hi
         case (KDE_BOUNDARY_REFLECT)
             ! The images keep the mass inside unless the kernel is wider than the whole support,
             ! where the doubly reflected terms they omit would carry some (`pf_kde`'s rule, F3).
@@ -1316,7 +1496,7 @@ contains
     !! and nothing is clipped here. What the kernel puts beyond a FREE edge is counted by the plain
     !! kernel's mass there, which R1, R2 and R3 keep exact: beyond a free edge the correction is not
     !! acting.
-    subroutine deposit_linear(self, xj, wj, hj, reach, z, k, acc, below, above)
+    subroutine deposit_corrected(self, xj, wj, hj, reach, z, k, acc, below, above)
         class(pf_kde_grid), intent(in) :: self   !! the grid, read for its geometry
         real(real64), intent(in)       :: xj     !! the point, inside the support
         real(real64), intent(in)       :: wj     !! its weight
@@ -1328,20 +1508,40 @@ contains
         real(real64), intent(inout)    :: below  !! the weight below `xmin`
         real(real64), intent(inout)    :: above  !! the weight above `xmax`
 
-        type(kde_lin_factor) :: lf
-        real(real64) :: tl, th, s_below, s_above, rj, c, v
+        type(kde_corr_kernel) :: cf
+        type(kde_point_fn) :: fn
+        real(real64) :: tl, th, s_below, s_above, rj, c, v, a, b
         integer :: ilo, ihi, n, i, ic
 
         rj = 1.0_real64/hj
+        ! What the term puts outside the range but inside the support: the CORRECTED term's own
+        ! integral there, so that the cells and the two counters are the one density and still sum
+        ! to its whole mass. Beyond a free edge the correction is not acting, and the integral is
+        ! then the plain kernel's distribution function to the bit -- which is every case `"linear"`
+        ! can reach, R1 and R2 keeping its bounded edges at the bounds.
+        fn%code = self%kernel_code
+        fn%bcode = self%boundary_code
+        fn%has_lower = self%has_lower
+        fn%lo = self%lo
+        fn%has_upper = self%has_upper
+        fn%hi = self%hi
+        fn%xj = xj
+        fn%hj = hj
+        fn%r = rj
+        fn%absolute = .false.
+        a = xj - reach
+        if (self%has_lower) a = max(a, self%lo)
+        b = xj + reach
+        if (self%has_upper) b = min(b, self%hi)
         s_below = 0.0_real64
         if (xj - reach < self%x0) then
             if (.not. self%has_lower .or. self%lo < self%x0) &
-                s_below = kde_kernel_cdf(self%kernel_code, (self%x0 - xj)*rj)
+                s_below = kde_term_integral(fn, a, self%x0, 0.0_real64, .false.)
         end if
         s_above = 0.0_real64
         if (xj + reach > self%x1) then
             if (.not. self%has_upper .or. self%hi > self%x1) &
-                s_above = 1.0_real64 - kde_kernel_cdf(self%kernel_code, (self%x1 - xj)*rj)
+                s_above = kde_term_integral(fn, self%x1, b, 0.0_real64, .false.)
         end if
         if (s_below > 0.0_real64) below = below + wj*s_below
         if (s_above > 0.0_real64) above = above + wj*s_above
@@ -1362,9 +1562,16 @@ contains
             call kde_kernel_pdf_many(self%kernel_code, z(1:n), k(1:n))
             do i = 1, n
                 c = centre(self, ilo + i - 1)
-                lf = kde_linear_factor(self%kernel_code, self%has_lower, self%lo, self%has_upper, &
-                    self%hi, c, rj)
-                v = kde_linear_value(lf, z(i), k(i))
+                ! A centre a whole reach from every bound has a plain kernel there, which is what
+                ! `kde_corr_factor` would answer after forming its interval: the same value,
+                ! without the moments. Most cells of a wide grid are in this case.
+                if (plain_at(self, c, rj)) then
+                    v = k(i)
+                else
+                    cf = kde_corr_factor(self%boundary_code, self%kernel_code, self%has_lower, &
+                        self%lo, self%has_upper, self%hi, c, rj)
+                    v = kde_corr_value(cf, z(i), k(i))
+                end if
                 acc(ilo + i - 1) = acc(ilo + i - 1) + wj*v*rj
             end do
             return
@@ -1376,7 +1583,29 @@ contains
         ic = max(1, min(self%nc, ic))
         acc(ic) = acc(ic) + wj*(1.0_real64 - s_below - s_above)/self%dx
 
-    end subroutine deposit_linear
+    end subroutine deposit_corrected
+
+    !> `.true.` when a kernel of reach `reach` centred at `t` is clear of every bound, so that the
+    !! correction is not acting there and the corrected kernel is the plain one. The same test
+    !! `kde_corr_factor` makes on its own interval, made before the interval is formed.
+    pure function plain_at(self, t, r) result(res)
+        class(pf_kde_grid), intent(in) :: self !! the grid
+        real(real64), intent(in)       :: t    !! the query
+        real(real64), intent(in)       :: r    !! one over the point's bandwidth
+        logical                        :: res  !! the kernel is plain there
+
+        real(real64) :: rad
+
+        ! `kde_corr_factor`'s own comparison, operand for operand: it clips its interval only where
+        ! `(t - lo)*r < rad`, so the test has to be made on that product and not on `t - lo` against
+        ! `rad*h_j`, which can land on the other side of the boundary by a last bit.
+        rad = KDE_RADIUS(self%kernel_code)
+        res = .true.
+        if (self%has_lower) res = .not. ((t - self%lo)*r < rad)
+        if (.not. res) return
+        if (self%has_upper) res = .not. ((self%hi - t)*r < rad)
+
+    end function plain_at
 
     !> The support's lower end, `-Infinity` when unbounded.
     pure function lower_end(self) result(t)
@@ -1434,7 +1663,7 @@ contains
         real(real64)                   :: a    !! its accumulation, clipped where the correction needs it
 
         a = self%acc(i)
-        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
+        if (kde_is_corrected(self%boundary_code)) then
             if (.not. (a > 0.0_real64)) a = 0.0_real64
         end if
 
@@ -1448,10 +1677,28 @@ contains
         class(pf_kde_grid), intent(in) :: self !! the grid
         real(real64)                   :: t    !! the mass
 
+        ! Once the grid is closed this is what `%finish` left; `%print`, which answers at any point
+        ! in the lifecycle, is the one caller that can still reach the sum itself.
+        if (self%finished) then
+            t = self%mass_total
+        else
+            t = accumulated_mass(self)
+        end if
+
+    end function total_mass
+
+    !> The mass the queries normalise by, summed from the cells: the total weight, and under a
+    !! local-polynomial correction the CLIPPED estimate's own mass, `step * sum(max(acc, 0))` plus
+    !! what the kernels put beyond each end. `%finish` calls it once and every query then reads
+    !! what it left.
+    pure function accumulated_mass(self) result(t)
+        class(pf_kde_grid), intent(in) :: self !! the grid
+        real(real64)                   :: t    !! the mass
+
         integer :: i
         real(real64) :: s
 
-        if (self%boundary_code /= KDE_BOUNDARY_LINEAR) then
+        if (.not. kde_is_corrected(self%boundary_code)) then
             t = self%w_total
             return
         end if
@@ -1461,7 +1708,7 @@ contains
         end do
         t = s*self%dx + self%w_below + self%w_above
 
-    end function total_mass
+    end function accumulated_mass
 
     !> Cell `i`'s density on this grid, which holds weight.
     function cell_density(self, i) result(f)
@@ -1486,7 +1733,7 @@ contains
         wt = total_mass(self)
         if (.not. (wt > 0.0_real64)) return
         f = interp_cells(self%nc, self%x0, self%x1, self%dx, self%acc, wt, t, &
-            self%boundary_code == KDE_BOUNDARY_LINEAR)
+            kde_is_corrected(self%boundary_code))
 
     end function pdf_value
 
@@ -1589,11 +1836,12 @@ contains
     !! then capped at `bandwidth_max`. Where the pilot reads zero, the cap is the answer; without
     !! one, the pilot's smallest positive cell density stands in for `p`. NaN from a table with
     !! nothing to read, whatever `alpha`.
-    function rule_bandwidth(a, h, t) result(hj)
-        type(kde_adapt), intent(in) :: a  !! the rule
-        real(real64), intent(in)    :: h  !! the global bandwidth
-        real(real64), intent(in)    :: t  !! the point
-        real(real64)                :: hj !! its bandwidth
+    function rule_bandwidth(a, h, elim, t) result(hj)
+        type(kde_adapt), intent(in) :: a    !! the rule
+        real(real64), intent(in)    :: h    !! the global bandwidth
+        real(real64), intent(in)    :: elim !! the largest exponent `h*exp(e)` can be formed at
+        real(real64), intent(in)    :: t    !! the point
+        real(real64)                :: hj   !! its bandwidth
 
         real(real64) :: p, e
 
@@ -1612,7 +1860,7 @@ contains
                 p = a%pmin
             end if
             e = -a%alpha*(log(p) - a%logg)
-            if (e > log(huge(h)) - log(h) - 1.0_real64) then
+            if (e > elim) then
                 hj = ieee_value(1.0_real64, ieee_positive_inf)
             else
                 hj = h*exp(e)
@@ -1624,28 +1872,27 @@ contains
 
     end function rule_bandwidth
 
-    !> `q(i)`, the accumulated weight per unit length integrated from `xmin` to centre `i`, under
-    !! `%pdf`'s interpolant: half a cell of `acc(1)` to the first centre, then a trapezoid per
-    !! segment.
-    pure subroutine running_mass(self, q)
-        class(pf_kde_grid), intent(in)         :: self !! the grid
-        real(real64), allocatable, intent(out) :: q(:) !! the running integral at each centre
+    !> Fills `%cum`: `cum(i)` is the accumulated weight per unit length integrated from `xmin` to
+    !! centre `i`, under `%pdf`'s interpolant -- half a cell of `acc(1)` to the first centre, then a
+    !! trapezoid per segment. Formed once by `%finish`; `%cdf`, `%quantile` and `%sample` read it.
+    subroutine fill_running_mass(self)
+        class(pf_kde_grid), intent(inout) :: self !! the grid, its cells final
 
         integer :: i
 
-        allocate(q(self%nc))
-        q(1) = 0.5_real64*cell_acc(self, 1)*self%dx
+        if (allocated(self%cum)) deallocate(self%cum)
+        allocate(self%cum(self%nc))
+        self%cum(1) = 0.5_real64*cell_acc(self, 1)*self%dx
         do i = 2, self%nc
-            q(i) = q(i - 1) + 0.5_real64*(cell_acc(self, i - 1) + cell_acc(self, i))*self%dx
+            self%cum(i) = self%cum(i - 1) + 0.5_real64*(cell_acc(self, i - 1) + cell_acc(self, i))*self%dx
         end do
 
-    end subroutine running_mass
+    end subroutine fill_running_mass
 
     !> `P(X <= t)` from the running integral `q`: the weight below `xmin`, plus `%pdf`'s integral
     !! from `xmin` to `t`, over the total weight; exactly 0 and 1 beyond the bounds.
-    pure function cdf_value(self, q, t) result(p)
-        class(pf_kde_grid), intent(in) :: self !! the grid
-        real(real64), intent(in)       :: q(:) !! the running integral at each centre
+    pure function cdf_value(self, t) result(p)
+        class(pf_kde_grid), intent(in) :: self !! the grid, finished
         real(real64), intent(in)       :: t    !! where to evaluate
         real(real64)                   :: p    !! the probability at or below `t`
 
@@ -1668,17 +1915,17 @@ contains
         if (t < self%x0) then
             mass = self%w_below
         else if (t >= self%x1) then
-            mass = self%w_below + q(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
+            mass = self%w_below + self%cum(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
         else if (t <= centre(self, 1)) then
             mass = self%w_below + cell_acc(self, 1)*(t - self%x0)
         else if (t >= centre(self, self%nc)) then
-            mass = self%w_below + q(self%nc) + cell_acc(self, self%nc)*(t - centre(self, self%nc))
+            mass = self%w_below + self%cum(self%nc) + cell_acc(self, self%nc)*(t - centre(self, self%nc))
         else
             j = segment(self, t)
             s = (t - centre(self, j))/self%dx
             a = cell_acc(self, j)
             b = cell_acc(self, j + 1)
-            mass = self%w_below + q(j) + self%dx*s*(a + 0.5_real64*(b - a)*s)
+            mass = self%w_below + self%cum(j) + self%dx*s*(a + 0.5_real64*(b - a)*s)
         end if
         p = mass/wt
         if (p < 0.0_real64) p = 0.0_real64
@@ -1690,9 +1937,8 @@ contains
     !! `q`. A quantile the weight below `xmin` covers is `xmin`; one only the weight above `xmax`
     !! reaches is `xmax`; otherwise the linear piece of an outer half-cell or the quadratic piece
     !! between two centres is solved for it.
-    pure function quantile_value(self, q, p) result(x)
-        class(pf_kde_grid), intent(in) :: self !! the grid
-        real(real64), intent(in)       :: q(:) !! the running integral at each centre
+    pure function quantile_value(self, p) result(x)
+        class(pf_kde_grid), intent(in) :: self !! the grid, finished
         real(real64), intent(in)       :: p    !! the probability, in `[0, 1]`
         real(real64)                   :: x    !! the quantile
 
@@ -1702,7 +1948,7 @@ contains
         if (grid_poisoned(self)) return
         wt = total_mass(self)
         if (.not. (wt > 0.0_real64)) return
-        total = q(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
+        total = self%cum(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
         target = p*wt - self%w_below
         if (p <= 0.0_real64 .or. target <= 0.0_real64) then
             x = self%x0
@@ -1714,7 +1960,7 @@ contains
             if (.not. (self%w_above > 0.0_real64)) x = right_end(self)
             return
         end if
-        x = mass_at(self, q, target)
+        x = mass_at(self, target)
 
     end function quantile_value
 
@@ -1722,31 +1968,30 @@ contains
     !! reaches `target`, strictly between zero and the cells' whole mass: the linear piece of an
     !! outer half-cell, or the quadratic piece between two centres, solved for it. What `%quantile`
     !! and `%sample` both invert.
-    pure function mass_at(self, q, target) result(x)
-        class(pf_kde_grid), intent(in) :: self   !! the grid
-        real(real64), intent(in)       :: q(:)   !! the running integral at each centre
+    pure function mass_at(self, target) result(x)
+        class(pf_kde_grid), intent(in) :: self   !! the grid, finished
         real(real64), intent(in)       :: target !! the mass to reach
         real(real64)                   :: x      !! where it is reached
 
         real(real64) :: d, a, b, s
         integer :: j, lo_j, hi_j, mid
 
-        if (target <= q(1)) then
+        if (target <= self%cum(1)) then
             ! The first half-cell, where the density is the constant `acc(1)`, positive here.
             x = min(self%x0 + target/cell_acc(self, 1), centre(self, 1))
             return
         end if
-        if (target > q(self%nc)) then
+        if (target > self%cum(self%nc)) then
             ! The last half-cell, where the density is the constant `acc(ncells)`, positive here.
-            x = min(centre(self, self%nc) + (target - q(self%nc))/cell_acc(self, self%nc), self%x1)
+            x = min(centre(self, self%nc) + (target - self%cum(self%nc))/cell_acc(self, self%nc), self%x1)
             return
         end if
-        ! The first segment whose end reaches the target: `q(j) < target <= q(j + 1)`.
+        ! The first segment whose end reaches the target: `self%cum(j) < target <= self%cum(j + 1)`.
         lo_j = 1
         hi_j = self%nc - 1
         do while (lo_j < hi_j)
             mid = lo_j + (hi_j - lo_j)/2
-            if (q(mid + 1) >= target) then
+            if (self%cum(mid + 1) >= target) then
                 hi_j = mid
             else
                 lo_j = mid + 1
@@ -1755,7 +2000,7 @@ contains
         j = lo_j
         ! `step*(a*s + (b - a)*s**2/2) = d` solved in its rationalised form, which needs no case
         ! for `a == b` and cannot cancel: `s = 2*d' / (a + sqrt(a**2 + 2*(b - a)*d'))`, `d' = d/step`.
-        d = (target - q(j))/self%dx
+        d = (target - self%cum(j))/self%dx
         a = cell_acc(self, j)
         b = cell_acc(self, j + 1)
         s = 2.0_real64*d/(a + sqrt(max(a*a + 2.0_real64*(b - a)*d, 0.0_real64)))
@@ -1775,26 +2020,24 @@ contains
         integer, intent(in), optional  :: threads !! the caller's request
 
         character(len=*), parameter :: EP = "pf_kde_grid%sample"
-        real(real64), allocatable :: q(:)
         real(real64) :: total
         integer(int64) :: k, n, key
         integer :: team
 
-        call require_initialised(self, EP)
+        call require_finished(self, EP)
         n = size(v, kind=int64)
         call kde_query_team(EP, threads, n, KDE_DRAW_WORK, team)
         v = ieee_value(1.0_real64, ieee_quiet_nan)
         if (grid_poisoned(self)) return
         if (.not. (total_mass(self) > 0.0_real64)) return
-        call running_mass(self, q)
-        total = q(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
+        total = self%cum(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
         ! Weight counted only beyond the range has no place in it to be drawn at.
         if (.not. (total > 0.0_real64)) return
         key = pf_random_key(seed, KDE_GRID_FAMILY_LABEL)
         if (team <= 1) then
             kde_team_used = 1
             do k = 1_int64, n
-                v(k) = cells_draw(self, q, total, pf_random_at(key, pf_random_key(stream, k), 1_int64))
+                v(k) = cells_draw(self, total, pf_random_at(key, pf_random_key(stream, k), 1_int64))
             end do
             return
         end if
@@ -1802,7 +2045,7 @@ contains
         call kde_record_team()
         !$omp do schedule(static)
         do k = 1_int64, n
-            v(k) = cells_draw(self, q, total, pf_random_at(key, pf_random_key(stream, k), 1_int64))
+            v(k) = cells_draw(self, total, pf_random_at(key, pf_random_key(stream, k), 1_int64))
         end do
         !$omp end do
         !$omp end parallel
@@ -1812,9 +2055,8 @@ contains
     !> The draw at the uniform `u`: where `%pdf`'s integral over the cells reaches the share `u` of
     !! their mass `total`; `u = 0`, and rounding at the top end, fall on where the accumulated
     !! density starts and ends.
-    pure function cells_draw(self, q, total, u) result(x)
+    pure function cells_draw(self, total, u) result(x)
         class(pf_kde_grid), intent(in) :: self  !! the grid, with mass in its cells
-        real(real64), intent(in)       :: q(:)  !! the running integral at each centre
         real(real64), intent(in)       :: total !! the cells' whole mass
         real(real64), intent(in)       :: u     !! the uniform, in `[0, 1)`
         real(real64)                   :: x     !! the draw
@@ -1827,7 +2069,7 @@ contains
         else if (.not. (target < total)) then
             x = right_end(self)
         else
-            x = mass_at(self, q, target)
+            x = mass_at(self, target)
         end if
 
     end function cells_draw

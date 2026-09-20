@@ -1064,6 +1064,95 @@ contains
         end if
     end function stats_var
 
+    !> `.true.` when `stats_var`'s answer is one the plain accumulation can be trusted for: finite
+    !! and above zero. Zero is not in it -- a constant population answers zero, and so does one
+    !! whose squared deviations all underflowed.
+    pure function stats_var_trusted(v) result(res)
+        real(real64), intent(in) :: v   !! the variance `stats_var` answered.
+        logical :: res                  !! the plain accumulation carried it.
+
+        ! The NaN first, as its own test: an ordered comparison raises IEEE_INVALID on one.
+        res = .false.
+        if (v /= v) return
+        res = v > 0.0_real64 .and. v <= huge(v)
+
+    end function stats_var_trusted
+
+    !> The spread of a population whose plain sum of squared deviations over- or underflowed,
+    !! recomputed with every deviation scaled by the largest of them.
+    !>
+    !! `c` is that largest deviation. It is attained at the smallest or the largest surviving value,
+    !! so the accumulator already holds what it takes to form it and no pass is needed to find it;
+    !! `t` is then the variance of `(x - mean)/c`, an ordinary number of order one for every
+    !! representable sample. The caller forms `c*c*t` for a variance and `c*sqrt(t)` for a standard
+    !! deviation: the second is representable over a far wider range of samples than the first,
+    !! which is the case this exists for -- a sample of magnitude `1e200` has a standard deviation
+    !! an ordinary `real64` holds and a variance no `real64` can.
+    !!
+    !! **A COLD PATH.** It runs only where `stats_var` answered something `stats_var_trusted`
+    !! rejects, so every ordinary answer is the plain accumulation's, to the last bit, and
+    !! `parquet_stats`' golden vectors do not move. `ok` is `.false.` wherever there is nothing
+    !! better to answer -- an empty or poisoned population, a constant one, or a sample so wide that
+    !! its own extent is not representable -- and the caller then keeps what it had.
+    subroutine stats_spread_scaled(values, what, is_valid, weights, skipnan, acc, ddof, freq, c, t, ok)
+        real(real64), intent(in) :: values(:)            !! the population, before exclusions.
+        character(len=*), intent(in) :: what             !! the public procedure's name, for messages.
+        logical, intent(in), optional :: is_valid(:)     !! per element: .false. marks a null.
+        real(real64), intent(in), optional :: weights(:) !! per element weight.
+        logical, intent(in), optional :: skipnan         !! .true. (default) excludes a NaN.
+        type(stats_acc), intent(in) :: acc               !! the population, already summarised.
+        integer, intent(in) :: ddof                      !! delta degrees of freedom.
+        logical, intent(in) :: freq                      !! .true. for frequency weights.
+        real(real64), intent(out) :: c                   !! the largest absolute deviation.
+        real(real64), intent(out) :: t                   !! the variance of the deviations over `c`.
+        logical, intent(out) :: ok                       !! the pair is usable.
+
+        real(real64), allocatable :: keep_x(:), keep_w(:)
+        real(real64) :: denom, half, s, d, lim
+        integer(int64) :: i, nv, nnull, nnan
+        logical :: saw_nan
+
+        c = 0.0_real64
+        t = 0.0_real64
+        ok = .false.
+        if (acc%empty .or. acc%saw_nan) return
+        if (.not. (acc%w_sum > 0.0_real64)) return
+        ! Every value the scale is formed from is screened for NaN and for infinity first, so that
+        ! neither the differences below nor the `max` over them can meet one.
+        if (acc%mean /= acc%mean .or. acc%vmin /= acc%vmin .or. acc%vmax /= acc%vmax) return
+        lim = huge(1.0_real64)
+        if (.not. (abs(acc%mean) <= lim .and. abs(acc%vmin) <= lim .and. abs(acc%vmax) <= lim)) return
+        ! Halved before the difference, so that a population spanning most of the range cannot
+        ! overflow forming its own extent; doubled back only once that is known to fit.
+        half = max(abs(0.5_real64*acc%vmin - 0.5_real64*acc%mean), &
+            abs(0.5_real64*acc%vmax - 0.5_real64*acc%mean))
+        if (.not. (half > 0.0_real64 .and. half <= 0.5_real64*lim)) return
+        c = half + half
+        if (freq) then
+            denom = acc%w_sum - real(ddof, real64)
+        else
+            denom = acc%w_sum - real(ddof, real64)*acc%w_sq/acc%w_sum
+        end if
+        if (.not. (denom > 0.0_real64)) return
+        ! The survivors again, under the family's own exclusion order, so that this pass sees
+        ! exactly the population the accumulator summarised.
+        call stats_compact(values, what, is_valid, weights, skipnan, keep_x, keep_w, nv, nnull, &
+            nnan, saw_nan)
+        if (saw_nan .or. nv < 1_int64) return
+        s = 0.0_real64
+        do i = 1_int64, nv
+            d = (keep_x(i) - acc%mean)/c
+            if (present(weights)) then
+                s = s + keep_w(i)*(d*d)
+            else
+                s = s + d*d
+            end if
+        end do
+        t = s/denom
+        ok = t > 0.0_real64 .and. t <= lim
+
+    end subroutine stats_spread_scaled
+
     !> The skewness: `g1` uncorrected, `G1` corrected, NaN when the population has no spread.
     pure function stats_skew(acc, bias, freq) result(res)
         type(stats_acc), intent(in) :: acc !! the population.
@@ -1378,8 +1467,9 @@ contains
 
     module procedure variance_f64
         type(stats_acc) :: acc
-        logical :: freq
+        logical :: freq, scaled
         integer :: dd
+        real(real64) :: c, t
         call stats_weight_kind("pf_variance", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
@@ -1387,27 +1477,45 @@ contains
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         v = stats_var(acc, dd, freq)
+        if (.not. stats_var_trusted(v)) then
+            ! The squared deviations over- or underflowed: recompute them scaled. A cold path, and
+            ! `c*c*t` still answers `+Infinity` where the variance itself is unrepresentable.
+            call stats_spread_scaled(values, "pf_variance", is_valid, weights, skipnan, acc, dd, &
+                freq, c, t, scaled)
+            if (scaled) v = (c*c)*t
+        end if
         if (present(ok)) ok = (v == v)
     end procedure variance_f64
 
     module procedure stddev_f64
         type(stats_acc) :: acc
-        logical :: freq
+        logical :: freq, scaled
         integer :: dd
+        real(real64) :: v, c, t
         call stats_weight_kind("pf_stddev", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
         call stats_engine(values, "pf_stddev", is_valid, weights, skipnan, acc, threads=threads, nmom=2)
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
-        sd = stats_sqrt(stats_var(acc, dd, freq))
+        v = stats_var(acc, dd, freq)
+        sd = stats_sqrt(v)
+        if (.not. stats_var_trusted(v)) then
+            ! The squared deviations over- or underflowed. `c*sqrt(t)` is the standard deviation
+            ! without ever forming the variance, which for a sample of magnitude `1e200` no
+            ! `real64` holds while its standard deviation is an ordinary number.
+            call stats_spread_scaled(values, "pf_stddev", is_valid, weights, skipnan, acc, dd, &
+                freq, c, t, scaled)
+            if (scaled) sd = c*sqrt(t)
+        end if
         if (present(ok)) ok = (sd == sd)
     end procedure stddev_f64
 
     module procedure sem_f64
         type(stats_acc) :: acc
-        logical :: freq
+        logical :: freq, scaled
         integer :: dd
+        real(real64) :: c, t
         call stats_weight_kind("pf_sem", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
@@ -1415,6 +1523,13 @@ contains
         if (present(n_null)) n_null = acc%n_null
         if (present(n_nan)) n_nan = acc%n_nan
         se = stats_sem(acc, dd, freq)
+        ! The standard error is the standard deviation over a count, so it follows it onto the
+        ! rescaled recomputation wherever the squared deviations over- or underflowed.
+        if (.not. stats_var_trusted(stats_var(acc, dd, freq))) then
+            call stats_spread_scaled(values, "pf_sem", is_valid, weights, skipnan, acc, dd, freq, &
+                c, t, scaled)
+            if (scaled) se = c*sqrt(t)/sqrt(stats_neff(acc, freq))
+        end if
         if (present(ok)) ok = (se == se)
     end procedure sem_f64
 
@@ -1448,8 +1563,9 @@ contains
 
     module procedure moments_f64
         type(stats_acc) :: acc
-        logical :: freq, bs, ex
+        logical :: freq, bs, ex, scaled
         integer :: dd, nm
+        real(real64) :: vv, c, t
 
         call stats_weight_kind("pf_moments", weight_type, freq)
         dd = 1
@@ -1476,9 +1592,23 @@ contains
         if (present(n_nan)) n_nan = acc%n_nan
         if (present(n_valid)) n_valid = acc%n_valid
         if (present(mean)) mean = acc%mean
-        if (present(variance)) variance = stats_var(acc, dd, freq)
-        if (present(stddev)) stddev = stats_sqrt(stats_var(acc, dd, freq))
+        vv = stats_var(acc, dd, freq)
+        if (present(variance)) variance = vv
+        if (present(stddev)) stddev = stats_sqrt(vv)
         if (present(sem)) sem = stats_sem(acc, dd, freq)
+        ! The squared deviations over- or underflowed: the same rescaled recomputation `pf_variance`
+        ! and `pf_stddev` fall back to, so that the three entry points answer alike. `sem` divides
+        ! the standard deviation by a count and follows it.
+        if ((present(variance) .or. present(stddev) .or. present(sem)) .and. &
+                .not. stats_var_trusted(vv)) then
+            call stats_spread_scaled(values, "pf_moments", is_valid, weights, skipnan, acc, dd, &
+                freq, c, t, scaled)
+            if (scaled) then
+                if (present(variance)) variance = (c*c)*t
+                if (present(stddev)) stddev = c*sqrt(t)
+                if (present(sem)) sem = c*sqrt(t)/sqrt(stats_neff(acc, freq))
+            end if
+        end if
         if (present(skewness)) skewness = stats_skew(acc, bs, freq)
         if (present(kurtosis)) kurtosis = stats_kurt(acc, bs, ex, freq)
         if (present(vsum)) vsum = acc%vsum

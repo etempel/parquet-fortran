@@ -13,8 +13,7 @@
 !! for the ISJ rule and whose exclusion pass and argument checkers are this module's population
 !! rules, so that "in the population" means here exactly what it means for every `pf_*` statistic;
 !! `parquet_root` and `parquet_transform`, whose root finder and discrete cosine transform the ISJ
-!! rule is built on; `parquet_integrate`, whose adaptive quadrature the linear boundary correction
-!! integrates each nearby point's corrected kernel with; and `parquet_random`, the generator
+!! rule is built on; and `parquet_random`, the generator
 !! `%sample` draws from. `tools/module_footprints.txt` records the cost.
 !!
 !! **`bandwidth` is the standard deviation of the kernel, whichever kernel is chosen.** Each
@@ -90,12 +89,6 @@ module parquet_kde
     use parquet_argsort, only : pf_argsort, resolve_thread_count
     ! The Gaussian kernel is the library's `phi` and `Phi`, never a second spelling of them.
     use parquet_utils, only : pf_norm_pdf, pf_norm_cdf
-    ! The linear boundary correction integrates each nearby point's corrected kernel on its own,
-    ! with the point's own edges as breakpoints: the library's adaptive quadrature, rather than a
-    ! second one written here. `parquet_integrate` is an Arrow-free leaf of three files.
-    use parquet_integrate, only : pf_integrand, pf_integrate, pf_tolerance, pf_integration_info, &
-        PF_INT_OK, PF_INT_LIMIT, PF_INT_ROUNDOFF, PF_INT_BAD_INTEGRAND, PF_INT_NO_CONVERGENCE, &
-        PF_INT_DIVERGENT, PF_INT_BAD_VALUE
     ! `%sample`'s draws: the coordinate-addressed generator, so that a draw is a pure function of
     ! its coordinates and a sample splits among threads anywhere.
     use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
@@ -167,7 +160,7 @@ module parquet_kde
     !! formed centred on the interval's midpoint by quadrature rather than as differences of the
     !! closed forms, which cancel there: `D` falls as the fourth power of the width while each
     !! closed form stays of order one.
-    real(real64), parameter :: KDE_LINEAR_NARROW = 1.0_real64
+    real(real64), parameter :: KDE_CORR_NARROW = 1.0_real64
 
     !> The eight-point Gauss-Legendre rule on `[-1, 1]`: its nodes and weights, computed at 50
     !! digits. It forms the centred moments of a narrow interval, where it is exact for the three
@@ -179,10 +172,31 @@ module parquet_kde
         0.31370664587788728734_real64, 0.36268378337836198297_real64, 0.36268378337836198297_real64, &
         0.31370664587788728734_real64, 0.22238103445337447054_real64, 0.10122853629037625915_real64]
 
-    !> What each per-point integral of the linear correction is taken to: the relative tolerance
-    !! governs a term's own mass, the absolute one a piece of it far out in a tail. Not settings:
-    !! they change what the library answers at the last digits, which an argument never does.
-    real(real64), parameter :: KDE_LINEAR_RTOL = 1.0e-13_real64, KDE_LINEAR_ATOL = 1.0e-16_real64
+    !> The sixteen-point Gauss-Legendre rule on `[-1, 1]`: its nodes and weights, computed at 50
+    !! digits and verified exact through degree 31 and no further, which is what a sixteen-point
+    !! Gauss rule is. Every per-point integral of a boundary correction is taken with it.
+    real(real64), parameter :: KDE_GL16_X(16) = [-0.98940093499164993260_real64, -0.94457502307323257608_real64, &
+        -0.86563120238783174388_real64, -0.75540440835500303390_real64, -0.61787624440264374845_real64, &
+        -0.45801677765722738634_real64, -0.28160355077925891323_real64, -0.095012509837637440185_real64, &
+        0.095012509837637440185_real64, 0.28160355077925891323_real64, 0.45801677765722738634_real64, &
+        0.61787624440264374845_real64, 0.75540440835500303390_real64, 0.86563120238783174388_real64, &
+        0.94457502307323257608_real64, 0.98940093499164993260_real64]
+    real(real64), parameter :: KDE_GL16_W(16) = [0.027152459411754094852_real64, 0.062253523938647892863_real64, &
+        0.095158511682492784810_real64, 0.12462897125553387205_real64, 0.14959598881657673208_real64, &
+        0.16915651939500253819_real64, 0.18260341504492358887_real64, 0.18945061045506849629_real64, &
+        0.18945061045506849629_real64, 0.18260341504492358887_real64, 0.16915651939500253819_real64, &
+        0.14959598881657673208_real64, 0.12462897125553387205_real64, 0.095158511682492784810_real64, &
+        0.062253523938647892863_real64, 0.027152459411754094852_real64]
+
+    !> The widest sub-interval, in bandwidths, that one application of `KDE_GL16_X`'s rule is given.
+    !!
+    !! Each per-point integral is already cut at the term's own breakpoints -- the kernel's knots,
+    !! its moments' knots and the two correction edges -- so every piece is analytic; a Gauss rule
+    !! converges geometrically on such a piece, but the rate falls with its width in bandwidths, so
+    !! a piece wider than this is split into equal parts no wider than it. The cost is then fixed
+    !! and predictable, and no convergence test is made or needed. Not a setting: it changes what
+    !! the library answers at the last digits, which an argument never does.
+    real(real64), parameter :: KDE_GL_SPAN = 2.0_real64
 
     !> How many points to a bandwidth the fit's scan for the stretches the clip removes evaluates
     !! the raw estimate at, the bandwidth being the narrowest among the kernels that reach the point.
@@ -193,7 +207,7 @@ module parquet_kde
 
     !> Breakpoints one per-point integral can carry: its kernel's knots, its moments' knots, its two
     !! correction edges and, for the sampler, its sign change.
-    integer, parameter :: KDE_LINEAR_MAX_BREAKS = 8
+    integer, parameter :: KDE_CORR_MAX_BREAKS = 8
 
     !> The two zones' places in `pf_kde%zones`: the one at the lower bound and the one at the upper.
     integer, parameter :: KDE_ZONE_LO = 1, KDE_ZONE_HI = 2
@@ -201,13 +215,19 @@ module parquet_kde
     !> How much dearer a zone query is than a plain one, in kernel evaluations, so that a bulk
     !! `%cdf`, `%quantile` or `%sample` under `"linear"` opens a team where the plain estimate's
     !! work would not pay for one.
-    real(real64), parameter :: KDE_LINEAR_CDF_WORK = 64.0_real64
+    real(real64), parameter :: KDE_CORR_CDF_WORK = 64.0_real64
 
     !> The robust scale's divisor, `IQR/1.349`: the interquartile range of a unit normal.
     real(real64), parameter :: KDE_IQR_NORMAL = 1.349_real64
 
-    !> The rules' constants: Silverman's rule of thumb and Scott's normal-reference rule.
-    real(real64), parameter :: KDE_SILVERMAN_C = 0.9_real64, KDE_SCOTT_C = 1.06_real64
+    !> Silverman's rule of thumb: the constant he recommends for the robust scale, `0.9`.
+    real(real64), parameter :: KDE_SILVERMAN_C = 0.9_real64
+
+    !> Scott's normal-reference rule: `(4/3)**(1/5)`, the factor that minimises the asymptotic mean
+    !! integrated squared error of a Gaussian kernel on a normal sample. Written as the fifth root
+    !! rather than as a rounded decimal, so that the rule is the rule and not a two-digit
+    !! approximation to it; a constant expression, folded by the front end.
+    real(real64), parameter :: KDE_SCOTT_C = (4.0_real64/3.0_real64)**0.2_real64
 
     ! ---- the Improved Sheather-Jones rule -------------------------------------------------------
 
@@ -303,6 +323,12 @@ module parquet_kde
     !! a few hundred microseconds, well above what opening the team costs.
     real(real64), parameter :: KDE_QUERY_MIN_WORK = 32768.0_real64
 
+    !> What one point of a GRID's bulk query costs, in the same units the query team is sized in:
+    !! after `%finish` has stored the total mass and the running integral, `%pdf` and `%cdf` are a
+    !! segment look-up and a few operations, and `%quantile` adds a binary search over the cells.
+    !! Far below one kernel evaluation, so a team opens only for a very long array.
+    real(real64), parameter :: KDE_GRID_QUERY_WORK = 1.0_real64
+
     !> What one draw of `%sample` costs, in kernel evaluations, about: a point chosen, a variate
     !! drawn and, rarely, a rejection.
     real(real64), parameter :: KDE_DRAW_WORK = 32.0_real64
@@ -361,37 +387,52 @@ module parquet_kde
         logical :: unreadable = .false.           !! the pilot has no density to read: poisoned, or empty cells
         real(real64) :: logg = 0.0_real64         !! `log g`: the mean of `log p` over the pilot's own density
         real(real64) :: pmin = 0.0_real64         !! the pilot's smallest positive cell density
+        real(real64) :: digest = 0.0_real64       !! a position-weighted checksum of `acc`, formed once, so
+                                                  !! that `%merge` refuses two rules that differ without
+                                                  !! walking their cells; a match is still scanned in full
         real(real64), allocatable :: acc(:)
         !! the pilot's accumulation, cell for cell
     end type kde_adapt
 
-    !> The linear boundary kernel at one query point for one bandwidth: there the kernel is
+    !> A local-polynomial boundary kernel at one query point for one bandwidth: there the kernel is
     !! `(a - b*(u - c))*dinv * K(u)`, `u` the offset in bandwidths from the point to the query,
-    !! or `K(u)` itself where both bounds are a reach or more away (`plain`). From the truncated
-    !! moments `a_l` of the kernel over the part of its support inside the bounds, `a = a_2`,
-    !! `b = a_1`, `c = 0` and `dinv = 1/(a_0 a_2 - a_1**2)`; for a narrow two-sided interval the
-    !! same kernel written about the interval's midpoint `c` (`kde_linear_factor`).
-    type :: kde_lin_factor
+    !! or `K(u)` itself where both bounds are a reach or more away (`plain`).
+    !!
+    !! **`"renormalise"` and `"linear"` are the `l = 0` and `l = 1` members of one family**, the
+    !! kernel of a local polynomial fit of degree `l` at the query point, and this type carries
+    !! both. From the truncated moments `a_l` of the kernel over the part of its support inside the
+    !! bounds: the constant member is `a = 1`, `b = 0`, `c = 0` and `dinv = 1/a_0`, the kernel
+    !! divided by the mass a kernel CENTRED AT THE QUERY POINT keeps inside the support; the linear
+    !! member is `a = a_2`, `b = a_1`, `c = 0` and `dinv = 1/(a_0 a_2 - a_1**2)`. For a narrow
+    !! two-sided interval both are written about the interval's midpoint `c` (`kde_corr_factor`).
+    type :: kde_corr_kernel
         logical :: plain = .true.         !! both bounds a reach or more away: the plain kernel
         real(real64) :: a = 0.0_real64    !! the constant term
         real(real64) :: b = 0.0_real64    !! the slope, per bandwidth
         real(real64) :: c = 0.0_real64    !! the offset the slope is taken about
         real(real64) :: dinv = 0.0_real64 !! one over the moments' determinant
-    end type kde_lin_factor
+        real(real64) :: a0 = 1.0_real64
+        !! `a_0`, the mass a kernel centred at the query point keeps inside the bounds: the constant
+        !! member's whole correction, and what the `"renormalise"` sampler's envelope is bounded by.
+        !! Exactly one for a plain kernel, which the bounds do not reach
+    end type kde_corr_kernel
 
-    !> One retained point's corrected term as a function, for `pf_integrate`: `g_j(x)`, the point's
-    !! linear boundary kernel at its own bandwidth, or its magnitude for the sampler's envelope.
+    !> One retained point's corrected term as a function: `g_j(x)`, the point's local-polynomial
+    !! boundary kernel at its own bandwidth, or its magnitude for the sampler's envelope.
     !!
     !! It holds the point's SCALARS -- where it is, one over its bandwidth, the bounds and the
     !! kernel -- and nothing else: a query builds one on its stack per call, so nothing is copied but
     !! those and nothing points at the fitted object, which every query reads through `intent(in)`.
-    type, extends(pf_integrand) :: kde_point_fn
+    type :: kde_point_fn
         integer :: code = KDE_GAUSSIAN     !! the kernel
+        integer :: bcode = KDE_BOUNDARY_LINEAR !! which member of the family corrects it
         logical :: has_lower = .false.     !! a lower bound was given
         real(real64) :: lo = 0.0_real64    !! the lower bound
         logical :: has_upper = .false.     !! an upper bound was given
         real(real64) :: hi = 0.0_real64    !! the upper bound
         real(real64) :: xj = 0.0_real64    !! where the point is
+        real(real64) :: hj = 0.0_real64    !! its bandwidth, whose reach bounds every integral of the
+                                           !! term and whose knots break it into smooth pieces
         real(real64) :: r = 0.0_real64     !! one over its bandwidth
         logical :: absolute = .false.      !! evaluate `|g_j|`, which the zone sampler draws from
     contains
@@ -461,17 +502,21 @@ module parquet_kde
     !> A kernel density estimate accumulated on a fixed grid of cells from points streamed through
     !! it, which are forgotten.
     !!
-    !! `%init` fixes the geometry -- `ncells` cells of width `step = (xmax - xmin)/ncells`, centred
-    !! on `xmin + (i - 1/2)*step` -- with the bandwidth, the kernel and the support, and with
-    !! `pilot=` the adaptive rule. Each point `%add` accepts deposits its kernel on the cell centres
-    !! it reaches, normalised so that the point adds exactly its weight: what the kernel puts beyond
-    !! `xmin` or `xmax` is counted there but not located. `%merge` adds one grid to another. The
-    !! queries read the cells: `%density` at the centres, `%pdf` interpolated between them, `%cdf`
-    !! its integral and `%quantile` the inverse. The queries are read-only, so any number of
-    !! threads may share a finished grid.
+    !! **The lifecycle is `%init` -> `%add`* -> `%finish` -> query.** `%init` fixes the geometry --
+    !! `ncells` cells of width `step = (xmax - xmin)/ncells`, centred on `xmin + (i - 1/2)*step` --
+    !! with the bandwidth, the kernel and the support, and with `pilot=` the adaptive rule. Each
+    !! point `%add` accepts deposits its kernel on the cell centres it reaches; what the kernel puts
+    !! beyond `xmin` or `xmax` is counted there but not located. `%merge` adds one grid to another.
+    !! `%finish` closes the accumulation, and `finish=.true.` on the last `%add` or `%merge` is the
+    !! one-line form of it. Only then do the queries answer: `%density` at the centres, `%pdf`
+    !! interpolated between them, `%cdf` its integral and `%quantile` the inverse. They are
+    !! read-only, so any number of threads may share a finished grid, and `%add` and `%merge` abort
+    !! after it -- `%clear` reopens the grid, empty.
     type :: pf_kde_grid
         private
         logical :: initialised = .false.             !! `%init` has run
+        logical :: finished = .false.                !! `%finish` has closed the accumulation; the
+                                                     !! queries are open and `%add`/`%merge` are shut
         logical :: poisoned = .false.                !! a NaN kept by `skipnan = .false.` arrived
         logical :: reach_poisoned = .false.          !! under `"linear"`, a kernel wider than a grid with a
                                                      !! free edge crossed a bound: its weight beyond that edge
@@ -495,8 +540,13 @@ module parquet_kde
         integer(int64) :: cnt_null = 0_int64         !! excluded as null
         integer(int64) :: cnt_nan = 0_int64          !! excluded as NaN
         integer(int64) :: cnt_out = 0_int64          !! excluded as outside the support
+        real(real64) :: mass_total = 0.0_real64      !! what `%finish` left: the mass every query
+                                                     !! normalises by, formed once
         real(real64), allocatable :: acc(:)
         !! each cell's accumulated weight per unit length; `acc(i)*step` is the weight in cell `i`
+        real(real64), allocatable :: cum(:)
+        !! what `%finish` left: `%pdf`'s integral from `xmin` to each cell centre, which `%cdf`,
+        !! `%quantile` and `%sample` read instead of rebuilding it per call
         type(kde_adapt) :: adapt = kde_adapt()
         !! the adaptive rule, from the pilot `%init` was given; off for a fixed bandwidth. Default-
         !! initialised, so that the whole-object constructor `pf_kde_grid()` needs no value for it
@@ -510,6 +560,8 @@ module parquet_kde
         procedure, private :: grid_add_f32_r1 !! an array of `real32` points, widened
         procedure, private :: grid_add_col !! a numeric `parquet_column`, widened
         procedure :: merge => grid_merge !! adds another grid of the same geometry and settings
+        procedure :: finish => grid_finish !! closes the accumulation; the queries open here
+        procedure :: is_finished => grid_is_finished !! `%finish` has run
         procedure :: density => grid_density !! the density at every cell centre
         generic :: pdf => grid_pdf_r0, grid_pdf_r1 !! the density interpolated between the centres
         procedure, private :: grid_pdf_r0 !! at one point
@@ -561,7 +613,9 @@ module parquet_kde
         real(real64) :: hi = 0.0_real64              !! the upper bound, when given
         real(real64) :: h = 0.0_real64               !! the global bandwidth, after `adjust`
         real(real64) :: hinv = 0.0_real64            !! one over the global bandwidth
-        real(real64) :: hmax = 0.0_real64            !! the largest point bandwidth: how far a query reaches
+        real(real64) :: hmax = 0.0_real64            !! the largest point bandwidth
+        real(real64) :: reach = 0.0_real64           !! `R*hmax`: how far a query reaches, formed once at
+                                                     !! `%fit` rather than at the head of every query
         real(real64) :: ext_lo = 0.0_real64          !! the estimate's extent: the smallest `x_j - R h_j`, unclipped
         real(real64) :: ext_hi = 0.0_real64          !! and the largest `x_j + R h_j`, unclipped
         real(real64) :: dens_lo = 0.0_real64         !! where the density starts: the extent clipped to the
@@ -570,7 +624,10 @@ module parquet_kde
         real(real64) :: dens_hi = 0.0_real64         !! where it stops, the mirror of `dens_lo`
         real(real64) :: zmid = 0.0_real64            !! the clipped estimate's mass between the zones, over `W`
         real(real64) :: znorm = 1.0_real64           !! `Z`: its mass over the whole support, which divides it
-        integer :: zone_status = PF_INT_OK           !! the worst status of the fit's own integrals
+        real(real64) :: a0min = 1.0_real64           !! under `"renormalise"`, the smallest mass a kernel keeps
+                                                     !! inside the support anywhere on it, which `%sample`
+                                                     !! thins its proposals against; 1 under every other
+                                                     !! correction, which do not use it
         real(real64) :: w_total = 0.0_real64         !! `sum(w)` over the population
         logical :: weighted = .false.                !! `weights=` was given
         integer(int64) :: cnt_all = 0_int64          !! `size(x)` at `%fit`
@@ -589,6 +646,10 @@ module parquet_kde
         real(real64), allocatable :: mass(:)
         !! each point's kernel mass inside the support, by which its kernel is divided; allocated
         !! only when a correction can make it differ from one
+        real(real64), allocatable :: cdf_lo(:)
+        !! each point's mass at or below the lower bound, summed over its images: a per-point
+        !! constant `%cdf` subtracts at every query point, formed once at `%fit`. Allocated only
+        !! under `"reflect"` with a lower bound, which is the one correction that reaches it
         real(real64), allocatable :: hb(:)
         !! each point's bandwidth, in the same order, read at `1 + (j - 1)*hstride`: one per point
         !! when adaptive, and the global bandwidth alone otherwise, so that both estimates run one
@@ -668,7 +729,8 @@ module parquet_kde
         !! the bandwidths follow the pilot, `0` being the fixed estimate, and `bandwidth_max` caps
         !! every one; both need `adaptive = .true.`. `lower` and `upper` bound the support: a
         !! point outside is excluded and counted in `n_outside`, and a kernel crossing a bound is
-        !! corrected by `boundary`, `"renormalise"` (the default) or `"reflect"`. `is_valid`,
+        !! corrected by `boundary`, `"reflect"` (the default), `"renormalise"` or `"linear"`.
+        !! `is_valid`,
         !! `weights`, `weight_type` and `skipnan` are the `pf_*` family's population arguments;
         !! `weight_type` decides the effective sample size the rules use. `n_null`, `n_nan` and
         !! `n_outside` report what each exclusion removed, and `ok` is `.false.` when the estimate
@@ -836,8 +898,11 @@ module parquet_kde
         !! `x` receives the points, from `xmin` to `xmax` inclusive, and `f` the density at each.
         !! The default range is the sample's minimum minus `cut` bandwidths to its maximum plus
         !! `cut` bandwidths (`cut` defaults to 3), clipped to the support. `size(f) /= size(x)`,
-        !! `xmin >= xmax` and a negative `cut` abort. On an undefined estimate `f` is NaN, and so
-        !! is `x` unless both ends were given. `threads` as `%pdf` takes it.
+        !! `xmin >= xmax` and a negative `cut` abort, and so does a DEFAULT range that has collapsed
+        !! to one point -- a sample with no spread at `cut = 0`, say -- naming that rather than
+        !! arguments the caller never passed. A single point is `xmin`, the range's first end, not
+        !! its midpoint. On an undefined estimate `f` is NaN, and so is `x` unless both ends were
+        !! given. `threads` as `%pdf` takes it.
         module subroutine kde_curve(self, x, f, xmin, xmax, cut, threads)
             implicit none
             class(pf_kde), intent(in)          :: self    !! the fitted estimate
@@ -938,7 +1003,8 @@ module parquet_kde
         !> How the bandwidth was chosen, as a token: `call k%rule(name)` answers the rule that gave
         !! it, `"isj"`, `"silverman"` or `"scott"`, or `"explicit"` when `bandwidth=` was given as a
         !! number. Under the default it answers `"silverman"` when the ISJ rule found no bandwidth
-        !! and Silverman's rule gave it instead.
+        !! and Silverman's rule gave it instead, and `"none"` on an undefined estimate, where no
+        !! rule produced a bandwidth at all.
         module subroutine kde_rule_name(self, name)
             implicit none
             class(pf_kde), intent(in)                  :: self !! the fitted estimate
@@ -1020,9 +1086,9 @@ module parquet_kde
             integer, intent(in), optional :: unit !! where to write
         end subroutine kde_print
 
-        !> One point's corrected term at `x`: its linear boundary kernel at its own bandwidth,
-        !! `g_j(x)`, or `|g_j(x)|` when the object asks for the magnitude. What `pf_integrate`
-        !! evaluates for every per-point integral of the correction.
+        !> One point's corrected term at `x`: its local-polynomial boundary kernel at its own
+        !! bandwidth, `g_j(x)`, or `|g_j(x)|` when the object asks for the magnitude. What
+        !! `term_piece`'s fixed rule evaluates for every per-point integral of the correction.
         module function kde_point_eval(this, x) result(f)
             implicit none
             class(kde_point_fn), intent(inout) :: this !! the point's scalars; never updated
@@ -1079,7 +1145,8 @@ module parquet_kde
         !> Accumulates one `real64` point: `call g%add(x, [is_valid], [weights], [skipnan],
         !! [n_null], [n_nan], [n_outside])`, with `is_valid` and `weights` scalars; otherwise as the
         !! array form.
-        module subroutine grid_add_f64_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside)
+        module subroutine grid_add_f64_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
+                finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self      !! the grid
             real(real64), intent(in)              :: x         !! the point
@@ -1089,6 +1156,7 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_null    !! excluded as null
             integer(int64), intent(out), optional :: n_nan     !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside !! excluded as outside the support
+            logical, intent(in), optional         :: finish    !! `.true.` finishes the grid after this call
         end subroutine grid_add_f64_r0
 
         !> Accumulates an array of `real64` points: `call g%add(x, [is_valid], [weights],
@@ -1102,7 +1170,7 @@ module parquet_kde
         !! summed in thread order: at a given count the bits do not change, and between counts
         !! they differ by rounding.
         module subroutine grid_add_f64_r1(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                threads)
+                threads, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self        !! the grid
             real(real64), intent(in)              :: x(:)        !! the points
@@ -1113,10 +1181,12 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
             integer, intent(in), optional         :: threads     !! the team for the deposit
+            logical, intent(in), optional         :: finish      !! `.true.` finishes the grid after this call
         end subroutine grid_add_f64_r1
 
         !> Accumulates one `real32` point, widened to `real64` first; otherwise as the `real64` form.
-        module subroutine grid_add_f32_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside)
+        module subroutine grid_add_f32_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
+                finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self      !! the grid
             real(real32), intent(in)              :: x         !! the point
@@ -1126,12 +1196,13 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_null    !! excluded as null
             integer(int64), intent(out), optional :: n_nan     !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside !! excluded as outside the support
+            logical, intent(in), optional         :: finish    !! `.true.` finishes the grid after this call
         end subroutine grid_add_f32_r0
 
         !> Accumulates an array of `real32` points, widened to `real64` first; otherwise as the
         !! `real64` form.
         module subroutine grid_add_f32_r1(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                threads)
+                threads, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self        !! the grid
             real(real32), intent(in)              :: x(:)        !! the points
@@ -1142,6 +1213,7 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
             integer, intent(in), optional         :: threads     !! the team for the deposit
+            logical, intent(in), optional         :: finish      !! `.true.` finishes the grid after this call
         end subroutine grid_add_f32_r1
 
         !> Accumulates a numeric `parquet_column`, widened to `real64` first: `int32`, `int64`,
@@ -1149,7 +1221,7 @@ module parquet_kde
         !! the null mask, so `is_valid` cannot be given beside it; otherwise as the `real64` array
         !! form.
         module subroutine grid_add_col(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                threads)
+                threads, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self        !! the grid
             type(parquet_column), intent(in)      :: x           !! the points, one numeric column
@@ -1160,6 +1232,7 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
             integer, intent(in), optional         :: threads     !! the team for the deposit
+            logical, intent(in), optional         :: finish      !! `.true.` finishes the grid after this call
         end subroutine grid_add_col
 
         !> Adds another grid's accumulation and counts to this one: `call g%merge(other)`. The two
@@ -1167,11 +1240,31 @@ module parquet_kde
         !! boundary correction and the pilot -- the same copy, cell for cell, with the same `alpha`
         !! and `bandwidth_max` -- or the call aborts naming the first that differs. One grid per
         !! thread, merged at the end, is how a caller's own threads accumulate one estimate.
-        module subroutine grid_merge(self, other)
+        module subroutine grid_merge(self, other, finish)
             implicit none
-            class(pf_kde_grid), intent(inout) :: self  !! the grid that receives
-            class(pf_kde_grid), intent(in)    :: other !! the grid that is added; unchanged
+            class(pf_kde_grid), intent(inout) :: self   !! the grid that receives
+            class(pf_kde_grid), intent(in)    :: other  !! the grid that is added; unchanged
+            logical, intent(in), optional     :: finish !! `.true.` finishes the grid after this call
         end subroutine grid_merge
+
+        !> Closes the accumulation: `call g%finish()`. The queries answer only after it, and
+        !! `%add` and `%merge` abort after it -- `%clear` reopens the grid, empty.
+        !!
+        !! A grid has no `%fit` to be the seam between filling it and reading it, so the seam is
+        !! named. Everything a query would otherwise rebuild per call is computed once here.
+        !! A second `%finish` is a no-op, so a caller who cannot tell whether a helper already
+        !! finished the grid may call it again. An uninitialised grid aborts.
+        module subroutine grid_finish(self)
+            implicit none
+            class(pf_kde_grid), intent(inout) :: self !! the grid
+        end subroutine grid_finish
+
+        !> `.true.` once `%finish` has run, until `%clear`. Never aborts.
+        module function grid_is_finished(self) result(res)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            logical                        :: res  !! it is finished
+        end function grid_is_finished
 
     end interface
 
@@ -1206,13 +1299,16 @@ module parquet_kde
             real(real64), intent(out)      :: f    !! the density there
         end subroutine grid_pdf_r0
 
-        !> The interpolated density at each point of `x`: `call g%pdf(x, f)`. `size(f) /= size(x)`
-        !! aborts.
-        module subroutine grid_pdf_r1(self, x, f)
+        !> The interpolated density at each point of `x`: `call g%pdf(x, f, [threads])`.
+        !! `size(f) /= size(x)` aborts. `threads` is the team the points are shared among; each
+        !! point is computed by one thread alone, so the answer does not depend on it, and a team
+        !! opens only where the work would pay for it.
+        module subroutine grid_pdf_r1(self, x, f, threads)
             implicit none
-            class(pf_kde_grid), intent(in) :: self !! the grid
-            real(real64), intent(in)       :: x(:) !! where to evaluate
-            real(real64), intent(out)      :: f(:) !! the density at each point
+            class(pf_kde_grid), intent(in) :: self    !! the grid
+            real(real64), intent(in)       :: x(:)    !! where to evaluate
+            real(real64), intent(out)      :: f(:)    !! the density at each point
+            integer, intent(in), optional  :: threads !! the team for the points
         end subroutine grid_pdf_r1
 
         !> `P(X <= x)` at one point: `call g%cdf(x, p)`, the integral of `%pdf` from `xmin` plus the
@@ -1229,12 +1325,14 @@ module parquet_kde
             real(real64), intent(out)      :: p    !! the probability at or below `x`
         end subroutine grid_cdf_r0
 
-        !> `P(X <= x)` at each point of `x`: `call g%cdf(x, p)`. `size(p) /= size(x)` aborts.
-        module subroutine grid_cdf_r1(self, x, p)
+        !> `P(X <= x)` at each point of `x`: `call g%cdf(x, p, [threads])`. `size(p) /= size(x)`
+        !! aborts; `threads` as `%pdf` takes it.
+        module subroutine grid_cdf_r1(self, x, p, threads)
             implicit none
-            class(pf_kde_grid), intent(in) :: self !! the grid
-            real(real64), intent(in)       :: x(:) !! where to evaluate
-            real(real64), intent(out)      :: p(:) !! the probability at or below each point
+            class(pf_kde_grid), intent(in) :: self    !! the grid
+            real(real64), intent(in)       :: x(:)    !! where to evaluate
+            real(real64), intent(out)      :: p(:)    !! the probability at or below each point
+            integer, intent(in), optional  :: threads !! the team for the points
         end subroutine grid_cdf_r1
 
         !> The quantile at probability `p`: `call g%quantile(p, x)`, the smallest `x` in
@@ -1251,13 +1349,14 @@ module parquet_kde
             real(real64), intent(out)      :: x    !! the quantile
         end subroutine grid_quantile_r0
 
-        !> The quantile at each probability of `p`: `call g%quantile(p, x)`.
-        !! `size(x) /= size(p)` aborts.
-        module subroutine grid_quantile_r1(self, p, x)
+        !> The quantile at each probability of `p`: `call g%quantile(p, x, [threads])`.
+        !! `size(x) /= size(p)` aborts; `threads` as `%pdf` takes it.
+        module subroutine grid_quantile_r1(self, p, x, threads)
             implicit none
-            class(pf_kde_grid), intent(in) :: self !! the grid
-            real(real64), intent(in)       :: p(:) !! the probabilities
-            real(real64), intent(out)      :: x(:) !! the quantile at each
+            class(pf_kde_grid), intent(in) :: self    !! the grid
+            real(real64), intent(in)       :: p(:)    !! the probabilities
+            real(real64), intent(out)      :: x(:)    !! the quantile at each
+            integer, intent(in), optional  :: threads !! the team for the probabilities
         end subroutine grid_quantile_r1
 
         !> Draws from the grid's density: `call g%sample(v, seed, [stream], [threads])` fills `v`
@@ -1404,7 +1503,8 @@ module parquet_kde
         end subroutine grid_print
 
         !> Zeroes the accumulation and every count, keeping the geometry and the settings: the grid
-        !! is initialised and empty. Does nothing to a grid that was never initialised.
+        !! is initialised, empty and UNFINISHED, so it accumulates again. Does nothing to a grid
+        !! that was never initialised.
         module subroutine grid_clear(self)
             implicit none
             class(pf_kde_grid), intent(inout) :: self !! the grid
@@ -1553,7 +1653,7 @@ module parquet_kde
         !> Validates and resolves the settings `pf_kde%fit` and `pf_kde_grid%init` share -- the
         !! kernel, the two bounds and the boundary correction -- in that order, aborting with the
         !! caller's `entry` on the first mistake. Absent bounds leave the support unbounded on that
-        !! side; any bound without `boundary` selects `"renormalise"`.
+        !! side; any bound without `boundary` selects `"reflect"`.
         module subroutine kde_resolve_setup(entry, kernel, lower, upper, boundary, kernel_code, &
                 has_lower, lo, has_upper, hi, boundary_code)
             implicit none
@@ -1570,6 +1670,16 @@ module parquet_kde
             integer, intent(out)                   :: boundary_code !! the correction
         end subroutine kde_resolve_setup
 
+        !> `.true.` under a local-polynomial boundary correction: `"renormalise"` and `"linear"`,
+        !! the `l = 0` and `l = 1` members of one family, which share the corrected kernel, the zone
+        !! tables, `Z` and the quadrature. `"reflect"` and the unbounded estimate do not. The one
+        !! home of that grouping; both forms read it.
+        pure module function kde_is_corrected(bcode) result(res)
+            implicit none
+            integer, intent(in) :: bcode !! the boundary correction's code
+            logical             :: res   !! it is a local-polynomial correction
+        end function kde_is_corrected
+
         !> `.true.` for a finite number above zero. The NaN is screened first, as its own test: an
         !! ordered comparison raises `IEEE_INVALID` on one.
         pure module function kde_positive_finite(v) result(res)
@@ -1578,9 +1688,10 @@ module parquet_kde
             logical                  :: res !! it is finite and positive
         end function kde_positive_finite
 
-        !> `.true.` for a bandwidth the estimate can use: above zero, and finite once multiplied by
-        !! the kernel's support radius, which is how far a kernel of it reaches. An adaptive rule
-        !! can produce one that is neither, by overflow or underflow.
+        !> `.true.` for a bandwidth the estimate can use: NORMAL (so positive, and not subnormal),
+        !! and finite once multiplied by the kernel's support radius, which is how far a kernel of
+        !! it reaches. An adaptive rule can produce one that is neither, by overflow or underflow,
+        !! and so can a caller. The one admission rule; both forms apply it.
         pure module function kde_bandwidth_usable(code, h) result(res)
             implicit none
             integer, intent(in)      :: code !! the kernel
@@ -1649,19 +1760,25 @@ module parquet_kde
             real(real64)             :: m    !! the second moment at or below `z`
         end function kde_kernel_m2
 
-        !> The linear boundary kernel at the query `t` inside the support, for a point whose
-        !! reciprocal bandwidth is `r`: the kernel `K` corrected so that its zeroth moment over the
-        !! part of its support inside the bounds is one and its first moment zero.
+        !> The local-polynomial boundary kernel `bcode` names, at the query `t` inside the support,
+        !! for a point whose reciprocal bandwidth is `r`: the kernel `K` corrected so that its
+        !! zeroth moment over the part of its support inside the bounds is one -- and, under
+        !! `KDE_BOUNDARY_LINEAR`, its first moment zero as well.
         !!
         !! The moments are taken over `[max(-R, -q), min(R, p)]`, `p = (t - lo) r` and
         !! `q = (hi - t) r` the distances to the bounds in bandwidths; a bound a reach or more away
-        !! leaves the kernel plain. Where the interval is `KDE_LINEAR_NARROW` standard deviations
+        !! leaves the kernel plain. Where the interval is `KDE_CORR_NARROW` standard deviations
         !! wide or more they are differences of the closed forms (`kde_kernel_cdf`, `kde_kernel_m1`,
         !! `kde_kernel_m2`); below it they are formed centred on the interval's midpoint by
         !! `KDE_GL8_X`'s rule, per piece between the kernel's knots, scaled by the width so that
-        !! nothing cancels and nothing underflows.
-        pure module function kde_linear_factor(code, has_lower, lo, has_upper, hi, t, r) result(lf)
+        !! nothing cancels and nothing underflows -- which is also where `a_0` alone would lose
+        !! digits, two distribution functions of order one differencing to the width.
+        !!
+        !! `bcode` other than the two corrected codes is a caller's mistake, not a data condition,
+        !! and answers the plain kernel.
+        pure module function kde_corr_factor(bcode, code, has_lower, lo, has_upper, hi, t, r) result(cf)
             implicit none
+            integer, intent(in)      :: bcode     !! the correction: renormalise (`l = 0`) or linear (`l = 1`)
             integer, intent(in)      :: code      !! the kernel
             logical, intent(in)      :: has_lower !! a lower bound was given
             real(real64), intent(in) :: lo        !! the lower bound
@@ -1669,18 +1786,39 @@ module parquet_kde
             real(real64), intent(in) :: hi        !! the upper bound
             real(real64), intent(in) :: t         !! the query, inside the support
             real(real64), intent(in) :: r         !! one over the point's bandwidth
-            type(kde_lin_factor)     :: lf        !! the kernel's correction there
-        end function kde_linear_factor
+            type(kde_corr_kernel)    :: cf        !! the kernel's correction there
+        end function kde_corr_factor
 
-        !> The linear boundary kernel's value at the offset `u`, in bandwidths, from the plain
-        !! kernel's value there, `k = K(u)`: `k` itself where `lf` is plain.
-        pure module function kde_linear_value(lf, u, k) result(v)
+        !> The corrected kernel's value at the offset `u`, in bandwidths, from the plain kernel's
+        !! value there, `k = K(u)`: `k` itself where `cf` is plain.
+        pure module function kde_corr_value(cf, u, k) result(v)
             implicit none
-            type(kde_lin_factor), intent(in) :: lf !! the correction at the query
-            real(real64), intent(in)         :: u  !! the offset, in bandwidths
-            real(real64), intent(in)         :: k  !! the plain kernel's value there
-            real(real64)                     :: v  !! the corrected kernel's value
-        end function kde_linear_value
+            type(kde_corr_kernel), intent(in) :: cf !! the correction at the query
+            real(real64), intent(in)          :: u  !! the offset, in bandwidths
+            real(real64), intent(in)          :: k  !! the plain kernel's value there
+            real(real64)                      :: v  !! the corrected kernel's value
+        end function kde_corr_value
+
+        !> The integral of one point's corrected term `fn` between `s` and `t`, both inside the
+        !! support: closed form by the kernel's own distribution function where the term is plain,
+        !! a fixed Gauss-Legendre rule per analytic piece where the correction is acting.
+        !! `fn%absolute` integrates the magnitude instead, whose sign change the caller supplies.
+        !!
+        !! The one home of the per-point integral: `pf_kde`'s zone tables, stretches and envelope
+        !! read it, and `pf_kde_grid`'s deposit reads it for the corrected weight it puts beyond its
+        !! own range. Only the part the kernel reaches counts; the piece between the two correction
+        !! edges is the plain kernel's, and each corrected piece is integrated with the point's own
+        !! breakpoints -- the kernel's knots, its moments' knots, the two correction edges and, for
+        !! the sampler, the sign change.
+        module function kde_term_integral(fn, s, t, sigma, has_sigma) result(v)
+            implicit none
+            type(kde_point_fn), intent(inout) :: fn        !! the point's scalars; never updated
+            real(real64), intent(in)          :: s         !! the lower end
+            real(real64), intent(in)          :: t         !! the upper end
+            real(real64), intent(in)          :: sigma     !! the term's sign change
+            logical, intent(in)               :: has_sigma !! the sign change is known
+            real(real64)                      :: v         !! the integral
+        end function kde_term_integral
 
         !> The bandwidth a rule gives the population `x` with its `weights`: `C * A * n_eff**(-1/5)`
         !! with `A = min(s, IQR/1.349)`, or `s` alone where the interquartile range is zero, and

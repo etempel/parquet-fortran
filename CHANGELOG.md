@@ -110,11 +110,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   kernel's standard deviation; the Improved Sheather-Jones rule (the default), Silverman's and
   Scott's rules, a number, and `adjust=`; per-element weights and nulls under the `pf_*` family's
   rules, with `n_eff` in the rules; `lower=`/`upper=` for a bounded support, corrected by
-  renormalisation, by reflection or by the linear boundary kernel (`boundary="linear"`:
-  second-order at the bound, negative values set to zero and the estimate renormalised). `adaptive=.true.` selects the sample-point adaptive kernel (each
+  `boundary=` `"reflect"` (the default), `"renormalise"` or `"linear"` -- the last two the
+  degree-zero and degree-one members of the local-polynomial boundary kernel, each dividing the
+  summed kernels by the mass a kernel centred at the QUERY point keeps inside the support and then
+  by the estimate's own integral, `"linear"` additionally setting negative values to zero.
+  `adaptive=.true.` selects the sample-point adaptive kernel (each
   point's bandwidth from a pilot density, sensitivity `alpha=`, capped by `bandwidth_max=`, read
   back through `%bandwidths`, `%bandwidth_at` and `%pilot`), and the streaming form takes the same
-  rule from a `pilot=` grid. `threads=` on the bulk forms; draws addressed by `(seed, stream)`. An
+  rule from a `pilot=` grid. A grid's lifecycle is `%init` -> `%add`* -> `%finish` -> query, with
+  `%is_finished`, `finish=.true.` on `%add` and `%merge` as the one-line form, and `%clear` to
+  reopen it. `threads=` on the bulk forms of both; draws addressed by `(seed, stream)`. An
   Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
   [Kernel density estimation](doc/pages/utilities/kernel-density.md).
 - **A direction inside a HEALPix pixel, not just at its centre**:
@@ -247,6 +252,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `pf_stddev`, `pf_variance`, `pf_sem` and `pf_moments` answer a sample scaled to either end of the
+  representable range. The sum of squared deviations overflows above a magnitude of about `1e150`
+  and underflows to zero below about `1e-170`, so a standard deviation an ordinary `real64` holds
+  was answered as `+Infinity` or, worse, as `0` for a population that has spread; where the plain
+  accumulation returns something that is not finite and positive, the deviations are now scaled by
+  the largest of them and the sum retaken. Every other answer is unchanged, to the last bit.
 - `pf_spatial_index%within_segment`, `%within_cylinder` and `%within_cone` find the points lying
   exactly on their axis when the radius is zero, and refuse an axis whose squared length overflows
   rather than answering as a ball about its first endpoint. The zero-radius answer holds under a

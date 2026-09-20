@@ -3664,6 +3664,18 @@ contains
                 test_kde_grid_cell_width_aborts), &
             new_unittest("pf_kde_grid%init refuses a zero bandwidth", &
                 test_kde_grid_bandwidth_aborts), &
+            new_unittest("pf_kde_grid%init refuses a subnormal bandwidth", &
+                test_kde_grid_bandwidth_subnormal_aborts), &
+            new_unittest("pf_kde_grid%init refuses a bandwidth whose reach overflows", &
+                test_kde_grid_bandwidth_unusable_aborts), &
+            new_unittest("a query on an unfinished grid aborts", &
+                test_kde_grid_query_unfinished_aborts), &
+            new_unittest("pf_kde_grid%add after %finish aborts", &
+                test_kde_grid_add_after_finish_aborts), &
+            new_unittest("pf_kde_grid%merge after %finish aborts", &
+                test_kde_grid_merge_after_finish_aborts), &
+            new_unittest("pf_kde_grid%init refuses an unfinished pilot", &
+                test_kde_grid_pilot_unfinished_aborts), &
             new_unittest("pf_kde_grid%init refuses an unknown kernel", &
                 test_kde_grid_unknown_kernel_aborts), &
             new_unittest("pf_kde_grid%init refuses boundary= without a bound", &
@@ -21602,6 +21614,42 @@ contains
         call check_kde_scenario(error, "kde_grid_bandwidth", &
             "pf_kde_grid%init: bandwidth must be a finite, positive number")
     end subroutine test_kde_grid_bandwidth_aborts
+    !
+    subroutine test_kde_grid_bandwidth_subnormal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_bandwidth_subnormal", &
+            "pf_kde_grid%init: bandwidth must be a normal positive number whose kernel reach is finite")
+    end subroutine test_kde_grid_bandwidth_subnormal_aborts
+    !
+    subroutine test_kde_grid_bandwidth_unusable_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_bandwidth_unusable", &
+            "pf_kde_grid%init: bandwidth must be a normal positive number whose kernel reach is finite")
+    end subroutine test_kde_grid_bandwidth_unusable_aborts
+    !
+    subroutine test_kde_grid_query_unfinished_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_query_unfinished", &
+            "pf_kde_grid%density: the grid has not been finished; call %finish before querying it")
+    end subroutine test_kde_grid_query_unfinished_aborts
+    !
+    subroutine test_kde_grid_add_after_finish_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_add_after_finish", &
+            "pf_kde_grid%add: the grid has been finished; call %clear to accumulate into it again")
+    end subroutine test_kde_grid_add_after_finish_aborts
+    !
+    subroutine test_kde_grid_merge_after_finish_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_after_finish", &
+            "pf_kde_grid%merge: the grid has been finished; call %clear to accumulate into it again")
+    end subroutine test_kde_grid_merge_after_finish_aborts
+    !
+    subroutine test_kde_grid_pilot_unfinished_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_pilot_unfinished", &
+            "pf_kde_grid%init: pilot must be a finished grid; call %finish on it")
+    end subroutine test_kde_grid_pilot_unfinished_aborts
     !
     subroutine test_kde_grid_unknown_kernel_aborts(error)
         type(error_type), allocatable, intent(out) :: error

@@ -2917,6 +2917,7 @@ KDE_OPTIONAL_ORDER = (
     + ["xmin", "xmax", "cut", "x", "normalise", "stream"]
     + ["is_valid", "weights", "weight_type", "skipnan", "n_null", "n_nan", "n_outside", "ok",
        "threads"]
+    + ["finish"]
     + ["unit"]
 )
 

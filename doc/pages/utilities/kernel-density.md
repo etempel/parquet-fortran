@@ -139,6 +139,13 @@ The answer is the smallest solution no narrower than one cell.
 - **Repeated values are concentrations to it.** A sample of few distinct values repeated many times,
   and in the same way one given integer frequency weights, can be given a bandwidth of about a cell,
   which resolves the repeats. Name a rule of thumb, or give the bandwidth, for such data.
+- **Several narrow components at a REGULAR spacing on a broad one are its blind spot**, and the one
+  shape where its error grows with the sample rather than falling: a transform-based fixed point
+  reads an evenly spaced comb as genuine high-frequency structure and keeps narrowing. A few narrow
+  components at irregular positions do not do this -- the rule is excellent on an ordinary mixture
+  at every width and weight -- so what defeats it is the regularity. Name a rule of thumb, or use
+  the adaptive kernel, for such data. `bench/benchmark_kde.sh` measures the rule's own cost, not
+  its accuracy; the shape is one to recognise rather than to detect.
 - **Its cost is one pass binning the sample and a fixed amount besides**: a transform of the 16384
   cells and a few tens of evaluations of the equation. On a large sample that is less than the rules
   of thumb spend on their own passes over it; on a small one it is many times more, so a loop
@@ -159,7 +166,7 @@ same weights and `weight_type`.
 | `rule=` | `h` |
 |---|---|
 | `"silverman"` | `0.9 * A * n_eff**(-1/5)` -- Silverman's rule of thumb |
-| `"scott"` | `1.06 * A * n_eff**(-1/5)` -- Scott's normal-reference rule |
+| `"scott"` | `(4/3)**(1/5) * A * n_eff**(-1/5)` -- Scott's normal-reference rule |
 
 - **`adjust=`** multiplies the bandwidth however it was chosen, a rule's or an explicit number:
   `adjust=0.5` halves the smoothing.
@@ -183,11 +190,15 @@ same weights and `weight_type`.
   reads the population inside the support as if it were unbounded, and the correction is applied
   to the kernels afterwards.
 
-Other software computes different numbers under the two rules of thumb's names. When a particular
-value is needed, pass it as `bandwidth=`.
+Other software may compute a different number under the same name. statsmodels' `bw_silverman`
+agrees with `rule="silverman"` exactly, to the last bit; its `bw_scott` uses the rounded `1.059`
+where this library uses the exact `(4/3)**(1/5)`. scipy's `gaussian_kde` differs under both names,
+because its `bw_method="silverman"` and `"scott"` scale the sample's standard deviation rather than
+the robust scale `A`. When a particular value is needed, pass it as `bandwidth=`.
 
 `%bandwidth()` answers the bandwidth in use, after `adjust`, and `%rule(name)` the rule that chose
-it: `"isj"`, `"silverman"` or `"scott"`, or `"explicit"` when it was given as a number.
+it: `"isj"`, `"silverman"` or `"scott"`, `"explicit"` when it was given as a number, or `"none"` on
+an undefined estimate, where no rule produced one.
 
 ## Bounded support: `lower=`, `upper=` and `boundary=`
 
@@ -202,46 +213,64 @@ beyond that limit, and a kernel placed near it would put mass where none can be.
 
 A kernel crossing a bound is corrected, in one of three ways chosen by `boundary=`:
 
-- **`"renormalise"`** (the default): the kernel is cut at the bounds and divided by the mass it
-  keeps inside them, so every point contributes exactly one unit inside the support. It never
-  invents mass, and it does not force the estimate flat at the bound.
-- **`"reflect"`**: the point is mirrored about each bound within its reach, and the mirror image's
-  mass is folded back inside. It is exact for a density that is flat at the bound -- the density of
-  `abs(v)` for a `v` symmetric about zero, say -- and it forces the estimate flat there.
+- **`"reflect"`** (the default): the point is mirrored about each bound within its reach, and the
+  mirror image's mass is folded back inside. It is exact for a density that is flat at the bound --
+  the density of `abs(v)` for a `v` symmetric about zero, say -- and it forces the estimate flat
+  there. Its `%cdf` has a closed form, so it costs no more than the unbounded estimate.
+- **`"renormalise"`**: at each query point the summed kernels are divided by the mass a kernel
+  *centred there* keeps inside the support, and the estimate is then divided by its own integral so
+  that it is still a density. This is the cut-and-normalised kernel of the literature, the
+  local-CONSTANT member of the same family as `"linear"` below. At the bound it answers what
+  `"reflect"` answers -- both double the one-sided sum there -- and it differs from it inside.
+  Because the divisor varies with the query point, `%cdf` and `%quantile` within one kernel's reach
+  of a bound are quadratures rather than closed forms, and cost what `"linear"`'s cost.
 - **`"linear"`**: within one kernel's reach of a bound each point's kernel is replaced by the
   linear boundary kernel, the kernel of a local linear fit there: `(a_2 - a_1 u) K(u)` over the
   moments `a_l` the support leaves it, which is the unique kernel of that form whose mass inside
   the support is one and whose first moment is zero. Its bias at the bound is of the order of
   `h**2`, the interior's, rather than `h`. It can go negative where the true density falls to zero
-  at a bound: those values are set to zero and the whole estimate divided by its own integral, so
-  `%pdf` is still a density and `%cdf` still its exact integral.
+  at a bound: those values are set to zero. **The division by the estimate's own integral is not a
+  consequence of that clip** -- neither member of the family integrates to one by itself, and both
+  are divided by their own integral whether or not anything was clipped -- so `%pdf` is a density
+  and `%cdf` is exactly its integral in every case.
 
-The two simple corrections are biased near a bound by an amount proportional to `h` unless the true
-density is flat there, and each is the right choice for a different shape. Two hundred points drawn
-from the rising density `f(x) = 2x` on `[0, 1]`, fitted with Silverman's rule (`h = 0.0737`) and
-`lower=0`:
+**`"renormalise"` and `"linear"` are the two members of one family**, the kernel of a local
+polynomial fit of degree zero and of degree one at the query point. They share the arithmetic: the
+same truncated moments, the same normalisation by the estimate's own integral, and the same
+quadrature near a bound.
+
+The two local-constant corrections -- `"reflect"` and `"renormalise"` -- are biased near a bound by
+an amount proportional to `h` unless the true density is flat there, and each is the right choice
+for a different shape. Two hundred points drawn from the rising density `f(x) = 2x` on `[0, 1]`,
+fitted with Silverman's rule (`h = 0.0737`) and `lower=0`:
 
 ```
    x     true    unbounded    "renormalise"   "reflect"    "linear"
- 0.00    0.000     0.058          0.068          0.117       0.000
- 0.05    0.100     0.122          0.137          0.143       0.100
- 0.10    0.200     0.207          0.221          0.212       0.202
- 0.20    0.400     0.400          0.405          0.400       0.402
+ 0.00    0.000     0.058          0.116          0.117       0.000
+ 0.05    0.100     0.122          0.163          0.143       0.100
+ 0.10    0.200     0.207          0.226          0.212       0.202
+ 0.20    0.400     0.400          0.401          0.400       0.402
 ```
 
-At the bound itself reflection forces the estimate flat and so roughly doubles it; the unbounded
-estimate is closest there only because it has lost mass below zero, which it never gets back.
+At the bound itself both simple corrections force the estimate flat and so roughly double it, and
+they agree there to a thousandth; the unbounded estimate is closest there only because it has lost
+mass below zero, which it never gets back.
 
 **Which to choose.** `"linear"` where the density rises or falls at the bound, which is what the
-table above shows and what the other two cannot follow. `"reflect"` where it is flat there, which
-reflection is exact for. `"renormalise"`, the default, where the estimate's cost matters more than
-its last per cent at the bound, or where many draws are wanted from `%sample`.
+table above shows and what the other two cannot follow. `"reflect"`, the default, where it is flat
+there, which reflection is exact for, and wherever the estimate's cost matters: it is the only
+correction whose `%cdf`, `%quantile` and `%sample` cost no more near a bound than away from it.
+`"renormalise"` where the cut-and-normalised kernel is wanted by name; it is unbiased at the bound
+exactly as `"reflect"` is, and pays `"linear"`'s cost for `%cdf` and `%quantile` there.
 
-**What `"linear"` costs.** Inside one kernel's reach of a bound, `%cdf` and `%quantile` integrate
-each nearby point's corrected kernel numerically, and `%sample` draws there from those kernels and
-keeps a draw by the estimate, so each costs many times what it costs elsewhere; `%pdf` costs about
-what it costs under the other corrections. `bench/benchmark_kde.sh` measures all of it
-(`MODE=boundary`). For many draws from a density whose mass sits near a bound, accumulate the
+**What a corrected boundary costs.** Inside one kernel's reach of a bound, `%cdf` and
+`%quantile` integrate each nearby point's corrected kernel, and `%sample` draws there from those
+kernels and keeps a draw by the estimate, so each costs tens of times what it costs elsewhere --
+under `"linear"` and under `"renormalise"` alike, the two sharing that machinery. `%pdf` costs
+about what it costs under `"reflect"`, which needs no integral at all and is the reason it is the
+default. The integrals are a fixed Gauss-Legendre rule over pieces the kernel's own knots and the
+correction's edges cut, so their cost is known before a query starts and no tolerance governs it.
+`bench/benchmark_kde.sh` measures all of it (`MODE=boundary`). For many draws from a density whose mass sits near a bound, accumulate the
 estimate into a `pf_kde_grid` and sample that instead, which costs one quadratic solve per draw
 under every correction. Under the adaptive kernel a far tail's wide kernels widen the zone the
 correction acts in, and `bandwidth_max` is the remedy.
@@ -302,7 +331,9 @@ one, and a boundary correction applies to each kernel at its own bandwidth.
   proportional to the pilot, which is the nearest-neighbour extreme.
 - **`bandwidth_max`** caps every point's bandwidth. An outlier has a pilot density near zero and
   so a very wide kernel, and since every query sums the points within reach of the widest
-  kernel, one far outlier slows every query. The cap is the remedy.
+  kernel, one far outlier slows every query. The cap is the remedy. A cap BELOW the resolved global
+  bandwidth is accepted and then governs every point, which makes the estimate narrower everywhere
+  rather than only where the pilot is thin: it is a cap, not a check on the rule.
 - **The pilot** is a `pf_kde_grid` that `%fit` builds at the global bandwidth over the population,
   with the same kernel and support, from four bandwidths below the lowest point to four above the
   highest (clipped to the support), a quarter of a bandwidth to the cell, and never fewer than 64
@@ -359,17 +390,24 @@ the last `%clear()`. `%print([unit])` writes all of it as one block.
 ## Streaming into a grid: `pf_kde_grid`
 
 A grid lays `ncells` cells across `[xmin, xmax]`. Each point `%add` accepts deposits its kernel on
-the cells and is forgotten, so the grid's memory is its cells whatever the sample's size:
+the cells and is forgotten, so the grid's memory is its cells whatever the sample's size.
+
+**The lifecycle is `%init` -> `%add`* -> `%finish` -> query.** A grid has no `%fit` to be the seam
+between filling it and reading it, so the seam is named: `%finish` closes the accumulation, and
+only then do the queries answer. A query before it aborts, `%add` and `%merge` after it abort, and
+`%clear` reopens the grid, empty. `finish=.true.` on the last `%add` or `%merge` is the one-line
+form.
 
 ```fortran
 call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha], [bandwidth_max], &
             [lower], [upper], [boundary])
-call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], [threads])
-call g%merge(other)
+call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], [threads], [finish])
+call g%merge(other, [finish])
+call g%finish()
 call g%density(f, [x], [normalise])
-call g%pdf(x, f)
-call g%cdf(x, p)
-call g%quantile(p, x)
+call g%pdf(x, f, [threads])
+call g%cdf(x, p, [threads])
+call g%quantile(p, x, [threads])
 call g%sample(v, seed, [stream], [threads])
 call g%grid(x)
 ```
@@ -378,11 +416,14 @@ call g%grid(x)
   `xmin + (i - 1/2)*step`. The bandwidth is always a number, since a grid has seen no data when it
   is set up: to use a rule, fit a `pf_kde` to a subsample and pass its `%bandwidth()`. `kernel`,
   `lower`, `upper` and `boundary` are as for `%fit`, and `[xmin, xmax]` must lie inside the support.
-  A second `%init` discards everything.
+  A second `%init` discards everything, the finished state included.
 - **`%add`** takes one point or an array, `real64` or `real32`, or a numeric `parquet_column` as
   `%fit` does, under the population rules of `%fit`. `n_null`, `n_nan` and `n_outside` report what that call excluded, and the accessors
   (`%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%n_outside()`, `%sum_weights()`) the totals over
-  every call.
+  every call. `finish=.true.` closes the grid after that call.
+- **`%finish`** closes the accumulation; `%is_finished()` reports whether it has run, and a second
+  `%finish` is a no-op. The accessors and `%print` answer at any point in the lifecycle; the five
+  queries need a finished grid.
 - **Each point adds exactly its weight**, to rounding, at every cell width. Its kernel is evaluated
   at every cell centre it reaches and scaled so that the values sum to the point's weight, and a
   kernel crossing a bound is corrected onto the cells inside it as `boundary=` says.
@@ -400,7 +441,11 @@ Reading it:
 - **`%density(f, [x], [normalise])`**: the estimate at every cell centre, with `x` receiving the
   centres. `normalise=.false.` skips the division by the total weight and answers the weighted count
   per unit length.
-- **`%pdf(x, f)`**: linear between neighbouring centres, constant over the outer half of the first
+- **What a query costs.** `%finish` forms the total mass and the running integral once, so
+  `%density` costs one pass over the cells and `%pdf`, `%cdf` and `%quantile` cost a segment
+  look-up and a few operations each -- independent of the cell count, apart from `%quantile`'s
+  binary search over it. Nothing a query does grows with the number of points the grid has seen.
+- **`%pdf(x, f, [threads])`**: linear between neighbouring centres, constant over the outer half of the first
   and the last cell, zero outside `[xmin, xmax]`; at a centre it is `%density` exactly.
 - **`%cdf(x, p)`**: the integral of `%pdf` from `xmin`, plus the share counted below `xmin`. Below
   `xmin` it is that share and above `xmax` one less the share counted above; it is exactly 0 at and
@@ -444,6 +489,7 @@ do rg = 1, size(bounds, 2)                          ! one row group at a time
     call t%get("z", z)
     call dens%add(z)
 end do
+call dens%finish()                                  ! the seam: the queries open here
 call dens%density(f, x=zc)
 ```
 
@@ -466,6 +512,7 @@ do rg = 1, size(bounds, 2)                          ! pass one: the pilot
     call t%get("z", z)
     call pilot%add(z)
 end do
+call pilot%finish()                                 ! a pilot is read, so it is finished first
 
 call dens%init(400, 0.0_real64, 2.0_real64, 0.03_real64, lower=0.0_real64, pilot=pilot)
 do rg = 1, size(bounds, 2)                          ! pass two: the estimate
@@ -473,6 +520,7 @@ do rg = 1, size(bounds, 2)                          ! pass two: the estimate
     call t%get("z", z)
     call dens%add(z)
 end do
+call dens%finish()
 call dens%density(f, x=zc)
 ```
 
@@ -524,9 +572,10 @@ program grid_per_thread
     !$omp end parallel do
 
     call dens%init(400, 0.0_real64, 2.0_real64, 0.03_real64, lower=0.0_real64)
-    do i = 1, size(part)
+    do i = 1, size(part) - 1
         call dens%merge(part(i))
     end do
+    call dens%merge(part(size(part)), finish=.true.)   ! the one-line form of %finish
     call dens%density(f, x=zc)
 end program grid_per_thread
 ```
@@ -712,8 +761,6 @@ per thread merged at the end is how several threads accumulate one estimate.
 `use parquet_kde` compiles the statistics tier it is built on (`parquet_stats`, and beneath it the
 sorting tier), the random-number generator `%sample` draws from (`parquet_random`), the root finder
 and the discrete cosine transform the ISJ rule is built on (`parquet_root`, `parquet_transform`),
-the adaptive quadrature `boundary="linear"` integrates each nearby point's corrected kernel with
-(`parquet_integrate`, three files), and the module's own four files; no reader, writer or C++
-boundary. It re-exports
+and the module's own four files; no reader, writer or C++ boundary. It re-exports
 the verbosity and message-stream pair, which `%print` reads, so a program importing it alone can
 silence its output with `parquet_set_verbosity("silent")`.

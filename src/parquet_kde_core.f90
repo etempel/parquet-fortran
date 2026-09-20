@@ -168,10 +168,19 @@ contains
             if (.not. (has_lower .or. has_upper)) call kde_abort(entry, "boundary= needs lower= or upper=")
             call kde_resolve_boundary(entry, boundary, boundary_code)
         else if (has_lower .or. has_upper) then
-            boundary_code = KDE_BOUNDARY_RENORMALISE
+            ! The default correction. `"reflect"` is unbiased at the bound -- exactly as unbiased as
+            ! the corrected `"renormalise"`, both doubling the one-sided sum there -- and it keeps a
+            ! closed-form `%cdf`, which the corrected `"renormalise"` does not.
+            boundary_code = KDE_BOUNDARY_REFLECT
         end if
 
     end procedure kde_resolve_setup
+
+    module procedure kde_is_corrected
+
+        res = bcode == KDE_BOUNDARY_RENORMALISE .or. bcode == KDE_BOUNDARY_LINEAR
+
+    end procedure kde_is_corrected
 
     module procedure kde_positive_finite
 
@@ -185,10 +194,13 @@ contains
     module procedure kde_bandwidth_usable
 
         ! The NaN is screened first, as its own test: an ordered comparison raises IEEE_INVALID on
-        ! one.
+        ! one. Then NORMAL, not merely positive: a subnormal bandwidth puts the kernel's whole
+        ! support inside the gap between two neighbouring numbers, so the density is zero wherever
+        ! it is asked for while the distribution function still steps from 0 to 1. Then the reach,
+        ! which is how far a kernel of it looks.
         res = .false.
         if (h /= h) return
-        if (.not. (h > 0.0_real64)) return
+        if (.not. (h >= tiny(h))) return
         res = h <= huge(h)/KDE_RADIUS(code)
 
     end procedure kde_bandwidth_usable
@@ -411,7 +423,7 @@ contains
 
     end procedure kde_kernel_m2
 
-    module procedure kde_linear_factor
+    module procedure kde_corr_factor
 
         real(real64) :: rad, lo_z, hi_z, w, c, g, a0, a1, a2, m0, m1, m2
 
@@ -426,23 +438,32 @@ contains
         if (has_upper) then
             if ((hi - t)*r < rad) lo_z = -((hi - t)*r)
         end if
-        lf%plain = .true.
-        lf%a = 0.0_real64
-        lf%b = 0.0_real64
-        lf%c = 0.0_real64
-        lf%dinv = 0.0_real64
+        cf%plain = .true.
+        cf%a = 0.0_real64
+        cf%b = 0.0_real64
+        cf%c = 0.0_real64
+        cf%dinv = 0.0_real64
+        cf%a0 = 1.0_real64
         if (hi_z >= rad .and. lo_z <= -rad) return
-        lf%plain = .false.
+        cf%plain = .false.
         w = hi_z - lo_z
-        if (w >= KDE_LINEAR_NARROW) then
+        if (w >= KDE_CORR_NARROW) then
             ! The moments as differences of the closed forms; a one-sided interval's lower end is
             ! minus the radius, where every closed form is exactly zero.
             a0 = kde_kernel_cdf(code, hi_z) - kde_kernel_cdf(code, lo_z)
+            cf%a0 = a0
+            if (bcode /= KDE_BOUNDARY_LINEAR) then
+                ! The constant member: the kernel over the mass it keeps inside the bounds. It
+                ! needs no moment beyond the zeroth, and it is never negative.
+                cf%a = 1.0_real64
+                cf%dinv = 1.0_real64/a0
+                return
+            end if
             a1 = kde_kernel_m1(code, hi_z) - kde_kernel_m1(code, lo_z)
             a2 = kde_kernel_m2(code, hi_z) - kde_kernel_m2(code, lo_z)
-            lf%a = a2
-            lf%b = a1
-            lf%dinv = 1.0_real64/(a0*a2 - a1*a1)
+            cf%a = a2
+            cf%b = a1
+            cf%dinv = 1.0_real64/(a0*a2 - a1*a1)
             return
         end if
         ! A narrow two-sided interval: the moments about its midpoint `c`, in the scaled offset
@@ -454,20 +475,28 @@ contains
         ! loses nothing.
         c = 0.5_real64*(lo_z + hi_z)
         call centred_moments(code, lo_z, hi_z, c, w, m0, m1, m2)
+        ! `a_0` is the width times the zeroth centred moment, never the difference of two
+        ! distribution functions: here they are of order one and differ by the width.
+        cf%a0 = w*m0
+        if (bcode /= KDE_BOUNDARY_LINEAR) then
+            cf%a = 1.0_real64
+            cf%dinv = 1.0_real64/cf%a0
+            return
+        end if
         g = c/w
-        lf%a = m2 + g*m1
-        lf%b = (m1 + g*m0)/w
-        lf%c = c
-        lf%dinv = 1.0_real64/(w*(m0*m2 - m1*m1))
+        cf%a = m2 + g*m1
+        cf%b = (m1 + g*m0)/w
+        cf%c = c
+        cf%dinv = 1.0_real64/(w*(m0*m2 - m1*m1))
 
-    end procedure kde_linear_factor
+    end procedure kde_corr_factor
 
-    module procedure kde_linear_value
+    module procedure kde_corr_value
 
         v = k
-        if (.not. lf%plain) v = k*((lf%a - lf%b*(u - lf%c))*lf%dinv)
+        if (.not. cf%plain) v = k*((cf%a - cf%b*(u - cf%c))*cf%dinv)
 
-    end procedure kde_linear_value
+    end procedure kde_corr_value
 
     module procedure kde_n_eff
 
@@ -714,9 +743,180 @@ contains
         lookup = kde_fit_ns(3)
     end procedure parquet_debug_kde_fit_nanos
 
+    module procedure kde_term_integral
+
+        real(real64) :: reach, s2, t2, cj, dj, ps, pe
+
+        v = 0.0_real64
+        if (.not. (t > s)) return
+        reach = KDE_RADIUS(fn%code)*fn%hj
+        ! Only the part its kernel reaches.
+        s2 = max(s, fn%xj - reach)
+        t2 = min(t, fn%xj + reach)
+        if (.not. (t2 > s2)) return
+        ! The correction edges: below `c_j` the lower bound corrects the term, above `d_j` the upper
+        ! one. Where they cross -- a kernel wider than half the support -- the whole piece is
+        ! corrected on both sides, and both edges enter as breakpoints.
+        cj = s2
+        dj = t2
+        if (fn%has_lower) cj = fn%lo + reach
+        if (fn%has_upper) dj = fn%hi - reach
+        if (cj > dj) then
+            v = term_piece(fn, s2, t2, sigma, has_sigma)
+            return
+        end if
+        if (s2 < cj) v = v + term_piece(fn, s2, min(t2, cj), sigma, has_sigma)
+        ps = max(s2, cj)
+        pe = min(t2, dj)
+        if (pe > ps) v = v + (kde_kernel_cdf(fn%code, (pe - fn%xj)*fn%r) &
+            - kde_kernel_cdf(fn%code, (ps - fn%xj)*fn%r))
+        if (t2 > dj) v = v + term_piece(fn, max(s2, dj), t2, sigma, has_sigma)
+
+    end procedure kde_term_integral
+
     ! ==========================================================================================
     ! Private helpers
     ! ==========================================================================================
+
+    !> The integral of the term `fn` over `[alpha, beta]`, a piece on which it is corrected: the
+    !! term's own breakpoints cut it into analytic pieces, each piece is cut again into parts no
+    !! wider than `KDE_GL_SPAN` bandwidths, and `KDE_GL16_X`'s rule is applied to each part.
+    !!
+    !! **A fixed rule, not an adaptive one.** The breakpoints are the kernel's knots, its moments'
+    !! knots and the two correction edges, every one of them a closed form of the point's own
+    !! bandwidth and the bounds -- nothing about the integrand is discovered at run time, so there
+    !! is nothing for a convergence test to find. The cost is `16 * (parts)` evaluations, known
+    !! before the integral starts, where an adaptive rule spent 135 to 190 on the same integrand.
+    function term_piece(fn, alpha, beta, sigma, has_sigma) result(v)
+        type(kde_point_fn), intent(inout) :: fn        !! the point's scalars
+        real(real64), intent(in)          :: alpha     !! the piece's lower end
+        real(real64), intent(in)          :: beta      !! its upper end
+        real(real64), intent(in)          :: sigma     !! its sign change, a breakpoint of the magnitude
+        logical, intent(in)               :: has_sigma !! the sign change is known
+        real(real64)                      :: v         !! the integral
+
+        real(real64) :: bp(KDE_CORR_MAX_BREAKS), lo, hi
+        integer :: n, i
+
+        v = 0.0_real64
+        if (.not. (beta > alpha)) return
+        call term_breaks(fn, alpha, beta, sigma, has_sigma, bp, n)
+        lo = alpha
+        do i = 1, n + 1
+            if (i <= n) then
+                hi = bp(i)
+            else
+                hi = beta
+            end if
+            v = v + gauss_piece(fn, lo, hi)
+            lo = hi
+        end do
+
+    end function term_piece
+
+    !> `KDE_GL16_X`'s rule over `[a, b]`, an interval the term is analytic on, split into equal
+    !! parts no wider than `KDE_GL_SPAN` bandwidths so that the rule's geometric convergence is not
+    !! asked to cover more width than it can.
+    function gauss_piece(fn, a, b) result(v)
+        type(kde_point_fn), intent(inout) :: fn !! the point's scalars
+        real(real64), intent(in)          :: a  !! the interval's lower end
+        real(real64), intent(in)          :: b  !! its upper end
+        real(real64)                      :: v  !! the integral
+
+        real(real64) :: w, span, step, mid, half
+        integer :: ns, p, i
+
+        v = 0.0_real64
+        w = b - a
+        if (.not. (w > 0.0_real64)) return
+        ! The width in bandwidths: `fn%r` is one over the point's, so `w*r` is the count.
+        span = w*fn%r
+        ns = 1
+        if (span > KDE_GL_SPAN) ns = int(ceiling(span/KDE_GL_SPAN))
+        step = w/real(ns, real64)
+        do p = 1, ns
+            mid = a + (real(p, real64) - 0.5_real64)*step
+            half = 0.5_real64*step
+            do i = 1, 16
+                v = v + half*KDE_GL16_W(i)*fn%eval(mid + half*KDE_GL16_X(i))
+            end do
+        end do
+
+    end function gauss_piece
+
+    !> The term's own breakpoints strictly inside `(alpha, beta)`, ascending and distinct: the knots
+    !! of its kernel and of its moments for the cubic B-spline, its two correction edges, and the
+    !! sign change of the term where the sampler integrates the magnitude.
+    !!
+    !! Nothing here is taken from the data, so no call can see a repeated breakpoint whatever the
+    !! sample -- `pf_integrate` aborts on one -- and the list is at most `KDE_CORR_MAX_BREAKS`
+    !! long, far below the budget's pieces.
+    pure subroutine term_breaks(fn, alpha, beta, sigma, has_sigma, bp, n)
+        type(kde_point_fn), intent(in) :: fn        !! the point's scalars
+        real(real64), intent(in)       :: alpha     !! the piece's lower end
+        real(real64), intent(in)       :: beta      !! its upper end
+        real(real64), intent(in)       :: sigma     !! the term's sign change
+        logical, intent(in)            :: has_sigma !! the sign change is one of the breakpoints
+        real(real64), intent(out)      :: bp(:)     !! the breakpoints, ascending and distinct
+        integer, intent(out)           :: n         !! how many
+
+        real(real64) :: cand(KDE_CORR_MAX_BREAKS), rad, sc, v
+        integer :: nc, i, p
+        logical :: dup
+
+        rad = KDE_RADIUS(fn%code)
+        sc = KDE_SCALE(fn%code)
+        nc = 0
+        if (fn%code == KDE_BSPLINE) then
+            ! The kernel's own knots, where its cubic pieces meet, and its moments', where the
+            ! truncated moments' pieces do.
+            cand(nc + 1) = fn%xj - sc*fn%hj
+            cand(nc + 2) = fn%xj
+            cand(nc + 3) = fn%xj + sc*fn%hj
+            nc = nc + 3
+            if (fn%has_lower) then
+                nc = nc + 1
+                cand(nc) = fn%lo + sc*fn%hj
+            end if
+            if (fn%has_upper) then
+                nc = nc + 1
+                cand(nc) = fn%hi - sc*fn%hj
+            end if
+        end if
+        if (fn%has_lower) then
+            nc = nc + 1
+            cand(nc) = fn%lo + rad*fn%hj
+        end if
+        if (fn%has_upper) then
+            nc = nc + 1
+            cand(nc) = fn%hi - rad*fn%hj
+        end if
+        if (has_sigma) then
+            nc = nc + 1
+            cand(nc) = sigma
+        end if
+        ! Strictly inside the piece, made distinct, then insertion-sorted: the distinctness test
+        ! comes first, because a repeat found after the shift would leave the list holding it twice.
+        n = 0
+        do i = 1, nc
+            v = cand(i)
+            if (.not. (v > alpha .and. v < beta)) cycle
+            dup = .false.
+            do p = 1, n
+                if (bp(p) == v) dup = .true.
+            end do
+            if (dup) cycle
+            p = n
+            do while (p >= 1)
+                if (bp(p) <= v) exit
+                bp(p + 1) = bp(p)
+                p = p - 1
+            end do
+            bp(p + 1) = v
+            n = n + 1
+        end do
+
+    end subroutine term_breaks
 
     !> The linear kernel's moments over the narrow interval `[lo_z, hi_z]`, in standard deviations,
     !! about its midpoint `c` and scaled by its width `w`: `m_l`, the integral of `s**l K(c + w s)`

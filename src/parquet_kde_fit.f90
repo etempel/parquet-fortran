@@ -76,7 +76,7 @@ contains
         integer(int64), allocatable :: perm(:)
         integer(int64) :: nv, nnull, nnan, nout, m, i, c0, c1, rate
         real(real64) :: v, hh, adj, a_alpha, a_bmax, one(1)
-        logical :: saw_nan, freq, want_adaptive, built, found
+        logical :: saw_nan, freq, want_adaptive, built, found, usable
 
         call kde_clear(self)
         kde_fit_ns = 0_int64
@@ -264,14 +264,22 @@ contains
             self%hstride = 0_int64
         end if
         self%hinv = reciprocal(hh)
+        ! How far any query reaches, formed once: every window search and every scan reads it.
+        self%reach = KDE_RADIUS(self%kernel_code)*self%hmax
         call set_extent(self)
         call set_density_ends(self)
 
         ! ---- each point's mass inside the support, where it can differ from one ----
-        call build_mass(self)
-        ! ---- under `"linear"`, the zones, their tables and the mass that normalises the estimate ----
-        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
-            call build_linear(self)
+        call build_mass(self, usable)
+        ! A divisor that underflowed leaves nothing to answer with: a data condition, as every
+        ! other undefined estimate is.
+        if (.not. usable) then
+            self%h = ieee_value(1.0_real64, ieee_quiet_nan)
+            return
+        end if
+        ! ---- under a local-polynomial correction, the zones, their tables and `Z` ----
+        if (kde_is_corrected(self%boundary_code)) then
+            call build_corrected(self)
             ! The clipped estimate holding no mass leaves nothing to normalise by: a data condition,
             ! answered as every other undefined estimate is.
             if (.not. (self%znorm > 0.0_real64 .and. self%znorm <= huge(1.0_real64))) then
@@ -467,7 +475,17 @@ contains
         if (self%has_upper) b = min(b, self%hi)
         if (present(xmin)) a = xmin
         if (present(xmax)) b = xmax
-        if (.not. (a < b)) call kde_abort(EP, "xmin must be below xmax")
+        if (.not. (a < b)) then
+            ! Two texts: a caller who passed the ends hears about the ends, and one who passed
+            ! neither hears about what actually collapsed -- `cut = 0` on a sample of one value,
+            ! or a support clipping both ends onto one point.
+            if (present(xmin) .or. present(xmax)) then
+                call kde_abort(EP, "xmin must be below xmax")
+            else
+                call kde_abort(EP, "the default range has collapsed to one point; the sample has " // &
+                    "no spread at this cut=, so give xmin= and xmax=")
+            end if
+        end if
         call spaced(a, b, x)
         if (team <= 1) then
             kde_team_used = 1
@@ -534,10 +552,13 @@ contains
 
     module procedure kde_bandwidth_at_r0
 
-        real(real64) :: hs(1)
+        real(real64) :: xs(1), hs(1)
 
         call require_fitted(self, "pf_kde%bandwidth_at")
-        call bandwidths_at(self, [x], hs)
+        ! A named local, not `[x]`: an array constructor at a dummy is a temporary per call, and
+        ! this one is per query point when a caller loops.
+        xs(1) = x
+        call bandwidths_at(self, xs, hs)
         h = hs(1)
 
     end procedure kde_bandwidth_at_r0
@@ -586,6 +607,13 @@ contains
 
     module procedure kde_rule_name
         call require_fitted(self, "pf_kde%rule")
+        ! An undefined estimate was given no bandwidth by anything, so no rule produced one and
+        ! there is no rule to name. `"none"` rather than the rule that was ASKED for: every other
+        ! query on an undefined estimate answers what it has, not what it was aiming at.
+        if (.not. self%defined) then
+            name = "none"
+            return
+        end if
         select case (self%rule_code)
         case (KDE_RULE_EXPLICIT)
             name = "explicit"
@@ -679,10 +707,6 @@ contains
             write(u, '(2x,a,a)') kde_label("boundary"), "reflect"
         case (KDE_BOUNDARY_LINEAR)
             write(u, '(2x,a,a)') kde_label("boundary"), "linear"
-            ! What the fit's own integrals came to. Nothing is emitted about a status other than
-            ! converged: a quadrature reaching round-off at the last digit is not a finding about
-            ! the caller's data, and a caller who asks can read it here.
-            write(u, '(2x,a,a)') kde_label("quadrature"), trim(quadrature_text(self%zone_status))
         case default
             write(u, '(2x,a,a)') kde_label("boundary"), "none (unbounded)"
         end select
@@ -706,6 +730,7 @@ contains
         if (allocated(self%w)) deallocate(self%w)
         if (allocated(self%cw)) deallocate(self%cw)
         if (allocated(self%mass)) deallocate(self%mass)
+        if (allocated(self%cdf_lo)) deallocate(self%cdf_lo)
         if (allocated(self%hb)) deallocate(self%hb)
         if (allocated(self%hr)) deallocate(self%hr)
         if (allocated(self%cwz)) deallocate(self%cwz)
@@ -715,10 +740,11 @@ contains
         self%dens_hi = 0.0_real64
         self%zmid = 0.0_real64
         self%znorm = 1.0_real64
-        self%zone_status = PF_INT_OK
+        self%a0min = 1.0_real64
         self%adapt = kde_adapt()
         self%pilot_grid = pf_kde_grid()
         self%hmax = 0.0_real64
+        self%reach = 0.0_real64
         self%ext_lo = 0.0_real64
         self%ext_hi = 0.0_real64
         self%hinv = 0.0_real64
@@ -766,6 +792,9 @@ contains
     end subroutine check_probability
 
     !> Fills `x` with `size(x)` equally spaced points from `a` to `b`, both ends exact.
+    !!
+    !! A single point is the range's FIRST end, `a`, not its midpoint: `%curve`'s points ascend from
+    !! `xmin`, and a caller reading `x(1)` gets what they asked for at every size.
     pure subroutine spaced(a, b, x)
         real(real64), intent(in)  :: a    !! the first point
         real(real64), intent(in)  :: b    !! the last point
@@ -924,7 +953,7 @@ contains
     end subroutine set_extent
 
     !> Where the density starts and stops: the extent clipped to the bounds, which is what
-    !! `%quantile(0)` and `%quantile(1)` answer under every correction. `build_linear` moves either
+    !! `%quantile(0)` and `%quantile(1)` answer under every correction. `build_corrected` moves either
     !! one to a crossing where the clip removes a stretch that starts at it.
     subroutine set_density_ends(self)
         class(pf_kde), intent(inout) :: self !! the estimate, extent set
@@ -937,36 +966,51 @@ contains
     end subroutine set_density_ends
 
     !> Each point's mass inside the support, stored only where a correction makes it differ from
-    !! one: under `"renormalise"` whenever a bound is given, and under `"reflect"` only when both
-    !! bounds are given and a kernel is wider than the range between them, which is the one case
-    !! where the images omit mass (the doubly reflected terms).
-    subroutine build_mass(self)
+    !! one: under `"reflect"` alone, and there only when both bounds are given and a kernel is wider
+    !! than the range between them, which is the one case where the images omit mass (the doubly
+    !! reflected terms).
+    !!
+    !! The local-polynomial corrections have no per-point divisor at all: they divide by the mass a
+    !! kernel centred at the QUERY point keeps inside the support, which is a property of the query
+    !! and not of the point, and which `kde_corr_factor` forms per (query, point) pair.
+    subroutine build_mass(self, ok)
         class(pf_kde), intent(inout) :: self !! the estimate, sample and bandwidths set
+        logical, intent(out)         :: ok   !! every divisor it stored is positive and finite
 
         integer(int64) :: j, m
         real(real64) :: s_lo, s_hi, r
+        logical :: need_mass
 
-        select case (self%boundary_code)
-        case (KDE_BOUNDARY_RENORMALISE)
-            continue
-        case (KDE_BOUNDARY_REFLECT)
-            if (.not. (self%has_lower .and. self%has_upper)) return
-            if (KDE_RADIUS(self%kernel_code)*self%hmax <= self%hi - self%lo) return
-        case default
-            return
-        end select
+        ok = .true.
+        if (self%boundary_code /= KDE_BOUNDARY_REFLECT) return
+        ! The per-point divisor, only where the images omit mass: both bounds given and a kernel
+        ! wider than the range between them (the doubly reflected terms).
+        need_mass = self%has_lower .and. self%has_upper
+        if (need_mass) need_mass = self%reach > self%hi - self%lo
+        if (.not. (need_mass .or. self%has_lower)) return
         m = size(self%x, kind=int64)
-        allocate(self%mass(m))
+        if (need_mass) allocate(self%mass(m))
+        if (self%has_lower) allocate(self%cdf_lo(m))
         do j = 1_int64, m
             r = point_reciprocal(self, j)
             s_lo = 0.0_real64
-            if (self%has_lower) s_lo = images_cdf(self, j, self%lo, r)
+            if (self%has_lower) then
+                s_lo = images_cdf(self, j, self%lo, r)
+                ! What `%cdf` subtracts at every query point: a per-point constant, so it is formed
+                ! here once rather than per query per windowed point.
+                self%cdf_lo(j) = s_lo
+            end if
+            if (.not. need_mass) cycle
             if (self%has_upper) then
                 s_hi = images_cdf(self, j, self%hi, r)
             else
                 s_hi = 1.0_real64
             end if
             self%mass(j) = s_hi - s_lo
+            ! A kernel far wider than a two-sided support keeps a mass that underflows to zero,
+            ! and every query would then divide by it: `+Infinity` for `%pdf` and `NaN` for `%cdf`,
+            ! with `ok = .true.`. The same test `build_corrected` applies to `Z`, applied here.
+            if (.not. kde_positive_finite(self%mass(j))) ok = .false.
         end do
 
     end subroutine build_mass
@@ -992,17 +1036,18 @@ contains
         if (self%has_upper) then
             if (t > self%hi) return
         end if
-        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
-            ! The linear correction's own sum, clipped where it is negative and divided by the mass
-            ! the clipped estimate holds over the support. The clip is a test on a value the sum has
-            ! made finite, never `max` on one that could be NaN.
+        if (kde_is_corrected(self%boundary_code)) then
+            ! The correction's own sum, clipped where it is negative and divided by the mass the
+            ! clipped estimate holds over the support. The clip is a test on a value the sum has
+            ! made finite, never `max` on one that could be NaN; under `"renormalise"` it never
+            ! bites, the constant member being a kernel over a positive mass.
             call window_at(self, t, first, last)
-            call linear_sum(self, t, first, last, acc)
+            call corrected_sum(self, t, first, last, acc)
             k = acc/(self%w_total*self%h)
             if (k > 0.0_real64) f = k/self%znorm
             return
         end if
-        reach = KDE_RADIUS(self%kernel_code)*self%hmax
+        reach = self%reach
         first = first_at_or_above(self%x, t - reach)
         last = last_at_or_below(self%x, t + reach)
         acc = 0.0_real64
@@ -1047,13 +1092,13 @@ contains
             p = 1.0_real64
             if (t >= self%hi) return
         end if
-        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
-            p = cdf_linear(self, t)
+        if (kde_is_corrected(self%boundary_code)) then
+            p = cdf_corrected(self, t)
             if (p < 0.0_real64) p = 0.0_real64
             if (p > 1.0_real64) p = 1.0_real64
             return
         end if
-        reach = KDE_RADIUS(self%kernel_code)*self%hmax
+        reach = self%reach
         first = first_at_or_above(self%x, t - reach)
         last = last_at_or_below(self%x, t + reach)
         if (first <= 1_int64) then
@@ -1067,8 +1112,10 @@ contains
         do j = first, last
             r = self%hr(jb)
             jb = jb + self%hstride
+            ! The mass below the bound is a per-point constant `%fit` already formed, so a query
+            ! reads it rather than summing each point's images at the bound again.
             s_lo = 0.0_real64
-            if (self%has_lower) s_lo = images_cdf(self, j, self%lo, r)
+            if (allocated(self%cdf_lo)) s_lo = self%cdf_lo(j)
             c = images_cdf(self, j, t, r) - s_lo
             if (allocated(self%mass)) c = c/self%mass(j)
             if (self%weighted) c = self%w(j)*c
@@ -1079,6 +1126,72 @@ contains
         if (p > 1.0_real64) p = 1.0_real64
 
     end function cdf_at
+
+    !> `%cdf` and `%pdf` at `t` from ONE pass over the window, for the Newton iteration that asks
+    !! for both at every step.
+    !!
+    !! The two sums run over the same points in the same order, so each answer is the bit its own
+    !! procedure would give; what is saved is the second window search and the second pass. Where
+    !! either answer is decided without a window -- an undefined estimate, a NaN, a point at or
+    !! beyond a bound -- or where a local-polynomial correction answers `%cdf` from the zone tables
+    !! and `%pdf` from the corrected sum, the two are simply asked separately, because there is
+    !! nothing shared to save.
+    function cdf_and_pdf_at(self, t, p, f) result(shared)
+        class(pf_kde), intent(in) :: self !! the fitted estimate
+        real(real64), intent(in)  :: t    !! where to evaluate
+        real(real64), intent(out) :: p    !! the probability at or below `t`
+        real(real64), intent(out) :: f    !! the density there
+        logical                   :: shared !! one window served both
+
+        integer(int64) :: j, jb, first, last
+        real(real64) :: cacc, facc, c, k, r, s_lo
+
+        shared = .false.
+        if (kde_is_corrected(self%boundary_code) .or. .not. self%defined) return
+        if (t /= t) return
+        if (self%has_lower) then
+            if (t <= self%lo) return
+        end if
+        if (self%has_upper) then
+            if (t >= self%hi) return
+        end if
+        shared = .true.
+        first = first_at_or_above(self%x, t - self%reach)
+        last = last_at_or_below(self%x, t + self%reach)
+        if (first <= 1_int64) then
+            cacc = 0.0_real64
+        else if (self%weighted) then
+            cacc = self%cw(first - 1_int64)
+        else
+            cacc = real(first - 1_int64, real64)
+        end if
+        facc = 0.0_real64
+        jb = 1_int64 + (first - 1_int64)*self%hstride
+        do j = first, last
+            r = self%hr(jb)
+            jb = jb + self%hstride
+            s_lo = 0.0_real64
+            if (allocated(self%cdf_lo)) s_lo = self%cdf_lo(j)
+            c = images_cdf(self, j, t, r) - s_lo
+            k = images_pdf(self, j, t, r)
+            if (r /= self%hinv) k = k*(self%h*r)
+            if (allocated(self%mass)) then
+                c = c/self%mass(j)
+                k = k/self%mass(j)
+            end if
+            if (self%weighted) then
+                c = self%w(j)*c
+                k = self%w(j)*k
+            end if
+            cacc = cacc + c
+            facc = facc + k
+        end do
+        p = cacc/self%w_total
+        if (p < 0.0_real64) p = 0.0_real64
+        if (p > 1.0_real64) p = 1.0_real64
+        f = facc/(self%w_total*self%h)
+
+    end function cdf_and_pdf_at
 
     !> The smallest `x` at which `%cdf` reaches `p`, by Newton's method on `%cdf` inside a bracket
     !! that bisection takes over whenever a step would leave it or the density is zero. `p = 0` and
@@ -1130,14 +1243,18 @@ contains
         ! `a` always has `%cdf < p` and `b` always `%cdf >= p`; the answer is the point between.
         x = guess
         do it = 1, MAX_STEPS
-            fx = cdf_at(self, x)
+            ! One window for both where one serves: the step needs `%cdf` to move the bracket and
+            ! `%pdf` to take a Newton step, and asking separately searches and sums twice.
+            if (.not. cdf_and_pdf_at(self, x, fx, dx)) then
+                fx = cdf_at(self, x)
+                dx = density_at(self, x)
+            end if
             if (fx >= p) then
                 b = x
             else
                 a = x
             end if
             if (b - a <= 4.0_real64*spacing(max(abs(a), abs(b)))) exit
-            dx = density_at(self, x)
             xn = a + 0.5_real64*(b - a)
             if (dx > 0.0_real64) then
                 ! A Newton step is taken only when it lands strictly inside the bracket.
@@ -1152,6 +1269,11 @@ contains
             end if
             x = xn
         end do
+        ! Two hundred steps with bisection as the fallback is far beyond what double precision
+        ! needs -- each step at least halves the bracket, so sixty would do -- and no input is known
+        ! that reaches here. The answer is the bracket's upper end, which satisfies `%cdf >= p` and
+        ! is inside the support, so it is bounded rather than wrong, and nothing is emitted about
+        ! it: an advice-class message on a path nobody can reach is noise.
         x = b
 
     end function solve_cdf
@@ -1195,7 +1317,7 @@ contains
         ! Halved before the difference, which cannot then overflow; the reach is finite, the fit
         ! having refused any bandwidth whose kernel would reach beyond the largest number.
         half = 0.5_real64*self%x(m) - 0.5_real64*self%x(1)
-        reach = KDE_RADIUS(self%kernel_code)*self%hmax
+        reach = self%reach
         if (reach < half) then
             w = real(m, real64)*(reach/half)
         else
@@ -1205,54 +1327,32 @@ contains
 
     end function query_work
 
-    !> What one `%cdf` or one step of one `%quantile` costs, in kernel evaluations: the window,
-    !! multiplied under `"linear"` by what a zone query's per-point integrals cost over a plain sum,
-    !! so that a bulk query there opens a team where the plain estimate's work would not pay for one.
     !> What one draw costs, in kernel evaluations: a point chosen and a variate drawn, multiplied
     !! under `"linear"` by what a zone draw's inversion and its pass over the window cost.
+    !!
+    !! `"renormalise"` is NOT multiplied: its draw is the plain rejection loop with one extra mass
+    !! per attempt, where `"linear"`'s evaluates the whole estimate per attempt.
     pure function draw_work(self) result(w)
         class(pf_kde), intent(in) :: self !! the fitted estimate
         real(real64)              :: w    !! the cost of one draw
 
         w = KDE_DRAW_WORK
-        if (self%boundary_code == KDE_BOUNDARY_LINEAR) w = w*KDE_LINEAR_CDF_WORK
+        if (self%boundary_code == KDE_BOUNDARY_LINEAR) w = w*KDE_CORR_CDF_WORK
 
     end function draw_work
 
+    !> What one `%cdf` or one step of one `%quantile` costs, in kernel evaluations: the window,
+    !! multiplied under either local-polynomial correction by what a zone query's per-point
+    !! integrals cost over a plain sum, so that a bulk query there opens a team where the plain
+    !! estimate's work would not pay for one.
     pure function cdf_work(self) result(w)
         class(pf_kde), intent(in) :: self !! the fitted estimate
         real(real64)              :: w    !! the cost of one query point
 
         w = query_work(self)
-        if (self%boundary_code == KDE_BOUNDARY_LINEAR) w = w*KDE_LINEAR_CDF_WORK
+        if (kde_is_corrected(self%boundary_code)) w = w*KDE_CORR_CDF_WORK
 
     end function cdf_work
-
-    !> What `%print`'s `quadrature` row says of the worst status the fit's own integrals reached:
-    !! `converged`, or `not converged: ` and a word for it. `parquet_integrate` names no status, so
-    !! the words are mapped here.
-    pure function quadrature_text(status) result(text)
-        integer, intent(in) :: status !! the worst `PF_INT_*` status
-        character(len=32)   :: text   !! what to print
-
-        select case (status)
-        case (PF_INT_OK)
-            text = "converged"
-        case (PF_INT_LIMIT)
-            text = "not converged: limit"
-        case (PF_INT_ROUNDOFF)
-            text = "not converged: roundoff"
-        case (PF_INT_BAD_INTEGRAND)
-            text = "not converged: bad integrand"
-        case (PF_INT_NO_CONVERGENCE)
-            text = "not converged: no convergence"
-        case (PF_INT_DIVERGENT)
-            text = "not converged: divergent"
-        case default
-            text = "not converged: bad value"
-        end select
-
-    end function quadrature_text
 
     !> Fills `v` with draws from the estimate, element `k` from stream `pf_random_key(stream, k)`
     !! under the family key, serially or shared among a team; NaN on an undefined estimate.
@@ -1298,7 +1398,7 @@ contains
     !! where the kernel's cut or the support rejects it and, after `sample_tries()` redraws, found
     !! by inverting the point's corrected distribution function instead.
     !!
-    !! Under `"linear"` the draw is `draw_linear`'s instead, whose first draw chooses among the
+    !! Under `"linear"` the draw is `draw_corrected`'s instead, whose first draw chooses among the
     !! zones and the interior. Not `pure`: a zone draw reaches `pf_integrate`, and the redraw cap
     !! is a test hook's to move.
     function draw_at(self, key, sk) result(y)
@@ -1313,7 +1413,11 @@ contains
         logical :: kept
 
         if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
-            y = draw_linear(self, key, sk)
+            y = draw_corrected(self, key, sk)
+            return
+        end if
+        if (self%boundary_code == KDE_BOUNDARY_RENORMALISE) then
+            y = draw_renormalised(self, key, sk)
             return
         end if
         m = size(self%x, kind=int64)
@@ -1487,8 +1591,84 @@ contains
 
     end function invert_between
 
+    !> The mass a kernel of reciprocal bandwidth `r` centred at `t` keeps inside the support: `a_0`,
+    !! the whole of the constant member's correction there. Exactly one where no bound reaches `t`.
+    pure function renorm_a0(self, t, r) result(a0)
+        class(pf_kde), intent(in) :: self !! the fitted estimate
+        real(real64), intent(in)  :: t    !! the query, inside the support
+        real(real64), intent(in)  :: r    !! one over the point's bandwidth
+        real(real64)              :: a0   !! the mass inside
+
+        type(kde_corr_kernel) :: cf
+
+        cf = kde_corr_factor(KDE_BOUNDARY_RENORMALISE, self%kernel_code, self%has_lower, self%lo, &
+            self%has_upper, self%hi, t, r)
+        a0 = cf%a0
+
+    end function renorm_a0
+
+    !> One draw under `"renormalise"`: a proposal from the plain mixture, thinned by the query
+    !! point's own mass inside the support.
+    !!
+    !! The estimate is `g(x)/(a_0(x) Z)`, `g` the plain mixture of the retained kernels, so a draw
+    !! from `g` that lands inside the support and is kept with probability `a0min/a_0(x)` follows
+    !! the estimate exactly: the proposal's density times that probability is the estimate, up to
+    !! the constant `a0min` that divides out. `a_0` is formed at the CHOSEN POINT's bandwidth,
+    !! which is what makes the thinning exact under the adaptive kernel too. With one bound
+    !! `a_0` is at least a half, so at least half the attempts are kept.
+    !!
+    !! After `sample_tries()` attempts the estimate's own distribution function is inverted at a
+    !! fresh uniform instead. That path is exact on its own and reads draws nothing else read, so
+    !! the two together are exact whatever the split between them.
+    function draw_renormalised(self, key, sk) result(y)
+        class(pf_kde), intent(in)  :: self !! the fitted estimate, defined
+        integer(int64), intent(in) :: key  !! the family key
+        integer(int64), intent(in) :: sk   !! this element's stream
+        real(real64)               :: y    !! the draw
+
+        integer(int64) :: j, m, d
+        integer :: attempt
+        real(real64) :: xj, hj, rj, e, a0
+        logical :: kept
+
+        m = size(self%x, kind=int64)
+        d = 1_int64
+        if (self%weighted) then
+            ! The first point whose running weight passes a uniform share of the total; rounding
+            ! at the top end is held to the last point.
+            j = last_at_or_below(self%cw, pf_random_at(key, sk, d)*self%w_total) + 1_int64
+            if (j > m) j = m
+        else
+            j = pf_random_int_at(key, sk, 1_int64, m, d)
+        end if
+        d = d + 1_int64
+        xj = self%x(j)
+        hj = self%hb(1_int64 + (j - 1_int64)*self%hstride)
+        rj = point_reciprocal(self, j)
+        do attempt = 1, sample_tries()
+            call kernel_variate(self%kernel_code, key, sk, d, e)
+            ! The Gaussian is cut at five standard deviations, inclusive, and a variate beyond is
+            ! drawn again: the fitted kernel is the cut one.
+            if (self%kernel_code == KDE_GAUSSIAN) then
+                if (abs(e) > KDE_GAUSS_CUT) cycle
+            end if
+            y = xj + hj*e
+            call place(self, y, kept)
+            if (kept) then
+                a0 = renorm_a0(self, y, rj)
+                if (pf_random_at(key, sk, d)*a0 <= self%a0min) then
+                    d = d + 1_int64
+                    return
+                end if
+                d = d + 1_int64
+            end if
+        end do
+        y = quantile_at(self, pf_random_at(key, sk, d))
+
+    end function draw_renormalised
+
     ! ==========================================================================================
-    ! The linear boundary correction
+    ! The local-polynomial boundary corrections
     ! ==========================================================================================
 
     !> Point `j`'s weight, or one where the fit is unweighted.
@@ -1511,7 +1691,7 @@ contains
 
         real(real64) :: reach
 
-        reach = KDE_RADIUS(self%kernel_code)*self%hmax
+        reach = self%reach
         first = first_at_or_above(self%x, t - reach)
         last = last_at_or_below(self%x, t + reach)
 
@@ -1527,7 +1707,7 @@ contains
     !! which is once per query on a fixed fit, and each kernel is scaled by `h/h_j` only where that
     !! reciprocal differs from the global one -- so an adaptive fit whose every bandwidth is the
     !! global one answers the fixed estimate's bits.
-    pure subroutine linear_sum(self, t, first, last, acc, env, hnear)
+    pure subroutine corrected_sum(self, t, first, last, acc, env, hnear)
         class(pf_kde), intent(in)           :: self  !! the fitted estimate
         real(real64), intent(in)            :: t     !! the query, inside the support
         integer(int64), intent(in)          :: first !! the window's first point
@@ -1536,7 +1716,7 @@ contains
         real(real64), intent(out), optional :: env   !! the same over their magnitudes
         real(real64), intent(out), optional :: hnear !! the narrowest bandwidth reaching `t`
 
-        type(kde_lin_factor) :: lf
+        type(kde_corr_kernel) :: cf
         integer(int64) :: j, jb
         real(real64) :: r, rprev, u, k, hj, near, rad
 
@@ -1560,11 +1740,11 @@ contains
             k = kde_kernel_pdf(self%kernel_code, u)
             if (k == 0.0_real64) cycle
             if (r /= rprev) then
-                lf = kde_linear_factor(self%kernel_code, self%has_lower, self%lo, self%has_upper, &
-                    self%hi, t, r)
+                cf = kde_corr_factor(self%boundary_code, self%kernel_code, self%has_lower, &
+                    self%lo, self%has_upper, self%hi, t, r)
                 rprev = r
             end if
-            k = kde_linear_value(lf, u, k)
+            k = kde_corr_value(cf, u, k)
             ! The sum is divided by the global bandwidth by the caller, so a kernel of any other is
             ! scaled here by `h/h_j` and one of the global bandwidth is left exactly as it is.
             if (r /= self%hinv) k = k*(self%h*r)
@@ -1574,7 +1754,7 @@ contains
         end do
         if (present(hnear)) hnear = near
 
-    end subroutine linear_sum
+    end subroutine corrected_sum
 
     !> The raw linear estimate at `t`, before the clip and before `Z`: the density the correction
     !! gives, which the fit's scan looks for the negative stretches of.
@@ -1587,7 +1767,7 @@ contains
         real(real64) :: acc
 
         call window_at(self, t, first, last)
-        call linear_sum(self, t, first, last, acc)
+        call corrected_sum(self, t, first, last, acc)
         f = acc/(self%w_total*self%h)
 
     end function raw_density
@@ -1600,15 +1780,16 @@ contains
         real(real64), intent(in)   :: x    !! where to evaluate
         real(real64)               :: v    !! the term there
 
-        type(kde_lin_factor) :: lf
+        type(kde_corr_kernel) :: cf
         real(real64) :: r, u
 
         r = point_reciprocal(self, j)
         u = (x - self%x(j))*r
         v = kde_kernel_pdf(self%kernel_code, u)
         if (v /= 0.0_real64) then
-            lf = kde_linear_factor(self%kernel_code, self%has_lower, self%lo, self%has_upper, self%hi, x, r)
-            v = kde_linear_value(lf, u, v)*r
+            cf = kde_corr_factor(self%boundary_code, self%kernel_code, self%has_lower, self%lo, &
+                self%has_upper, self%hi, x, r)
+            v = kde_corr_value(cf, u, v)*r
         end if
 
     end function term_density
@@ -1623,13 +1804,14 @@ contains
         real(real64), intent(in)   :: x    !! where to evaluate
         real(real64)               :: v    !! the factor there
 
-        type(kde_lin_factor) :: lf
+        type(kde_corr_kernel) :: cf
         real(real64) :: r
 
         r = point_reciprocal(self, j)
-        lf = kde_linear_factor(self%kernel_code, self%has_lower, self%lo, self%has_upper, self%hi, x, r)
+        cf = kde_corr_factor(self%boundary_code, self%kernel_code, self%has_lower, self%lo, &
+            self%has_upper, self%hi, x, r)
         v = 1.0_real64
-        if (.not. lf%plain) v = (lf%a - lf%b*((x - self%x(j))*r - lf%c))*lf%dinv
+        if (.not. cf%plain) v = (cf%a - cf%b*((x - self%x(j))*r - cf%c))*cf%dinv
 
     end function term_factor
 
@@ -1648,144 +1830,24 @@ contains
     !> One point's corrected term as `pf_integrate` evaluates it.
     module procedure kde_point_eval
 
-        type(kde_lin_factor) :: lf
+        type(kde_corr_kernel) :: cf
         real(real64) :: u
 
         u = (x - this%xj)*this%r
         f = kde_kernel_pdf(this%code, u)
         if (f /= 0.0_real64) then
-            lf = kde_linear_factor(this%code, this%has_lower, this%lo, this%has_upper, this%hi, x, this%r)
-            f = kde_linear_value(lf, u, f)*this%r
+            cf = kde_corr_factor(this%bcode, this%code, this%has_lower, this%lo, this%has_upper, &
+                this%hi, x, this%r)
+            f = kde_corr_value(cf, u, f)*this%r
         end if
         if (this%absolute) f = abs(f)
 
     end procedure kde_point_eval
 
-    !> Point `j`'s own breakpoints strictly inside `(alpha, beta)`, ascending and distinct: the
-    !! knots of its kernel and of its moments for the cubic B-spline, its two correction edges, and
-    !! the sign change of its term where the sampler integrates the magnitude.
-    !!
-    !! Nothing here is taken from the data, so no call can see a repeated breakpoint whatever the
-    !! sample -- `pf_integrate` aborts on one -- and the list is at most `KDE_LINEAR_MAX_BREAKS`
-    !! long, far below the budget's pieces.
-    pure subroutine piece_breaks(self, j, alpha, beta, sigma, has_sigma, bp, n)
-        class(pf_kde), intent(in)  :: self       !! the fitted estimate
-        integer(int64), intent(in) :: j          !! the point
-        real(real64), intent(in)   :: alpha      !! the piece's lower end
-        real(real64), intent(in)   :: beta       !! its upper end
-        real(real64), intent(in)   :: sigma      !! the term's sign change
-        logical, intent(in)        :: has_sigma  !! the sign change is one of the breakpoints
-        real(real64), intent(out)  :: bp(:)      !! the breakpoints, ascending and distinct
-        integer, intent(out)       :: n          !! how many
-
-        real(real64) :: cand(KDE_LINEAR_MAX_BREAKS), hj, rad, sc, v
-        integer :: nc, i, p
-        logical :: dup
-
-        hj = self%hb(1_int64 + (j - 1_int64)*self%hstride)
-        rad = KDE_RADIUS(self%kernel_code)
-        sc = KDE_SCALE(self%kernel_code)
-        nc = 0
-        if (self%kernel_code == KDE_BSPLINE) then
-            ! The kernel's own knots, where its cubic pieces meet, and its moments', where the
-            ! truncated moments' pieces do.
-            cand(nc + 1) = self%x(j) - sc*hj
-            cand(nc + 2) = self%x(j)
-            cand(nc + 3) = self%x(j) + sc*hj
-            nc = nc + 3
-            if (self%has_lower) then
-                nc = nc + 1
-                cand(nc) = self%lo + sc*hj
-            end if
-            if (self%has_upper) then
-                nc = nc + 1
-                cand(nc) = self%hi - sc*hj
-            end if
-        end if
-        if (self%has_lower) then
-            nc = nc + 1
-            cand(nc) = self%lo + rad*hj
-        end if
-        if (self%has_upper) then
-            nc = nc + 1
-            cand(nc) = self%hi - rad*hj
-        end if
-        if (has_sigma) then
-            nc = nc + 1
-            cand(nc) = sigma
-        end if
-        ! Strictly inside the piece, made distinct, then insertion-sorted: the distinctness test
-        ! comes first, because a repeat found after the shift would leave the list holding it twice.
-        n = 0
-        do i = 1, nc
-            v = cand(i)
-            if (.not. (v > alpha .and. v < beta)) cycle
-            dup = .false.
-            do p = 1, n
-                if (bp(p) == v) dup = .true.
-            end do
-            if (dup) cycle
-            p = n
-            do while (p >= 1)
-                if (bp(p) <= v) exit
-                bp(p + 1) = bp(p)
-                p = p - 1
-            end do
-            bp(p + 1) = v
-            n = n + 1
-        end do
-
-    end subroutine piece_breaks
-
-    !> The integral of point `j`'s term over `[alpha, beta]`, a piece on which it is corrected, by
-    !! `pf_integrate` to `KDE_LINEAR_RTOL` and `KDE_LINEAR_ATOL` with the point's own breakpoints.
-    !! `status` keeps the worst status seen.
-    function term_piece(self, j, alpha, beta, absolute, sigma, has_sigma, status) result(v)
-        class(pf_kde), intent(in)  :: self      !! the fitted estimate
-        integer(int64), intent(in) :: j         !! the point
-        real(real64), intent(in)   :: alpha     !! the piece's lower end
-        real(real64), intent(in)   :: beta      !! its upper end
-        logical, intent(in)        :: absolute  !! integrate the term's magnitude
-        real(real64), intent(in)   :: sigma     !! its sign change, a breakpoint of the magnitude
-        logical, intent(in)        :: has_sigma !! the sign change is known
-        integer, intent(inout)     :: status    !! the worst `pf_integrate` status so far
-        real(real64)               :: v         !! the integral
-
-        type(kde_point_fn) :: fn
-        type(pf_integration_info) :: info
-        type(pf_tolerance) :: tol
-        real(real64) :: bp(KDE_LINEAR_MAX_BREAKS)
-        integer :: n
-
-        v = 0.0_real64
-        if (.not. (beta > alpha)) return
-        fn%code = self%kernel_code
-        fn%has_lower = self%has_lower
-        fn%lo = self%lo
-        fn%has_upper = self%has_upper
-        fn%hi = self%hi
-        fn%xj = self%x(j)
-        fn%r = point_reciprocal(self, j)
-        fn%absolute = absolute
-        tol%rtol = KDE_LINEAR_RTOL
-        tol%atol = KDE_LINEAR_ATOL
-        call piece_breaks(self, j, alpha, beta, sigma, has_sigma, bp, n)
-        if (n > 0) then
-            v = pf_integrate(fn, alpha, beta, tol, info=info, breakpoints=bp(1:n), &
-                context='pf_kde, boundary="linear"')
-        else
-            v = pf_integrate(fn, alpha, beta, tol, info=info, context='pf_kde, boundary="linear"')
-        end if
-        ! A status other than `PF_INT_OK` is used as answered and never aborted on; `%fit` keeps the
-        ! worst of its own, which `%print` reports, and a query records nothing.
-        if (info%status > status) status = info%status
-
-    end function term_piece
-
-    !> The integral of point `j`'s term between `s` and `t`, both inside the support: closed form
-    !! by the kernel's own distribution function where the term is plain, `pf_integrate` where it is
-    !! corrected. `absolute` integrates the magnitude instead, whose sign change the caller supplies.
-    function term_integral(self, j, s, t, absolute, sigma, has_sigma, status) result(v)
+    !> The integral of point `j`'s term between `s` and `t`, both inside the support: the module's
+    !! one per-point integral (`kde_term_integral`), given this point's scalars. `absolute`
+    !! integrates the magnitude instead, whose sign change the caller supplies.
+    function term_integral(self, j, s, t, absolute, sigma, has_sigma) result(v)
         class(pf_kde), intent(in)  :: self      !! the fitted estimate
         integer(int64), intent(in) :: j         !! the point
         real(real64), intent(in)   :: s         !! the lower end
@@ -1793,42 +1855,36 @@ contains
         logical, intent(in)        :: absolute  !! integrate the term's magnitude
         real(real64), intent(in)   :: sigma     !! its sign change
         logical, intent(in)        :: has_sigma !! the sign change is known
-        integer, intent(inout)     :: status    !! the worst `pf_integrate` status so far
         real(real64)               :: v         !! the integral
 
-        real(real64) :: r, hj, xj, reach, s2, t2, cj, dj, ps, pe, plain
+        type(kde_point_fn) :: fn
 
-        v = 0.0_real64
-        if (.not. (t > s)) return
-        xj = self%x(j)
-        hj = self%hb(1_int64 + (j - 1_int64)*self%hstride)
-        r = point_reciprocal(self, j)
-        reach = KDE_RADIUS(self%kernel_code)*hj
-        ! Only the part its kernel reaches.
-        s2 = max(s, xj - reach)
-        t2 = min(t, xj + reach)
-        if (.not. (t2 > s2)) return
-        ! The correction edges: below `c_j` the lower bound corrects the term, above `d_j` the upper
-        ! one. Where they cross -- a kernel wider than half the support -- the whole piece is
-        ! corrected on both sides, and both edges enter as breakpoints.
-        cj = s2
-        dj = t2
-        if (self%has_lower) cj = self%lo + reach
-        if (self%has_upper) dj = self%hi - reach
-        if (cj > dj) then
-            v = term_piece(self, j, s2, t2, absolute, sigma, has_sigma, status)
-            return
-        end if
-        if (s2 < cj) v = v + term_piece(self, j, s2, min(t2, cj), absolute, sigma, has_sigma, status)
-        ps = max(s2, cj)
-        pe = min(t2, dj)
-        if (pe > ps) then
-            plain = kde_kernel_cdf(self%kernel_code, (pe - xj)*r) - kde_kernel_cdf(self%kernel_code, (ps - xj)*r)
-            v = v + plain
-        end if
-        if (t2 > dj) v = v + term_piece(self, j, max(s2, dj), t2, absolute, sigma, has_sigma, status)
+        call point_function(self, j, absolute, fn)
+        v = kde_term_integral(fn, s, t, sigma, has_sigma)
 
     end function term_integral
+
+    !> Point `j`'s scalars as the integrand `pf_integrate` evaluates: where it is, its bandwidth and
+    !! that bandwidth's reciprocal, the kernel, the correction and the bounds. Nothing points at the
+    !! fitted object, so a query builds one on its stack per call.
+    subroutine point_function(self, j, absolute, fn)
+        class(pf_kde), intent(in)       :: self     !! the fitted estimate
+        integer(int64), intent(in)      :: j        !! the point
+        logical, intent(in)             :: absolute !! evaluate the term's magnitude
+        type(kde_point_fn), intent(out) :: fn       !! the point as a function
+
+        fn%code = self%kernel_code
+        fn%bcode = self%boundary_code
+        fn%has_lower = self%has_lower
+        fn%lo = self%lo
+        fn%has_upper = self%has_upper
+        fn%hi = self%hi
+        fn%xj = self%x(j)
+        fn%hj = self%hb(1_int64 + (j - 1_int64)*self%hstride)
+        fn%r = point_reciprocal(self, j)
+        fn%absolute = absolute
+
+    end subroutine point_function
 
     !> A bound on what the discontinuity at point `j`'s edge `e` can do to the raw estimate over an
     !! interval `dt` wide: the jump in the point's term there, plus the jump in its slope times the
@@ -1968,7 +2024,7 @@ contains
         real(real64) :: acc
 
         call window_at(self, t, first, last)
-        call linear_sum(self, t, first, last, acc, hnear=hnear)
+        call corrected_sum(self, t, first, last, acc, hnear=hnear)
         f = acc/(self%w_total*self%h)
 
     end subroutine raw_at
@@ -2125,6 +2181,10 @@ contains
                 else if (cf < 0.0_real64) then
                     start = crossing(self, px, cx)
                     open_stretch = .true.
+                    ! Everything positive so far lies BEFORE this stretch, so the flag starts
+                    ! afresh: a stretch that opens here and never closes must leave it `.false.`,
+                    ! or `%quantile(1)` answers the bound where the density is exactly zero.
+                    pos_after = .false.
                 else if (cf > 0.0_real64) then
                     if (ns == 0) pos_before = .true.
                     pos_after = .true.
@@ -2209,14 +2269,12 @@ contains
 
         integer(int64) :: j, jb, k, n, first, last, j1, j2
         real(real64) :: acc, reach, hj, o
-        integer :: status
         logical :: up
 
         up = iz == KDE_ZONE_HI
         j1 = self%zones(iz)%j1
         j2 = self%zones(iz)%j2
         n = j2 - j1 + 1_int64
-        status = PF_INT_OK
         o = self%lo
         if (up) o = self%hi
         call window_at(self, t, first, last)
@@ -2241,16 +2299,14 @@ contains
                     cycle
                 end if
                 if (self%x(j) - reach >= t) cycle
-                acc = acc + point_weight(self, j)*term_integral(self, j, o, t, .false., 0.0_real64, &
-                    .false., status)
+                acc = acc + point_weight(self, j)*term_integral(self, j, o, t, .false., 0.0_real64, .false.)
             else
                 if (self%x(j) - reach >= t) then
                     acc = acc + point_weight(self, j)*self%zones(iz)%val(j - j1 + 1_int64)
                     cycle
                 end if
                 if (self%x(j) + reach <= t) cycle
-                acc = acc + point_weight(self, j)*term_integral(self, j, t, o, .false., 0.0_real64, &
-                    .false., status)
+                acc = acc + point_weight(self, j)*term_integral(self, j, t, o, .false., 0.0_real64, .false.)
             end if
         end do
         l = acc/self%w_total
@@ -2348,7 +2404,7 @@ contains
     !> `P(X <= t)` under `"linear"`, for a `t` strictly inside the support: the clipped estimate's
     !! mass up to `t` over its mass over the whole support. Inside a zone that mass is integrated
     !! point by point; between the zones it is the zone's mass plus a closed form.
-    function cdf_linear(self, t) result(p)
+    function cdf_corrected(self, t) result(p)
         class(pf_kde), intent(in) :: self !! the fitted estimate
         real(real64), intent(in)  :: t    !! the query
         real(real64)              :: p    !! the probability at or below `t`
@@ -2361,26 +2417,25 @@ contains
             p = (self%zones(KDE_ZONE_LO)%mass + interior_mass(self, t))/self%znorm
         end if
 
-    end function cdf_linear
+    end function cdf_corrected
 
     !> The raw estimate's integral over `[s, t]`, summed over the window: what each stretch's
     !! negative mass is.
-    function stretch_raw(self, s, t, status) result(v)
+    function stretch_raw(self, s, t) result(v)
         class(pf_kde), intent(in) :: self   !! the fitted estimate
         real(real64), intent(in)  :: s      !! the lower end
         real(real64), intent(in)  :: t      !! the upper end
-        integer, intent(inout)    :: status !! the worst `pf_integrate` status so far
         real(real64)              :: v      !! the integral, over the total weight
 
         integer(int64) :: j, first, last
         real(real64) :: acc, reach
 
-        reach = KDE_RADIUS(self%kernel_code)*self%hmax
+        reach = self%reach
         first = first_at_or_above(self%x, s - reach)
         last = last_at_or_below(self%x, t + reach)
         acc = 0.0_real64
         do j = first, last
-            acc = acc + point_weight(self, j)*term_integral(self, j, s, t, .false., 0.0_real64, .false., status)
+            acc = acc + point_weight(self, j)*term_integral(self, j, s, t, .false., 0.0_real64, .false.)
         end do
         v = acc/self%w_total
 
@@ -2388,12 +2443,11 @@ contains
 
     !> One zone's tables: the points that can reach it, each one's integral of its term over it and
     !! their running weighted sum, and the stretches the clip removes, from the scan.
-    subroutine build_zone_tables(self, iz, edge, z, status, pos_before, pos_after)
+    subroutine build_zone_tables(self, iz, edge, z, pos_before, pos_after)
         class(pf_kde), intent(in)     :: self       !! the fitted estimate, sample and bandwidths set
         integer, intent(in)           :: iz         !! the zone
         real(real64), intent(in)      :: edge       !! its inner end
         type(kde_zone), intent(out)   :: z          !! the tables
-        integer, intent(inout)        :: status     !! the worst `pf_integrate` status so far
         logical, intent(out)          :: pos_before !! a positive value before the first stretch
         logical, intent(out)          :: pos_after  !! a positive value after the last
 
@@ -2401,7 +2455,7 @@ contains
         real(real64) :: reach, s0, s1, acc
 
         m = size(self%x, kind=int64)
-        reach = KDE_RADIUS(self%kernel_code)*self%hmax
+        reach = self%reach
         z%on = .true.
         z%edge = edge
         if (iz == KDE_ZONE_HI) then
@@ -2415,7 +2469,17 @@ contains
             z%j1 = 1_int64
             z%j2 = last_at_or_below(self%x, edge + reach)
         end if
-        call scan_zone(self, s0, s1, z, pos_before, pos_after)
+        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
+            call scan_zone(self, s0, s1, z, pos_before, pos_after)
+        else
+            ! The constant member is a kernel over a positive mass, so it is never negative and
+            ! there is nothing for the clip to remove: no scan, and the density's ends stay the
+            ! extent clipped to the bounds. This is the expensive half of the fit that
+            ! `"renormalise"` does not pay for.
+            z%ns = 0
+            pos_before = .true.
+            pos_after = .true.
+        end if
         n = z%j2 - z%j1 + 1_int64
         if (n < 1_int64) then
             z%j1 = 1_int64
@@ -2426,7 +2490,7 @@ contains
         allocate(z%val(n), z%cum(n))
         do k = 1_int64, n
             j = z%j1 + k - 1_int64
-            z%val(k) = term_integral(self, j, s0, s1, .false., 0.0_real64, .false., status)
+            z%val(k) = term_integral(self, j, s0, s1, .false., 0.0_real64, .false.)
         end do
         ! The running weighted sum, from the zone's bound inwards, so that a query reads one entry
         ! for every point its window leaves out on that side.
@@ -2448,10 +2512,9 @@ contains
     !> One zone's stretch integrals and the mass it holds, once its tables are in place: each
     !! stretch's integral of the raw estimate (negative), accumulated from the zone's bound, and the
     !! clipped mass up to each stretch's near end, which the distribution function answers inside it.
-    subroutine build_zone_stretches(self, iz, status)
+    subroutine build_zone_stretches(self, iz)
         class(pf_kde), intent(inout) :: self   !! the fitted estimate, tables in place
         integer, intent(in)          :: iz     !! the zone
-        integer, intent(inout)       :: status !! the worst `pf_integrate` status so far
 
         integer :: ns, k
         integer(int64) :: n
@@ -2475,7 +2538,7 @@ contains
         acc = 0.0_real64
         if (iz == KDE_ZONE_HI) then
             do k = ns, 1, -1
-                acc = acc + stretch_raw(self, self%zones(iz)%s(k), self%zones(iz)%e(k), status)
+                acc = acc + stretch_raw(self, self%zones(iz)%s(k), self%zones(iz)%e(k))
                 self%zones(iz)%nu(k) = acc
             end do
             do k = ns, 1, -1
@@ -2484,7 +2547,7 @@ contains
             end do
         else
             do k = 1, ns
-                acc = acc + stretch_raw(self, self%zones(iz)%s(k), self%zones(iz)%e(k), status)
+                acc = acc + stretch_raw(self, self%zones(iz)%s(k), self%zones(iz)%e(k))
                 self%zones(iz)%nu(k) = acc
             end do
             do k = 1, ns
@@ -2563,10 +2626,9 @@ contains
     !! part, and the running weighted sum of the integral of `|g_j|` over the zone, which the
     !! sampler chooses a point from. Only for a one-sided zone; where the zones meet a term can
     !! change sign twice and every draw there inverts the zone's own integral instead.
-    subroutine build_zone_envelope(self, iz, status)
+    subroutine build_zone_envelope(self, iz)
         class(pf_kde), intent(inout) :: self   !! the fitted estimate, tables in place
         integer, intent(in)          :: iz     !! the zone
-        integer, intent(inout)       :: status !! the worst `pf_integrate` status so far
 
         integer(int64) :: j, k, n
         real(real64) :: a1, b1, sigma, acc, negv
@@ -2583,9 +2645,9 @@ contains
             negv = 0.0_real64
             if (found) then
                 if (iz == KDE_ZONE_HI) then
-                    negv = -term_integral(self, j, sigma, b1, .false., 0.0_real64, .false., status)
+                    negv = -term_integral(self, j, sigma, b1, .false., 0.0_real64, .false.)
                 else
-                    negv = -term_integral(self, j, a1, sigma, .false., 0.0_real64, .false., status)
+                    negv = -term_integral(self, j, a1, sigma, .false., 0.0_real64, .false.)
                 end if
             end if
             if (.not. (negv > 0.0_real64)) negv = 0.0_real64
@@ -2600,18 +2662,16 @@ contains
 
     !> Everything `"linear"` fixes at `%fit`: the two zones and their tables, the stretches the clip
     !! removes, the interior masses, `Z`, and where the density starts and stops.
-    subroutine build_linear(self)
+    subroutine build_corrected(self)
         class(pf_kde), intent(inout) :: self !! the estimate, sample and bandwidths set
 
         type(kde_zone) :: z
         integer(int64) :: j, jb, m
-        integer :: status
         real(real64) :: rad, hj, c, d, elo, ehi, acc, r, mj
         logical :: pos_before_lo, pos_after_lo, pos_before_hi, pos_after_hi, two_sided
 
         m = size(self%x, kind=int64)
         rad = KDE_RADIUS(self%kernel_code)
-        status = PF_INT_OK
         pos_before_lo = .false.
         pos_after_lo = .false.
         pos_before_hi = .false.
@@ -2660,18 +2720,18 @@ contains
 
         ! ---- each zone's tables ----
         if (self%has_lower .and. elo > self%lo) then
-            call build_zone_tables(self, KDE_ZONE_LO, elo, z, status, pos_before_lo, pos_after_lo)
+            call build_zone_tables(self, KDE_ZONE_LO, elo, z, pos_before_lo, pos_after_lo)
             z%two_sided = two_sided
             self%zones(KDE_ZONE_LO) = z
-            call build_zone_stretches(self, KDE_ZONE_LO, status)
-            call build_zone_envelope(self, KDE_ZONE_LO, status)
+            call build_zone_stretches(self, KDE_ZONE_LO)
+            if (self%boundary_code == KDE_BOUNDARY_LINEAR) call build_zone_envelope(self, KDE_ZONE_LO)
         end if
         if (self%has_upper .and. ehi < self%hi) then
-            call build_zone_tables(self, KDE_ZONE_HI, ehi, z, status, pos_before_hi, pos_after_hi)
+            call build_zone_tables(self, KDE_ZONE_HI, ehi, z, pos_before_hi, pos_after_hi)
             z%two_sided = two_sided
             self%zones(KDE_ZONE_HI) = z
-            call build_zone_stretches(self, KDE_ZONE_HI, status)
-            call build_zone_envelope(self, KDE_ZONE_HI, status)
+            call build_zone_stretches(self, KDE_ZONE_HI)
+            if (self%boundary_code == KDE_BOUNDARY_LINEAR) call build_zone_envelope(self, KDE_ZONE_HI)
         end if
 
         ! ---- each point's mass between the zones, and its running weighted sum ----
@@ -2691,6 +2751,18 @@ contains
         self%zmid = acc/self%w_total
         self%znorm = self%zones(KDE_ZONE_LO)%mass + self%zmid + self%zones(KDE_ZONE_HI)%mass
 
+        ! ---- what the `"renormalise"` sampler thins against ----
+        ! `a_0` is smallest at a bound -- it grows away from one, the kernel having more of itself
+        ! inside -- and, at a bound, smallest for the widest kernel, which keeps least of itself
+        ! inside. So the two bounds at `hmax` are the only candidates for the minimum over every
+        ! (query, point) pair, which is what makes the thinning exact under the adaptive kernel.
+        self%a0min = 1.0_real64
+        if (self%boundary_code == KDE_BOUNDARY_RENORMALISE) then
+            r = reciprocal(self%hmax)
+            if (self%has_lower) self%a0min = min(self%a0min, renorm_a0(self, self%lo, r))
+            if (self%has_upper) self%a0min = min(self%a0min, renorm_a0(self, self%hi, r))
+        end if
+
         ! ---- where the density starts and stops ----
         ! The extent, clipped to the bounds; but where the clip removes a stretch that starts at
         ! such an end, with nothing positive below it, the density starts where that stretch ends.
@@ -2704,9 +2776,8 @@ contains
         if (self%zones(KDE_ZONE_HI)%on .and. self%zones(KDE_ZONE_HI)%ns > 0) then
             if (.not. pos_after_hi) self%dens_hi = self%zones(KDE_ZONE_HI)%s(self%zones(KDE_ZONE_HI)%ns)
         end if
-        self%zone_status = status
 
-    end subroutine build_linear
+    end subroutine build_corrected
 
     ! ==========================================================================================
     ! `%sample` under the linear correction
@@ -2726,13 +2797,12 @@ contains
     !! the term's own integral, with the bracket taken over whenever a step would leave it. The
     !! integral is increasing and its derivative is the term's magnitude, which the same evaluation
     !! gives, so a handful of steps place the draw to the last bits.
-    function solve_term_mass(self, j, a1, b1, target, status) result(y)
+    function solve_term_mass(self, j, a1, b1, target) result(y)
         class(pf_kde), intent(in)  :: self   !! the fitted estimate
         integer(int64), intent(in) :: j      !! the point
         real(real64), intent(in)   :: a1     !! the piece's lower end, where the mass is zero
         real(real64), intent(in)   :: b1     !! its upper end
         real(real64), intent(in)   :: target !! the mass to reach
-        integer, intent(inout)     :: status !! the worst `pf_integrate` status so far
         real(real64)               :: y      !! where it is reached
 
         integer, parameter :: MAX_STEPS = 100
@@ -2747,7 +2817,7 @@ contains
             return
         end if
         do it = 1, MAX_STEPS
-            v = term_integral(self, j, a1, y, .true., 0.0_real64, .false., status)
+            v = term_integral(self, j, a1, y, .true., 0.0_real64, .false.)
             if (v >= target) then
                 hi_b = y
             else
@@ -2777,13 +2847,12 @@ contains
     !> A draw from `|g_j|` over point `j`'s part of zone `iz`, by inverting that one term: the
     !! uniform `u` locates the mass, which the sign change splits into the part the term is negative
     !! on and the part it is positive on.
-    function invert_abs_term(self, iz, j, k, u, status) result(y)
+    function invert_abs_term(self, iz, j, k, u) result(y)
         class(pf_kde), intent(in)  :: self   !! the fitted estimate
         integer, intent(in)        :: iz     !! the zone
         integer(int64), intent(in) :: j      !! the point
         integer(int64), intent(in) :: k      !! its place in the zone's tables
         real(real64), intent(in)   :: u      !! the uniform, in `[0, 1)`
-        integer, intent(inout)     :: status !! the worst `pf_integrate` status so far
         real(real64)               :: y      !! the draw
 
         real(real64) :: a1, b1, sigma, amass, target, upto_sigma
@@ -2800,9 +2869,9 @@ contains
             upto_sigma = self%zones(iz)%neg(k)
         end if
         if (target <= upto_sigma) then
-            y = solve_term_mass(self, j, a1, sigma, target, status)
+            y = solve_term_mass(self, j, a1, sigma, target)
         else
-            y = solve_term_mass(self, j, sigma, b1, target - upto_sigma, status)
+            y = solve_term_mass(self, j, sigma, b1, target - upto_sigma)
         end if
 
     end function invert_abs_term
@@ -2848,11 +2917,10 @@ contains
         real(real64)                  :: y    !! the draw
 
         integer(int64) :: j, k, n
-        integer :: attempt, status
+        integer :: attempt
         real(real64) :: total, acc, env, fplus
         integer(int64) :: first, last
 
-        status = PF_INT_OK
         n = self%zones(iz)%j2 - self%zones(iz)%j1 + 1_int64
         if (.not. self%zones(iz)%two_sided .and. n >= 1_int64) then
             if (allocated(self%zones(iz)%cabs)) then
@@ -2863,11 +2931,11 @@ contains
                         if (k > n) k = n
                         d = d + 1_int64
                         j = self%zones(iz)%j1 + k - 1_int64
-                        y = invert_abs_term(self, iz, j, k, pf_random_at(key, sk, d), status)
+                        y = invert_abs_term(self, iz, j, k, pf_random_at(key, sk, d))
                         d = d + 1_int64
                         ! The estimate and the envelope at the draw, from one pass over its window.
                         call window_at(self, y, first, last)
-                        call linear_sum(self, y, first, last, acc, env=env)
+                        call corrected_sum(self, y, first, last, acc, env=env)
                         fplus = 0.0_real64
                         if (acc > 0.0_real64) fplus = acc
                         if (env > 0.0_real64) then
@@ -2926,7 +2994,7 @@ contains
 
     !> One draw under `"linear"`: the first draw chooses among the two zones and the interior by
     !! their masses, and the next ones place it there.
-    function draw_linear(self, key, sk) result(y)
+    function draw_corrected(self, key, sk) result(y)
         class(pf_kde), intent(in)  :: self !! the fitted estimate, defined
         integer(int64), intent(in) :: key  !! the family key
         integer(int64), intent(in) :: sk   !! this element's stream
@@ -2962,7 +3030,7 @@ contains
             y = draw_zone(self, iz, key, sk, d)
         end if
 
-    end function draw_linear
+    end function draw_corrected
 
     !> Records phase `k` of the fit, from clock reading `c0` to `c1`, in nanoseconds; nothing when
     !! the processor has no clock.

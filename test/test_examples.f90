@@ -542,7 +542,7 @@ contains
             type(pf_kde_grid) :: cells
             real(real64) :: f(4)
             call cells%init(4, 0.0_real64, 4.0_real64, 0.1_real64)
-            call cells%add(1.5_real64)
+            call cells%add(1.5_real64, finish=.true.)
             call cells%density(f)
             call check(error, abs(f(2) - 1.0_real64) <= 1.0e-15_real64, &
                 "pf_kde_grid must be reachable from use parquet alone, with a narrow kernel whole in its cell")

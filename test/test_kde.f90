@@ -51,6 +51,7 @@ module test_kde
     use parquet_kde
     use parquet_stats, only : pf_stddev, pf_iqr, pf_count_valid
     use parquet_integrate, only : pf_integrand, pf_integrate, pf_integration_info
+    use parquet_utils, only : pf_norm_pdf, pf_norm_cdf
     use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
     use parquet_columns, only : parquet_column, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64
     use test_kde_golden
@@ -84,6 +85,20 @@ module test_kde
     contains
         procedure :: eval => kde_density_eval !! `x**power` times the density at `x`
     end type kde_density
+
+    !> The squared error of a fitted estimate against the two-component normal mixture
+    !> `MIX_W N(0, 1) + (1 - MIX_W) N(MIX_MU, MIX_SD)`, for `pf_integrate`.
+    type, extends(pf_integrand) :: kde_mix_error
+        type(pf_kde) :: k !! the fitted estimate
+    contains
+        procedure :: eval => kde_mix_error_eval !! the squared error at `x`
+    end type kde_mix_error
+
+    !> The mixture `test_isj_error_falls_with_n` draws from: one broad component and one narrow one
+    !> at an IRREGULAR offset, which is the shape the rule handles well. Several narrow components
+    !> at a REGULAR spacing are its blind spot, and the guide says so; a fixture of that shape would
+    !> fail this test by design rather than by regression.
+    real(real64), parameter :: MIX_W = 0.6_real64, MIX_MU = 3.0_real64, MIX_SD = 0.4_real64
 
     !> The squared error of a bounded estimate against the density `2x` on `[0, 1]`, for
     !> `pf_integrate`: what the boundary corrections are compared by over a zone.
@@ -121,6 +136,8 @@ contains
                 test_kernel_identities), &
             new_unittest("the fixed estimate reproduces the golden vectors", test_golden_vectors), &
             new_unittest("the default rule is isj", test_default_rule_is_isj), &
+            new_unittest("the isj rule's error falls with the sample on an ordinary mixture", &
+                test_isj_error_falls_with_n), &
             new_unittest("isj finds a narrower bandwidth than silverman on a bimodal sample", &
                 test_isj_narrower_on_bimodal), &
             new_unittest("without a root the default falls back to silverman and rule=isj is undefined", &
@@ -139,6 +156,12 @@ contains
             new_unittest("a NaN under skipnan=.false. poisons the estimate", test_skipnan_false_poisons), &
             new_unittest("an empty and a degenerate population are quiet", test_quiet_returns), &
             new_unittest("lower/upper conserve mass under both corrections", test_bounds_conserve_mass), &
+            new_unittest("every correction is unbiased at a flat bound", test_corrections_unbiased_at_a_bound), &
+            new_unittest("a bound without boundary= resolves to reflect", test_default_boundary_is_reflect), &
+            new_unittest("a bandwidth the estimate cannot use leaves it undefined", &
+                test_bandwidth_admission), &
+            new_unittest("the grid's lifecycle: %finish closes it and %clear reopens it", &
+                test_grid_lifecycle), &
             new_unittest("a point outside the support is excluded and counted", test_outside_excluded), &
             new_unittest("%quantile inverts %cdf", test_quantile_inverts_cdf), &
             new_unittest("%curve spans min - cut*h to max + cut*h, clipped to the support", &
@@ -466,10 +489,10 @@ contains
         case ("WFREQ")
             call k%fit(x, rule="silverman", weights=w, weight_type="frequency", ok=ok)
         case ("REN_LO")
-            call k%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, ok=ok)
+            call k%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, boundary="renormalise", ok=ok)
         case ("REN_BOTH")
             call k%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", lower=-470.0_real64, &
-                upper=460.0_real64, ok=ok)
+                upper=460.0_real64, boundary="renormalise", ok=ok)
         case ("REF_LO")
             call k%fit(x, bandwidth=60.0_real64, kernel="bspline", lower=-470.0_real64, &
                 boundary="reflect", ok=ok)
@@ -481,7 +504,7 @@ contains
                 boundary="reflect", ok=ok)
         case ("REN_WIDE")
             call k%fit(x, bandwidth=600.0_real64, kernel="box", lower=-470.0_real64, &
-                upper=460.0_real64, ok=ok)
+                upper=460.0_real64, boundary="renormalise", ok=ok)
         case ("RULE_BOUNDED")
             call k%fit(x, rule="silverman", lower=-400.0_real64, upper=400.0_real64, ok=ok)
         case ("ONE_H")
@@ -492,7 +515,7 @@ contains
             call k%fit(x, rule="silverman", adaptive=.true., ok=ok)
         case ("ADAPT_CAP")
             call k%fit(x, bandwidth=80.0_real64, kernel="bspline", adaptive=.true., alpha=1.0_real64, &
-                bandwidth_max=120.0_real64, lower=-340.0_real64, ok=ok)
+                bandwidth_max=120.0_real64, lower=-340.0_real64, boundary="renormalise", ok=ok)
         case ("ADAPT_REF")
             call k%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", adaptive=.true., lower=-340.0_real64, &
                 upper=470.0_real64, boundary="reflect", ok=ok)
@@ -840,15 +863,17 @@ contains
             if (allocated(error)) return
             call i%pdf(KG_X, f)
             call i%rule(name)
+            ! `"none"`, not `"isj"`: no rule produced a bandwidth, and naming the one that was
+            ! ASKED for would imply one had. The rule tried is not reported back.
             call check(error, .not. oki .and. ieee_is_nan(i%bandwidth()) .and. all(ieee_is_nan(f)) .and. &
-                name == "isj", trim(merge("the recipe at n = 32:", "the rounded recipe:  ", c == 1)) // &
+                name == "none", trim(merge("the recipe at n = 32:", "the rounded recipe:  ", c == 1)) // &
                 " a named isj rule that finds no bandwidth must leave the estimate undefined")
             if (allocated(error)) return
         end do
         call d%fit([2.5_real64, 2.5_real64, 2.5_real64], ok=okd)
         call d%rule(name)
-        call check(error, .not. okd .and. name == "silverman", &
-            "a constant sample has no bandwidth under the default, and silverman's rule was tried last")
+        call check(error, .not. okd .and. name == "none", &
+            "a constant sample has no bandwidth under the default, and no rule is named for it")
 
     end subroutine test_isj_fallback
 
@@ -1009,7 +1034,9 @@ contains
                 call gc%add(c, n_null=nnc)
                 call ga%add(wide, is_valid=mask, n_null=nna)
             end if
+            call gc%finish()
             call gc%density(dc)
+            call ga%finish()
             call ga%density(da)
             call check(error, all(dc == da) .and. nnc == nna .and. gc%n_valid() == ga%n_valid(), &
                 trim(tag) // ": %add over a column must accumulate what the array does")
@@ -1051,9 +1078,16 @@ contains
             "silverman must be 0.9 * min(s, IQR/1.349) * n_eff**(-1/5)")
         if (allocated(error)) return
         call k%fit(x, rule="scott", weights=w)
-        want = 1.06_real64*a*n_eff**(-0.2_real64)
+        ! The fifth root written out, not a decimal read off a run: Scott's constant is
+        ! `(4/3)**(1/5)`, and a test that quoted its digits would pin a rounding rather than a rule.
+        want = (4.0_real64/3.0_real64)**0.2_real64*a*n_eff**(-0.2_real64)
         call check(error, abs(k%bandwidth() - want) <= 1.0e-14_real64*want, &
-            "scott must be 1.06 * min(s, IQR/1.349) * n_eff**(-1/5)")
+            "scott must be (4/3)**(1/5) * min(s, IQR/1.349) * n_eff**(-1/5)")
+        if (allocated(error)) return
+        ! And it is NOT the two-digit `1.06` the rule is often written with: the two differ by
+        ! `7e-4` relative, far above the tolerance above, so this fails if the constant is rounded.
+        call check(error, abs(k%bandwidth() - 1.06_real64*a*n_eff**(-0.2_real64)) > 1.0e-5_real64*want, &
+            "scott must be the exact fifth root, not 1.06")
         if (allocated(error)) return
 
         ! Unweighted and near-uniform, the standard deviation binds instead.
@@ -1514,6 +1548,28 @@ contains
         call k%quantile(1.0e-6_real64, q1)
         write(what, '(a,es12.5,a,es22.15)') "linear: %cdf at the crossing is ", c0, " and the 1e-6 quantile ", q1
         call check(error, c0 == 0.0_real64 .and. q1 > q0, trim(what))
+        if (allocated(error)) return
+
+        ! The mirror at the UPPER bound, on the falling fixture: the clip removes a stretch that
+        ! ends at the bound, so `%quantile(1)` is the crossing where that stretch starts and not
+        ! `upper` itself, where the density is exactly zero. Written out rather than folded into the
+        ! arm above, because the asymmetry between the two is what a scan carrying a flag across a
+        ! stretch it opens gets wrong.
+        call kde_falling(200, x)
+        call k%fit(x, rule="silverman", upper=1.0_real64, boundary="linear")
+        call k%quantile(1.0_real64, q1)
+        write(what, '(a,es22.15)') "linear: p = 1 must answer a crossing below the bound, not ", q1
+        call check(error, q1 < 1.0_real64, trim(what))
+        if (allocated(error)) return
+        call k%pdf(q1 - 0.05_real64*k%bandwidth(), c0)
+        call k%pdf(q1 + 0.05_real64*k%bandwidth(), c1)
+        write(what, '(a,es12.5,a,es12.5)') "linear: %pdf below p = 1's answer is ", c0, " and above it ", c1
+        call check(error, c0 > 0.0_real64 .and. c1 == 0.0_real64, trim(what))
+        if (allocated(error)) return
+        call k%cdf(q1, c0)
+        call k%quantile(1.0_real64 - 1.0e-6_real64, q0)
+        write(what, '(a,es12.5,a,es22.15)') "linear: %cdf at the crossing is ", c0, " and the 1-1e-6 quantile ", q0
+        call check(error, c0 == 1.0_real64 .and. q0 < q1, trim(what))
 
     end subroutine test_quantile_inverts_cdf
 
@@ -1550,6 +1606,269 @@ contains
             "xmin= must replace one end only, and the points must be equally spaced")
 
     end subroutine test_curve_default_range
+
+    !> Every correction answers the true density at a bound the density is FLAT at, which is the
+    !> case each of them is supposed to be exact for.
+    !>
+    !> The sample is the uniform density's own quantiles on `[0, 1]`, so the true density is exactly
+    !> 1 everywhere and exactly flat at both bounds, and the estimate's own discretisation error is
+    !> below a part in a million -- nothing here is a Monte-Carlo figure. A correction that
+    !> normalises each DATA POINT's kernel by the mass that point keeps inside the support, rather
+    !> than the kernel AT THE QUERY POINT, answers `ln 2 = 0.693` times the truth at the bound, for
+    !> every kernel and however small the bandwidth.
+    subroutine test_corrections_unbiased_at_a_bound(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(2000), f0, f1, fm
+        character(len=11), parameter :: WHICH(3) = [character(len=11) :: "renormalise", "reflect", "linear"]
+        character(len=140) :: what
+        integer :: i, c
+
+        do i = 1, 2000
+            x(i) = (real(i, real64) - 0.5_real64)/2000.0_real64
+        end do
+        do c = 1, 3
+            call k%fit(x, bandwidth=0.05_real64, lower=0.0_real64, upper=1.0_real64, &
+                boundary=trim(WHICH(c)))
+            call k%pdf(0.0_real64, f0)
+            call k%pdf(1.0_real64, f1)
+            call k%pdf(0.5_real64, fm)
+            write(what, '(4a,es12.5,a,es12.5,a,es12.5)') trim(WHICH(c)), ": the density of a uniform sample ", &
+                "is 1 at both bounds and between them; got ", "", f0, ", ", f1, ", ", fm
+            call check(error, abs(f0 - 1.0_real64) <= 0.02_real64 .and. abs(f1 - 1.0_real64) <= 0.02_real64 &
+                .and. abs(fm - 1.0_real64) <= 0.02_real64, trim(what))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_corrections_unbiased_at_a_bound
+
+    !> A bound given without `boundary=` resolves to `"reflect"`: the fit is that fit, bit for bit.
+    subroutine test_default_boundary_is_reflect(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: a, b
+        real(real64), allocatable :: x(:)
+        real(real64) :: fa(NKX), fb(NKX), ca(NKX), cb(NKX)
+        character(len=:), allocatable :: token
+
+        call kde_fixture(64_int64, x)
+        call a%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, upper=460.0_real64)
+        call b%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, upper=460.0_real64, boundary="reflect")
+        call a%pdf(KG_X, fa)
+        call b%pdf(KG_X, fb)
+        call a%cdf(KG_X, ca)
+        call b%cdf(KG_X, cb)
+        call check(error, all(fa == fb) .and. all(ca == cb), &
+            "a bound without boundary= must give the reflected fit, bit for bit")
+        if (allocated(error)) return
+        ! And `%print` names it, which is where a caller reads what they got.
+        call a%fit(x, bandwidth=60.0_real64, lower=-470.0_real64)
+        call a%kernel(token)
+        call check(error, token == "gaussian", "the kernel default must not have moved")
+
+    end subroutine test_default_boundary_is_reflect
+
+    !> One admission rule for the bandwidth, applied by both forms: it must be positive, NORMAL and
+    !> reach a finite distance. A bandwidth failing it leaves `pf_kde` undefined -- `ok = .false.`
+    !> and every query a quiet NaN -- rather than answering a density that is wrong.
+    !>
+    !> The two cases are the ones that answered silently before: a SUBNORMAL bandwidth, whose
+    !> kernel is narrower than the gap between two neighbouring numbers, so that `%pdf` is
+    !> identically zero while `%cdf` still steps from 0 to 1; and one far wider than a two-sided
+    !> support, where the mass a kernel keeps inside the support underflows and the division by it
+    !> gives `+Infinity` and `NaN`. `pf_kde_grid%init` refuses both, out of process
+    !> (`kde_grid_bandwidth_subnormal`, `kde_grid_bandwidth_unusable`).
+    subroutine test_bandwidth_admission(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        real(real64) :: f, c, sub
+        logical :: ok
+        character(len=140) :: what
+
+        call bounded_fixture(200_int64, x)
+        ! The control: an ordinary bandwidth on the same sample is defined, so that neither
+        ! assertion below can pass because the fixture itself is unusable.
+        call k%fit(x, bandwidth=0.05_real64, lower=0.0_real64, upper=1.0_real64, ok=ok)
+        call check(error, ok, "control: an ordinary bandwidth on this sample must be defined")
+        if (allocated(error)) return
+
+        ! Subnormal: built by halving `tiny`, never written as a literal.
+        sub = 0.5_real64*tiny(1.0_real64)
+        call check(error, sub > 0.0_real64 .and. sub < tiny(1.0_real64), &
+            "precondition: the fixture's bandwidth must be positive and subnormal")
+        if (allocated(error)) return
+        call k%fit(x, bandwidth=sub, ok=ok)
+        call k%pdf(0.5_real64, f)
+        call k%cdf(0.5_real64, c)
+        write(what, '(a,es12.5,a,es12.5)') "a subnormal bandwidth must leave the estimate " // &
+            "undefined; %pdf is ", f, " and %cdf ", c
+        call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
+        if (allocated(error)) return
+
+        ! Far wider than the support it is bounded by, at both bounds.
+        call k%fit(x, bandwidth=1.0e300_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="reflect", ok=ok)
+        call k%pdf(0.5_real64, f)
+        call k%cdf(0.5_real64, c)
+        write(what, '(a,es12.5,a,es12.5)') "a bandwidth far wider than a two-sided support must " // &
+            "leave the estimate undefined; %pdf is ", f, " and %cdf ", c
+        call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
+
+    end subroutine test_bandwidth_admission
+
+    !> The grid's lifecycle, in process: `%finish` closes the accumulation, `%is_finished` reports
+    !> both states, a second `%finish` is a no-op, `%clear` reopens the grid empty, and
+    !> `finish=.true.` on `%add` and on `%merge` is exactly that call followed by `%finish`.
+    !>
+    !> The aborts either side of the seam -- a query before `%finish`, an `%add` or a `%merge`
+    !> after it -- are out of process, in `test_errors.f90`.
+    subroutine test_grid_lifecycle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g, h, p1, p2
+        real(real64), allocatable :: x(:)
+        real(real64) :: fg(24), fh(24)
+
+        call bounded_fixture(200_int64, x)
+        call g%init(24, 0.0_real64, 1.0_real64, 0.05_real64)
+        call check(error, .not. g%is_finished(), "a grid is not finished when %init returns")
+        if (allocated(error)) return
+        call g%add(x)
+        call check(error, .not. g%is_finished(), "%add must not finish a grid on its own")
+        if (allocated(error)) return
+        call g%finish()
+        call check(error, g%is_finished(), "%finish must finish it")
+        if (allocated(error)) return
+        ! A second `%finish` is a no-op, so a caller who cannot tell whether a helper already
+        ! closed the grid may call it again.
+        call g%finish()
+        call g%density(fg)
+        call check(error, g%is_finished() .and. any(fg > 0.0_real64), &
+            "a second %finish must be a no-op, not a reset")
+        if (allocated(error)) return
+
+        ! `finish=.true.` on `%add` is that call followed by `%finish`, bit for bit.
+        call h%init(24, 0.0_real64, 1.0_real64, 0.05_real64)
+        call h%add(x, finish=.true.)
+        call h%density(fh)
+        call check(error, h%is_finished() .and. all(fh == fg), &
+            "add(finish=.true.) must equal %add then %finish, bit for bit")
+        if (allocated(error)) return
+
+        ! And on `%merge`, over two halves.
+        call p1%init(24, 0.0_real64, 1.0_real64, 0.05_real64)
+        call p1%add(x(1:100))
+        call p2%init(24, 0.0_real64, 1.0_real64, 0.05_real64)
+        call p2%add(x(101:200))
+        call p1%merge(p2, finish=.true.)
+        call p1%density(fh)
+        call check(error, p1%is_finished() .and. maxval(abs(fh - fg)) <= 1.0e-14_real64*maxval(fg), &
+            "merge(finish=.true.) must finish the grid, and the halves must sum to the whole")
+        if (allocated(error)) return
+
+        ! `%clear` reopens it, empty: it accumulates again and answers as a fresh grid.
+        call g%clear()
+        call check(error, .not. g%is_finished() .and. g%n() == 0_int64, &
+            "%clear must reopen the grid and empty it")
+        if (allocated(error)) return
+        call g%add(x, finish=.true.)
+        call g%density(fg)
+        call check(error, any(fg > 0.0_real64), "the reopened grid must accumulate and answer again")
+        if (allocated(error)) return
+        call h%clear()
+        call h%add(x, finish=.true.)
+        call h%density(fh)
+        call check(error, all(fg == fh), "a cleared and refilled grid must equal a fresh one, bit for bit")
+
+    end subroutine test_grid_lifecycle
+
+    !> The mixture's density at `x`.
+    pure function mix_pdf(x) result(f)
+        real(real64), intent(in) :: x !! where to evaluate
+        real(real64)             :: f !! the density there
+
+        f = MIX_W*pf_norm_pdf(x) + (1.0_real64 - MIX_W)*pf_norm_pdf((x - MIX_MU)/MIX_SD)/MIX_SD
+
+    end function mix_pdf
+
+    !> The squared error of the fitted estimate against the mixture at `x`.
+    function kde_mix_error_eval(this, x) result(f)
+        class(kde_mix_error), intent(inout) :: this !! the estimate as a function
+        real(real64), intent(in)            :: x    !! where to evaluate
+        real(real64)                        :: f    !! the squared error there
+
+        real(real64) :: g
+
+        call this%k%pdf(x, g)
+        f = (g - mix_pdf(x))**2
+
+    end function kde_mix_error_eval
+
+    !> `n` quantiles of the mixture, by bisection on its distribution function: a deterministic
+    !> sample with no Monte-Carlo noise in it, so the error below is the smoothing's alone.
+    subroutine mix_fixture(n, x)
+        integer, intent(in)                    :: n    !! how many points
+        real(real64), allocatable, intent(out) :: x(:) !! the quantiles, ascending
+
+        real(real64) :: u, a, b, m, c
+        integer :: i, it
+
+        allocate(x(n))
+        do i = 1, n
+            u = (real(i, real64) - 0.5_real64)/real(n, real64)
+            a = -8.0_real64
+            b = 8.0_real64
+            do it = 1, 200
+                m = 0.5_real64*(a + b)
+                c = MIX_W*pf_norm_cdf(m) + (1.0_real64 - MIX_W)*pf_norm_cdf((m - MIX_MU)/MIX_SD)
+                if (c < u) then
+                    a = m
+                else
+                    b = m
+                end if
+            end do
+            x(i) = 0.5_real64*(a + b)
+        end do
+
+    end subroutine mix_fixture
+
+    !> The ISJ rule's integrated squared error FALLS as the sample grows, on an ordinary
+    !> two-component mixture.
+    !>
+    !> A guard against regression rather than a defect caught: the rule is near-optimal on this
+    !> shape today. What it would catch is the rule losing its footing the way it does on the claw
+    !> density -- several narrow components at a regular spacing -- where the bandwidth walks away
+    !> from the optimum and the error RISES with the sample, from `1.7e-2` at n = 500 to `2.2e-2` at
+    !> n = 128 000. The fixture here is deliberately not of that shape: one broad component and one
+    !> narrow one at an irregular offset.
+    subroutine test_isj_error_falls_with_n(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(kde_mix_error) :: fn
+        real(real64), allocatable :: x(:)
+        real(real64) :: ise(2), h(2)
+        integer, parameter :: SIZES(2) = [600, 4800]
+        character(len=160) :: what
+        logical :: ok
+        integer :: i
+
+        do i = 1, 2
+            call mix_fixture(SIZES(i), x)
+            call fn%k%fit(x, rule="isj", ok=ok)
+            call check(error, ok, "the isj rule must find a bandwidth for this mixture")
+            if (allocated(error)) return
+            h(i) = fn%k%bandwidth()
+            ! Over the whole range the mixture has mass in; the estimate is zero beyond its own
+            ! reach, so the error there is the mixture's own tail and is common to both sizes.
+            ise(i) = pf_integrate(fn, -8.0_real64, 8.0_real64, 1.0e-10_real64)
+            deallocate(x)
+        end do
+        write(what, '(a,es11.4,a,es11.4,a,es11.4,a,es11.4)') "the isj rule's ISE must fall with n: ", &
+            ise(1), " at 600 and ", ise(2), " at 4800, with h ", h(1), " and ", h(2)
+        call check(error, ise(2) < 0.6_real64*ise(1), trim(what))
+        if (allocated(error)) return
+        ! And the bandwidth narrows with the sample, which is what an ISE that falls rests on.
+        call check(error, h(2) < h(1), "the isj bandwidth must narrow as the sample grows")
+
+    end subroutine test_isj_error_falls_with_n
 
     !> A `real32` sample is widened: the fit equals the fit over its `real64` copy exactly.
     subroutine test_real32_widens(error)
@@ -1682,15 +2001,15 @@ contains
         call read_back(PATH, nlines, "quadrature", seen)
         call check(error, .not. seen, "%print must not write a quadrature row under renormalise")
         if (allocated(error)) return
-        ! Under `"linear"` it reports what the fit's own integrals came to, which is `converged` on
-        ! every fixture here.
+        ! Under `"linear"` it names the correction and nothing more: the per-point integrals are a
+        ! fixed rule over analytic pieces, so there is no convergence for a row to report.
         call k%fit(x, rule="silverman", lower=-480.0_real64, boundary="linear")
         open(newunit=u, file=PATH, status="replace", action="write")
         call k%print(unit=u)
         close(u)
-        call read_back(PATH, nlines, "quadrature   converged", seen)
-        call check(error, nlines == 12 .and. seen, &
-            "%print under linear must write the quadrature row, saying converged")
+        call read_back(PATH, nlines, "boundary     linear", seen)
+        call check(error, nlines == 11 .and. seen, &
+            "%print under linear must name the correction and write no quadrature row")
         if (allocated(error)) return
         open(newunit=u, file=PATH, status="replace", action="write")
         call empty%print(unit=u)
@@ -1755,6 +2074,7 @@ contains
         call k%cdf(2.0_real64, p_exact)
         call g%init(200, 0.0_real64, 2.0_real64, 0.3_real64, lower=0.0_real64, boundary="linear")
         call g%add(xe)
+        call g%finish()
         call g%cdf(2.0_real64, p_grid)
         step = g%step()
         write(msg, '(a,es22.15,a,es22.15,a,es10.3)') "the grid's %cdf at its free edge is ", p_grid, &
@@ -1774,7 +2094,7 @@ contains
     !> both reasons.
     subroutine test_grid_linear_reach_poisons(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
-        type(pf_kde_grid) :: pilot, g, gc, gb, gn
+        type(pf_kde_grid) :: pilot, g, gc, gb, gn, gm
         real(real64) :: xe(200), f(200), nan
         integer :: u, nlines, n_in
         logical :: seen
@@ -1788,9 +2108,11 @@ contains
         call pilot%add(xe(1:n_in))
         ! Where the pilot's density is small -- the sparse tail -- the rule gives a point a bandwidth
         ! several times the global one, whose reach passes the grid's own width.
+        call pilot%finish()
         call g%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
             lower=0.0_real64, boundary="linear")
         call g%add(xe(1:n_in))
+        call g%finish()
         call g%density(f)
         call check(error, all(ieee_is_nan(f)), "R3 must poison the grid: every query answers NaN")
         if (allocated(error)) return
@@ -1798,6 +2120,7 @@ contains
         call gc%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
             bandwidth_max=0.5_real64, lower=0.0_real64, boundary="linear")
         call gc%add(xe(1:n_in))
+        call gc%finish()
         call gc%density(f)
         call check(error, .not. any(ieee_is_nan(f)) .and. any(f > 0.0_real64), &
             "bandwidth_max below the width must leave the grid usable")
@@ -1807,6 +2130,7 @@ contains
         call gb%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
             lower=0.0_real64, upper=3.0_real64, boundary="linear")
         call gb%add(xe(1:n_in))
+        call gb%finish()
         call gb%density(f)
         call check(error, .not. any(ieee_is_nan(f)) .and. any(f > 0.0_real64), &
             "with both bounds given R3 must not fire: no edge is free")
@@ -1817,9 +2141,14 @@ contains
         call gn%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
             lower=0.0_real64, boundary="linear")
         call gn%add([nan], skipnan=.false.)
-        call g%merge(gn)
+        ! On a grid of its own, not on `g`: `g` was queried above and so is closed, and asserting
+        ! R3 on a grid a kept NaN had already poisoned would not be asserting R3.
+        call gm%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, boundary="linear")
+        call gm%add(xe(1:n_in))
+        call gm%merge(gn, finish=.true.)
         open(newunit=u, file=PATH, status="replace", action="write")
-        call g%print(unit=u)
+        call gm%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "every query answers NaN", seen)
         call check(error, seen, "the kept NaN's reason must survive the merge and be printed")
@@ -1925,6 +2254,7 @@ contains
         ! grid's unnormalised cells, a twentieth of the spacing wide, are what shows it.
         call gdiag%init(4000, 0.0_real64, 1.0_real64, h, kernel="box", upper=1.0_real64, boundary="linear")
         call gdiag%add(x(1:280))
+        call gdiag%finish()
         call gdiag%density(rawc, normalise=.false.)
         write(msg2, '(a,i0,a,es10.3,a,es10.3)') "the raw estimate is negative in ", &
             count(rawc < 0.0_real64), " cells of ", gdiag%step(), ", against a scan spacing of ", &
@@ -2005,6 +2335,7 @@ contains
             call g%init(400, 0.0_real64, 1.0_real64, k%bandwidth(), lower=0.0_real64, &
                 upper=1.0_real64, boundary="linear")
             call g%add(x)
+            call g%finish()
             call g%density(raw, normalise=.false.)
             call check(error, any(raw < 0.0_real64), &
                 "the raw linear sum must be negative somewhere, or the clip has nothing to remove")
@@ -2152,10 +2483,11 @@ contains
     subroutine test_guide_boundary_table(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k
-        real(real64) :: x(200), got(4)
+        real(real64) :: x(200), got(4), at_bound
+        character(len=140) :: what
         real(real64), parameter :: AT(4) = [0.0_real64, 0.05_real64, 0.1_real64, 0.2_real64]
         real(real64), parameter :: NONE(4) = [0.058_real64, 0.122_real64, 0.207_real64, 0.400_real64]
-        real(real64), parameter :: REN(4) = [0.068_real64, 0.137_real64, 0.221_real64, 0.405_real64]
+        real(real64), parameter :: REN(4) = [0.116_real64, 0.163_real64, 0.226_real64, 0.401_real64]
         real(real64), parameter :: REF(4) = [0.117_real64, 0.143_real64, 0.212_real64, 0.400_real64]
         real(real64), parameter :: LIN(4) = [0.000_real64, 0.100_real64, 0.202_real64, 0.402_real64]
         integer :: i
@@ -2170,13 +2502,20 @@ contains
         call k%pdf(AT, got)
         call check(error, all(abs(got - NONE) <= 5.0e-4_real64), "the page's unbounded column")
         if (allocated(error)) return
-        call k%fit(x, rule="silverman", lower=0.0_real64)
+        call k%fit(x, rule="silverman", lower=0.0_real64, boundary="renormalise")
         call k%pdf(AT, got)
         call check(error, all(abs(got - REN) <= 5.0e-4_real64), "the page's renormalise column")
         if (allocated(error)) return
+        at_bound = got(1)
         call k%fit(x, rule="silverman", lower=0.0_real64, boundary="reflect")
         call k%pdf(AT, got)
         call check(error, all(abs(got - REF) <= 5.0e-4_real64), "the page's reflect column")
+        if (allocated(error)) return
+        ! The page says the two local-constant corrections agree AT the bound, where both double the
+        ! one-sided sum. Asserted on the values themselves, not on the table's rounded ones.
+        write(what, '(a,es12.5,a,es12.5)') "the page says renormalise and reflect agree at the " // &
+            "bound; they are ", at_bound, " and ", got(1)
+        call check(error, abs(at_bound - got(1)) <= 1.0e-3_real64, trim(what))
         if (allocated(error)) return
         call k%fit(x, rule="silverman", lower=0.0_real64, boundary="linear")
         call k%pdf(AT, got)
@@ -2261,6 +2600,7 @@ contains
             do r = 1, 2
                 call g%init(100*r, lo, hi, h, kernel=KERNELS(kk))
                 call g%add(x)
+                call g%finish()
                 call g%pdf(t, fg)
                 e(r) = rms(fg - fx)
             end do
@@ -2276,6 +2616,7 @@ contains
         call g%init(100, lo, hi, h)
         call g%add(x)
         allocate(c(100), f(100), fe(100))
+        call g%finish()
         call g%density(f, x=c)
         call k%pdf(c, fe)
         write(msg, '(a,es10.3)') "at its centres the grid must be the exact estimate; the largest " // &
@@ -2294,6 +2635,7 @@ contains
                     call g%init(100*r, 0.0_real64, 1.0_real64, 0.05_real64, kernel=KERNELS(kk), &
                         lower=0.0_real64, upper=1.0_real64, boundary=METHODS(mm))
                     call g%add(z)
+                    call g%finish()
                     call g%pdf(t, fg)
                     e(r) = rms(fg - fx)
                 end do
@@ -2307,15 +2649,23 @@ contains
     end subroutine test_grid_converges
 
     !> Every accepted point deposits exactly its weight, at every resolution: `sum(f)*step` is one
-    !> to rounding for every kernel, unbounded, and under both corrections with the bandwidth
-    !> twice the width of the support (every point corrected, F3's case), and under one bound.
+    !> to rounding for every kernel, unbounded, and under `"reflect"` with the bandwidth twice the
+    !> width of the support (every point corrected, F3's case), and under one bound.
     !> `normalise = .false.` sums to the total weight. A deposit normalised by the midpoint rule
     !> instead of by its own discrete sum misses by that rule's residual, `1e-3` and more here.
+    !>
+    !> **The local-polynomial corrections are not in this test, and cannot be.** Under
+    !> `"renormalise"` and `"linear"` the divisor is the mass a kernel centred AT THE QUERY POINT
+    !> keeps inside the support, so there is no per-point split to conserve: a point deposits its
+    !> own corrected mass and the estimate is normalised once, at query time. What replaces the
+    !> promise is checked elsewhere -- that the grid converges to the exact estimate
+    !> (`test_grid_converges`), and that the weight it counts beyond its range is that estimate's
+    !> own mass there (`test_grid_counts_weight_beyond_range`).
     subroutine test_grid_deposits_exact_mass(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde_grid) :: g
         real(real64), allocatable :: x(:), w(:), f(:)
-        character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        character(len=11), parameter :: METHODS(1) = [character(len=11) :: "reflect"]
         integer, parameter :: CELLS(3) = [7, 64, 501]
         integer :: kk, r, mm
         character(len=160) :: msg
@@ -2328,16 +2678,18 @@ contains
                 ! Unbounded, on a range every kernel's reach fits inside.
                 call g%init(CELLS(r), -0.2_real64, 1.2_real64, 0.03_real64, kernel=KERNELS(kk))
                 call g%add(x)
+                call g%finish()
                 call raw_cells(g, f)
                 write(msg, '(2a,i0,a,es10.3)') trim(KERNELS(kk)), " unbounded at ", CELLS(r), &
                     " cells: the mass is one plus ", sum(f)*g%step()/g%sum_weights() - 1.0_real64
                 call check(error, abs(sum(f)*g%step()/g%sum_weights() - 1.0_real64) <= 1.0e-13_real64, trim(msg))
                 if (allocated(error)) return
-                do mm = 1, 2
+                do mm = 1, size(METHODS)
                     ! Both bounds, the bandwidth twice the support: every point is corrected.
                     call g%init(CELLS(r), 0.0_real64, 1.0_real64, 2.0_real64, kernel=KERNELS(kk), &
                         lower=0.0_real64, upper=1.0_real64, boundary=METHODS(mm))
                     call g%add(x, weights=w)
+                    call g%finish()
                     call raw_cells(g, f)
                     write(msg, '(4a,i0,a,es10.3)') trim(KERNELS(kk)), " ", trim(METHODS(mm)), &
                         " (wide) at ", CELLS(r), " cells: the mass is one plus ", &
@@ -2349,6 +2701,7 @@ contains
                     call g%init(CELLS(r), 0.0_real64, 1.5_real64, 0.08_real64, kernel=KERNELS(kk), &
                         lower=0.0_real64, boundary=METHODS(mm))
                     call g%add(x)
+                    call g%finish()
                     call raw_cells(g, f)
                     write(msg, '(4a,i0,a,es10.3)') trim(KERNELS(kk)), " ", trim(METHODS(mm)), &
                         " (lower) at ", CELLS(r), " cells: the mass is one plus ", &
@@ -2373,14 +2726,16 @@ contains
         type(pf_kde) :: k
         type(pf_kde_grid) :: g
         real(real64), allocatable :: x(:), z(:)
-        real(real64) :: p0, p1, e0, e1, pb, fb, q
+        real(real64) :: p0, p1, e0, e1, pb, fb, q, gap, fine
         character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        character(len=160) :: what
         integer :: mm
 
         call kde_fixture(400_int64, x)
         call k%fit(x, bandwidth=40.0_real64)
         call g%init(100, -100.0_real64, 100.0_real64, 40.0_real64)
         call g%add(x)
+        call g%finish()
         call g%cdf(-100.0_real64, p0)
         call g%cdf(100.0_real64, p1)
         call k%cdf(-100.0_real64, e0)
@@ -2410,13 +2765,37 @@ contains
             call g%init(60, 0.2_real64, 0.8_real64, 0.05_real64, lower=0.0_real64, upper=1.0_real64, &
                 boundary=METHODS(mm))
             call g%add(z)
+            call g%finish()
             call g%cdf(0.2_real64, p0)
             call g%cdf(0.8_real64, p1)
             call k%cdf(0.2_real64, e0)
             call k%cdf(0.8_real64, e1)
-            call check(error, abs(p0 - e0) <= 1.0e-12_real64 .and. abs(p1 - e1) <= 1.0e-12_real64, &
-                trim(METHODS(mm)) // ": the weight counted beyond each end must be the exact " // &
-                "estimate's distribution function there")
+            if (METHODS(mm) == "reflect") then
+                ! Each point's weight is split exactly between the cells and the two counters, so
+                ! the share counted below is the exact estimate's own distribution function there.
+                call check(error, abs(p0 - e0) <= 1.0e-12_real64 .and. abs(p1 - e1) <= 1.0e-12_real64, &
+                    trim(METHODS(mm)) // ": the weight counted beyond each end must be the exact " // &
+                    "estimate's distribution function there")
+                if (allocated(error)) return
+                cycle
+            end if
+            ! Under the corrected `"renormalise"` the counters ARE the corrected density's own mass
+            ! beyond each end -- that part is exact -- but the total they are a share of is the
+            ! grid's own discrete mass, so the two agree to the grid's discretisation and not to
+            ! rounding. What must hold is that the gap is small and that it falls as the square of
+            ! the cell width: a counter formed from the PLAIN kernel instead would sit at `4e-3`
+            ! here and not move when the cells are refined.
+            gap = max(abs(p0 - e0), abs(p1 - e1))
+            call g%init(240, 0.2_real64, 0.8_real64, 0.05_real64, lower=0.0_real64, upper=1.0_real64, &
+                boundary=METHODS(mm))
+            call g%add(z)
+            call g%finish()
+            call g%cdf(0.2_real64, p0)
+            call g%cdf(0.8_real64, p1)
+            fine = max(abs(p0 - e0), abs(p1 - e1))
+            write(what, '(3a,es10.3,a,es10.3)') trim(METHODS(mm)), ": the share counted beyond an end ", &
+                "misses the exact estimate by ", gap, " at 60 cells and ", fine
+            call check(error, gap <= 1.0e-5_real64 .and. fine <= 0.125_real64*gap, trim(what))
             if (allocated(error)) return
         end do
 
@@ -2433,18 +2812,21 @@ contains
 
         call g%init(10, 0.0_real64, 10.0_real64, 0.01_real64)
         call g%add(2.5_real64)
+        call g%finish()
         call g%density(f)
         call check(error, count(f /= 0.0_real64) == 1 .and. abs(f(3) - 1.0_real64) <= 1.0e-15_real64, &
             "a kernel on cell 3's centre must land whole in cell 3")
         if (allocated(error)) return
         call g%clear()
         call g%add(7.0_real64)
+        call g%finish()
         call g%density(f)
         call check(error, count(f /= 0.0_real64) == 1 .and. abs(f(8) - 1.0_real64) <= 1.0e-15_real64, &
             "a kernel between two centres must land whole in the cell holding the point")
         if (allocated(error)) return
         call g%init(10, 0.0_real64, 10.0_real64, 0.3_real64, kernel="box")
         call g%add(5.0_real64)
+        call g%finish()
         call g%density(f)
         call check(error, count(f /= 0.0_real64) == 2 .and. abs(f(5) - f(6)) <= 1.0e-15_real64 .and. &
             abs(f(5) + f(6) - 1.0_real64) <= 1.0e-15_real64, &
@@ -2452,6 +2834,7 @@ contains
         if (allocated(error)) return
         call g%init(10, 0.0_real64, 10.0_real64, 0.01_real64)
         call g%add(0.001_real64)
+        call g%finish()
         call g%density(f)
         call g%cdf(0.0_real64, p)
         call check(error, count(f /= 0.0_real64) == 1 .and. p > 0.4_real64 .and. &
@@ -2472,6 +2855,7 @@ contains
         call kde_fixture(50_int64, x)
         call g%init(40, -700.0_real64, 700.0_real64, 60.0_real64)
         call g%add(x)
+        call g%finish()
         call g%density(f, x=c)
         call g%pdf(c, fc)
         call check(error, all(fc == f), "%pdf at a centre must be %density there, to the bit")
@@ -2514,6 +2898,7 @@ contains
         ! counted below `xmin` starts the running sum.
         call g%init(64, -0.3_real64, 0.3_real64, 0.05_real64)
         call g%add(x)
+        call g%finish()
         call g%density(f, x=c)
         s = g%step()
         call g%cdf(c, p)
@@ -2530,6 +2915,7 @@ contains
         end do
         call g%init(64, -1.0_real64, 1.0_real64, 0.05_real64)
         call g%add(x)
+        call g%finish()
         call g%density(f, x=c)
         s = g%step()
         a = c(30) + 0.2_real64*s
@@ -2560,6 +2946,7 @@ contains
         ! ends, and `%cdf` is 0 and 1 there.
         call g%init(64, -1.0_real64, 1.0_real64, 0.01_real64, kernel="box")
         call g%add(x)
+        call g%finish()
         call g%quantile(0.0_real64, q0)
         call g%quantile(1.0_real64, q1)
         call g%cdf(q0, p0)
@@ -2577,7 +2964,7 @@ contains
     !> grid poisons the merge.
     subroutine test_grid_merge(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
-        type(pf_kde_grid) :: g_all, g1, g2, ge, gp
+        type(pf_kde_grid) :: g_all, g1, g2, ge, gp, gb
         real(real64), allocatable :: x(:), w(:), r_all(:), r(:), r1(:), r2(:), zz(:)
         real(real64) :: f(30), fl(100), fl2(100), ends(2), ends_all(2), q_before, q_after, p_low
 
@@ -2590,20 +2977,25 @@ contains
         call g2%init(30, -700.0_real64, 700.0_real64, 50.0_real64)
         call g2%add(x(101:101))
         call g1%merge(g2)
+        call g_all%finish()
         call raw_cells(g_all, r_all)
+        call g1%finish()
         call raw_cells(g1, r)
         call check(error, all(r == r_all) .and. g1%n() == 101_int64 .and. g1%n_valid() == 101_int64 &
             .and. g1%sum_weights() == g_all%sum_weights(), &
             "a grid over 100 points merged with one over the 101st must be the grid over all 101, to the bit")
         if (allocated(error)) return
         ! The kernels reach past both ends of this range, so the weight counted there merges too.
+        call g1%finish()
         call g1%cdf([-700.0_real64, 700.0_real64], ends)
+        call g_all%finish()
         call g_all%cdf([-700.0_real64, 700.0_real64], ends_all)
         call check(error, ends_all(1) > 0.0_real64 .and. ends_all(2) < 1.0_real64 .and. all(ends == ends_all), &
             "the weight counted beyond each end must merge, to the bit")
         if (allocated(error)) return
         call ge%init(30, -700.0_real64, 700.0_real64, 50.0_real64)
         call ge%merge(g_all)
+        call ge%finish()
         call raw_cells(ge, r)
         call check(error, all(r == r_all), "a merge into an empty grid must copy the other, to the bit")
         if (allocated(error)) return
@@ -2622,9 +3014,15 @@ contains
         call g2%init(100, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
             boundary="linear")
         call g2%add(zz(51:101))
-        call raw_cells(g1, r1)
-        call raw_cells(g2, r2)
-        call g1%merge(g2)
+        ! Each half is read off a COPY: a query closes a grid, and a closed grid takes no merge.
+        gb = g1
+        call gb%finish()
+        call raw_cells(gb, r1)
+        gb = g2
+        call gb%finish()
+        call raw_cells(gb, r2)
+        call g1%merge(g2, finish=.true.)
+        call g_all%finish()
         call raw_cells(g_all, r_all)
         call raw_cells(g1, r)
         ! To rounding, not to the bit: the halves group the same additions differently, as the
@@ -2650,7 +3048,9 @@ contains
         call g2%init(30, -700.0_real64, 700.0_real64, 50.0_real64, kernel="bspline")
         call g2%add(x(51:101), weights=w(51:101))
         call g1%merge(g2)
+        call g_all%finish()
         call raw_cells(g_all, r_all)
+        call g1%finish()
         call raw_cells(g1, r)
         call check(error, maxval(abs(r - r_all)) <= 1.0e-14_real64*maxval(r_all), &
             "two weighted halves merged must equal the whole to rounding")
@@ -2667,8 +3067,12 @@ contains
         call g1%add(0.5_real64)
         call g2%init(10, 0.0_real64, 1.0_real64, 0.02_real64)
         call g2%add(1.5_real64)
-        call g1%quantile(1.0_real64, q_before)
-        call g1%merge(g2)
+        ! The before-merge answer is read off a COPY: a query closes a grid, and a closed grid
+        ! takes no merge. The copy also shows `finish=` on `%merge`, the one-line form.
+        gb = g1
+        call gb%finish()
+        call gb%quantile(1.0_real64, q_before)
+        call g1%merge(g2, finish=.true.)
         call g1%quantile(1.0_real64, q_after)
         call check(error, q_before < 1.0_real64 .and. q_after == 1.0_real64, &
             "weight above the range must merge: p = 1 then answers xmax")
@@ -2679,6 +3083,7 @@ contains
         call g2%init(10, 0.0_real64, 1.0_real64, 0.02_real64)
         call g2%add(-0.5_real64)
         call g1%merge(g2)
+        call g1%finish()
         call g1%cdf(0.0_real64, p_low)
         call check(error, p_low == 0.5_real64, "weight below the range must merge: %cdf(xmin) is then 1/2")
         if (allocated(error)) return
@@ -2688,6 +3093,7 @@ contains
         call gp%init(30, -700.0_real64, 700.0_real64, 50.0_real64, kernel="bspline")
         call gp%add([1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan)], skipnan=.false.)
         call g1%merge(gp)
+        call g1%finish()
         call g1%density(f)
         call check(error, all(ieee_is_nan(f)), "merging a poisoned grid must poison the result")
 
@@ -2732,7 +3138,9 @@ contains
         call g2%add(2.5_real64, weights=2.0_real64)
         call g2%add(4.0_real64, weights=0.5_real64, is_valid=.false.)
         call g2%add(6.25_real64, weights=3.0_real64)
+        call g1%finish()
         call raw_cells(g1, r1)
+        call g2%finish()
         call raw_cells(g2, r2)
         call check(error, all(r1 == r2) .and. g2%n_null() == 1_int64 .and. g2%n() == 4_int64, &
             "adding the points one at a time must equal adding the array, to the bit")
@@ -2745,15 +3153,21 @@ contains
         call g2%init(16, 0.0_real64, 8.0_real64, 0.5_real64)
         call g1%add(x32)
         call g2%add(real(x32, real64))
+        call g1%finish()
         call raw_cells(g1, r1)
+        call g2%finish()
         call raw_cells(g2, r2)
         call check(error, all(r1 == r2), "a real32 array must deposit as its widened values do")
         if (allocated(error)) return
-        call g1%add(x32(1))
-        call g2%add(real(x32(1), real64))
+        ! Reopened for the scalar form: a query closed both grids, and the comparison is about
+        ! the scalar `%add` alone, so it needs no history.
+        call g1%clear()
+        call g2%clear()
+        call g1%add(x32(1), finish=.true.)
+        call g2%add(real(x32(1), real64), finish=.true.)
         call raw_cells(g1, r1)
         call raw_cells(g2, r2)
-        call check(error, all(r1 == r2) .and. g1%n() == 6_int64, &
+        call check(error, all(r1 == r2) .and. g1%n() == 1_int64, &
             "a real32 point must deposit as its widened value does")
 
     end subroutine test_grid_population_rules
@@ -2767,6 +3181,7 @@ contains
         real(real64) :: f(8), pdf, cdf, q
 
         call g%init(8, 0.0_real64, 8.0_real64, 0.5_real64)
+        call g%finish()
         call g%density(f)
         call g%pdf(4.0_real64, pdf)
         call g%cdf(4.0_real64, cdf)
@@ -2775,13 +3190,17 @@ contains
             ieee_is_nan(q) .and. g%n() == 0_int64, &
             "an empty grid must answer zeros from %density and NaN from its queries")
         if (allocated(error)) return
-        call g%add([1.0_real64, 2.0_real64], is_valid=[.false., .false.])
+        ! Querying closed the grid, so each stage below reopens it with `%clear` and accumulates
+        ! afresh; the counts are per stage for that reason.
+        call g%clear()
+        call g%add([1.0_real64, 2.0_real64], is_valid=[.false., .false.], finish=.true.)
         call g%density(f)
         call check(error, all(f == 0.0_real64) .and. g%n_null() == 2_int64 .and. g%n_valid() == 0_int64, &
             "an all-null %add must leave the grid empty and count the nulls")
         if (allocated(error)) return
+        call g%clear()
         call g%add([1.0_real64, ieee_value(1.0_real64, ieee_quiet_nan), 2.0_real64], skipnan=.false.)
-        call g%add([3.0_real64])
+        call g%add([3.0_real64], finish=.true.)
         call g%density(f)
         call g%pdf(2.0_real64, pdf)
         call check(error, all(ieee_is_nan(f)) .and. ieee_is_nan(pdf) .and. g%n_valid() == 4_int64, &
@@ -2789,6 +3208,7 @@ contains
         if (allocated(error)) return
         call g%clear()
         call g%add([3.0_real64])
+        call g%finish()
         call g%density(f)
         call check(error, .not. any(ieee_is_nan(f)) .and. abs(sum(f) - 1.0_real64) <= 1.0e-15_real64, &
             "%clear must lift the poison")
@@ -2817,6 +3237,7 @@ contains
         if (allocated(error)) return
         call g%add([0.0_real64, 1.0_real64, 2.0_real64])
         call g%clear()
+        call g%finish()
         call g%density(f)
         call check(error, g%is_initialised() .and. g%ncells() == 50 .and. g%bandwidth() == 0.2_real64 .and. &
             g%n() == 0_int64 .and. all(f == 0.0_real64), "%clear must empty the grid and keep its geometry")
@@ -2834,8 +3255,10 @@ contains
     subroutine test_grid_print_writes(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde_grid) :: g, fresh
-        integer :: u, nlines
+        integer :: u, nlines, i
         logical :: seen
+        character(len=11), parameter :: CORRECTIONS(3) = [character(len=11) :: &
+            "renormalise", "reflect", "linear"]
         character(len=*), parameter :: PATH = "test_run/kde_grid_print_writes.txt"
 
         call g%init(10, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
@@ -2845,20 +3268,51 @@ contains
         close(u)
         call read_back(PATH, nlines, "sum_weights", seen)
         ! The heading, twelve rows, the lower bound and the correction.
-        call check(error, nlines == 15 .and. seen, "%print must write a heading and fourteen rows")
+        call check(error, nlines == 16 .and. seen, "%print must write a heading and fifteen rows")
         if (allocated(error)) return
         call g%clear()
         open(newunit=u, file=PATH, status="replace", action="write")
         call g%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "nothing accumulated", seen)
-        call check(error, nlines == 16 .and. seen, "an empty grid must say so")
+        call check(error, nlines == 17 .and. seen, "an empty grid must say so")
         if (allocated(error)) return
         open(newunit=u, file=PATH, status="replace", action="write")
         call fresh%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "not initialised", seen)
         call check(error, nlines == 1 .and. seen, "an uninitialised grid must print one line saying so")
+        if (allocated(error)) return
+
+        ! Every correction names itself, `"linear"` included: a printer that spelled out only the
+        ! ones it knew reported a `"linear"` grid as unbounded, which is a sharper mistake than
+        ! saying nothing.
+        do i = 1, 3
+            call g%init(10, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64, upper=1.0_real64, &
+                boundary=trim(CORRECTIONS(i)))
+            call g%add([0.2_real64, 0.5_real64], finish=.true.)
+            open(newunit=u, file=PATH, status="replace", action="write")
+            call g%print(unit=u)
+            close(u)
+            call read_back(PATH, nlines, trim(CORRECTIONS(i)), seen)
+            call check(error, seen, "the grid's %print must name the correction in force: " // &
+                trim(CORRECTIONS(i)))
+            if (allocated(error)) return
+        end do
+        ! And the lifecycle, which is what a caller looks for when a query has just refused.
+        ! Printed afresh: `read_back` deletes the file it reads.
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call g%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "finished", seen)
+        call check(error, seen, "the grid's %print must say it is finished")
+        if (allocated(error)) return
+        call g%clear()
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call g%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "accumulating", seen)
+        call check(error, seen, "and that a cleared grid is accumulating again")
 
     end subroutine test_grid_print_writes
 
@@ -3067,13 +3521,18 @@ contains
             call pilot%init(64, -700.0_real64, 800.0_real64, 60.0_real64, kernel=kern)
             call pilot%add(x)
             call gf%init(150, -650.0_real64, 750.0_real64, 50.0_real64, kernel=kern)
+            call pilot%finish()
             call g0%init(150, -650.0_real64, 750.0_real64, 50.0_real64, kernel=kern, pilot=pilot, &
                 alpha=0.0_real64)
             call gf%add(x)
             call g0%add(x)
+            call gf%finish()
             call raw_cells(gf, rf)
+            call g0%finish()
             call raw_cells(g0, r0)
+            call gf%finish()
             call gf%cdf(t, cf)
+            call g0%finish()
             call g0%cdf(t, c0)
             call check(error, g0%is_adaptive() .and. all(r0 == rf) .and. all(c0 == cf), &
                 trim(kern) // ": a grid whose pilot rule has alpha = 0 must accumulate the fixed grid's bits")
@@ -3282,6 +3741,7 @@ contains
             do r = 1, 2
                 call g%init(400*r, lo, hi, h, kernel=KERNELS(kk), pilot=p)
                 call g%add(x)
+                call g%finish()
                 call g%pdf(t, fg)
                 e(r) = rms(fg - fx)
             end do
@@ -3328,21 +3788,23 @@ contains
             call g%init(200, 0.0_real64, 1.0_real64, 0.06_real64, kernel="bspline", pilot=p, lower=0.0_real64, &
                 upper=1.0_real64, boundary=METHODS(mm))
             call g%add(z)
-            if (mm < 3) then
+            if (mm == 2) then
+                call g%finish()
                 call raw_cells(g, r)
                 call check(error, abs(sum(r)*g%step()/g%sum_weights() - 1.0_real64) <= 1.0e-13_real64, &
                     trim(METHODS(mm)) // ": an adaptive grid must deposit exactly its weight")
             else
-                ! Under `"linear"` a point deposits its linear boundary mass, which is near but not
-                ! exactly its weight: the normalisation is the estimate's, once, at query time. What
-                ! must hold is that the density the grid answers is one over the range, the cells
-                ! clipped and divided by the mass they hold -- nothing lies beyond this range, both
-                ! bounds being its ends.
+                ! Under either local-polynomial correction a point deposits its own corrected mass,
+                ! which is near but not exactly its weight: the normalisation is the estimate's,
+                ! once, at query time. What must hold is that the density the grid answers is one
+                ! over the range, the cells clipped and divided by the mass they hold -- nothing
+                ! lies beyond this range, both bounds being its ends.
                 allocate(dens(g%ncells()))
+                call g%finish()
                 call g%density(dens)
                 call check(error, abs(sum(dens)*g%step() - 1.0_real64) <= 1.0e-13_real64 .and. &
-                    all(dens >= 0.0_real64), &
-                    "linear: an adaptive grid's density must be clipped and integrate to one over its range")
+                    all(dens >= 0.0_real64), trim(METHODS(mm)) // &
+                    ": an adaptive grid's density must be clipped and integrate to one over its range")
                 deallocate(dens)
             end if
             if (allocated(error)) return
@@ -3400,20 +3862,24 @@ contains
         call kde_two_component(60_int64, x)
         call p%init(64, -700.0_real64, 800.0_real64, 50.0_real64)
         call p%add(x)
+        call p%finish()
         call g%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
         call gf%init(100, -600.0_real64, 700.0_real64, 50.0_real64)
         call check(error, g%is_adaptive() .and. .not. gf%is_adaptive(), "pilot= must make the grid adaptive")
         if (allocated(error)) return
         call g%add(x)
+        call g%finish()
         call raw_cells(g, before)
         call p%clear()
         call g%clear()
         call g%add(x)
+        call g%finish()
         call raw_cells(g, r)
         call check(error, all(r == before), "the pilot must be copied: clearing the caller's must change nothing")
         if (allocated(error)) return
 
         call p%add(x)
+        call p%finish()
         call g_all%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
         call g_all%add(x)
         call g1%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
@@ -3421,7 +3887,9 @@ contains
         call g2%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=p, alpha=0.7_real64)
         call g2%add(x(60:60))
         call g1%merge(g2)
+        call g_all%finish()
         call raw_cells(g_all, r_all)
+        call g1%finish()
         call raw_cells(g1, r)
         call check(error, all(r == r_all) .and. g1%n() == 60_int64, &
             "two adaptive grids reading one pilot must merge into the grid over all their points, to the bit")
@@ -3432,16 +3900,20 @@ contains
         call pp%init(64, -700.0_real64, 800.0_real64, 50.0_real64)
         call pp%add(x)
         call pp%add([ieee_value(1.0_real64, ieee_quiet_nan)], skipnan=.false.)
+        call pp%finish()
         call gp%init(100, -600.0_real64, 700.0_real64, 50.0_real64, pilot=pp)
+        call gp%finish()
         call gp%density(f)
         call check(error, all(ieee_is_nan(f)), "a grid on a poisoned pilot must answer NaN before any %add")
         if (allocated(error)) return
-        call gp%add(x)
+        call gp%clear()
+        call gp%add(x, finish=.true.)
         call gp%density(f)
         call check(error, all(ieee_is_nan(f)), "a poisoned pilot must poison the grid built on it")
         if (allocated(error)) return
         call gp%clear()
         call gp%add(x)
+        call gp%finish()
         call gp%density(f)
         call check(error, all(ieee_is_nan(f)), "clearing the grid must not clear its pilot's poison")
 
@@ -3461,6 +3933,7 @@ contains
         call empty%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call beyond%init(8, 0.0_real64, 1.0_real64, 0.01_real64)
         call beyond%add([5.0_real64])
+        call beyond%finish()
         call beyond%density(fp)
         call check(error, beyond%sum_weights() == 1.0_real64 .and. all(fp == 0.0_real64), &
             "the fixture: a pilot whose one point lies beyond its range holds its weight and none in its cells")
@@ -3468,8 +3941,10 @@ contains
         call full%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
         call full%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
 
+        call full%finish()
         call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=full)
         call g%add([0.25_real64, 0.5_real64])
+        call g%finish()
         call g%density(f)
         call check(error, g%is_adaptive() .and. .not. any(ieee_is_nan(f)), &
             "the control: a grid on a pilot with points in its cells must answer finite densities")
@@ -3477,15 +3952,18 @@ contains
 
         do which = 1, 2
             if (which == 1) then
+                call empty%finish()
                 call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=empty, bandwidth_max=0.5_real64)
             else
                 call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=beyond)
             end if
+            call g%finish()
             call g%density(f)
             call check(error, g%is_adaptive() .and. all(ieee_is_nan(f)), &
                 "a grid on a pilot with nothing to read must be adaptive and answer NaN before any %add")
             if (allocated(error)) return
-            call g%add([0.25_real64, 0.5_real64])
+            call g%clear()
+            call g%add([0.25_real64, 0.5_real64], finish=.true.)
             call g%density(f)
             call g%pdf(0.5_real64, pdf)
             call g%cdf(0.5_real64, cdf)
@@ -3496,6 +3974,7 @@ contains
             if (allocated(error)) return
             call g%clear()
             call g%add([0.5_real64])
+            call g%finish()
             call g%density(f)
             call g%sample(fp, 3_int64)
             call check(error, all(ieee_is_nan(f)) .and. all(ieee_is_nan(fp)), &
@@ -3938,6 +4417,7 @@ contains
         call kde_fixture(1000_int64, x)
         call g%init(400, -700.0_real64, 700.0_real64, 30.0_real64)
         call g%add(x)
+        call g%finish()
         call g%sample(w, SEED, 5)
         call g%cdf(w, p)
         key = pf_random_key(SEED, KDE_GRID_LABEL)
@@ -3960,6 +4440,7 @@ contains
         call g%init(300, -300.0_real64, 300.0_real64, 40.0_real64)
         call g%add(x)
         allocate(v(N))
+        call g%finish()
         call g%sample(v, SEED)
         call moments(v, mean, var, kurt)
         fn%g = g
@@ -3978,15 +4459,18 @@ contains
         if (allocated(error)) return
 
         call g%init(10, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%finish()
         call g%sample(b, SEED)
         call check(error, all(ieee_is_nan(b)), "an empty grid must draw NaN")
         if (allocated(error)) return
-        call g%add([5.0_real64])
+        call g%clear()
+        call g%add([5.0_real64], finish=.true.)
         call g%sample(b, SEED)
         call check(error, all(ieee_is_nan(b)), "a grid whose only weight lies beyond its range must draw NaN")
         if (allocated(error)) return
         call g%clear()
         call g%add([0.5_real64, ieee_value(1.0_real64, ieee_quiet_nan)], skipnan=.false.)
+        call g%finish()
         call g%sample(b, SEED)
         call check(error, all(ieee_is_nan(b)), "a poisoned grid must draw NaN")
 

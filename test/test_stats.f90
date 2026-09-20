@@ -81,6 +81,8 @@ contains
             new_unittest("the fixture recipe still matches the generator's", test_fixture_recipe), &
             new_unittest("pf_moments matches the 50-digit oracle, unweighted", test_golden_unweighted), &
             new_unittest("variance is shift-invariant at an offset of 1e9", test_shift_invariance), &
+            new_unittest("the spread survives a sample scaled to the ends of the range", &
+                test_spread_at_extreme_scales), &
             new_unittest("pf_moments matches the oracle under both weight_type conventions", &
                 test_golden_weighted), &
             new_unittest("pf_moments matches the oracle with nulls and NaNs excluded", &
@@ -771,6 +773,61 @@ contains
     !! oracle. The textbook `sum(x**2) - sum(x)**2/n` misses this by orders of magnitude; two-pass
     !! misses it by a few ulp, because the derivative of the central moment with respect to the
     !! mean is zero at the mean.
+    !> The standard deviation of a sample scaled to either end of the representable range is that
+    !> sample's own standard deviation times the scale, exactly as the scale-equivariance of the
+    !> definition requires.
+    !>
+    !> The plain accumulation sums SQUARED deviations, so it overflows above about `1e150` and
+    !> underflows to zero below about `1e-170`, although the standard deviation it should answer is
+    !> an ordinary `real64` in both cases -- `+Infinity` and `0` respectively, the second of which
+    !> then silently reports a population with spread as having none. The variance is asserted at
+    !> gentler scales, `1e+-150`, because the variance ITSELF is unrepresentable at `1e+-200`:
+    !> squaring is what puts it out of range, and no accumulation can put it back.
+    subroutine test_spread_at_extreme_scales(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x(:), y(:)
+        real(real64) :: sd0, sd1, v0, v1, sc
+        real(real64), parameter :: SD_SCALES(2) = [1.0e200_real64, 1.0e-200_real64]
+        real(real64), parameter :: V_SCALES(2) = [1.0e150_real64, 1.0e-150_real64]
+        character(len=200) :: msg
+        integer(int64) :: i
+        integer :: k
+        logical :: ok
+
+        call golden_fixture(1000_int64, x)
+        allocate(y(size(x)))
+        call pf_stddev(x, sd0, ok=ok)
+        call pf_variance(x, v0)
+        call check(error, ok .and. sd0 > 0.0_real64, &
+            "control: the unscaled fixture must have a standard deviation to scale")
+        if (allocated(error)) return
+
+        do k = 1, 2
+            sc = SD_SCALES(k)
+            do i = 1_int64, size(x, kind=int64)
+                y(i) = x(i)*sc
+            end do
+            call pf_stddev(y, sd1, ok=ok)
+            write(msg, '(a,es10.3,a,es24.17,a,es24.17)') "pf_stddev at a scale of ", sc, &
+                " answers ", sd1, " against the scaled ", sd0*sc
+            call check(error, ok .and. abs(sd1 - sd0*sc) <= 1.0e-12_real64*(sd0*sc), trim(msg))
+            if (allocated(error)) return
+        end do
+
+        do k = 1, 2
+            sc = V_SCALES(k)
+            do i = 1_int64, size(x, kind=int64)
+                y(i) = x(i)*sc
+            end do
+            call pf_variance(y, v1, ok=ok)
+            write(msg, '(a,es10.3,a,es24.17,a,es24.17)') "pf_variance at a scale of ", sc, &
+                " answers ", v1, " against the scaled ", v0*sc*sc
+            call check(error, ok .and. abs(v1 - v0*sc*sc) <= 1.0e-12_real64*(v0*sc*sc), trim(msg))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_spread_at_extreme_scales
+
     subroutine test_shift_invariance(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64), allocatable :: x(:), shifted(:)

@@ -57,6 +57,8 @@ contains
                 test_queries_ignore_the_team), &
             new_unittest("a bulk query opens a team only where the work pays for it", &
                 test_query_team_floor), &
+            new_unittest("the grid's bulk queries answer the same bits at every thread count", &
+                test_grid_queries_ignore_the_team), &
             new_unittest("one object per iteration inside a caller's region answers the serial bits", &
                 test_one_object_per_iteration), &
             new_unittest("one fitted object shared by every thread answers the serial bits", &
@@ -64,6 +66,73 @@ contains
             ]
 
     end subroutine collect_tests_kde_omp
+
+    !> `pf_kde_grid`'s three bulk queries take `threads=` and answer the same bits at every count.
+    !>
+    !> Each element is computed by one thread alone, so the team can only change the time; the team
+    !> observable is read beside every answer, with `threads=1` as the negative control, because an
+    !> answer comparison cannot tell a team that ran from one that never opened.
+    subroutine test_grid_queries_ignore_the_team(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), w(:), t(:), f1(:), f4(:), c1(:), c4(:), pr(:), q1(:), q4(:)
+        integer(int64) :: i, n
+        integer :: team1(3), team4(3)
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it no team can open at any thread count, so " // &
+            "the one-thread and four-thread queries below would be the same serial code and agree " // &
+            "for the wrong reason")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
+                "processors available, so a process bound to one opens no team")
+            return
+        end if
+#endif
+        call team_fixture(20000_int64, x, w)
+        call g%init(400, -500.0_real64, 500.0_real64, 5.0_real64)
+        call g%add(x, weights=w, finish=.true.)
+        ! Long enough that the team's own floor of work per thread is passed.
+        n = 400000_int64
+        allocate(t(n), pr(n), f1(n), f4(n), c1(n), c4(n), q1(n), q4(n))
+        do i = 1_int64, n
+            t(i) = -500.0_real64 + 1000.0_real64*real(i - 1_int64, real64)/real(n - 1_int64, real64)
+            pr(i) = real(i, real64)/real(n + 1_int64, real64)
+        end do
+        call g%pdf(t, f1, threads=1)
+        team1(1) = parquet_debug_kde_threads_used()
+        call g%pdf(t, f4, threads=4)
+        team4(1) = parquet_debug_kde_threads_used()
+        call g%cdf(t, c1, threads=1)
+        team1(2) = parquet_debug_kde_threads_used()
+        call g%cdf(t, c4, threads=4)
+        team4(2) = parquet_debug_kde_threads_used()
+        call g%quantile(pr, q1, threads=1)
+        team1(3) = parquet_debug_kde_threads_used()
+        call g%quantile(pr, q4, threads=4)
+        team4(3) = parquet_debug_kde_threads_used()
+
+        call check(error, all(team1 == 1), &
+            "threads=1 must run every grid query serially; the team observable says not")
+        if (allocated(error)) return
+        call check(error, all(team4 == 4), &
+            "threads=4 must open a team of four for every grid query, or the comparisons below " // &
+            "compare the serial answers with themselves")
+        if (allocated(error)) return
+        call check(error, all(f4 == f1) .and. all(c4 == c1) .and. all(q4 == q1), &
+            "every grid bulk query must give the same bits at every thread count")
+        if (allocated(error)) return
+        ! And the serial answers are the scalar forms', which nothing about threading can reach.
+        call g%pdf(t(7), f1(1))
+        call g%cdf(t(7), c1(1))
+        call g%quantile(pr(7), q1(1))
+        call check(error, f1(1) == f4(7) .and. c1(1) == c4(7) .and. q1(1) == q4(7), &
+            "a grid's bulk query must equal its scalar form at every element")
+
+    end subroutine test_grid_queries_ignore_the_team
 
     !> `n` values spread over about `[-500, 500]`, a pure function of the index, and their
     !> weights `1, 2, 3, 1, 2, 3, ...`.
@@ -130,8 +199,11 @@ contains
             "deposit with itself")
         if (allocated(error)) return
 
+        call g1%finish()
         call g1%density(r1, normalise=.false.)
+        call g4%finish()
         call g4%density(r4, normalise=.false.)
+        call g4b%finish()
         call g4b%density(r4b, normalise=.false.)
         call check(error, all(r4 == r4b), "one team size must give the same bits every time")
         if (allocated(error)) return
@@ -269,7 +341,9 @@ contains
         call g4%init(400, -200.0_real64, 200.0_real64, 5.0_real64, pilot=p)
         call g4%add(x, weights=w, threads=4)
         team_add = parquet_debug_kde_threads_used()
+        call g1%finish()
         call g1%density(r1, normalise=.false.)
+        call g4%finish()
         call g4%density(r4, normalise=.false.)
         call check(error, team_add == 4 .and. maxval(abs(r4 - r1)) <= 1.0e-13_real64*maxval(r1), &
             "an adaptive grid's four-thread deposit must open its team and agree with one thread's to rounding")
@@ -321,7 +395,7 @@ contains
         type(pf_kde) :: k, ka, kl
         type(pf_kde_grid) :: g
         real(real64), allocatable :: x(:), w(:), t(:), f1(:), f4(:), c1(:), c4(:), s1(:), s4(:)
-        real(real64) :: p(NP), q1(NP), q4(NP), qc(NP), xc1(NQ), xc4(NQ), fc1(NQ), fc4(NQ), fe, ce, mass, wsum
+        real(real64) :: p(NP), q1(NP), q4(NP), qc(NP), xc1(NQ), xc4(NQ), fc1(NQ), fc4(NQ), fe, ce, img, wsum
         real(real64) :: gap_f, gap_c, mean, xbar
         real(real64) :: tl(NL), pl(NL), cl1(NL), cl4(NL), ql1(NL), ql4(NL), sl1(NL), sl4(NL)
         integer :: team1(7), team4(7), i
@@ -379,7 +453,11 @@ contains
             all(fc4 == fc1) .and. all(s4 == s1), "every bulk query and %sample must give the same bits at every thread count")
         if (allocated(error)) return
 
-        ! The oracle: every point's cut kernel, renormalised to the mass it keeps above the bound.
+        ! The oracle: every point's cut kernel plus its mirror image about the bound, which is what
+        ! `"reflect"` sums -- the correction a bound without `boundary=` resolves to. With one bound
+        ! the images keep the whole mass inside the support, so nothing is divided by a mass; the
+        ! two terms subtracted at the bound are a point's mass below it and its mirror's, which sum
+        ! to one.
         wsum = sum(w, mask=x >= LO)
         gap_f = 0.0_real64
         gap_c = 0.0_real64
@@ -388,9 +466,10 @@ contains
             ce = 0.0_real64
             do j = 1_int64, size(x, kind=int64)
                 if (x(j) < LO) cycle
-                mass = 1.0_real64 - cut_cdf((LO - x(j))/H)
-                fe = fe + w(j)*cut_pdf((t(i) - x(j))/H)/mass
-                ce = ce + w(j)*(cut_cdf((t(i) - x(j))/H) - cut_cdf((LO - x(j))/H))/mass
+                img = 2.0_real64*LO - x(j)
+                fe = fe + w(j)*(cut_pdf((t(i) - x(j))/H) + cut_pdf((t(i) - img)/H))
+                ce = ce + w(j)*((cut_cdf((t(i) - x(j))/H) + cut_cdf((t(i) - img)/H)) &
+                    - (cut_cdf((LO - x(j))/H) + cut_cdf((LO - img)/H)))
             end do
             gap_f = max(gap_f, abs(f1(i) - fe/(H*wsum)))
             gap_c = max(gap_c, abs(c1(i) - ce/wsum))
@@ -442,6 +521,7 @@ contains
 
         call g%init(500, -500.0_real64, 500.0_real64, H)
         call g%add(x, weights=w)
+        call g%finish()
         call g%sample(s1, 7_int64, 2_int64, threads=1)
         team1(7) = parquet_debug_kde_threads_used()
         call g%sample(s4, 7_int64, 2_int64, threads=4)
@@ -583,7 +663,7 @@ contains
         call k%fit(x, bandwidth=5.0_real64, weights=w, adaptive=.true., lower=-450.0_real64)
         call k%pilot(p)
         call g%init(400, -450.0_real64, 500.0_real64, 5.0_real64, pilot=p, lower=-450.0_real64)
-        call g%add(x, weights=w)
+        call g%add(x, weights=w, finish=.true.)
         do j = 1, NT
             do i = 1, NQ
                 t(i, j) = -440.0_real64 + 930.0_real64*modulo(real(i + NQ*j, real64)*0.6180339887498949_real64, &
@@ -602,6 +682,8 @@ contains
         call k%cdf(t(:, tid), c(:, tid))
         call k%quantile(pr, q(:, tid))
         call k%sample(v(:, tid), 3_int64, tid)
+        ! The grid was finished BEFORE the region: `%finish` writes, and a write shared by four
+        ! threads is a race whatever it writes. Only the queries are shared here.
         call g%pdf(t(:, tid), gf(:, tid))
         call g%sample(gv(:, tid), 3_int64, tid)
         !$omp end parallel

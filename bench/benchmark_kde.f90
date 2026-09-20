@@ -38,6 +38,13 @@ program benchmark_kde
     !> others.
     real(real64), parameter :: MASS_GATE = 1.0e-10_real64
 
+    !> How much dearer a bulk `%pdf` may be per point on a grid of sixteen times the cells before
+    !! the run is called a failure: the query reads what `%finish` stored, so the true ratio is one
+    !! and anything near it passes, while a return to a per-call `O(cells)` sum -- which cost
+    !! hundreds of times more at the larger count -- does not. Loose on purpose: this runs on a
+    !! machine with other work on it.
+    real(real64), parameter :: PDF_COST_GATE = 2.0_real64
+
     character(len=32) :: mode
     integer :: rounds, failures
     integer(int64) :: npoints, nqueries
@@ -529,8 +536,11 @@ contains
         integer, parameter :: PARTS = 16
         type(pf_kde_grid) :: g
         type(pf_kde_grid), allocatable :: part(:)
+        integer, parameter :: GATE_CELLS(2) = [1600, 25600]
+        integer, parameter :: NQ_GATE = 20000
         real(real64), allocatable :: x(:), f(:)
-        real(real64) :: lo, hi, h, step, xmin, t0, t, best, mass, checksum
+        real(real64) :: lo, hi, h, step, xmin, t0, t, best, mass, checksum, gate_ns(2)
+        real(real64) :: qx(NQ_GATE)
         integer(int64) :: reps, r, a, b
         integer :: kk, q, nc, lap, i
 
@@ -573,6 +583,7 @@ contains
                 end do
                 if (allocated(f)) deallocate(f)
                 allocate(f(nc))
+                call g%finish()
                 call g%density(f, normalise=.false.)
                 mass = sum(f)*g%step()/real(n, real64) - 1.0_real64
                 if (.not. (abs(mass) <= MASS_GATE)) failures = failures + 1
@@ -619,6 +630,7 @@ contains
         end do
         deallocate(f)
         allocate(f(nc))
+        call g%finish()
         call g%density(f, normalise=.false.)
         mass = sum(f)*g%step()/real(n, real64) - 1.0_real64
         if (.not. (abs(mass) <= MASS_GATE)) failures = failures + 1
@@ -627,6 +639,49 @@ contains
         print '(a,i0,a,i0,a)', "=== pf_kde_grid%merge: ", PARTS, " grids of ", nc, " cells into one ==="
         print '(a,f9.3,a,es11.2)', "  ns per cell merged ", 1.0e9_real64*best/(real(PARTS, real64)*real(nc, real64)), &
             "   mass-1 ", mass
+
+        ! ---- the cost gate: a bulk `%pdf` must not grow with the cell count ----
+        ! `%finish` forms the total mass and the running integral once, so a query is a segment
+        ! look-up whatever the grid's size. Before that it rebuilt an `O(cells)` sum per point, and
+        ! a grid of twenty-five thousand cells answered four hundred times slower than one of
+        ! sixteen hundred. The gate is deliberately loose -- a small factor, not a ratio of one --
+        ! because this runs on a loaded machine; what it catches is a return to `O(cells)`.
+        deallocate(f)
+        allocate(f(NQ_GATE))
+        do i = 1, NQ_GATE
+            qx(i) = lo + (hi - lo)*(real(i, real64) - 0.5_real64)/real(NQ_GATE, real64)
+        end do
+        print '(a)', ""
+        print '(a)', "=== pf_kde_grid%pdf: nanoseconds per point against the cell count ==="
+        print '(a)', "  cells     ns/point"
+        do q = 1, 2
+            nc = GATE_CELLS(q)
+            call g%init(nc, lo - h, hi + h, h)
+            call g%add(x, finish=.true.)
+            reps = 1_int64
+            do
+                t0 = clock()
+                do r = 1_int64, reps
+                    call g%pdf(qx, f)
+                end do
+                t = clock() - t0
+                if (t >= MIN_LAP) exit
+                reps = 2_int64*reps
+            end do
+            gate_ns(q) = 1.0e9_real64*t/(real(reps, real64)*real(NQ_GATE, real64))
+            do lap = 2, rounds
+                t0 = clock()
+                do r = 1_int64, reps
+                    call g%pdf(qx, f)
+                end do
+                gate_ns(q) = min(gate_ns(q), 1.0e9_real64*(clock() - t0)/(real(reps, real64)*real(NQ_GATE, real64)))
+            end do
+            checksum = checksum + sum(f)
+            print '(i7,f13.3)', nc, gate_ns(q)
+        end do
+        print '(a,f6.2,a,f6.2,a)', "  ", real(GATE_CELLS(2), real64)/real(GATE_CELLS(1), real64), &
+            "x the cells costs ", gate_ns(2)/gate_ns(1), "x per point (gate: at most 2x)"
+        if (.not. (gate_ns(2) <= PDF_COST_GATE*gate_ns(1))) failures = failures + 1
         print '(a)', ""
         print '(a,es22.14)', "checksum ", checksum
 
@@ -673,6 +728,7 @@ contains
             do rung = 1, RUNGS
                 call g%init(nc, xmin, xmax, h, kernel=trim(KERNELS(kk)))
                 call g%add(x)
+                call g%finish()
                 call g%pdf(xq, fg)
                 err = sqrt(sum((fg - fx)**2)/real(m, real64))
                 if (allocated(c)) deallocate(c, fc, fe)
@@ -1000,6 +1056,7 @@ contains
                 best_draw = min(best_draw, t)
                 team(3) = parquet_debug_kde_threads_used()
             end do
+            call g%finish()
             call g%density(acc, normalise=.false.)
             if (nt == 1) then
                 base = [best_add, best_pdf, best_draw]

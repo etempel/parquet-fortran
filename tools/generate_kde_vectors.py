@@ -516,7 +516,10 @@ def rule_bandwidth(rule, xs, ws, weighted, weight_type):
         n_eff = sum(ws)
     else:
         n_eff = sum(ws) ** 2 / sum(w * w for w in ws)
-    c = mpf("0.9") if rule == "silverman" else mpf("1.06")
+    # Silverman's 0.9, and Scott's exact (4/3)**(1/5) -- the fifth root, not a rounded decimal, so
+    # that the oracle carries the rule at fifty digits and the library's own folded constant is what
+    # a golden case compares against.
+    c = mpf("0.9") if rule == "silverman" else (mpf(4) / 3) ** (mpf(1) / 5)
     return c * a * n_eff ** (mpf(-1) / 5)
 
 
@@ -591,10 +594,10 @@ class Estimate:
 def quad_smooth(f, interval):
     """`quad` over an interval the integrand is ANALYTIC on, by Gauss-Legendre.
 
-    `LinearEstimate.prepare` cuts the estimate at every kernel knot, correction edge and sign
+    `PolyEstimate.prepare` cuts the estimate at every kernel knot, correction edge and sign
     change, so no interval it integrates carries a kink or an endpoint singularity -- the case
     Gauss-Legendre converges geometrically on, at a fraction of the default tanh-sinh's
-    evaluations. The entropy integrals of `pilot_log_g` and `linear_log_g` keep the default:
+    evaluations. The entropy integrals of `pilot_log_g` and `poly_log_g` keep the default:
     `p log p` has an infinite derivative wherever the density vanishes, which is the endpoint
     behaviour tanh-sinh exists for.
     """
@@ -614,8 +617,8 @@ def quad_entropy(f, cuts, dens):
                 else quad(f, [cuts[i], cuts[i + 1]])) for i in range(len(cuts) - 1))
 
 
-class LinearEstimate:
-    """The linear boundary kernel's estimate over points `xs`, weights `ws`, bandwidths `hs`.
+class PolyEstimate:
+    """A local-polynomial boundary estimate over points `xs`, weights `ws`, bandwidths `hs`.
 
     At a query `x` each point's kernel is replaced by `(a_2 - a_1 u) K(u)/D`, `u = (x - x_j)/h_j`
     and `a_l` the kernel's moments over the part of its support inside the bounds, `D = a_0 a_2 -
@@ -623,15 +626,18 @@ class LinearEstimate:
     plain differences at the working precision -- which is why the narrow cases are a check of the
     library's centred form rather than a second copy of it.
 
+    `deg` picks the member: 1 is `"linear"`, the form above; 0 is `"renormalise"`, the kernel over
+    `a_0` alone, which is the same expression with `a_1 = 0`, `a_2 = 1` and `D = a_0`.
+
     `raw` is that sum, `clipped` it with its negative part set to zero, and `pdf` the clipped sum
     over its own integral `Z`. Nothing here is decomposed point by point the way the library's
     distribution function is: `Z` and every probe's CDF are quadratures of the SUM, between the
     kernels' knots, the correction edges, the sign changes and the probes.
     """
 
-    def __init__(self, xs, ws, hs, kernel, lo, hi):
+    def __init__(self, xs, ws, hs, kernel, lo, hi, deg=1):
         self.xs, self.ws, self.hs = xs, ws, hs
-        self.kernel, self.lo, self.hi = kernel, lo, hi
+        self.kernel, self.lo, self.hi, self.deg = kernel, lo, hi, deg
         self.W = sum(ws)
         self.rad = radius(kernel)
         self._nodes = None
@@ -639,7 +645,7 @@ class LinearEstimate:
         # `(a_1, a_2, D)` over the kernel's WHOLE support, per working precision: what `factor`
         # answers wherever neither bound clips the kernel, which is most of the support and every
         # point of an unbounded side. Keyed on the precision because the pilot's entropy integral
-        # runs at `G_DPS` (`linear_log_g`).
+        # runs at `G_DPS` (`poly_log_g`).
         self._whole = {}
         # Each point's centre and reach in doubles, widened by a margin, so that `raw` skips the
         # points whose kernel is exactly zero at `x` without dividing at all. A skip test only:
@@ -650,6 +656,8 @@ class LinearEstimate:
     def moments(self, lo_z, hi_z):
         """`(a_1, a_2, D)` from the kernel's moments between `lo_z` and `hi_z`."""
         a0 = kernel_cdf(self.kernel, hi_z) - kernel_cdf(self.kernel, lo_z)
+        if self.deg == 0:
+            return (mpf(0), mpf(1), a0)
         a1 = kernel_m1(self.kernel, hi_z) - kernel_m1(self.kernel, lo_z)
         a2 = kernel_m2(self.kernel, hi_z) - kernel_m2(self.kernel, lo_z)
         return (a1, a2, a0 * a2 - a1 * a1)
@@ -732,6 +740,8 @@ class LinearEstimate:
         stretch the library can find is missed here; each sign change is then bisected. A jump
         (the box kernel's edges) is a node of the scan, so a sign change across one is found too.
         """
+        if self.deg == 0:
+            return []          # a kernel over a positive mass: never negative, nothing to cross
         cuts = sorted({a, b} | self.edges(a, b))
         step = min(self.hs) / per_h
         out = []
@@ -802,8 +812,8 @@ def pilot_log_g(pilot, a, b, dps):
     return num / den
 
 
-def linear_log_g(lin, z, a, b, dps):
-    """`log g` for a `"linear"` pilot: the mean of `log p` over the pilot's own density on `[a, b]`,
+def poly_log_g(lin, z, a, b, dps):
+    """`log g` for a corrected pilot: the mean of `log p` over the pilot's own density on `[a, b]`,
     `p` the CLIPPED estimate over its whole mass -- which is what the library's pilot grid holds
     there, cell by cell, under this correction.
     """
@@ -837,7 +847,7 @@ def estimate(case):
     upper = case.get("upper")
     lo = mpf(lower) if lower is not None else None
     hi = mpf(upper) if upper is not None else None
-    boundary = case.get("boundary", "renormalise" if (lower is not None or upper is not None)
+    boundary = case.get("boundary", "reflect" if (lower is not None or upper is not None)
                         else "none")
     xs, ws, _ = population(values, weights, lo, hi)
     if not xs:
@@ -854,26 +864,34 @@ def estimate(case):
             return False, None, None, None
     h *= mpf(case.get("adjust", 1.0))
     hs = [h] * len(xs)
-    if case.get("adaptive") and boundary == "linear":
-        # The pilot is the CLIPPED linear estimate at the global bandwidth, over its own mass, which
-        # is what the library's pilot grid holds under this correction; and its range starts at the
-        # bound and, with one bound, reaches at least a kernel's reach from it (7.3, R1 and R2).
-        pilot = LinearEstimate(xs, ws, hs, kernel, lo, hi)
+    corrected = boundary in ("renormalise", "linear")
+    deg = 1 if boundary == "linear" else 0
+    if case.get("adaptive") and corrected:
+        # The pilot is the CLIPPED corrected estimate at the global bandwidth, over its own mass,
+        # which is what the library's pilot grid holds under either member of the family.
+        pilot = PolyEstimate(xs, ws, hs, kernel, lo, hi, deg)
         zp = pilot.prepare(PROBES)
         a = min(xs) - PILOT_REACH * h
         b = max(xs) + PILOT_REACH * h
         if lo is not None:
-            a = lo
+            a = max(a, lo)
         if hi is not None:
-            b = hi
-        if (lo is None) != (hi is None):
-            rad = radius(kernel) * h
-            if b - a < rad:
-                if lo is not None:
-                    b = a + rad
-                else:
-                    a = b - rad
-        log_g = linear_log_g(pilot, zp, a, b, G_DPS)
+            b = min(b, hi)
+        if boundary == "linear":
+            # R1 and R2, which `"linear"` alone carries: the pilot's range starts at the bound and,
+            # with one bound, reaches at least a kernel's reach from it (7.3).
+            if lo is not None:
+                a = lo
+            if hi is not None:
+                b = hi
+            if (lo is None) != (hi is None):
+                rad = radius(kernel) * h
+                if b - a < rad:
+                    if lo is not None:
+                        b = a + rad
+                    else:
+                        a = b - rad
+        log_g = poly_log_g(pilot, zp, a, b, G_DPS)
         alpha = mpf(case.get("alpha", 0.5))
         cap = mpf(case["bandwidth_max"]) if "bandwidth_max" in case else None
         hs = []
@@ -897,11 +915,11 @@ def estimate(case):
         for x in xs:
             hj = h * mp.exp(-alpha * (mp.log(pilot.pdf(x)) - log_g))
             hs.append(min(hj, cap) if cap is not None else hj)
-    if boundary == "linear":
+    if corrected:
         # The clipped estimate over its own integral, both by quadrature of the SUM between its
         # knots, its correction edges and its sign changes -- never point by point, which is how
         # the library does it, so that the two share no arithmetic.
-        lin = LinearEstimate(xs, ws, hs, kernel, lo, hi)
+        lin = PolyEstimate(xs, ws, hs, kernel, lo, hi, deg)
         if "negative_at" in case:
             # The case exists to show the clip acting AT a probe: assert the raw estimate is
             # negative there before emitting it, so that a case which stopped showing it fails here
@@ -944,9 +962,10 @@ CASES = [
     ("WFREQ", "weights mod 5, frequency: sum(w) in the rule, the inverted-CDF quartiles",
      {"rule": "silverman", "weights": "mod5", "weight_type": "frequency"}),
     ("REN_LO", "renormalised at a lower bound, Gaussian, h = 60",
-     {"bandwidth": 60.0, "lower": -470.0}),
+     {"bandwidth": 60.0, "lower": -470.0, "boundary": "renormalise"}),
     ("REN_BOTH", "renormalised at both bounds, Epanechnikov, h = 60",
-     {"bandwidth": 60.0, "kernel": "epanechnikov", "lower": -470.0, "upper": 460.0}),
+     {"bandwidth": 60.0, "kernel": "epanechnikov", "lower": -470.0, "upper": 460.0,
+      "boundary": "renormalise"}),
     ("REF_LO", "reflected at a lower bound, B-spline, h = 60",
      {"bandwidth": 60.0, "kernel": "bspline", "lower": -470.0, "boundary": "reflect"}),
     ("REF_HI", "reflected at an upper bound, box, h = 60",
@@ -955,7 +974,8 @@ CASES = [
      "normalisation carries the doubly reflected terms",
      {"bandwidth": 400.0, "lower": -470.0, "upper": 460.0, "boundary": "reflect"}),
     ("REN_WIDE", "renormalised at both bounds with the kernel wider than the range, box",
-     {"bandwidth": 600.0, "kernel": "box", "lower": -470.0, "upper": 460.0}),
+     {"bandwidth": 600.0, "kernel": "box", "lower": -470.0, "upper": 460.0,
+      "boundary": "renormalise"}),
     ("RULE_BOUNDED", "Silverman's rule over the population inside the support: two points are "
      "outside [-400, 400] and leave the rule's sample too",
      {"rule": "silverman", "lower": -400.0, "upper": 400.0}),
@@ -967,7 +987,7 @@ CASES = [
     ("ADAPT_CAP", "the adaptive kernel at alpha = 1 with every bandwidth capped at 120, the "
      "B-spline at an explicit bandwidth of 80, renormalised at a lower bound",
      {"fixture": "two", "n": 60, "adaptive": True, "alpha": 1.0, "bandwidth_max": 120.0,
-      "bandwidth": 80.0, "kernel": "bspline", "lower": -340.0}),
+      "bandwidth": 80.0, "kernel": "bspline", "lower": -340.0, "boundary": "renormalise"}),
     ("ADAPT_REF", "the adaptive kernel reflected at both bounds, Epanechnikov, h = 60",
      {"fixture": "two", "n": 60, "adaptive": True, "bandwidth": 60.0, "kernel": "epanechnikov",
       "lower": -340.0, "upper": 470.0, "boundary": "reflect"}),
@@ -1212,7 +1232,7 @@ def self_test():
     rising = [mpf(i) for i in range(1, 201)]
     rising = [mp.sqrt((v - mpf(1) / 2) / 200) for v in rising]
     h1 = rule_bandwidth("silverman", rising, [mpf(1)] * 200, False, "reliability")
-    lin1 = LinearEstimate(rising, [mpf(1)] * 200, [h1] * 200, "gaussian", mpf(0), None)
+    lin1 = PolyEstimate(rising, [mpf(1)] * 200, [h1] * 200, "gaussian", mpf(0), None)
     z1 = lin1.prepare([])
     f_at_bound = lin1.clipped(mpf(0)) / z1
     if not f_at_bound < mpf("1e-3"):
@@ -1221,7 +1241,7 @@ def self_test():
     print("self-test: on the density 2x the clipped linear estimate at the bound is %s" % mp.nstr(f_at_bound, 3))
     flat = [(mpf(i) - mpf(1) / 2) / 200 for i in range(1, 201)]
     h2 = rule_bandwidth("silverman", flat, [mpf(1)] * 200, False, "reliability")
-    lin2 = LinearEstimate(flat, [mpf(1)] * 200, [h2] * 200, "gaussian", mpf(0), mpf(1))
+    lin2 = PolyEstimate(flat, [mpf(1)] * 200, [h2] * 200, "gaussian", mpf(0), mpf(1))
     z2 = lin2.prepare([])
     f_flat = lin2.clipped(mpf(0)) / z2
     if abs(f_flat - 1) > mpf("1e-3"):

@@ -51,14 +51,14 @@ module test_kde_golden
 
     !> Scott's rule
     logical, parameter :: KG_SCOTT_DEF = .true.
-    real(real64), parameter :: KG_SCOTT_H = 153.92716921912896_real64
-    real(real64), parameter :: KG_SCOTT_PDF(NKX) = [0.0006269100922933849_real64, 0.00079152011960188014_real64,  &
-        0.001131781042812987_real64, 0.0009457156591543797_real64, 0.00092289573285295689_real64,  &
-        0.00091948560503923697_real64, 0.00081412253604538117_real64, 0.00046366677846428972_real64,  &
-        0.00043866002119589807_real64]
-    real(real64), parameter :: KG_SCOTT_CDF(NKX) = [0.071262478766859233_real64, 0.10391428939477601_real64,  &
-        0.27125172257665803_real64, 0.52232257765074697_real64, 0.57944174895300982_real64, 0.59556133519719023_real64,  &
-        0.80129998768656818_real64, 0.93896203943550616_real64, 0.94415048985413585_real64]
+    real(real64), parameter :: KG_SCOTT_H = 153.81445983212856_real64
+    real(real64), parameter :: KG_SCOTT_PDF(NKX) = [0.00062688742901624702_real64, 0.00079166388607323915_real64,  &
+        0.0011321427356006026_real64, 0.00094559350903998605_real64, 0.00092283502038093901_real64,  &
+        0.00091944931513646458_real64, 0.00081423010207472019_real64, 0.00046368452542471872_real64,  &
+        0.00043866176529086564_real64]
+    real(real64), parameter :: KG_SCOTT_CDF(NKX) = [0.071199652415947445_real64, 0.1038542144207535_real64,  &
+        0.27124709153954768_real64, 0.52233229437789663_real64, 0.57944557694399723_real64, 0.59556431327552295_real64,  &
+        0.80131776364498797_real64, 0.93899969160877472_real64, 0.94418825448397758_real64]
 
     !> Silverman's rule times adjust = 1.5
     logical, parameter :: KG_ADJUST_DEF = .true.
@@ -149,22 +149,22 @@ module test_kde_golden
     !> renormalised at a lower bound, Gaussian, h = 60
     logical, parameter :: KG_REN_LO_DEF = .true.
     real(real64), parameter :: KG_REN_LO_H = 60.0_real64
-    real(real64), parameter :: KG_REN_LO_PDF(NKX) = [0.0_real64, 0.0013367384489376538_real64, 0.0015647202311552184_real64,  &
-        0.00064896971115428238_real64, 0.00084808244863724791_real64, 0.00095746817460533155_real64,  &
-        0.0007803708817237325_real64, 0.00050969653009056912_real64, 0.00046814632186509974_real64]
-    real(real64), parameter :: KG_REN_LO_CDF(NKX) = [0.0_real64, 0.0052605552770164255_real64, 0.28041801948013723_real64,  &
-        0.52415263318999761_real64, 0.56775464335677228_real64, 0.58355226934178106_real64, 0.80473219368621363_real64,  &
-        0.96751804423431131_real64, 0.97314640936028252_real64]
+    real(real64), parameter :: KG_REN_LO_PDF(NKX) = [0.0_real64, 0.0017083771475601981_real64, 0.0015397288695792358_real64,  &
+        0.00065330081957571588_real64, 0.00085374366778749806_real64, 0.00096385959032064346_real64,  &
+        0.00078558011667465412_real64, 0.00051309892379988644_real64, 0.00047127135412747522_real64]
+    real(real64), parameter :: KG_REN_LO_CDF(NKX) = [0.0_real64, 0.006866534633698713_real64, 0.27680487504607615_real64,  &
+        0.52097620809917056_real64, 0.56486926212175936_real64, 0.58077234238671971_real64, 0.8034287161920346_real64,  &
+        0.9673012163858975_real64, 0.97296715271937706_real64]
 
     !> renormalised at both bounds, Epanechnikov, h = 60
     logical, parameter :: KG_REN_BOTH_DEF = .true.
     real(real64), parameter :: KG_REN_BOTH_H = 60.0_real64
-    real(real64), parameter :: KG_REN_BOTH_PDF(NKX) = [0.0_real64, 0.0012685904724035121_real64, 0.0014967290090745846_real64,  &
-        0.00066988926025680342_real64, 0.00085083003132306449_real64, 0.00091362988381794136_real64,  &
-        0.00083508033882937643_real64, 0.00078486251257870777_real64, 0.0_real64]
-    real(real64), parameter :: KG_REN_BOTH_CDF(NKX) = [0.0_real64, 0.0049815926613440481_real64, 0.27884747419048245_real64,  &
-        0.52295556302898205_real64, 0.57054510834049965_real64, 0.58595970583001966_real64, 0.80763269354375633_real64,  &
-        0.99882790424600498_real64, 1.0_real64]
+    real(real64), parameter :: KG_REN_BOTH_PDF(NKX) = [0.0_real64, 0.0016683751053890152_real64, 0.001494532606409885_real64,  &
+        0.00067913776777072451_real64, 0.00086257661154849532_real64, 0.00092624348034312496_real64,  &
+        0.00084326847881304281_real64, 0.00092808162645698956_real64, 0.0_real64]
+    real(real64), parameter :: KG_REN_BOTH_CDF(NKX) = [0.0_real64, 0.0066482461600199279_real64, 0.27856691610948986_real64,  &
+        0.52548146411490748_real64, 0.57372803185313015_real64, 0.58935544365266201_real64, 0.81404406888068259_real64,  &
+        0.99860622772340579_real64, 1.0_real64]
 
     !> reflected at a lower bound, B-spline, h = 60
     logical, parameter :: KG_REF_LO_DEF = .true.
@@ -209,11 +209,11 @@ module test_kde_golden
     !> Silverman's rule over the population inside the support: two points are outside [-400, 400] and leave the rule's sample too
     logical, parameter :: KG_RULE_BOUNDED_DEF = .true.
     real(real64), parameter :: KG_RULE_BOUNDED_H = 114.46940783744346_real64
-    real(real64), parameter :: KG_RULE_BOUNDED_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0016910175009328058_real64,  &
-        0.0011180402759664446_real64, 0.001129013917835547_real64, 0.0011430746486520644_real64, 0.0011486701238141005_real64,  &
+    real(real64), parameter :: KG_RULE_BOUNDED_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0016712474972578318_real64,  &
+        0.0010843029800294221_real64, 0.0011107041080110711_real64, 0.0011251906735834244_real64, 0.0010688468964687341_real64,  &
         0.0_real64, 0.0_real64]
-    real(real64), parameter :: KG_RULE_BOUNDED_CDF(NKX) = [0.0_real64, 0.0_real64, 0.15230803175483573_real64,  &
-        0.49005339890574579_real64, 0.55844915865837241_real64, 0.57832697660315735_real64, 0.85290365143664992_real64,  &
+    real(real64), parameter :: KG_RULE_BOUNDED_CDF(NKX) = [0.0_real64, 0.0_real64, 0.17668800273112303_real64,  &
+        0.49164280659899862_real64, 0.55856237658341035_real64, 0.5781258693003648_real64, 0.84020765344626402_real64,  &
         1.0_real64, 1.0_real64]
 
     !> one point with an explicit bandwidth: a single bump
@@ -247,12 +247,12 @@ module test_kde_golden
     !! renormalised at a lower bound
     logical, parameter :: KG_ADAPT_CAP_DEF = .true.
     real(real64), parameter :: KG_ADAPT_CAP_H = 80.0_real64
-    real(real64), parameter :: KG_ADAPT_CAP_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0076328655127352032_real64,  &
-        3.6620969238690797e-05_real64, 0.00010982629842453274_real64, 0.00014241207456504383_real64,  &
-        0.00085189938351307724_real64, 0.00051928698465249755_real64, 0.00047641647529906287_real64]
-    real(real64), parameter :: KG_ADAPT_CAP_CDF(NKX) = [0.0_real64, 0.0_real64, 0.25107861593961978_real64,  &
-        0.6680924893905219_real64, 0.67227788169285618_real64, 0.67447687499390996_real64, 0.78918531936613479_real64,  &
-        0.95416711523802578_real64, 0.95989213357644021_real64]
+    real(real64), parameter :: KG_ADAPT_CAP_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0075920457152265624_real64,  &
+        3.5822038434574117e-05_real64, 0.0001066649524772942_real64, 0.00013824677774856308_real64,  &
+        0.00082677113288129865_real64, 0.00050396971391289717_real64, 0.00046236374462674441_real64]
+    real(real64), parameter :: KG_ADAPT_CAP_CDF(NKX) = [0.0_real64, 0.0_real64, 0.30892285057447705_real64,  &
+        0.6778700985383872_real64, 0.68194317320386744_real64, 0.68407827166202329_real64, 0.79540366420162534_real64,  &
+        0.95551903570864161_real64, 0.96107518469644571_real64]
 
     !> the adaptive kernel reflected at both bounds, Epanechnikov, h = 60
     logical, parameter :: KG_ADAPT_REF_DEF = .true.
@@ -306,11 +306,11 @@ module test_kde_golden
     !! first centre, and lands whole on it
     logical, parameter :: KG_ISJ_BOUNDED_DEF = .true.
     real(real64), parameter :: KG_ISJ_BOUNDED_H = 13.197266419755225_real64
-    real(real64), parameter :: KG_ISJ_BOUNDED_PDF(NKX) = [0.0_real64, 0.0_real64, 0.011663664339004167_real64, 0.0_real64,  &
-        0.0_real64, 0.0_real64, 0.00054065996256343464_real64, 2.2436785770791909e-05_real64, 1.4193020218056085e-06_real64]
-    real(real64), parameter :: KG_ISJ_BOUNDED_CDF(NKX) = [0.0_real64, 0.0_real64, 0.25630559978092898_real64,  &
+    real(real64), parameter :: KG_ISJ_BOUNDED_PDF(NKX) = [0.0_real64, 0.0_real64, 0.011373587433789061_real64, 0.0_real64,  &
+        0.0_real64, 0.0_real64, 0.00054065996256343464_real64, 2.2475446160370721e-05_real64, 2.8381170248336531e-06_real64]
+    real(real64), parameter :: KG_ISJ_BOUNDED_CDF(NKX) = [0.0_real64, 0.0_real64, 0.25911178516270172_real64,  &
         0.66666666666666663_real64, 0.66666666666666663_real64, 0.66666666666666663_real64, 0.76305071941273173_real64,  &
-        0.99990738206624796_real64, 1.0_real64]
+        0.99990264279550489_real64, 1.0_real64]
 
     !> the ISJ rule over the recipe rounded to multiples of 8: the fixed point is not negative at one cell, so the rule finds no
     !! bandwidth and the estimate is undefined

@@ -2241,7 +2241,7 @@ contains
         ! so the cells hold the whole weight.
         if (what == "") then
             call g%init(4, -2.0_real64, 2.0_real64, 0.1_real64)
-            call g%add([-1.0_real64, 0.0_real64, 1.0_real64])
+            call g%add([-1.0_real64, 0.0_real64, 1.0_real64], finish=.true.)
             call g%density(cells)
             if (abs(sum(cells)*g%step() - 1.0_real64) > 1.0e-15_real64 .or. g%n_valid() /= 3) &
                 what = "pf_kde_grid%density"

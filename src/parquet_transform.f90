@@ -1,6 +1,6 @@
-!> The discrete cosine transform of a `real64` sequence whose length is a power of two: `pf_dct`
-!> (type II) and `pf_idct` (its exact inverse), with `pf_is_pow2` and `pf_next_pow2` for choosing
-!> that length.
+!> The discrete cosine and sine transforms of a `real64` sequence whose length is a power of two:
+!> `pf_dct` and `pf_dst` (type II) with `pf_idct` and `pf_idst` (their exact inverses), and
+!> `pf_is_pow2` and `pf_next_pow2` for choosing that length.
 !!
 !! `parquet_transform` is an **Arrow-free leaf**: it imports the INTRINSIC module `iso_fortran_env`
 !! and no module of this library. An intrinsic module is not a compiled file, not a tier edge and
@@ -14,15 +14,28 @@
 !! ```
 !! pf_dct:   y[k] = 2 * sum_{j=0}^{n-1} x[j] * cos(pi*k*(2j+1) / (2n)),       k = 0 .. n-1
 !! pf_idct:  x[k] = (y[0] + 2 * sum_{j=1}^{n-1} y[j] * cos(pi*j*(2k+1) / (2n))) / (2n)
+!! pf_dst:   y[k] = 2 * sum_{j=0}^{n-1} x[j] * sin(pi*(k+1)*(2j+1) / (2n)),   k = 0 .. n-1
+!! pf_idst:  x[k] = ((-1)**k * y[n-1]
+!!                   + 2 * sum_{j=0}^{n-2} y[j] * sin(pi*(j+1)*(2k+1) / (2n))) / (2n)
 !! ```
 !!
-!! which are `scipy.fft.dct(x)` and `scipy.fft.idct(y)` under their defaults. `norm="ortho"`
-!! scales the coefficients by `sqrt(1/(4n))` at `k = 0` and by `sqrt(1/(2n))` elsewhere, scipy's
-!! `norm='ortho'`: the transform is then orthonormal, and `pf_idct` is its transpose. Every
+!! which are `scipy.fft.dct(x)`, `idct(y)`, `dst(x)` and `idst(y)` under their defaults, type 2.
+!! **The two inverses differ only in their unpaired term**: the cosine transform's is the constant
+!! `y[0]`, the sine transform's is the top frequency `y[n-1]`, which alternates in sign.
+!!
+!! `norm="ortho"` scales the coefficients by `sqrt(1/(4n))` at ONE index and by `sqrt(1/(2n))`
+!! elsewhere, scipy's `norm='ortho'`: the transform is then orthonormal, and the inverse is its
+!! transpose. **That index is `k = 0` for the cosine pair and `k = n-1` for the sine pair** -- the
+!! opposite end, because the two transforms carry their unpaired frequency at opposite ends. Every
 !! internal consistency test passes under a wrong convention, so `test/test_transform.f90` pins
 !! this one against values scipy produced. **The factor of two is load-bearing**: the Improved
 !! Sheather-Jones bandwidth rule squares `y(2:)/2`, dividing it back out, and a transform without
 !! it would put that rule's every bandwidth out by a constant factor.
+!!
+!! **A spectrum does not carry across from one pair to the other unchanged**: `pf_dct` coefficient
+!! `k` and `pf_dst` coefficient `k` are different frequencies, `k` and `k+1`. Code that transforms
+!! with `pf_dct` and inverts with `pf_idst` moves the coefficients down one position and drops the
+!! top frequency; the guide page's "Composing the two transforms" writes that out.
 !!
 !! **A length that is not a power of two is an `error stop`**, not a slow path. Zero-padding a
 !! sequence up to a legal length is not a fix: the transform of a padded sequence is not a padded
@@ -44,8 +57,10 @@
 !! each call allocates its own workspace, so concurrent calls on distinct arrays are independent.
 !! The `error stop` is taken under a named `critical`, so one thread aborts.
 !!
-!! The engine is a complex radix-2 FFT of length `n`, private to this module;
-!! `src/parquet_transform_dct.f90`'s header says how the two transforms are built on it.
+!! The engine is a complex radix-2 FFT of length `n`, private to this module, and there is exactly
+!! one of it: the sine pair is the cosine pair applied to a sign-alternated sequence and read
+!! backwards, not a second transform. `src/parquet_transform_core.f90`'s header says how all four
+!! are built on it.
 module parquet_transform
 
     use iso_fortran_env, only : real64
@@ -54,6 +69,7 @@ module parquet_transform
     private
 
     public :: pf_dct, pf_idct
+    public :: pf_dst, pf_idst
     public :: pf_is_pow2, pf_next_pow2
 
     ! ---- internal parameters, not part of the public surface -------------------------------
@@ -129,6 +145,73 @@ module parquet_transform
         end subroutine idct_r64
 
     end interface pf_idct
+
+    ! ---- the sine transforms ----------------------------------------------------------------
+    !
+    ! One specific each, the same shape as the cosine pair above. They are built ON that pair --
+    ! the type-II sine transform of `x` is the type-II cosine transform of `x` with every
+    ! odd-indexed value negated, read backwards -- so there is one engine here, not two, and the
+    ! scipy convention is inherited rather than restated.
+
+    !> The discrete sine transform of type II of `x`, into `y`: scipy's `dst(x)`.
+    !!
+    !! ```
+    !! call pf_dst(x, y, [norm], [context])
+    !! ```
+    !!
+    !! Optional arguments are shown in square brackets, with the comma outside the bracket. The
+    !! arguments:
+    !!
+    !! * `x` -- `real64`, the sequence. Its length must be a positive power of two.
+    !! * `y` -- `real64`, `intent(out)`: the coefficients, `y(k+1)` holding the formula's `y[k]`.
+    !!   Must have the size of `x`, and must not overlap it.
+    !! * `norm` -- optional token: `"none"`, the default, for the unnormalised transform with its
+    !!   factor of two, or `"ortho"` for the orthonormal one. Matched case-insensitively; any other
+    !!   token aborts. **Under `"ortho"` the exceptional coefficient is the LAST**, at `k = n-1`,
+    !!   where `pf_dct`'s is the first, at `k = 0`.
+    !! * `context` -- optional text appended to any abort message, to identify the call site.
+    !!   Capped at 100 characters.
+    interface pf_dst
+
+        !> The rank-1 `real64` form.
+        module subroutine dst_r64(x, y, norm, context)
+            implicit none
+            real(real64), intent(in)               :: x(:)    !! the sequence, of a power-of-two length
+            real(real64), intent(out)              :: y(:)    !! the coefficients, the size of `x`
+            character(len=*), intent(in), optional :: norm    !! `"none"` (default) or `"ortho"`
+            character(len=*), intent(in), optional :: context !! call-site text for an abort message
+        end subroutine dst_r64
+
+    end interface pf_dst
+
+    !> The inverse of `pf_dst`, into `x`: the sequence whose transform is `y`, scipy's `idst(y)`.
+    !!
+    !! ```
+    !! call pf_idst(y, x, [norm], [context])
+    !! ```
+    !!
+    !! Under `"none"` this is the type-III sine transform divided by `2n`; under `"ortho"` it is the
+    !! orthonormal type-III sine transform, the transpose of `pf_dst`'s. The arguments:
+    !!
+    !! * `y` -- `real64`, the coefficients. Their number must be a positive power of two.
+    !! * `x` -- `real64`, `intent(out)`: the sequence. Must have the size of `y`, and must not
+    !!   overlap it.
+    !! * `norm` -- optional token, as for `pf_dst`. Name the one the coefficients were made with:
+    !!   `pf_idst` then gives back the sequence `pf_dst` transformed, to rounding.
+    !! * `context` -- optional text appended to any abort message, to identify the call site.
+    !!   Capped at 100 characters.
+    interface pf_idst
+
+        !> The rank-1 `real64` form.
+        module subroutine idst_r64(y, x, norm, context)
+            implicit none
+            real(real64), intent(in)               :: y(:)    !! the coefficients, a power-of-two count
+            real(real64), intent(out)              :: x(:)    !! the sequence, the size of `y`
+            character(len=*), intent(in), optional :: norm    !! `"none"` (default) or `"ortho"`
+            character(len=*), intent(in), optional :: context !! call-site text for an abort message
+        end subroutine idst_r64
+
+    end interface pf_idst
 
     ! ---- choosing a length ------------------------------------------------------------------
 

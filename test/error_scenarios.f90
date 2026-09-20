@@ -4097,6 +4097,14 @@ program error_scenarios
         call scenario_transform_context_reported()
     case ("transform_context_capped")
         call scenario_transform_context_capped()
+    case ("transform_dst_length_not_pow2")
+        call scenario_transform_dst_length_not_pow2()
+    case ("transform_dst_size_mismatch")
+        call scenario_transform_dst_size_mismatch()
+    case ("transform_idst_length_not_pow2")
+        call scenario_transform_idst_length_not_pow2()
+    case ("transform_idst_bad_norm_token")
+        call scenario_transform_idst_bad_norm_token()
     case ("kde_bandwidth_zero")
         call scenario_kde_bandwidth_zero()
     case ("kde_bandwidth_nan")
@@ -34692,6 +34700,49 @@ contains
         call pf_dct(x, y(1:4), context=repeat("abcdefghij", 15))
         print '(a)', "accepted y shorter than x with a long context"
     end subroutine scenario_transform_context_capped
+    !
+    ! The sine pair delegates to the cosine pair, so each of these would report `pf_dct:` or
+    ! `pf_idct:` if the wrapper delegated before validating. That is the whole point of them.
+    !
+    subroutine scenario_transform_dst_length_not_pow2()
+        real(real64) :: x(1024), y(1024)
+
+        x = 1.0_real64
+        call pf_dst(x, y)
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dst(x(1:1000), y(1:1000))
+        print '(a)', "accepted a length of 1000"
+    end subroutine scenario_transform_dst_length_not_pow2
+    !
+    subroutine scenario_transform_dst_size_mismatch()
+        real(real64) :: x(8), y(8)
+
+        x = 1.0_real64
+        call pf_dst(x, y, context="my_call_site")
+        print '(a, es22.15)', "transform control transformed: ", y(1)
+        call pf_dst(x, y(1:4), context="my_call_site")
+        print '(a)', "accepted y shorter than x"
+    end subroutine scenario_transform_dst_size_mismatch
+    !
+    subroutine scenario_transform_idst_length_not_pow2()
+        real(real64) :: y(1024), x(1024)
+
+        y = 1.0_real64
+        call pf_idst(y, x)
+        print '(a, es22.15)', "transform control transformed: ", x(1)
+        call pf_idst(y(1:1000), x(1:1000))
+        print '(a)', "accepted a length of 1000"
+    end subroutine scenario_transform_idst_length_not_pow2
+    !
+    subroutine scenario_transform_idst_bad_norm_token()
+        real(real64) :: y(8), x(8)
+
+        y = 1.0_real64
+        call pf_idst(y, x, norm="ortho")
+        print '(a, es22.15)', "transform control transformed: ", x(1)
+        call pf_idst(y, x, norm="orthonormal")
+        print '(a)', "accepted a norm token it does not offer"
+    end subroutine scenario_transform_idst_bad_norm_token
     !
     ! ---- pf_kde: every caller contract it refuses -----------------------------------------
     !

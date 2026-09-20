@@ -1,5 +1,8 @@
-!> The transforms behind `pf_dct` and `pf_idct`, the two length helpers, every validation and the
-!> one `error stop`, and the radix-2 FFT the transforms are built on.
+!> The transforms behind `pf_dct`, `pf_idct`, `pf_dst` and `pf_idst`, the two length helpers, every
+!> validation and the one `error stop`, and the radix-2 FFT they are all built on.
+!!
+!! The file is named for the engine rather than for one transform family, because both families
+!! share it along with the validator and the abort.
 !!
 !! **The type-II transform through a complex FFT of the same length** (J. Makhoul, "A fast cosine
 !! transform in one and multiple dimensions", IEEE Trans. ASSP 28(1), 1980). For `x` of length
@@ -26,11 +29,29 @@
 !! impure deliberately: a `pure` guard-only subroutine's call is deleted by ifx at `-O0`
 !! (`fortran-gotchas.md`).
 !!
+!! **The sine pair needs no engine of its own.** With `x'[j] = (-1)**j * x[j]`,
+!!
+!! ```
+!! DST-II(x)[k] = DCT-II(x')[n-1-k]
+!! ```
+!!
+!! -- alternate the signs, transform, reverse -- because
+!! `cos(pi*(n-1-k)*(2j+1)/(2n)) = (-1)**j * sin(pi*(k+1)*(2j+1)/(2n))`, and the `(-1)**j` cancels
+!! the alternation that was put in. `pf_idst` runs the three steps backwards. The reversal is what
+!! carries the unpaired coefficient between the ends: `norm="ortho"` therefore needs no special
+!! handling either, since the cosine pair's `sqrt(1/(4n))` at `k = 0` arrives at `k = n-1`, where
+!! the sine pair's belongs. So there is one FFT, one validator and one convention here, and a
+!! sine-transform error would have to be a cosine-transform error.
+!!
+!! **Each wrapper validates under its OWN name before delegating**, so a refused `pf_dst` call
+!! says `pf_dst:` and not `pf_dct:`; the delegated call is then unconditionally valid and is given
+!! no `context`. Four error scenarios pin that (`transform_dst_*`, `transform_idst_*`).
+!!
 !! **Performance is not a design constraint**: the one known consumer transforms once per bandwidth
 !! selection, at `n = 1024`. So the FFT is the complex length-`n` one rather than the real-input
 !! form of half the length, and nothing is cached between calls -- which is also what keeps the
-!! module free of state.
-submodule (parquet_transform) parquet_transform_dct
+!! module free of state. The sine pair adds one pass over the sequence to that.
+submodule (parquet_transform) parquet_transform_core
 
     use iso_fortran_env, only : int64
 
@@ -161,23 +182,89 @@ contains
 
     end procedure idct_r64
 
+    ! ---- the sine transforms, on the cosine pair above ------------------------------------------
+    !
+    ! Both bodies sit BELOW dct_r64 and idct_r64 because they call them: nagfor rejects a separate
+    ! module procedure whose body appears below a call to it (`code-style.md`), and pf_dct here IS
+    ! that call.
+
+    module procedure dst_r64
+
+        real(real64), allocatable :: work(:) !! the sign-alternated sequence
+        real(real64)   :: swap               !! one end of a pair being reversed
+        integer(int64) :: n, j               !! the length; indices from 1
+
+        n = size(x, kind=int64)
+        call validate_call("pf_dst", n, size(y, kind=int64), norm, context)
+
+        ! x'[j] = (-1)**j * x[j] with j from 0, so the sign flips at every EVEN 1-based index.
+        ! Written as a loop rather than work(2::2) = -work(2::2): a section assignment whose two
+        ! sides are the same array costs a heap temporary (`fortran-gotchas.md`).
+        allocate (work(n))
+        do j = 1, n
+            if (mod(j, 2_int64) == 0) then
+                work(j) = -x(j)
+            else
+                work(j) = x(j)
+            end if
+        end do
+
+        ! The cosine transform of x' carries the sine transform of x, backwards. This call has
+        ! already been validated under pf_dst's own name, so it cannot abort and needs no context.
+        call pf_dct(work, y, norm)
+
+        ! Reverse in place: DCT-II coefficient n-1-k is DST-II coefficient k. Under "ortho" this
+        ! also carries the exceptional scaling from k = 0, where the cosine transform puts it, to
+        ! k = n-1, where the sine transform's belongs.
+        do j = 1, n/2
+            swap = y(j)
+            y(j) = y(n + 1 - j)
+            y(n + 1 - j) = swap
+        end do
+
+    end procedure dst_r64
+
+    module procedure idst_r64
+
+        integer(int64) :: n, j !! the length; indices from 1
+
+        n = size(y, kind=int64)
+        call validate_call("pf_idst", n, size(x, kind=int64), norm, context)
+
+        ! Reverse, then invert. y(n:1:-1) is a section, not a copy: pf_idct's dummy is plain
+        ! assumed-shape and carries no `contiguous` attribute, so the descriptor is passed as it
+        ! stands. Already validated above, so this call cannot abort.
+        call pf_idct(y(n:1:-1), x, norm)
+
+        ! x[j] = (-1)**j * x'[j], the same alternation undone.
+        do j = 2, n, 2
+            x(j) = -x(j)
+        end do
+
+    end procedure idst_r64
+
     ! ---- validation and the one error stop ------------------------------------------------------
 
     !> Checks one transform call in the order of the guide page's table, and resolves `norm`.
     !!
-    !! `n` is the length of the call's input (`x` for `pf_dct`, `y` for `pf_idct`) and `m` the size
-    !! of its output. Impure deliberately (see the header).
+    !! `n` is the length of the call's input (`x` for `pf_dct` and `pf_dst`, `y` for `pf_idct` and
+    !! `pf_idst`) and `m` the size of its output. Impure deliberately (see the header).
+    !!
+    !! `ortho` is optional because the two sine transforms have no use for the resolved token: they
+    !! forward the caller's `norm` to the cosine pair, which resolves it again. They still validate
+    !! here, under their OWN name, so that a refused call names the procedure the caller wrote.
     subroutine validate_call(entry, n, m, norm, context, ortho)
-        character(len=*), intent(in)           :: entry   !! `pf_dct` or `pf_idct`, for the message
+        character(len=*), intent(in)           :: entry   !! the public procedure, for the message
         integer(int64), intent(in)             :: n       !! the input's length
         integer(int64), intent(in)             :: m       !! the output's size
         character(len=*), intent(in), optional :: norm    !! the caller's token, when given
         character(len=*), intent(in), optional :: context !! caller's call-site text
-        logical, intent(out)                   :: ortho   !! `norm` resolved to `"ortho"`
+        logical, intent(out), optional         :: ortho   !! `norm` resolved to `"ortho"`, when wanted
 
-        character(len=:), allocatable :: hint  !! the legal length to suggest, as text
-        character(len=NORM_CAP)       :: token !! `norm` folded to lower case
-        integer(int64)                :: next  !! the smallest power of two at or above `n`
+        character(len=:), allocatable :: hint     !! the legal length to suggest, as text
+        character(len=NORM_CAP)       :: token    !! `norm` folded to lower case
+        integer(int64)                :: next     !! the smallest power of two at or above `n`
+        logical                       :: is_ortho !! `norm` resolved, before handing it back
 
         if (n == 0) call transform_abort(entry, "the sequence must not be empty", context)
 
@@ -196,18 +283,19 @@ contains
 
         if (m /= n) call transform_abort(entry, "x and y must have the same size", context)
 
-        ortho = .false.
+        is_ortho = .false.
         if (present(norm)) then
             call fold_token(norm, token)
             select case (trim(token))
             case ("none")
-                ortho = .false.
+                is_ortho = .false.
             case ("ortho")
-                ortho = .true.
+                is_ortho = .true.
             case default
                 call transform_abort(entry, 'norm must be "none" or "ortho"', context)
             end select
         end if
+        if (present(ortho)) ortho = is_ortho
 
     end subroutine validate_call
 
@@ -349,4 +437,4 @@ contains
 
     end subroutine fft_radix2
 
-end submodule parquet_transform_dct
+end submodule parquet_transform_core

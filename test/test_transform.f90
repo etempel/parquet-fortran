@@ -55,18 +55,22 @@ module test_transform
 
     ! ---- the scipy values -----------------------------------------------------------------------
     !
-    ! Produced by scipy 1.17.1 (numpy 2.4.5) with this snippet. Both inputs are exact in binary, so
-    ! no digits are lost on the way in, and `repr` round-trips every output exactly:
+    ! The cosine arrays were produced by scipy 1.17.1 (numpy 2.4.5) and the sine arrays by scipy
+    ! 1.18.0 (numpy 2.5.2), with this snippet; the cosine values reproduce unchanged under 1.18.0.
+    ! Type 2 is scipy's default for all four, and is written out because it is the whole point here.
+    ! Both inputs are exact in binary, so no digits are lost on the way in, and `repr` round-trips
+    ! every output exactly:
     !
     !   import numpy as np
-    !   from scipy.fft import dct, idct
+    !   from scipy.fft import dct, idct, dst, idst
     !   x8 = np.array([1.0, -2.0, 3.5, 0.25, -1.75, 4.0, -0.5, 2.25])
     !   x16 = np.array([0.5, -1.25, 2.0, 3.75, -0.125, 1.5, -2.5, 0.0,
     !                   4.25, -3.0, 0.75, 1.0, -0.375, 2.5, -1.0, 0.625])
     !   for name, x in (("x8", x8), ("x16", x16)):
-    !       for f in (dct, idct):
+    !       for f in (dct, idct, dst, idst):
     !           for norm in (None, 'ortho'):
-    !               print(name, f.__name__, norm, [repr(float(v)) for v in f(x, norm=norm)])
+    !               print(name, f.__name__, norm,
+    !                     [repr(float(v)) for v in f(x, type=2, norm=norm)])
 
     !> The eight-value input.
     real(real64), parameter :: X8(8) = [1.0_real64, -2.0_real64, 3.5_real64, 0.25_real64, &
@@ -121,6 +125,52 @@ module test_transform
         1.333300614978132_real64, 5.822042155906893_real64, -0.8717909385557049_real64, &
         -0.441529794647853_real64, 0.0642170787394743_real64]
 
+    !> `scipy.fft.dst(x8, type=2)`.
+    real(real64), parameter :: X8_DST(8) = [8.019924271335311_real64, -3.1214929814975125_real64, &
+        4.128043779760823_real64, -6.010407640085654_real64, -11.949389035221362_real64, &
+        2.9165530282272893_real64, 19.451276845476144_real64, -4.5_real64]
+    !> `scipy.fft.dst(x8, type=2, norm='ortho')`.
+    real(real64), parameter :: X8_DST_ORTHO(8) = [2.004981067833828_real64, -0.7803732453743781_real64, &
+        1.0320109449402057_real64, -1.5026019100214134_real64, -2.9873472588053405_real64, &
+        0.7291382570568223_real64, 4.862819211369036_real64, -0.7954951288348661_real64]
+    !> `scipy.fft.idst(x8, type=2)`.
+    real(real64), parameter :: X8_IDST(8) = [0.5532562045581587_real64, -0.033008830266542374_real64, &
+        0.06532567172190966_real64, -0.14696081742669848_real64, -0.5540544599312809_real64, &
+        0.672893044166802_real64, 1.0486701945300316_real64, -0.5047257855947421_real64]
+    !> `scipy.fft.idst(x8, type=2, norm='ortho')`.
+    real(real64), parameter :: X8_IDST_ORTHO(8) = [2.446019947067501_real64, -0.3650304499010356_real64, &
+        0.49429781572250475_real64, -0.8208383985416599_real64, -1.9832227108902578_real64, &
+        2.458577047832342_real64, 4.427675906954993_real64, -2.2518982712138347_real64]
+
+    !> `scipy.fft.dst(x16, type=2)`.
+    real(real64), parameter :: X16_DST(16) = [10.69312328424678_real64, 4.871191287439334_real64, &
+        11.312424988130191_real64, 3.4797962268002838_real64, 1.5973789495109667_real64, &
+        -9.262119411527111_real64, -19.492571243977917_real64, -0.8838834764831843_real64, &
+        5.8726785327889095_real64, -4.334785188723208_real64, -16.389019058152257_real64, &
+        18.85347496404699_real64, 22.977471571743706_real64, -9.890362825266507_real64, &
+        4.227493753713144_real64, -3.25_real64]
+    !> `scipy.fft.dst(x16, type=2, norm='ortho')`.
+    real(real64), parameter :: X16_DST_ORTHO(16) = [1.8902949965886662_real64, 0.8611130979512954_real64, &
+        1.999773105192752_real64, 0.6151468772794606_real64, 0.2823793718309622_real64, &
+        -1.637326861012594_real64, -3.4458323273446707_real64, -0.15625_real64, &
+        1.0381527035659257_real64, -0.7662890004832974_real64, -2.8971966282537567_real64, &
+        3.332854999002106_real64, 4.061881490725273_real64, -1.7483856555353219_real64, &
+        0.7473223751685842_real64, -0.4062500000000001_real64]
+    !> `scipy.fft.idst(x16, type=2)`.
+    real(real64), parameter :: X16_IDST(16) = [0.2997410849770326_real64, 0.2105536271426574_real64, &
+        0.2678745688421347_real64, 0.1825922209619209_real64, -0.07949731646441177_real64, &
+        -0.21699284258893303_real64, -0.6024898533008635_real64, 0.038336647868713825_real64, &
+        0.3038860969650501_real64, -0.020415518047533276_real64, -0.24076972719549194_real64, &
+        0.7547607994027579_real64, 0.5052397358589971_real64, -0.6044935194024832_real64, &
+        0.10028675875792858_real64, -0.1025700668967245_real64]
+    !> `scipy.fft.idst(x16, type=2, norm='ortho')`.
+    real(real64), parameter :: X16_IDST_ORTHO(16) = [1.7413561957393857_real64, 1.145306615008374_real64, &
+        1.5610919585251708_real64, 0.987133015633092_real64, -0.40394016702534635_real64, &
+        -1.273261449148239_real64, -3.3624327214814285_real64, 0.17110026396782485_real64, &
+        1.7648039244179992_real64, -0.16125217546237902_real64, -1.3162346889953378_real64, &
+        4.223807270012155_real64, 2.9038321122459774_real64, -3.4652962994621435_real64, &
+        0.6130721428872075_real64, -0.6259884842350557_real64]
+
 contains
 
     !> Registers this module's tests.
@@ -151,7 +201,27 @@ contains
             new_unittest("strided sections give the contiguous call's values to the bit", &
                          test_dct_accepts_strided_sections), &
             new_unittest("a NaN reaches every value of either transform", &
-                         test_dct_propagates_a_nan) &
+                         test_dct_propagates_a_nan), &
+            new_unittest("pf_dst and pf_idst give scipy.fft's values under both norms", &
+                         test_dst_matches_scipy_golden), &
+            new_unittest("both sine transforms match their direct definitions from n = 1 to 4096", &
+                         test_dst_matches_the_direct_definition), &
+            new_unittest("pf_idst undoes pf_dst under both norms", &
+                         test_dst_round_trips), &
+            new_unittest("the orthonormal sine transform and its inverse keep the sum of squares", &
+                         test_dst_ortho_is_parseval), &
+            new_unittest("a grid sine of frequency m+1 puts all its weight in y(m+1)", &
+                         test_dst_of_a_grid_sine), &
+            new_unittest("the sine transform of a*x + b*z is a*dst(x) + b*dst(z)", &
+                         test_dst_is_linear), &
+            new_unittest("the sine norm tokens relate as documented, the odd one out at k = n-1", &
+                         test_dst_norm_tokens_relate_as_documented), &
+            new_unittest("strided sections give the contiguous sine call's values to the bit", &
+                         test_dst_accepts_strided_sections), &
+            new_unittest("a NaN reaches every value of either sine transform", &
+                         test_dst_propagates_a_nan), &
+            new_unittest("a cosine transform in and an inverse sine out give an odd convolution", &
+                         test_dst_composes_with_dct) &
             ]
 
     end subroutine collect_tests_transform
@@ -502,6 +572,322 @@ contains
 
     end subroutine test_dct_propagates_a_nan
 
+    ! ---- the sine transforms ----------------------------------------------------------------------
+    !
+    ! The same list again, one test per cosine test, because the sine pair is built ON the cosine
+    ! pair and a reader comparing the two halves should find the same claims made twice. Two of
+    ! them are not mirrors: `test_dst_of_a_grid_sine` pins WHICH END carries the odd coefficient,
+    ! and `test_dst_composes_with_dct` pins the index offset between the two spectra.
+
+    !> **The convention itself**, against values `scipy.fft` produced: `dst` and `idst`, both norms,
+    !! at `n = 8` and `n = 16`. The sine pair is the cosine pair on an alternated, reversed sequence,
+    !! so a sign pattern applied at the wrong parity, or a reversal left out, moves every value here
+    !! while leaving every self-consistency test in this suite passing.
+    subroutine test_dst_matches_scipy_golden(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        call check_golden_sine(error, X8, X8_DST, X8_DST_ORTHO, X8_IDST, X8_IDST_ORTHO, "n = 8")
+        if (allocated(error)) return
+        call check_golden_sine(error, X16, X16_DST, X16_DST_ORTHO, X16_IDST, X16_IDST_ORTHO, "n = 16")
+
+    end subroutine test_dst_matches_scipy_golden
+
+    !> Both sine transforms against the `O(n**2)` definitions of the module header, at every power
+    !! of two to 64 and at 4096, on the same zero-mean data the cosine pair is checked on. A length
+    !! of one runs no butterfly and no reversal at all, and 4096 carries the accumulated twiddle
+    !! error the reversal must not disturb.
+    subroutine test_dst_matches_the_direct_definition(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: SIZES(8) = [1, 2, 4, 8, 16, 32, 64, 4096]
+        real(real64), allocatable :: x(:), y(:), want(:)
+        character(len=80) :: at
+        integer :: i, n
+
+        do i = 1, size(SIZES)
+            n = SIZES(i)
+            write (at, '(a, i0)') " at n = ", n
+            allocate (x(n), y(n), want(n))
+            call fill_uniform(x, 1500 + i)
+
+            call pf_dst(x, y)
+            call direct_dst(x, want)
+            call check(error, maxval(abs(y - want)) <= DIRECT_TOL*EPS*sum(abs(x)), &
+                       "pf_dst must match the direct definition"//trim(at))
+            if (allocated(error)) return
+
+            ! The same random values, read as coefficients.
+            call pf_idst(x, y)
+            call direct_idst(x, want)
+            call check(error, maxval(abs(y - want)) <= DIRECT_TOL*EPS*sum(abs(x))/n, &
+                       "pf_idst must match the direct definition"//trim(at))
+            if (allocated(error)) return
+            deallocate (x, y, want)
+        end do
+
+    end subroutine test_dst_matches_the_direct_definition
+
+    !> `pf_idst(pf_dst(x))` gives `x` back under each norm, at several lengths: the alternation is
+    !! undone at the same parity it was applied, and the reversal at the same end.
+    subroutine test_dst_round_trips(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: SIZES(6) = [1, 2, 4, 8, 64, 1024]
+        character(len=5), parameter :: NORMS(2) = ["none ", "ortho"]
+        real(real64), allocatable :: x(:), y(:), back(:)
+        character(len=80) :: at
+        integer :: i, which, n
+
+        do i = 1, size(SIZES)
+            n = SIZES(i)
+            allocate (x(n), y(n), back(n))
+            call fill_uniform(x, 2500 + i)
+            do which = 1, size(NORMS)
+                write (at, '(a, i0, 3a)') " at n = ", n, ", norm = """, trim(NORMS(which)), """"
+                call pf_dst(x, y, norm=trim(NORMS(which)))
+                call pf_idst(y, back, norm=trim(NORMS(which)))
+                call check(error, maxval(abs(back - x)) <= IDENTITY_TOL*EPS*maxval(abs(x)), &
+                           "pf_idst(pf_dst(x)) must give x back"//trim(at))
+                if (allocated(error)) return
+            end do
+            deallocate (x, y, back)
+        end do
+
+    end subroutine test_dst_round_trips
+
+    !> Under `norm="ortho"` both sine transforms are orthonormal, so each keeps the sum of squares.
+    !! `s(n-1)` is the one factor that differs from the rest, so a wrong one -- or the right one at
+    !! the cosine pair's end -- breaks the identity by exactly its own term.
+    subroutine test_dst_ortho_is_parseval(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: SIZES(5) = [1, 2, 8, 64, 1024]
+        real(real64), allocatable :: x(:), y(:)
+        real(real64) :: energy
+        character(len=80) :: at
+        integer :: i, n
+
+        do i = 1, size(SIZES)
+            n = SIZES(i)
+            write (at, '(a, i0)') " at n = ", n
+            allocate (x(n), y(n))
+            call fill_uniform(x, 4500 + i)
+            energy = pairwise_sum(x**2)
+
+            call pf_dst(x, y, norm="ortho")
+            call check(error, abs(pairwise_sum(y**2) - energy) <= IDENTITY_TOL*EPS*energy, &
+                       "the orthonormal pf_dst must keep the sum of squares"//trim(at))
+            if (allocated(error)) return
+
+            call pf_idst(x, y, norm="ortho")
+            call check(error, abs(pairwise_sum(y**2) - energy) <= IDENTITY_TOL*EPS*energy, &
+                       "the orthonormal pf_idst must keep the sum of squares"//trim(at))
+            if (allocated(error)) return
+            deallocate (x, y)
+        end do
+
+    end subroutine test_dst_ortho_is_parseval
+
+    !> A grid sine of frequency `m+1` has all its weight in `y(m+1)`, and **the top frequency is
+    !! the one that carries twice as much** -- the mirror of the cosine transform, whose doubled
+    !! coefficient is the constant term at `k = 0`. An implementation that reversed nothing, or
+    !! reversed the spectrum of the wrong transform, puts the peak at `n-m` instead.
+    subroutine test_dst_of_a_grid_sine(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        call check_grid_sine(error, 8, 0)
+        if (allocated(error)) return
+        call check_grid_sine(error, 8, 7)        ! frequency n: the doubled coefficient, at the end
+        if (allocated(error)) return
+        call check_grid_sine(error, 64, 5)
+        if (allocated(error)) return
+        call check_grid_sine(error, 64, 63)      ! frequency n again, at a length with more stages
+        if (allocated(error)) return
+        call check_grid_sine(error, 1024, 37)
+
+    end subroutine test_dst_of_a_grid_sine
+
+    !> Linearity, which no sign pattern applied at the wrong parity survives: negating the odd
+    !! entries of `a*x + b*z` is `a` times negating `x`'s plus `b` times negating `z`'s only when
+    !! the same entries are negated in all three.
+    subroutine test_dst_is_linear(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: SIZES(2) = [64, 1024]
+        real(real64), parameter :: A = 0.75_real64, B = -2.5_real64
+        real(real64), allocatable :: x(:), z(:), mix(:), tx(:), tz(:), tmix(:)
+        real(real64) :: scale
+        character(len=80) :: at
+        integer :: i, n
+
+        do i = 1, size(SIZES)
+            n = SIZES(i)
+            write (at, '(a, i0)') " at n = ", n
+            allocate (x(n), z(n), mix(n), tx(n), tz(n), tmix(n))
+            call fill_uniform(x, 3500 + i)
+            call fill_uniform(z, 3600 + i)
+            mix = A*x + B*z
+            scale = abs(A)*sum(abs(x)) + abs(B)*sum(abs(z))
+
+            call pf_dst(x, tx)
+            call pf_dst(z, tz)
+            call pf_dst(mix, tmix)
+            call check(error, maxval(abs(tmix - (A*tx + B*tz))) <= IDENTITY_TOL*EPS*scale, &
+                       "pf_dst must be linear"//trim(at))
+            if (allocated(error)) return
+
+            call pf_idst(x, tx)
+            call pf_idst(z, tz)
+            call pf_idst(mix, tmix)
+            call check(error, maxval(abs(tmix - (A*tx + B*tz))) <= IDENTITY_TOL*EPS*scale/n, &
+                       "pf_idst must be linear"//trim(at))
+            if (allocated(error)) return
+            deallocate (x, z, mix, tx, tz, tmix)
+        end do
+
+    end subroutine test_dst_is_linear
+
+    !> `"ortho"` is `"none"` scaled by `s(k) = sqrt(1/(2n))` everywhere but the LAST coefficient,
+    !! where it is `sqrt(1/(4n))` -- the opposite end from `pf_dct`, and the one line of this pair's
+    !! contract a reader cannot guess from the cosine pair. The tokens match whatever their case.
+    subroutine test_dst_norm_tokens_relate_as_documented(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: N = 64
+        real(real64) :: x(N), y_none(N), y_ortho(N), y_other(N), back(N), back_other(N), s(N)
+
+        call fill_uniform(x, 5500)
+        s(1:N - 1) = sqrt(0.5_real64/N)
+        s(N) = sqrt(0.25_real64/N)
+
+        call pf_dst(x, y_none)
+        call pf_dst(x, y_ortho, norm="ortho")
+        call check(error, all(abs(y_ortho - s*y_none) <= 2*EPS*abs(s*y_none)), &
+                   "pf_dst under norm=""ortho"" must be the unnormalised transform times s(k)")
+        if (allocated(error)) return
+
+        ! The exceptional factor is at the END. Reading it as the cosine pair's, at k = 0, changes
+        ! exactly two coefficients, so assert it there rather than trusting the whole-array test.
+        call check(error, abs(y_ortho(N)/y_none(N) - sqrt(0.25_real64/N)) <= 2*EPS, &
+                   "the last sine coefficient must carry sqrt(1/(4n))")
+        if (allocated(error)) return
+        call check(error, abs(y_ortho(1)/y_none(1) - sqrt(0.5_real64/N)) <= 2*EPS, &
+                   "the first sine coefficient must carry sqrt(1/(2n))")
+        if (allocated(error)) return
+
+        call pf_idst(x, back, norm="ortho")
+        call pf_idst(x/s, back_other)
+        call check(error, maxval(abs(back - back_other)) <= IDENTITY_TOL*EPS*maxval(abs(back)), &
+                   "pf_idst under norm=""ortho"" must be pf_idst of the coefficients divided by s(k)")
+        if (allocated(error)) return
+
+        call pf_dst(x, y_other, norm="none")
+        call check(error, all(y_other == y_none), "norm=""none"" must be what an absent norm means")
+        if (allocated(error)) return
+        call pf_dst(x, y_other, norm="OrThO ")
+        call check(error, all(y_other == y_ortho), "norm=""OrThO "" must match ""ortho""")
+        if (allocated(error)) return
+        call pf_idst(x, back_other, norm="Ortho")
+        call check(error, all(back_other == back), "pf_idst must match its norm token case-insensitively")
+
+    end subroutine test_dst_norm_tokens_relate_as_documented
+
+    !> Both dummies are plain assumed-shape arrays, and `pf_idst` hands `pf_idct` a REVERSED
+    !! section of its own input, so a strided actual meets a strided section inside. The answer
+    !! must be the contiguous call's, to the bit.
+    subroutine test_dst_accepts_strided_sections(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: N = 64
+        real(real64) :: wide(2*N), out(3*N), x(N), y(N)
+
+        call fill_uniform(wide, 7500)
+        x = wide(1::2)
+        out = -1.0_real64
+
+        call pf_dst(x, y)
+        call pf_dst(wide(1::2), out(2::3))
+        call check(error, all(out(2::3) == y), "pf_dst of a strided section must equal the contiguous call")
+        if (allocated(error)) return
+        call check(error, all(out(1::3) == -1.0_real64) .and. all(out(3::3) == -1.0_real64), &
+                   "pf_dst must write only the elements of its strided output")
+        if (allocated(error)) return
+
+        call pf_idst(x, y, norm="ortho")
+        call pf_idst(wide(1::2), out(2::3), norm="ortho")
+        call check(error, all(out(2::3) == y), "pf_idst of a strided section must equal the contiguous call")
+
+    end subroutine test_dst_accepts_strided_sections
+
+    !> A NaN is not screened by the sine pair either: it reaches every output value, whichever
+    !! element it is in. The alternation multiplies by -1 and the reversal moves values, so neither
+    !! can quieten one.
+    subroutine test_dst_propagates_a_nan(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: N = 16
+        real(real64) :: x(N), y(N)
+        integer :: at
+
+        do at = 1, N, 5
+            call fill_uniform(x, 8500 + at)
+            x(at) = ieee_value(1.0_real64, ieee_quiet_nan)
+            call pf_dst(x, y)
+            call check(error, all(y /= y), "a NaN in x must reach every coefficient of pf_dst")
+            if (allocated(error)) return
+            call pf_idst(x, y, norm="ortho")
+            call check(error, all(y /= y), "a NaN in y must reach every value of pf_idst")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_dst_propagates_a_nan
+
+    !> **The index offset between the two spectra**, which is what a caller composing a cosine
+    !! transform with an inverse sine transform has to get right (the guide page's "Composing the
+    !! two transforms"). `pf_dct` coefficient `k` and `pf_idst` coefficient `k-1` are the same
+    !! frequency, so a spectrum handed from one to the other moves down one position and the top
+    !! frequency is dropped.
+    !!
+    !! A grid cosine of frequency `m` has all its weight at `pf_dct` index `m`; restacked and
+    !! inverted it must come back as the grid SINE of that same frequency `m`. Leaving the restack
+    !! out answers the sine of frequency `m+1`, an `O(1)` error that every other test here passes.
+    !! The tolerance is the grid-cosine test's: a spectrum whose peak is `n`, carried through two
+    !! transforms of `log2(n)` stages.
+    subroutine test_dst_composes_with_dct(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: N = 64
+        integer, parameter :: MODES(3) = [1, 7, 63]
+        real(real64), allocatable :: table(:)
+        real(real64) :: x(N), co(N), sc(N), got(N), want(N)
+        character(len=80) :: at
+        integer(int64) :: j, n64, angle
+        integer :: i, m
+
+        n64 = N
+        call cos_table(n64, table)
+        do i = 1, size(MODES)
+            m = MODES(i)
+            write (at, '(a, i0)') " at m = ", m
+            do j = 1, n64
+                angle = modulo(int(m, int64)*(2*j - 1), 4*n64)
+                x(j) = table(angle)
+                want(j) = sin_at(table, angle, n64)
+            end do
+
+            ! The whole composition: transform, restack by one position, invert as a sine.
+            call pf_dct(x, co)
+            sc(1:N - 1) = co(2:N)
+            sc(N) = 0.0_real64
+            call pf_idst(sc, got)
+
+            call check(error, maxval(abs(got - want)) <= real(trailz(N), real64)*EPS*N, &
+                       "a restacked cosine spectrum must invert to the sine of the same frequency"//trim(at))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_dst_composes_with_dct
+
     ! ---- helpers ----------------------------------------------------------------------------------
 
     !> One scipy input: `pf_dct` and `pf_idct` under both norms against scipy's four outputs.
@@ -562,6 +948,129 @@ contains
                    "a grid cosine must transform to one nonzero coefficient"//trim(at))
 
     end subroutine check_grid_cosine
+
+    !> One scipy input: `pf_dst` and `pf_idst` under both norms against scipy's four outputs.
+    subroutine check_golden_sine(error, x, dst_none, dst_ortho, idst_none, idst_ortho, label)
+        type(error_type), allocatable, intent(out) :: error         !! test-drive's error handle.
+        real(real64), intent(in)                   :: x(:)          !! scipy's input
+        real(real64), intent(in)                   :: dst_none(:)   !! `dst(x, type=2)`
+        real(real64), intent(in)                   :: dst_ortho(:)  !! `dst(x, type=2, norm='ortho')`
+        real(real64), intent(in)                   :: idst_none(:)  !! `idst(x, type=2)`
+        real(real64), intent(in)                   :: idst_ortho(:) !! `idst(x, type=2, norm='ortho')`
+        character(len=*), intent(in)               :: label         !! the size, for messages
+
+        real(real64) :: got(size(x))
+        real(real64) :: scale
+
+        scale = GOLDEN_TOL*EPS*sum(abs(x))
+
+        call pf_dst(x, got)
+        call check(error, maxval(abs(got - dst_none)) <= scale, "pf_dst must give scipy's dst(x) at "//label)
+        if (allocated(error)) return
+        call pf_dst(x, got, norm="ortho")
+        call check(error, maxval(abs(got - dst_ortho)) <= scale, &
+                   "pf_dst must give scipy's dst(x, norm='ortho') at "//label)
+        if (allocated(error)) return
+        call pf_idst(x, got)
+        call check(error, maxval(abs(got - idst_none)) <= scale/size(x), &
+                   "pf_idst must give scipy's idst(x) at "//label)
+        if (allocated(error)) return
+        call pf_idst(x, got, norm="ortho")
+        call check(error, maxval(abs(got - idst_ortho)) <= scale, &
+                   "pf_idst must give scipy's idst(x, norm='ortho') at "//label)
+
+    end subroutine check_golden_sine
+
+    !> One grid sine: `x(j) = sin(pi*(m+1)*(2j-1)/(2n))`, built through the same exact angle
+    !! reduction as the oracle, and its transform's one nonzero value. The frequency is `m+1`
+    !! because DST-II coefficient `m` carries it; at `m = n-1` that frequency is `n`, where the
+    !! sequence is `(-1)**j` and the coefficient is `2n` rather than `n`.
+    subroutine check_grid_sine(error, n, m)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+        integer, intent(in)                        :: n     !! the length
+        integer, intent(in)                        :: m     !! the coefficient index, from 0 to n-1
+
+        real(real64), allocatable :: table(:), x(:), y(:), want(:)
+        character(len=80) :: at
+        integer(int64) :: j, n64
+
+        n64 = n
+        call cos_table(n64, table)
+        allocate (x(n), y(n), want(n))
+        do j = 1, n64
+            x(j) = sin_at(table, modulo(int(m + 1, int64)*(2*j - 1), 4*n64), n64)
+        end do
+        want = 0.0_real64
+        want(m + 1) = merge(2.0_real64*n, 1.0_real64*n, m == n - 1)
+
+        ! The peak is n, and an FFT's rounding grows with log2(n) (`trailz` of a power of two).
+        call pf_dst(x, y)
+        write (at, '(a, i0, a, i0)') " at n = ", n, ", m = ", m
+        call check(error, maxval(abs(y - want)) <= real(trailz(n), real64)*EPS*n, &
+                   "a grid sine must transform to one nonzero coefficient"//trim(at))
+
+    end subroutine check_grid_sine
+
+    !> The type-II sine transform by its definition:
+    !! `y[k] = 2*sum_j x[j]*sin(pi*(k+1)*(2j+1)/(2n))`.
+    !!
+    !! The same exact angle reduction and pairwise sum as `direct_dct`, reading the sine from
+    !! `cos_table` through `sin_at`. It shares nothing with the library's FFT.
+    subroutine direct_dst(x, y)
+        real(real64), intent(in)  :: x(:) !! the sequence
+        real(real64), intent(out) :: y(:) !! its unnormalised type-II sine transform
+
+        real(real64), allocatable :: table(:), terms(:)
+        integer(int64) :: n, j, k
+
+        n = size(x, kind=int64)
+        call cos_table(n, table)
+        allocate (terms(n))
+        do k = 0, n - 1
+            do j = 0, n - 1
+                terms(j + 1) = x(j + 1)*sin_at(table, modulo((k + 1)*(2*j + 1), 4*n), n)
+            end do
+            y(k + 1) = 2.0_real64*pairwise_sum(terms)
+        end do
+
+    end subroutine direct_dst
+
+    !> The inverse by its definition:
+    !! `x[k] = ((-1)**k*y[n-1] + 2*sum_{j<n-1} y[j]*sin(pi*(j+1)*(2k+1)/(2n)))/(2n)`.
+    !!
+    !! The unpaired term is the TOP frequency, where `direct_idct`'s is the constant term `y[0]`.
+    subroutine direct_idst(y, x)
+        real(real64), intent(in)  :: y(:) !! the coefficients
+        real(real64), intent(out) :: x(:) !! the sequence they are the transform of
+
+        real(real64), allocatable :: table(:), terms(:)
+        integer(int64) :: n, j, k
+
+        n = size(y, kind=int64)
+        call cos_table(n, table)
+        allocate (terms(n))
+        do k = 0, n - 1
+            do j = 0, n - 2
+                terms(j + 1) = 2.0_real64*y(j + 1)*sin_at(table, modulo((j + 1)*(2*k + 1), 4*n), n)
+            end do
+            terms(n) = merge(-1.0_real64, 1.0_real64, mod(k, 2_int64) == 1)*y(n)
+            x(k + 1) = pairwise_sum(terms)/real(2*n, real64)
+        end do
+
+    end subroutine direct_idst
+
+    !> `sin(pi*m/(2n))` read from `cos_table`'s entries: `sin(t) = cos(t - pi/2)`, and `pi/2` is
+    !! `n` steps of `pi/(2n)`, so the sine at `m` is the cosine at `m - n`, reduced modulo `4n`.
+    !! One table serves both definitions, and both keep the exact angle reduction.
+    pure function sin_at(table, m, n) result(s)
+        real(real64), intent(in)   :: table(0:) !! `cos_table`'s values
+        integer(int64), intent(in) :: m         !! the step count, already reduced or not
+        integer(int64), intent(in) :: n         !! the transform length
+        real(real64)               :: s         !! `sin(pi*m/(2n))`
+
+        s = table(modulo(m - n, 4*n))
+
+    end function sin_at
 
     !> The type-II transform by its definition: `y[k] = 2*sum_j x[j]*cos(pi*k*(2j+1)/(2n))`.
     !!

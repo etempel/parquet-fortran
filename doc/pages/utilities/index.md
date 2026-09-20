@@ -26,7 +26,7 @@ ordered_subpage: embedding-maml-schemas.md
 Things beyond the file being read or written: a general-purpose sorting API over plain Fortran
 arrays and this library's own column types, statistical reductions over those same arrays, kernel density estimates of
 a sample's distribution, minimisation of a function you supply,
-finding where a function of one variable crosses zero, the discrete cosine transform,
+finding where a function of one variable crosses zero, the discrete cosine and sine transforms,
 interpolation of tabulated data, distances and times in an expanding universe,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
@@ -112,11 +112,13 @@ helpers, and the two generators meant to be copied into your own project.
   missing sign change or a spent budget reported through a status code rather than an abort,
   `info%froot` to tell a pole from a root, and a record of every evaluation on request. Nothing
   is printed.
-- [Transforms: the discrete cosine transform](transforms.html) — `pf_dct` and `pf_idct`: the
-  type-II discrete cosine transform of a sequence whose length is a power of two, and its exact
-  inverse, in scipy's convention, factor of two included, unnormalised or orthonormal.
-  `pf_is_pow2` and `pf_next_pow2` for choosing the length before the sequence is built, and why
-  zero-padding one already built is not a substitute. Nothing is printed.
+- [Transforms: the discrete cosine and sine transforms](transforms.html) — `pf_dct`, `pf_idct`,
+  `pf_dst` and `pf_idst`: the type-II discrete cosine and sine transforms of a sequence whose
+  length is a power of two, and their exact inverses, in scipy's convention, factor of two
+  included, unnormalised or orthonormal. `pf_is_pow2` and `pf_next_pow2` for choosing the length
+  before the sequence is built, and why zero-padding one already built is not a substitute. How to
+  pass a spectrum from one family to the other, which needs a shift of one position. Nothing is
+  printed.
 - [Random numbers](random.html) — `pf_random_at` and friends: draws addressed by seed, stream and
   position, so a value does not depend on how many draws came before it and a parallel loop
   reproduces exactly under any schedule or thread count. Uniforms, raw bits and bounded integers;

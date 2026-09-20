@@ -63,7 +63,7 @@ point in the library.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
   statistics, kernel density estimation, numerical integration, interpolation of tabulated data, function minimisation,
   Powell's derivative-free solvers, root finding in one variable,
-  the discrete cosine transform,
+  the discrete cosine and sine transforms,
   reproducible random numbers and the sampling built on them,
   spatial neighbour search,
   sphere pixelisation, random points and geometry on the sphere, celestial coordinate systems,
@@ -123,7 +123,7 @@ All 47 pages, in reading order. (This list, each group's own page list and the
 - [Optimisation: minimising a function of one or many variables](utilities/optimization.html)
 - [Powell's derivative-free solvers with `parquet_prima`](utilities/prima.html)
 - [Root finding: solving f(x) = 0 in one variable](utilities/root-finding.html)
-- [Transforms: the discrete cosine transform](utilities/transforms.html)
+- [Transforms: the discrete cosine and sine transforms](utilities/transforms.html)
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)

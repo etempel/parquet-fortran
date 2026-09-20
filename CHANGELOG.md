@@ -44,12 +44,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the outcome, a missing sign change or a spent budget as a status rather than an abort, and
   nothing is printed; `history=` (`pf_root_history`) records every evaluation. An Arrow-free entry
   module. See [Root finding](doc/pages/utilities/root-finding.md).
-- **Discrete cosine transform: `parquet_transform`, `pf_dct` and `pf_idct`.** The type-II discrete
-  cosine transform of a `real64` sequence whose length is a power of two, and its exact inverse, in
-  scipy's convention (`scipy.fft.dct` and `idct`, factor of two included), unnormalised or
-  orthonormal (`norm="ortho"`); `pf_is_pow2` and `pf_next_pow2` choose the length. Nothing is
-  printed. An Arrow-free entry module. See
-  [Transforms: the discrete cosine transform](doc/pages/utilities/transforms.md).
+- **Discrete cosine and sine transforms: `parquet_transform`, `pf_dct`, `pf_idct`, `pf_dst` and
+  `pf_idst`.** The type-II discrete cosine and sine transforms of a `real64` sequence whose length
+  is a power of two, and their exact inverses, in scipy's convention (`scipy.fft.dct`, `idct`,
+  `dst` and `idst`, factor of two included), unnormalised or orthonormal (`norm="ortho"`, whose
+  exceptional coefficient is the first for the cosine pair and the last for the sine pair);
+  `pf_is_pow2` and `pf_next_pow2` choose the length. Nothing is printed. An Arrow-free entry
+  module. See [Transforms: the discrete cosine and sine
+  transforms](doc/pages/utilities/transforms.md).
 - **Linear binning: `pf_bin_linear`.** Deposits a sample onto a grid of points by linear
   (cloud-in-cell) assignment, splitting each value's weight between the two grid points around it
   into shares that sum to it exactly. In `parquet_stats` beside `pf_histogram`, with its

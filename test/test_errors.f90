@@ -3562,7 +3562,15 @@ contains
             new_unittest("pf_dct carries the caller's context into its message", &
                 test_transform_context_reported_aborts), &
             new_unittest("pf_dct caps the caller's context at 100 characters", &
-                test_transform_context_capped_aborts) &
+                test_transform_context_capped_aborts), &
+            new_unittest("pf_dst refuses a length that is not a power of two, in its own name", &
+                test_transform_dst_length_not_pow2_aborts), &
+            new_unittest("pf_dst refuses x and y of different sizes, in its own name", &
+                test_transform_dst_size_mismatch_aborts), &
+            new_unittest("pf_idst refuses a length that is not a power of two, in its own name", &
+                test_transform_idst_length_not_pow2_aborts), &
+            new_unittest("pf_idst refuses a norm token it does not offer, in its own name", &
+                test_transform_idst_bad_norm_token_aborts) &
             ]
         ! ---- parquet_stats: pf_bin_linear ----
         p37 = [ &
@@ -20233,6 +20241,34 @@ contains
         call check_transform_scenario(error, "transform_context_capped", &
             "pf_dct: x and y must have the same size (context: "//repeat("abcdefghij", 10)//"...)")
     end subroutine test_transform_context_capped_aborts
+    !
+    !> The four below are the negative controls for the sine pair's delegation: `pf_dst` and
+    !> `pf_idst` are built on `pf_dct` and `pf_idct`, so a wrapper that delegated before
+    !> validating would report the cosine procedure's name here and fail every one of them.
+    !
+    subroutine test_transform_dst_length_not_pow2_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_dst_length_not_pow2", &
+            "pf_dst: the sequence length must be a power of two (got 1000; pf_next_pow2 gives 1024)")
+    end subroutine test_transform_dst_length_not_pow2_aborts
+    !
+    subroutine test_transform_dst_size_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_dst_size_mismatch", &
+            "pf_dst: x and y must have the same size (context: my_call_site)")
+    end subroutine test_transform_dst_size_mismatch_aborts
+    !
+    subroutine test_transform_idst_length_not_pow2_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_idst_length_not_pow2", &
+            "pf_idst: the sequence length must be a power of two (got 1000; pf_next_pow2 gives 1024)")
+    end subroutine test_transform_idst_length_not_pow2_aborts
+    !
+    subroutine test_transform_idst_bad_norm_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_transform_scenario(error, "transform_idst_bad_norm_token", &
+            'pf_idst: norm must be "none" or "ortho"')
+    end subroutine test_transform_idst_bad_norm_token_aborts
     !
     subroutine test_interpolate_size_mismatch_aborts(error)
         type(error_type), allocatable, intent(out) :: error

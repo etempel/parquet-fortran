@@ -290,7 +290,7 @@ parquet_stats_relate.f90
 parquet_strings.f90
 parquet_temporal.f90
 parquet_transform.f90
-parquet_transform_dct.f90
+parquet_transform_core.f90
 parquet_utils.f90
 parquet_wrapper.cpp
 parquet_ziggurat.f90
@@ -373,7 +373,7 @@ parquet_wrapper.cpp
 
 [parquet_transform]
 parquet_transform.f90
-parquet_transform_dct.f90
+parquet_transform_core.f90
 parquet_wrapper.cpp
 
 [parquet_logging]
@@ -708,7 +708,7 @@ parquet_tables_write.f90
 parquet_temporal.f90
 parquet_toml.f90
 parquet_transform.f90
-parquet_transform_dct.f90
+parquet_transform_core.f90
 parquet_utils.f90
 parquet_version.f90
 parquet_wrapper.cpp

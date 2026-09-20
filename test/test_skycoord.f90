@@ -113,7 +113,7 @@ contains
                          test_system_tokens_round_trip), &
             new_unittest("pf_sky_convert from a system to itself returns its input by copy", &
                          test_convert_identity), &
-            new_unittest("pf_sky_convert answers exactly what the named procedure it calls answers", &
+            new_unittest("pf_sky_convert answers what the named procedure it calls answers, to a few ulp", &
                          test_convert_dispatches_to_named), &
             new_unittest("FK5 J2000 is not ICRS: positions move by what the frame bias's three angles say", &
                          test_fk5_is_not_the_identity), &
@@ -665,16 +665,32 @@ contains
         call check(error, ok, "a conversion from a system to itself changed its input")
     end subroutine test_convert_identity
 
-    !> For every pair with a named procedure, `pf_sky_convert` answers what that procedure answers, to
-    !! the bit, over a grid of positions: it calls the procedure rather than keeping a second body in
+    !> For every pair with a named procedure, `pf_sky_convert` answers what that procedure answers to
+    !! `CALLED` over a grid of positions: it calls the procedure rather than keeping a second body in
     !! step with it, and this is what would notice the second body.
+    !!
+    !! **To a few ulp and not to the bit, because CALLING the kernel is not enough to pin its last
+    !! bit.** The two routes are two call sites of `skc_rotate`, and a compiler may inline it at one
+    !! and leave it out of line at the other, optimising the two copies differently: gfortran 15.2 at
+    !! `--profile release` on arm64 inlines it into `pf_icrs2gal`, contracting four products into
+    !! fused multiply-adds, and calls the out-of-line copy, which has seven, from `pf_sky_convert`.
+    !! Measured over this grid: 1021 of 4250 comparisons differ, the worst by 5.7e-14 degrees --
+    !! about 0.2 nanoarcsecond, and `1.75*SAME` on the scale below. Nothing in the source closes
+    !! that (`fortran-gotchas.md`, "Calling one procedure from another does not pin its last bit"),
+    !! and `skc_rotate` is `pure`, so it cannot take the `volatile` that forces the rounding
+    !! elsewhere. A second body would differ by far more than `CALLED`, which is what this notices.
     subroutine test_convert_dispatches_to_named(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
-        real(real64) :: lon, lat, a1, b1, a2, b2
+        !> Agreement asked of two call sites of one kernel: four times `SAME`, itself `4*epsilon`,
+        !! against a measured worst of `1.75*SAME` -- margin for another compiler's inlining, and
+        !! still far under anything a second body would show.
+        real(real64), parameter :: CALLED = 4.0_real64 * SAME
+        real(real64) :: lon, lat, a1, b1, a2, b2, worst
         integer :: i, j, p, q, npair
-        logical :: found, same
+        logical :: found
+        character(len=160) :: msg
 
-        same = .true.
+        worst = 0.0_real64
         npair = 0
         do i = 1, NSYS
             do j = 1, NSYS
@@ -688,15 +704,21 @@ contains
                         lat = -90.0_real64 + 11.25_real64 * real(q, real64)
                         call named_rotation(SYSTEMS(i), SYSTEMS(j), lon, lat, a1, b1, found)
                         call pf_sky_convert(lon, lat, SYSTEMS(i), SYSTEMS(j), a2, b2)
-                        same = same .and. transfer(a1, 0_int64) == transfer(a2, 0_int64) .and. &
-                            transfer(b1, 0_int64) == transfer(b2, 0_int64)
+                        ! Measured as `%apply` against `pf_sky_convert` is: the latitude on its own
+                        ! scale, and the longitude as the distance it stands for at that latitude,
+                        ! so that a meridian's converging degrees are not read as a disagreement.
+                        worst = max(worst, abs(b1 - b2) / max(1.0_real64, abs(b2)), &
+                                    turn_gap(a1, a2) * cos(b2 * DEG) / 360.0_real64)
                     end do
                 end do
             end do
         end do
         call check(error, npair == 10, "the ten named rotations were not all found")
         if (allocated(error)) return
-        call check(error, same, "pf_sky_convert differs from the named procedure for its pair")
+        write(msg, '(a, es10.3, a, es10.3)') &
+            "pf_sky_convert differs from the named procedure for its pair by ", worst, &
+            " of its scale, beyond CALLED = ", CALLED
+        call check(error, worst <= CALLED, trim(msg))
     end subroutine test_convert_dispatches_to_named
 
     !> ICRS and FK5 J2000 differ, by what the frame bias's three angles say. Together the three small

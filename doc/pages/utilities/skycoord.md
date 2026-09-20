@@ -88,7 +88,8 @@ system = pf_coord_system_from_name(token)
 
 `pf_sky_convert` is the same conversion with the two systems given as `PF_COORD_*` selectors — for a
 system read out of a configuration file or a column's metadata. For a pair that has a named
-procedure it calls that procedure, so the two answer alike to the bit; for a pair that has none —
+procedure it calls that procedure, so the two answer alike to within a few ulp — they are two call
+sites of one kernel, and a compiler is free to inline it at one and not the other; for a pair that has none —
 Galactic and ecliptic, ecliptic and supergalactic, and FK5 J2000 and any system but ICRS, either way
 round — it applies that pair's own compile-time matrix, never two rotations in turn. **From a system
 to itself, the input comes back unchanged**, by copy and before any arithmetic: a longitude of `-10`

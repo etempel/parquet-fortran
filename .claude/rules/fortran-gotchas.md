@@ -193,7 +193,23 @@ done | sort | uniq -c | sort -rn
   number one ulp out, and `-ffp-contract=off` is the diagnosis rather than the fix. A fixture whose
   centring is EXACT proves nothing about such an identity, which is how a suite stays green over
   one (`stats_pair_moments`' `diagonal` fork, `src/parquet_stats_core.f90`;
-  `test_cov_identity_survives_inexact_centring`).
+  `test_cov_identity_survives_inexact_centring`). Calling is NECESSARY and not sufficient — the
+  next entry is its limit.
+- **Calling one procedure from another does not pin its last bit**, because the compiler may INLINE
+  the shared kernel at one call site and leave it out of line at the other, then optimise the two
+  copies differently. gfortran 15.2 at `--profile release` on arm64 inlined `skc_rotate` into the
+  one-line `pf_icrs2gal`, contracting four of its products into fused multiply-adds, while
+  `pf_sky_convert` -- which CALLS `pf_icrs2gal` -- reached the out-of-line copy, which has seven:
+  1021 of 4250 grid positions then disagreed, the worst by 5.7e-14 degrees. nagfor keeps both
+  routes out of line and answers bit for bit, so one compiler agreeing proves nothing about
+  another. **No source form closes it**: `volatile` on the products, which is the fix where the
+  arithmetic is reachable (`spatial_scan_axis`, `src/parquet_spatial_query.f90`), is FORBIDDEN in a
+  `pure` procedure (F2018 C1589; gfortran: "VOLATILE attribute ... cannot be specified in a PURE
+  procedure"), and `noinline` has a different spelling per compiler. So a bit-for-bit identity is
+  promised only between a procedure and ITSELF -- a second call of the same procedure, or an
+  argument copy such as `from == to` returning its input. Two call sites of one kernel are
+  documented, and asserted, to a few ulp (`test_convert_dispatches_to_named`,
+  `test_rotation_object_matches_the_free_procedure`).
 - **One target contracts to an FMA and another cannot, so ONE compiler at ONE version walks a
   different search path on each machine.** Contraction needs the instruction in the ISA: arm64 has
   it, and x86-64 has none without an `-march` that adds FMA3, which no profile here passes. nagfor
@@ -448,10 +464,10 @@ done | sort | uniq -c | sort -rn
   out-of-line `stats_block_moments` vectorised (`addpd`/`mulpd`, two lanes combined at the end) and
   an inlined copy of it scalar, which grouped one block's additions differently and moved the last
   bit. Confirm with `objdump -dr <object>` and the relocation list for the caller: a missing
-  `R_X86_64_PLT32` to the callee means it was inlined. The lesson is general — **a documented
-  bit-for-bit identity between two public procedures has to be delivered by CALLING one from the
-  other, never by writing two bodies to match** (`cov_f64` hands a diagonal pair to
-  `variance_f64`).
+  `R_X86_64_PLT32` to the callee means it was inlined. Calling one from the other is still the
+  right shape (`cov_f64` hands a diagonal pair to `variance_f64`), but it does not by itself buy a
+  bit-for-bit promise: the general group, "Calling one procedure from another does not pin its last
+  bit".
 - **ifx turns flush-to-zero AND denormals-are-zero on at `-O1` and above**; gfortran and nagfor
   leave gradual underflow in force. It is a process-wide MXCSR setting made by the main program, so
   a library procedure receives a subnormal argument already collapsed to zero and cannot recover

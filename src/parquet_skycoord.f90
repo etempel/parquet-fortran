@@ -425,8 +425,10 @@ module parquet_skycoord
         !> A position converted between two systems named at run time by `PF_COORD_*` selectors,
         !! in degrees.
         !!
-        !! For a pair with a named procedure it calls that procedure, so it answers exactly what the
-        !! procedure answers; for a pair without one -- Galactic and ecliptic, ecliptic and
+        !! For a pair with a named procedure it calls that procedure, so it answers what the
+        !! procedure answers to within a few ulp -- the two are call sites of one kernel, and a
+        !! compiler may inline it at one and not the other; for a pair without one -- Galactic and
+        !! ecliptic, ecliptic and
         !! supergalactic, and FK5 and any system but ICRS, either way round -- it applies that pair's
         !! own compile-time matrix, never two rotations through angles. **`from == to` is the
         !! identity: the input comes back by copy, before any arithmetic**, so a longitude of `-10`

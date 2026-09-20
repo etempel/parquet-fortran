@@ -71,6 +71,12 @@ contains
 
     end procedure kde_record_team
 
+    module procedure kde_label
+
+        lab = text
+
+    end procedure kde_label
+
     module procedure kde_fold
 
         character(len=len(token)) :: t
@@ -129,9 +135,11 @@ contains
             code = KDE_BOUNDARY_RENORMALISE
         case ("reflect")
             code = KDE_BOUNDARY_REFLECT
+        case ("linear")
+            code = KDE_BOUNDARY_LINEAR
         case default
             code = 0
-            call kde_abort(entry, 'boundary must be "renormalise" or "reflect"')
+            call kde_abort(entry, 'boundary must be "renormalise", "reflect" or "linear"')
         end select
 
     end procedure kde_resolve_boundary
@@ -318,6 +326,148 @@ contains
         end if
 
     end procedure kde_kernel_cdf
+
+    module procedure kde_kernel_m1
+
+        real(real64) :: t, v, w
+
+        ! `u K(u)` is odd, so the moment is even in `z`: it is formed on the lower half, where every
+        ! closed form below is a product or a short Horner sum that nothing cancels in, and read
+        ! there for either sign. Each was checked against quadrature at 50 digits
+        ! (`tools/generate_kde_vectors.py --self-test`).
+        m = 0.0_real64
+        t = -abs(z)
+        if (.not. (t > -KDE_RADIUS(code))) return
+        select case (code)
+        case (KDE_GAUSSIAN)
+            ! `(phi(R) - phi(t))/M`: the cut Gaussian's `-phi` between the cut and `t`.
+            m = (KDE_GAUSS_PHI_CUT - pf_norm_pdf(t))/KDE_GAUSS_MASS
+        case (KDE_EPANECHNIKOV)
+            ! `-(3C/16) (1 - v**2)**2` on the unit-scale variable `v = t/C`.
+            v = t/KDE_SCALE(code)
+            m = -(0.1875_real64*KDE_SCALE(code))*((1.0_real64 - v)*(1.0_real64 + v))**2
+        case (KDE_BSPLINE)
+            v = t/KDE_SCALE(code)
+            if (v <= -1.0_real64) then
+                ! The outer piece, `C W**4 (2W - 5)/60` with `W = 2 + v`.
+                w = 2.0_real64 + v
+                m = KDE_SCALE(code)*w**4*(2.0_real64*w - 5.0_real64)/60.0_real64
+            else
+                ! The inner piece, `C (v**2/3 - v**4/4 - v**5/10 - 7/30)`, from the outer piece's
+                ! `-C/20` at `v = -1`.
+                m = KDE_SCALE(code)*(v*v*(1.0_real64/3.0_real64 - v*v*(0.25_real64 + 0.1_real64*v)) &
+                    - 7.0_real64/30.0_real64)
+            end if
+        case (KDE_BOX)
+            ! `C (v**2 - 1)/4`.
+            v = t/KDE_SCALE(code)
+            m = -(0.25_real64*KDE_SCALE(code))*(1.0_real64 - v)*(1.0_real64 + v)
+        end select
+
+    end procedure kde_kernel_m1
+
+    module procedure kde_kernel_m2
+
+        real(real64) :: t, v, w, lower
+
+        ! `u**2 K(u)` is even, so the moment above zero is the variance less the moment below
+        ! `-z`: formed on the lower half and mirrored, as `kde_kernel_cdf` is, which keeps it exactly
+        ! symmetric and cancellation-free near either end.
+        t = -abs(z)
+        lower = 0.0_real64
+        if (t > -KDE_RADIUS(code)) then
+            select case (code)
+            case (KDE_GAUSSIAN)
+                ! `(Phi(t) - Phi(-R) - t phi(t) - R phi(R))/M`.
+                lower = ((pf_norm_cdf(t) - KDE_GAUSS_TAIL) - (t*pf_norm_pdf(t) &
+                    + KDE_GAUSS_CUT*KDE_GAUSS_PHI_CUT))/KDE_GAUSS_MASS
+            case (KDE_EPANECHNIKOV)
+                ! `(3C**2/4)(v**3/3 - v**5/5 + 2/15)` is `(1 + v)**2 (2 - 4v + 6v**2 - 3v**3)/4`.
+                v = t/KDE_SCALE(code)
+                lower = 0.25_real64*(1.0_real64 + v)**2*(2.0_real64 - v*(4.0_real64 - v*(6.0_real64 &
+                    - 3.0_real64*v)))
+            case (KDE_BSPLINE)
+                v = t/KDE_SCALE(code)
+                if (v <= -1.0_real64) then
+                    ! The outer piece, `C**2 W**4 (5W**2 - 24W + 30)/180` with `W = 2 + v`, `C**2 = 3`.
+                    w = 2.0_real64 + v
+                    lower = w**4*(30.0_real64 - w*(24.0_real64 - 5.0_real64*w))/60.0_real64
+                else
+                    ! The inner piece, `C**2 (1/6 + 2v**3/9 - v**5/5 - v**6/12)`, from `11/60` at
+                    ! `v = -1` to `1/2` at `v = 0`.
+                    lower = 0.5_real64 + v**3*(2.0_real64/3.0_real64 - v*v*(0.6_real64 + 0.25_real64*v))
+                end if
+            case (KDE_BOX)
+                ! `C**2 (v**3 + 1)/6` is `(1 + v)(1 - v + v**2)/2`, `C**2 = 3`.
+                v = t/KDE_SCALE(code)
+                lower = 0.5_real64*(1.0_real64 + v)*(1.0_real64 - v*(1.0_real64 - v))
+            end select
+        end if
+        if (z > 0.0_real64) then
+            m = KDE_VARIANCE(code) - lower
+        else
+            m = lower
+        end if
+
+    end procedure kde_kernel_m2
+
+    module procedure kde_linear_factor
+
+        real(real64) :: rad, lo_z, hi_z, w, c, g, a0, a1, a2, m0, m1, m2
+
+        ! The part of the kernel's support inside the bounds, in bandwidths: `[max(-R, -q),
+        ! min(R, p)]`. A bound a reach or more away leaves that end the kernel's own.
+        rad = KDE_RADIUS(code)
+        hi_z = rad
+        lo_z = -rad
+        if (has_lower) then
+            if ((t - lo)*r < rad) hi_z = (t - lo)*r
+        end if
+        if (has_upper) then
+            if ((hi - t)*r < rad) lo_z = -((hi - t)*r)
+        end if
+        lf%plain = .true.
+        lf%a = 0.0_real64
+        lf%b = 0.0_real64
+        lf%c = 0.0_real64
+        lf%dinv = 0.0_real64
+        if (hi_z >= rad .and. lo_z <= -rad) return
+        lf%plain = .false.
+        w = hi_z - lo_z
+        if (w >= KDE_LINEAR_NARROW) then
+            ! The moments as differences of the closed forms; a one-sided interval's lower end is
+            ! minus the radius, where every closed form is exactly zero.
+            a0 = kde_kernel_cdf(code, hi_z) - kde_kernel_cdf(code, lo_z)
+            a1 = kde_kernel_m1(code, hi_z) - kde_kernel_m1(code, lo_z)
+            a2 = kde_kernel_m2(code, hi_z) - kde_kernel_m2(code, lo_z)
+            lf%a = a2
+            lf%b = a1
+            lf%dinv = 1.0_real64/(a0*a2 - a1*a1)
+            return
+        end if
+        ! A narrow two-sided interval: the moments about its midpoint `c`, in the scaled offset
+        ! `s = (u - c)/w`, `m_l` the integral of `s**l K(c + w s)` over `[-1/2, 1/2]`, so that each is
+        ! of the kernel's own size whatever the width. With `g = c/w` the kernel is
+        ! `((m_2 + g m_1) - (m_1 + g m_0)(u - c)/w) K(u) / (w (m_0 m_2 - m_1**2))`, the linear boundary
+        ! kernel written about `c`: its zeroth moment is one and its first moment about zero, not
+        ! about `c`, is zero. `m_1**2` is two powers of the width below `m_0 m_2`, so the determinant
+        ! loses nothing.
+        c = 0.5_real64*(lo_z + hi_z)
+        call centred_moments(code, lo_z, hi_z, c, w, m0, m1, m2)
+        g = c/w
+        lf%a = m2 + g*m1
+        lf%b = (m1 + g*m0)/w
+        lf%c = c
+        lf%dinv = 1.0_real64/(w*(m0*m2 - m1*m1))
+
+    end procedure kde_linear_factor
+
+    module procedure kde_linear_value
+
+        v = k
+        if (.not. lf%plain) v = k*((lf%a - lf%b*(u - lf%c))*lf%dinv)
+
+    end procedure kde_linear_value
 
     module procedure kde_n_eff
 
@@ -552,6 +702,12 @@ contains
         kde_isj_cells_forced = n
     end procedure parquet_debug_set_kde_isj_cells
 
+    module procedure parquet_debug_set_kde_sample_tries
+        ! A negative `n` restores the default; every other value, zero included, is the cap.
+        kde_sample_tries_forced = n
+        if (n < 0) kde_sample_tries_forced = -1
+    end procedure parquet_debug_set_kde_sample_tries
+
     module procedure parquet_debug_kde_fit_nanos
         sort = kde_fit_ns(1)
         pilot = kde_fit_ns(2)
@@ -561,6 +717,58 @@ contains
     ! ==========================================================================================
     ! Private helpers
     ! ==========================================================================================
+
+    !> The linear kernel's moments over the narrow interval `[lo_z, hi_z]`, in standard deviations,
+    !! about its midpoint `c` and scaled by its width `w`: `m_l`, the integral of `s**l K(c + w s)`
+    !! over `s` in `[-1/2, 1/2]`, by the eight-point Gauss-Legendre rule on each piece between the
+    !! kernel's knots inside the interval (the cubic B-spline's at `-C`, `0` and `C`; the other
+    !! kernels have none inside their support). The rule is exact for a polynomial piece of degree
+    !! up to fifteen, so for the three polynomial kernels these are the moments to rounding, and for
+    !! the Gaussian, over an interval under one standard deviation wide, the rule's own error is
+    !! below rounding too.
+    pure subroutine centred_moments(code, lo_z, hi_z, c, w, m0, m1, m2)
+        integer, intent(in)       :: code !! the kernel
+        real(real64), intent(in)  :: lo_z !! the interval's lower end
+        real(real64), intent(in)  :: hi_z !! its upper end
+        real(real64), intent(in)  :: c    !! its midpoint
+        real(real64), intent(in)  :: w    !! its width, positive
+        real(real64), intent(out) :: m0   !! the zeroth moment
+        real(real64), intent(out) :: m1   !! the first, about `c`, over `w`
+        real(real64), intent(out) :: m2   !! the second, about `c`, over `w**2`
+        real(real64) :: cuts(5), knots(3), mid, half, s, k, ws
+        integer :: n, i, p
+
+        ! The pieces, in `s`: the interval's ends and every knot strictly inside it, ascending.
+        n = 1
+        cuts(1) = -0.5_real64
+        if (code == KDE_BSPLINE) then
+            knots = [-KDE_SCALE(code), 0.0_real64, KDE_SCALE(code)]
+            do i = 1, 3
+                if (knots(i) > lo_z .and. knots(i) < hi_z) then
+                    n = n + 1
+                    cuts(n) = (knots(i) - c)/w
+                end if
+            end do
+        end if
+        n = n + 1
+        cuts(n) = 0.5_real64
+        m0 = 0.0_real64
+        m1 = 0.0_real64
+        m2 = 0.0_real64
+        do p = 1, n - 1
+            mid = 0.5_real64*(cuts(p) + cuts(p + 1))
+            half = 0.5_real64*(cuts(p + 1) - cuts(p))
+            do i = 1, 8
+                s = mid + half*KDE_GL8_X(i)
+                k = kde_kernel_pdf(code, c + w*s)
+                ws = half*KDE_GL8_W(i)*k
+                m0 = m0 + ws
+                m1 = m1 + ws*s
+                m2 = m2 + (ws*s)*s
+            end do
+        end do
+
+    end subroutine centred_moments
 
     !> The norm of the density's `s`-th derivative at the time `t`, as the ISJ rule estimates it from
     !! the binned transform: `2 pi**(2s) sum_k k**(2s) (y_k/2)**2 exp(-k**2 pi**2 t)`.

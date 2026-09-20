@@ -1888,6 +1888,8 @@ scenarios=(
     "kde_grid_unknown_kernel:1"
     "kde_grid_boundary_without_bound:1"
     "kde_grid_outside_support:1"
+    "kde_grid_linear_range_not_at_bound:1"
+    "kde_grid_linear_narrow:1"
     "kde_grid_add_uninitialised:1"
     "kde_grid_threads_zero:1"
     "kde_grid_weights_size:1"

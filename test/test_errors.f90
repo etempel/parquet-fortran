@@ -3634,6 +3634,10 @@ contains
                 test_kde_grid_boundary_without_bound_aborts), &
             new_unittest("pf_kde_grid%init refuses a range reaching outside the support", &
                 test_kde_grid_outside_support_aborts), &
+            new_unittest("pf_kde_grid%init refuses a linear grid whose range leaves its bound", &
+                test_kde_grid_linear_range_not_at_bound_aborts), &
+            new_unittest("pf_kde_grid%init refuses a linear grid narrower than a reach with a free edge", &
+                test_kde_grid_linear_narrow_aborts), &
             new_unittest("pf_kde_grid%add refuses a grid that was never initialised", &
                 test_kde_grid_add_uninitialised_aborts), &
             new_unittest("pf_kde_grid%add refuses threads=0", &
@@ -21292,7 +21296,7 @@ contains
     subroutine test_kde_unknown_boundary_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_unknown_boundary", &
-            "pf_kde%fit: boundary must be ""renormalise"" or ""reflect""")
+            "pf_kde%fit: boundary must be ""renormalise"", ""reflect"" or ""linear""")
     end subroutine test_kde_unknown_boundary_aborts
     !
     subroutine test_kde_weights_size_aborts(error)
@@ -21454,6 +21458,18 @@ contains
         call check_kde_scenario(error, "kde_grid_outside_support", &
             "pf_kde_grid%init: the grid's range must lie inside the support")
     end subroutine test_kde_grid_outside_support_aborts
+    !
+    subroutine test_kde_grid_linear_range_not_at_bound_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_linear_range_not_at_bound", &
+            "pf_kde_grid%init: under boundary=""linear"" the grid's range must start at lower and end at upper")
+    end subroutine test_kde_grid_linear_range_not_at_bound_aborts
+    !
+    subroutine test_kde_grid_linear_narrow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_linear_narrow", &
+            "pf_kde_grid%init: under boundary=""linear"" the grid must be at least one kernel reach wide")
+    end subroutine test_kde_grid_linear_narrow_aborts
     !
     subroutine test_kde_grid_add_uninitialised_aborts(error)
         type(error_type), allocatable, intent(out) :: error

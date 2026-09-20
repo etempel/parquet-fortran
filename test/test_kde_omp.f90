@@ -317,12 +317,13 @@ contains
     subroutine test_queries_ignore_the_team(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         real(real64), parameter :: H = 5.0_real64, LO = -450.0_real64
-        integer, parameter :: NQ = 2000, NP = 400, NS = 100000
-        type(pf_kde) :: k, ka
+        integer, parameter :: NQ = 2000, NP = 400, NS = 100000, NL = 200
+        type(pf_kde) :: k, ka, kl
         type(pf_kde_grid) :: g
         real(real64), allocatable :: x(:), w(:), t(:), f1(:), f4(:), c1(:), c4(:), s1(:), s4(:)
         real(real64) :: p(NP), q1(NP), q4(NP), qc(NP), xc1(NQ), xc4(NQ), fc1(NQ), fc4(NQ), fe, ce, mass, wsum
         real(real64) :: gap_f, gap_c, mean, xbar
+        real(real64) :: tl(NL), pl(NL), cl1(NL), cl4(NL), ql1(NL), ql4(NL), sl1(NL), sl4(NL)
         integer :: team1(7), team4(7), i
         integer(int64) :: j
 
@@ -411,11 +412,32 @@ contains
         call ka%fit(x, bandwidth=H, weights=w, adaptive=.true., lower=LO)
         call ka%pdf(t, f1, threads=1)
         call ka%pdf(t, f4, threads=4)
-        team4(6) = parquet_debug_kde_threads_used()
+        team4(5) = parquet_debug_kde_threads_used()
         call ka%sample(s1, 5_int64, threads=1)
         call ka%sample(s4, 5_int64, threads=4)
-        call check(error, team4(6) == 4 .and. all(f4 == f1) .and. all(s4 == s1), &
+        call check(error, team4(5) == 4 .and. all(f4 == f1) .and. all(s4 == s1), &
             "an adaptive fit's %pdf and %sample must give the same bits at every thread count")
+        if (allocated(error)) return
+
+        ! Under `"linear"` a query inside a zone integrates its window point by point, which is
+        ! what has to answer the same bits at every thread count: a smaller fixture and fewer
+        ! points, one such query costing many times a plain one.
+        call kl%fit(x(1:400), bandwidth=H, lower=minval(x(1:400)), boundary="linear")
+        do i = 1, NL
+            tl(i) = minval(x(1:400)) + 60.0_real64*modulo(real(i, real64)*0.6180339887498949_real64, 1.0_real64)
+            pl(i) = (real(i, real64) - 0.5_real64)/real(NL, real64)
+        end do
+        call kl%cdf(tl, cl1, threads=1)
+        team1(6) = parquet_debug_kde_threads_used()
+        call kl%cdf(tl, cl4, threads=4)
+        team4(6) = parquet_debug_kde_threads_used()
+        call kl%quantile(pl, ql1, threads=1)
+        call kl%quantile(pl, ql4, threads=4)
+        call kl%sample(sl1, 9_int64, threads=1)
+        call kl%sample(sl4, 9_int64, threads=4)
+        call check(error, team1(6) == 1 .and. team4(6) == 4 .and. all(cl4 == cl1) .and. &
+            all(ql4 == ql1) .and. all(sl4 == sl1), &
+            "a linear fit's %cdf, %quantile and %sample must open their team and give the same bits at every count")
         if (allocated(error)) return
 
         call g%init(500, -500.0_real64, 500.0_real64, H)
@@ -538,12 +560,13 @@ contains
     !> writes nothing.
     subroutine test_one_object_shared(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
-        integer, parameter :: NT = 4, NQ = 300
-        type(pf_kde) :: k
+        integer, parameter :: NT = 4, NQ = 300, NL = 60
+        type(pf_kde) :: k, kl
         type(pf_kde_grid) :: g, p
         real(real64), allocatable :: x(:), w(:)
         real(real64) :: t(NQ, NT), f(NQ, NT), c(NQ, NT), q(NQ, NT), v(NQ, NT), gf(NQ, NT), gv(NQ, NT)
         real(real64) :: fs(NQ), cs(NQ), qs(NQ), vs(NQ), gfs(NQ), gvs(NQ), pr(NQ)
+        real(real64) :: cl(NL, NT), vl(NL, NT), cls(NL), vls(NL)
         integer :: i, j, tid, bad
 
 #ifndef _OPENMP
@@ -595,6 +618,28 @@ contains
                 any(gfs /= gf(:, j)) .or. any(gvs /= gv(:, j))) bad = bad + 1
         end do
         call check(error, bad == 0, "every thread sharing one fitted object and one grid must get the serial bits")
+        if (allocated(error)) return
+
+        ! Under `"linear"` every query inside a zone integrates its window point by point, so this
+        ! is the arm where `pf_integrate` runs from every thread of the caller's own region at once.
+        ! A smaller fixture and fewer points: one such query costs many times a plain one.
+        call kl%fit(x(1:400), bandwidth=5.0_real64, lower=minval(x(1:400)), boundary="linear")
+        !$omp parallel num_threads(NT) default(shared) private(tid)
+        tid = 1
+#ifdef _OPENMP
+        tid = omp_get_thread_num() + 1
+#endif
+        call kl%cdf(t(1:NL, tid), cl(:, tid))
+        call kl%sample(vl(:, tid), 5_int64, tid)
+        !$omp end parallel
+        bad = 0
+        do j = 1, NT
+            call kl%cdf(t(1:NL, j), cls)
+            call kl%sample(vls, 5_int64, j)
+            if (any(cls /= cl(:, j)) .or. any(vls /= vl(:, j))) bad = bad + 1
+        end do
+        call check(error, bad == 0, &
+            "every thread sharing one linear fit must get the serial bits of %cdf and %sample")
 
     end subroutine test_one_object_shared
 

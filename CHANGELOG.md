@@ -108,7 +108,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   kernel's standard deviation; the Improved Sheather-Jones rule (the default), Silverman's and
   Scott's rules, a number, and `adjust=`; per-element weights and nulls under the `pf_*` family's
   rules, with `n_eff` in the rules; `lower=`/`upper=` for a bounded support, corrected by
-  renormalisation or reflection. `adaptive=.true.` selects the sample-point adaptive kernel (each
+  renormalisation, by reflection or by the linear boundary kernel (`boundary="linear"`:
+  second-order at the bound, negative values set to zero and the estimate renormalised). `adaptive=.true.` selects the sample-point adaptive kernel (each
   point's bandwidth from a pilot density, sensitivity `alpha=`, capped by `bandwidth_max=`, read
   back through `%bandwidths`, `%bandwidth_at` and `%pilot`), and the streaming form takes the same
   rule from a `pilot=` grid. `threads=` on the bulk forms; draws addressed by `(seed, stream)`. An

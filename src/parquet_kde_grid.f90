@@ -61,7 +61,7 @@ contains
     module procedure kde_adapt_set
 
         integer :: i
-        real(real64) :: p, s1, s2
+        real(real64) :: p, s1, s2, tp
 
         a%on = .true.
         a%alpha = alpha
@@ -73,11 +73,26 @@ contains
         a%x1 = pilot%x1
         a%dx = pilot%dx
         a%wt = pilot%w_total
-        a%unreadable = pilot%poisoned
+        a%unreadable = grid_poisoned(pilot)
         allocate(a%acc(pilot%nc))
-        do i = 1, pilot%nc
-            a%acc(i) = pilot%acc(i)
-        end do
+        if (pilot%boundary_code == KDE_BOUNDARY_LINEAR) then
+            ! Under `"linear"` the pilot's cells can be negative and its mass is not its weight:
+            ! the table takes the CLIPPED, normalised densities, which is what `%density` answers
+            ! there, so the adaptive rule never reads a negative cell.
+            tp = total_mass(pilot)
+            a%wt = 1.0_real64
+            if (.not. (tp > 0.0_real64)) then
+                a%unreadable = .true.
+                tp = 1.0_real64
+            end if
+            do i = 1, pilot%nc
+                a%acc(i) = cell_acc(pilot, i)/tp
+            end do
+        else
+            do i = 1, pilot%nc
+                a%acc(i) = pilot%acc(i)
+            end do
+        end if
         a%logg = 0.0_real64
         a%pmin = 0.0_real64
         if (a%unreadable) return
@@ -140,6 +155,22 @@ contains
         end if
         if (has_lower) a = max(a, lo)
         if (has_upper) b = min(b, hi)
+        ! Under `"linear"` the pilot is a grid like any other and keeps R1 and R2: its range starts
+        ! at a bound that was given, even where no kernel reaches that bound's zone, so that
+        ! `%pilot`'s copy passes `%init(pilot=)`'s coverage check; and where one bound is given its
+        ! FREE edge lies at least a reach from it, which `x(m) + KDE_PILOT_REACH*h` need not.
+        if (boundary_code == KDE_BOUNDARY_LINEAR) then
+            if (has_lower) a = lo
+            if (has_upper) b = hi
+            if (has_lower .neqv. has_upper) then
+                reach = KDE_RADIUS(kernel_code)*h
+                if (has_lower) then
+                    if (b - a < reach .and. a <= lim - reach) b = a + reach
+                else
+                    if (b - a < reach .and. b >= reach - lim) a = b - reach
+                end if
+            end if
+        end if
         if (.not. (a < b)) return
         ! The cells: a quarter of a bandwidth wide, clamped, unless a test forces their number. A
         ! range too many bandwidths wide for the count is recognised before the count is formed.
@@ -201,6 +232,26 @@ contains
         end if
         if (has_hi) then
             if (xmax > hi) call kde_abort(EP, "the grid's range must lie inside the support")
+        end if
+        ! Under `"linear"` weight beyond the range is counted by the PLAIN kernel's mass there, which
+        ! is exact only where the correction is not acting. Two rules keep that true, at the cost of
+        ! refusing two configurations the other corrections accept.
+        if (bcode == KDE_BOUNDARY_LINEAR) then
+            ! R1: a bounded side's edge is the bound itself, so a zone lies wholly inside the range.
+            if (has_lo) then
+                if (xmin /= lo) call kde_abort(EP, &
+                    'under boundary="linear" the grid''s range must start at lower and end at upper')
+            end if
+            if (has_hi) then
+                if (xmax /= hi) call kde_abort(EP, &
+                    'under boundary="linear" the grid''s range must start at lower and end at upper')
+            end if
+            ! R2: with a FREE edge, the range is at least one reach wide, so that edge lies outside
+            ! the bound's zone. With both bounds no edge is free and the rule does not apply.
+            if (has_lo .neqv. has_hi) then
+                if (xmax - xmin < KDE_RADIUS(kcode)*bandwidth) call kde_abort(EP, &
+                    'under boundary="linear" the grid must be at least one kernel reach wide')
+            end if
         end if
 
         ! ---- the adaptive rule ----
@@ -290,6 +341,18 @@ contains
                     return
                 end if
             end do
+            ! R3: under `"linear"` with a free edge, a point whose own reach exceeds the range's
+            ! width would put corrected weight beyond that edge, where the beyond-range count is the
+            ! plain kernel's mass. The grid poisons itself rather than count it wrongly, as it does
+            ! for a bandwidth the rule cannot represent; `bandwidth_max` is the remedy.
+            if (self%boundary_code == KDE_BOUNDARY_LINEAR .and. (self%has_lower .neqv. self%has_upper)) then
+                do i = 1_int64, m
+                    if (KDE_RADIUS(self%kernel_code)*hb(i) > self%x1 - self%x0) then
+                        self%reach_poisoned = .true.
+                        return
+                    end if
+                end do
+            end if
             stride = 1_int64
         else
             allocate(hb(1))
@@ -382,6 +445,7 @@ contains
         self%cnt_nan = self%cnt_nan + other%cnt_nan
         self%cnt_out = self%cnt_out + other%cnt_out
         self%poisoned = self%poisoned .or. other%poisoned
+        self%reach_poisoned = self%reach_poisoned .or. other%reach_poisoned
 
     end procedure grid_merge
 
@@ -403,13 +467,15 @@ contains
         end if
         norm = .true.
         if (present(normalise)) norm = normalise
-        if (self%poisoned) then
+        if (grid_poisoned(self)) then
             f = ieee_value(1.0_real64, ieee_quiet_nan)
         else if (.not. norm) then
+            ! The accumulation as deposited, signed: under `"linear"` a cell can hold a negative
+            ! value, and this is where a caller sees it.
             do i = 1, self%nc
                 f(i) = self%acc(i)
             end do
-        else if (self%w_total > 0.0_real64) then
+        else if (total_mass(self) > 0.0_real64) then
             do i = 1, self%nc
                 f(i) = cell_density(self, i)
             end do
@@ -611,41 +677,46 @@ contains
             return
         end if
         write(u, '(a)') "pf_kde_grid"
-        write(u, '(2x,a,i0)') "cells       ", self%nc
-        write(u, '(2x,a,es24.16e3)') "xmin        ", self%x0
-        write(u, '(2x,a,es24.16e3)') "xmax        ", self%x1
-        write(u, '(2x,a,es24.16e3)') "step        ", self%dx
+        ! Every row's label in the one thirteen-character column, `kde_label`'s.
+        write(u, '(2x,a,i0)') kde_label("cells"), self%nc
+        write(u, '(2x,a,es24.16e3)') kde_label("xmin"), self%x0
+        write(u, '(2x,a,es24.16e3)') kde_label("xmax"), self%x1
+        write(u, '(2x,a,es24.16e3)') kde_label("step"), self%dx
         call grid_kernel_name(self, token)
-        write(u, '(2x,a,a)') "kernel      ", token
-        write(u, '(2x,a,es24.16e3)') "bandwidth   ", self%h
-        write(u, '(2x,a,i0)') "n           ", self%cnt_all
-        write(u, '(2x,a,i0)') "n_valid     ", self%cnt_valid
-        write(u, '(2x,a,i0)') "n_null      ", self%cnt_null
-        write(u, '(2x,a,i0)') "n_nan       ", self%cnt_nan
-        write(u, '(2x,a,i0)') "n_outside   ", self%cnt_out
-        write(u, '(2x,a,es24.16e3)') "sum_weights ", self%w_total
-        if (self%has_lower) write(u, '(2x,a,es24.16e3)') "lower       ", self%lo
-        if (self%has_upper) write(u, '(2x,a,es24.16e3)') "upper       ", self%hi
+        write(u, '(2x,a,a)') kde_label("kernel"), token
+        write(u, '(2x,a,es24.16e3)') kde_label("bandwidth"), self%h
+        write(u, '(2x,a,i0)') kde_label("n"), self%cnt_all
+        write(u, '(2x,a,i0)') kde_label("n_valid"), self%cnt_valid
+        write(u, '(2x,a,i0)') kde_label("n_null"), self%cnt_null
+        write(u, '(2x,a,i0)') kde_label("n_nan"), self%cnt_nan
+        write(u, '(2x,a,i0)') kde_label("n_outside"), self%cnt_out
+        write(u, '(2x,a,es24.16e3)') kde_label("sum_weights"), self%w_total
+        if (self%has_lower) write(u, '(2x,a,es24.16e3)') kde_label("lower"), self%lo
+        if (self%has_upper) write(u, '(2x,a,es24.16e3)') kde_label("upper"), self%hi
         select case (self%boundary_code)
         case (KDE_BOUNDARY_RENORMALISE)
-            write(u, '(2x,a,a)') "boundary    ", "renormalise"
+            write(u, '(2x,a,a)') kde_label("boundary"), "renormalise"
         case (KDE_BOUNDARY_REFLECT)
-            write(u, '(2x,a,a)') "boundary    ", "reflect"
+            write(u, '(2x,a,a)') kde_label("boundary"), "reflect"
         case default
-            write(u, '(2x,a,a)') "boundary    ", "none (unbounded)"
+            write(u, '(2x,a,a)') kde_label("boundary"), "none (unbounded)"
         end select
         if (self%adapt%on) then
-            write(u, '(2x,a,es24.16e3)') "alpha       ", self%adapt%alpha
-            if (self%adapt%has_bmax) write(u, '(2x,a,es23.16e3)') "bandwidth_max", self%adapt%bmax
-            write(u, '(2x,a,i0,a,es24.16e3,a,es24.16e3)') "pilot       ", self%adapt%nc, " cells over", &
+            write(u, '(2x,a,es24.16e3)') kde_label("alpha"), self%adapt%alpha
+            if (self%adapt%has_bmax) write(u, '(2x,a,es24.16e3)') kde_label("bandwidth_max"), self%adapt%bmax
+            write(u, '(2x,a,i0,a,es24.16e3,a,es24.16e3)') kde_label("pilot"), self%adapt%nc, " cells over", &
                 self%adapt%x0, " to", self%adapt%x1
         end if
         if (self%poisoned) then
             ! A kept NaN, a pilot with no density to read or a bandwidth the adaptive rule could not
             ! represent.
-            write(u, '(2x,a)') "poisoned    every query answers NaN"
-        else if (.not. (self%w_total > 0.0_real64)) then
-            write(u, '(2x,a)') "empty       nothing accumulated; %density answers zeros"
+            write(u, '(2x,a,a)') kde_label("poisoned"), "every query answers NaN"
+        end if
+        if (self%reach_poisoned) write(u, '(2x,a,a)') kde_label("poisoned"), &
+            'a kernel wider than the grid crossed a bound under boundary="linear"'
+        if (.not. grid_poisoned(self)) then
+            if (.not. (total_mass(self) > 0.0_real64)) &
+                write(u, '(2x,a,a)') kde_label("empty"), "nothing accumulated; %density answers zeros"
         end if
 
     end procedure grid_print
@@ -686,6 +757,7 @@ contains
 
         self%acc = 0.0_real64
         self%poisoned = self%adapt%on .and. self%adapt%unreadable
+        self%reach_poisoned = .false.
         self%w_total = 0.0_real64
         self%w_below = 0.0_real64
         self%w_above = 0.0_real64
@@ -1124,6 +1196,18 @@ contains
             return
         end if
 
+        ! ---- under `"linear"`, a corrected point deposits its boundary weights as they are ----
+        ! A point clear of every zone takes the plain path below, so it costs what it costs today.
+        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
+            need_mass = .false.
+            if (self%has_lower) need_mass = xj - reach < self%lo + reach
+            if (self%has_upper) need_mass = need_mass .or. xj + reach > self%hi - reach
+            if (need_mass) then
+                call deposit_linear(self, xj, wj, hj, reach, z, k, acc, below, above)
+                return
+            end if
+        end if
+
         ! ---- the shares: inside the support, below `xmin` and above `xmax` ----
         ! `S(t)`, the images' weight at or below `t`, is formed only where a share can differ
         ! from its plain value, so a kernel wholly inside the range and clear of every bound pays
@@ -1223,6 +1307,77 @@ contains
 
     end subroutine deposit_one
 
+    !> Deposits one point whose linear boundary correction is acting somewhere it reaches: the
+    !! value the exact form would give each cell centre, `w_j (a_2 - a_1 u) K(u)/(D h_j)`, with NO
+    !! per-point normalisation to the in-range share.
+    !!
+    !! A point deposits its linear boundary mass, which is near but not exactly its weight; the
+    !! normalisation is the estimate's, once, at query time (`total_mass`). Cells can go negative,
+    !! and nothing is clipped here. What the kernel puts beyond a FREE edge is counted by the plain
+    !! kernel's mass there, which R1, R2 and R3 keep exact: beyond a free edge the correction is not
+    !! acting.
+    subroutine deposit_linear(self, xj, wj, hj, reach, z, k, acc, below, above)
+        class(pf_kde_grid), intent(in) :: self   !! the grid, read for its geometry
+        real(real64), intent(in)       :: xj     !! the point, inside the support
+        real(real64), intent(in)       :: wj     !! its weight
+        real(real64), intent(in)       :: hj     !! its bandwidth
+        real(real64), intent(in)       :: reach  !! its kernel's reach, `R h_j`
+        real(real64), intent(inout)    :: z(:)   !! work: the offsets of the cells it reaches
+        real(real64), intent(inout)    :: k(:)   !! work: the kernel's value at each
+        real(real64), intent(inout)    :: acc(:) !! the cells to deposit into
+        real(real64), intent(inout)    :: below  !! the weight below `xmin`
+        real(real64), intent(inout)    :: above  !! the weight above `xmax`
+
+        type(kde_lin_factor) :: lf
+        real(real64) :: tl, th, s_below, s_above, rj, c, v
+        integer :: ilo, ihi, n, i, ic
+
+        rj = 1.0_real64/hj
+        s_below = 0.0_real64
+        if (xj - reach < self%x0) then
+            if (.not. self%has_lower .or. self%lo < self%x0) &
+                s_below = kde_kernel_cdf(self%kernel_code, (self%x0 - xj)*rj)
+        end if
+        s_above = 0.0_real64
+        if (xj + reach > self%x1) then
+            if (.not. self%has_upper .or. self%hi > self%x1) &
+                s_above = 1.0_real64 - kde_kernel_cdf(self%kernel_code, (self%x1 - xj)*rj)
+        end if
+        if (s_below > 0.0_real64) below = below + wj*s_below
+        if (s_above > 0.0_real64) above = above + wj*s_above
+
+        ! The cells it reaches, and the corrected kernel at each centre: the moments are the
+        ! centre's own, so a cell inside a zone gets the weight the exact form gives it there.
+        tl = (xj - reach - self%x0)/self%dx + 0.5_real64
+        th = (xj + reach - self%x0)/self%dx + 0.5_real64
+        ilo = 1
+        if (tl > 1.0_real64) ilo = int(ceiling(tl, int64))
+        ihi = self%nc
+        if (th < real(self%nc, real64)) ihi = int(floor(th, int64))
+        n = ihi - ilo + 1
+        if (n > 0) then
+            do i = 1, n
+                z(i) = (centre(self, ilo + i - 1) - xj)/hj
+            end do
+            call kde_kernel_pdf_many(self%kernel_code, z(1:n), k(1:n))
+            do i = 1, n
+                c = centre(self, ilo + i - 1)
+                lf = kde_linear_factor(self%kernel_code, self%has_lower, self%lo, self%has_upper, &
+                    self%hi, c, rj)
+                v = kde_linear_value(lf, z(i), k(i))
+                acc(ilo + i - 1) = acc(ilo + i - 1) + wj*v*rj
+            end do
+            return
+        end if
+        ! Narrower than a cell and between two centres: its in-range share goes whole into the cell
+        ! holding it, as the plain deposit does.
+        ic = 1
+        if (xj > self%x0) ic = int(min(real(self%nc, real64), (xj - self%x0)/self%dx + 1.0_real64))
+        ic = max(1, min(self%nc, ic))
+        acc(ic) = acc(ic) + wj*(1.0_real64 - s_below - s_above)/self%dx
+
+    end subroutine deposit_linear
+
     !> The support's lower end, `-Infinity` when unbounded.
     pure function lower_end(self) result(t)
         class(pf_kde_grid), intent(in) :: self !! the grid
@@ -1259,13 +1414,62 @@ contains
 
     end function cell_value
 
+    !> `.true.` when every query must answer NaN: a kept NaN, a pilot with no density to read, a
+    !! bandwidth the adaptive rule could not represent, or R3's kernel wider than a grid with a free
+    !! edge. Every query reads both flags through this one helper.
+    pure function grid_poisoned(self) result(res)
+        class(pf_kde_grid), intent(in) :: self !! the grid
+        logical                        :: res  !! every query answers NaN
+
+        res = self%poisoned .or. self%reach_poisoned
+
+    end function grid_poisoned
+
+    !> Cell `i`'s accumulation as the queries read it: under `"linear"` the cells can go negative,
+    !! and the clip is applied HERE, at query time, so that a merge of two grids and one grid over
+    !! the concatenation answer the same bits.
+    pure function cell_acc(self, i) result(a)
+        class(pf_kde_grid), intent(in) :: self !! the grid
+        integer, intent(in)            :: i    !! the cell
+        real(real64)                   :: a    !! its accumulation, clipped where the correction needs it
+
+        a = self%acc(i)
+        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
+            if (.not. (a > 0.0_real64)) a = 0.0_real64
+        end if
+
+    end function cell_acc
+
+    !> The mass the queries normalise by: the total weight, and under `"linear"` the CLIPPED
+    !! estimate's own mass, `step * sum(max(acc, 0))` plus what the kernels put beyond each end.
+    !! Formed per call, as the running integral is; a grid whose clipped cells hold nothing answers
+    !! as an empty one.
+    pure function total_mass(self) result(t)
+        class(pf_kde_grid), intent(in) :: self !! the grid
+        real(real64)                   :: t    !! the mass
+
+        integer :: i
+        real(real64) :: s
+
+        if (self%boundary_code /= KDE_BOUNDARY_LINEAR) then
+            t = self%w_total
+            return
+        end if
+        s = 0.0_real64
+        do i = 1, self%nc
+            if (self%acc(i) > 0.0_real64) s = s + self%acc(i)
+        end do
+        t = s*self%dx + self%w_below + self%w_above
+
+    end function total_mass
+
     !> Cell `i`'s density on this grid, which holds weight.
     function cell_density(self, i) result(f)
         class(pf_kde_grid), intent(in) :: self !! the grid, with weight in it
         integer, intent(in)            :: i    !! the cell
         real(real64)                   :: f    !! its density
 
-        f = cell_value(self%acc(i), self%w_total)
+        f = cell_value(cell_acc(self, i), total_mass(self))
 
     end function cell_density
 
@@ -1275,9 +1479,14 @@ contains
         real(real64), intent(in)       :: t    !! where to evaluate
         real(real64)                   :: f    !! the density
 
+        real(real64) :: wt
+
         f = ieee_value(1.0_real64, ieee_quiet_nan)
-        if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
-        f = interp_cells(self%nc, self%x0, self%x1, self%dx, self%acc, self%w_total, t)
+        if (grid_poisoned(self)) return
+        wt = total_mass(self)
+        if (.not. (wt > 0.0_real64)) return
+        f = interp_cells(self%nc, self%x0, self%x1, self%dx, self%acc, wt, t, &
+            self%boundary_code == KDE_BOUNDARY_LINEAR)
 
     end function pdf_value
 
@@ -1285,40 +1494,56 @@ contains
     !! centres, constant over the outer half-cells, zero outside `[x0, x1]`, NaN at a NaN `t`. At
     !! a centre it is `cell_value` itself, the value `%density` answers there. The one
     !! interpolation, for a grid's `%pdf` and for the adaptive rule's look-up of its pilot.
-    function interp_cells(nc, x0, x1, dx, acc, wt, t) result(f)
+    function interp_cells(nc, x0, x1, dx, acc, wt, t, clip) result(f)
         integer, intent(in)      :: nc      !! the number of cells
         real(real64), intent(in) :: x0      !! the first cell's left edge
         real(real64), intent(in) :: x1      !! the last cell's right edge
         real(real64), intent(in) :: dx      !! the cell width
         real(real64), intent(in) :: acc(:)  !! each cell's accumulation
-        real(real64), intent(in) :: wt      !! the total weight, positive
+        real(real64), intent(in) :: wt      !! the mass to divide by, positive
         real(real64), intent(in) :: t       !! where to evaluate
+        logical, intent(in)      :: clip    !! the cells are clipped at zero first (`"linear"`)
         real(real64)             :: f       !! the density
 
         integer :: j
-        real(real64) :: s
+        real(real64) :: s, aj, aj1
 
         f = ieee_value(1.0_real64, ieee_quiet_nan)
         if (t /= t) return
         f = 0.0_real64
         if (t < x0 .or. t > x1) return
         if (t <= centre_at(x0, dx, 1)) then
-            f = cell_value(acc(1), wt)
+            f = cell_value(clipped(acc(1), clip), wt)
             return
         end if
         if (t >= centre_at(x0, dx, nc)) then
-            f = cell_value(acc(nc), wt)
+            f = cell_value(clipped(acc(nc), clip), wt)
             return
         end if
         j = segment_at(nc, x0, dx, t)
         s = (t - centre_at(x0, dx, j))/dx
         if (s == 0.0_real64) then
-            f = cell_value(acc(j), wt)
+            f = cell_value(clipped(acc(j), clip), wt)
             return
         end if
-        f = ((1.0_real64 - s)*acc(j) + s*acc(j + 1))/wt
+        aj = clipped(acc(j), clip)
+        aj1 = clipped(acc(j + 1), clip)
+        f = ((1.0_real64 - s)*aj + s*aj1)/wt
 
     end function interp_cells
+
+    !> A cell's accumulation with the clip applied where the caller asks for it.
+    pure function clipped(a, clip) result(v)
+        real(real64), intent(in) :: a    !! the accumulation
+        logical, intent(in)      :: clip !! apply the clip
+        real(real64)             :: v    !! the value the queries read
+
+        v = a
+        if (clip) then
+            if (.not. (v > 0.0_real64)) v = 0.0_real64
+        end if
+
+    end function clipped
 
     !> The `j` in `1 .. ncells - 1` with `centre(j) <= t < centre(j + 1)`, for a `t` strictly
     !! between the first and the last centre.
@@ -1378,7 +1603,7 @@ contains
         if (a%alpha == 0.0_real64) then
             hj = h
         else
-            p = interp_cells(a%nc, a%x0, a%x1, a%dx, a%acc, a%wt, t)
+            p = interp_cells(a%nc, a%x0, a%x1, a%dx, a%acc, a%wt, t, .false.)
             if (.not. (p > 0.0_real64)) then
                 if (a%has_bmax) then
                     hj = a%bmax
@@ -1409,9 +1634,9 @@ contains
         integer :: i
 
         allocate(q(self%nc))
-        q(1) = 0.5_real64*self%acc(1)*self%dx
+        q(1) = 0.5_real64*cell_acc(self, 1)*self%dx
         do i = 2, self%nc
-            q(i) = q(i - 1) + 0.5_real64*(self%acc(i - 1) + self%acc(i))*self%dx
+            q(i) = q(i - 1) + 0.5_real64*(cell_acc(self, i - 1) + cell_acc(self, i))*self%dx
         end do
 
     end subroutine running_mass
@@ -1425,10 +1650,12 @@ contains
         real(real64)                   :: p    !! the probability at or below `t`
 
         integer :: j
-        real(real64) :: s, a, b, mass
+        real(real64) :: s, a, b, mass, wt
 
         p = ieee_value(1.0_real64, ieee_quiet_nan)
-        if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
+        if (grid_poisoned(self)) return
+        wt = total_mass(self)
+        if (.not. (wt > 0.0_real64)) return
         if (t /= t) return
         if (self%has_lower) then
             p = 0.0_real64
@@ -1441,19 +1668,19 @@ contains
         if (t < self%x0) then
             mass = self%w_below
         else if (t >= self%x1) then
-            mass = self%w_below + q(self%nc) + 0.5_real64*self%acc(self%nc)*self%dx
+            mass = self%w_below + q(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
         else if (t <= centre(self, 1)) then
-            mass = self%w_below + self%acc(1)*(t - self%x0)
+            mass = self%w_below + cell_acc(self, 1)*(t - self%x0)
         else if (t >= centre(self, self%nc)) then
-            mass = self%w_below + q(self%nc) + self%acc(self%nc)*(t - centre(self, self%nc))
+            mass = self%w_below + q(self%nc) + cell_acc(self, self%nc)*(t - centre(self, self%nc))
         else
             j = segment(self, t)
             s = (t - centre(self, j))/self%dx
-            a = self%acc(j)
-            b = self%acc(j + 1)
+            a = cell_acc(self, j)
+            b = cell_acc(self, j + 1)
             mass = self%w_below + q(j) + self%dx*s*(a + 0.5_real64*(b - a)*s)
         end if
-        p = mass/self%w_total
+        p = mass/wt
         if (p < 0.0_real64) p = 0.0_real64
         if (p > 1.0_real64) p = 1.0_real64
 
@@ -1469,12 +1696,14 @@ contains
         real(real64), intent(in)       :: p    !! the probability, in `[0, 1]`
         real(real64)                   :: x    !! the quantile
 
-        real(real64) :: target, total
+        real(real64) :: target, total, wt
 
         x = ieee_value(1.0_real64, ieee_quiet_nan)
-        if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
-        total = q(self%nc) + 0.5_real64*self%acc(self%nc)*self%dx
-        target = p*self%w_total - self%w_below
+        if (grid_poisoned(self)) return
+        wt = total_mass(self)
+        if (.not. (wt > 0.0_real64)) return
+        total = q(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
+        target = p*wt - self%w_below
         if (p <= 0.0_real64 .or. target <= 0.0_real64) then
             x = self%x0
             if (.not. (self%w_below > 0.0_real64)) x = left_end(self)
@@ -1504,12 +1733,12 @@ contains
 
         if (target <= q(1)) then
             ! The first half-cell, where the density is the constant `acc(1)`, positive here.
-            x = min(self%x0 + target/self%acc(1), centre(self, 1))
+            x = min(self%x0 + target/cell_acc(self, 1), centre(self, 1))
             return
         end if
         if (target > q(self%nc)) then
             ! The last half-cell, where the density is the constant `acc(ncells)`, positive here.
-            x = min(centre(self, self%nc) + (target - q(self%nc))/self%acc(self%nc), self%x1)
+            x = min(centre(self, self%nc) + (target - q(self%nc))/cell_acc(self, self%nc), self%x1)
             return
         end if
         ! The first segment whose end reaches the target: `q(j) < target <= q(j + 1)`.
@@ -1527,8 +1756,8 @@ contains
         ! `step*(a*s + (b - a)*s**2/2) = d` solved in its rationalised form, which needs no case
         ! for `a == b` and cannot cancel: `s = 2*d' / (a + sqrt(a**2 + 2*(b - a)*d'))`, `d' = d/step`.
         d = (target - q(j))/self%dx
-        a = self%acc(j)
-        b = self%acc(j + 1)
+        a = cell_acc(self, j)
+        b = cell_acc(self, j + 1)
         s = 2.0_real64*d/(a + sqrt(max(a*a + 2.0_real64*(b - a)*d, 0.0_real64)))
         s = max(0.0_real64, min(1.0_real64, s))
         x = centre(self, j) + s*self%dx
@@ -1555,9 +1784,10 @@ contains
         n = size(v, kind=int64)
         call kde_query_team(EP, threads, n, KDE_DRAW_WORK, team)
         v = ieee_value(1.0_real64, ieee_quiet_nan)
-        if (self%poisoned .or. .not. (self%w_total > 0.0_real64)) return
+        if (grid_poisoned(self)) return
+        if (.not. (total_mass(self) > 0.0_real64)) return
         call running_mass(self, q)
-        total = q(self%nc) + 0.5_real64*self%acc(self%nc)*self%dx
+        total = q(self%nc) + 0.5_real64*cell_acc(self, self%nc)*self%dx
         ! Weight counted only beyond the range has no place in it to be drawn at.
         if (.not. (total > 0.0_real64)) return
         key = pf_random_key(seed, KDE_GRID_FAMILY_LABEL)
@@ -1613,7 +1843,7 @@ contains
 
         x = self%x1
         do i = 1, self%nc
-            if (self%acc(i) > 0.0_real64) then
+            if (cell_acc(self, i) > 0.0_real64) then
                 x = self%x0
                 if (i > 1) x = centre(self, i - 1)
                 return
@@ -1632,7 +1862,7 @@ contains
 
         x = self%x0
         do i = self%nc, 1, -1
-            if (self%acc(i) > 0.0_real64) then
+            if (cell_acc(self, i) > 0.0_real64) then
                 x = self%x1
                 if (i < self%nc) x = centre(self, i + 1)
                 return

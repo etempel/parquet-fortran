@@ -330,4 +330,112 @@ module test_kde_golden
     real(real64), parameter :: KG_ISJ_NO_ROOT_CDF(NKX) = [0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64,  &
         0.0_real64, 0.0_real64, 0.0_real64, 0.0_real64]
 
+    !> the linear boundary kernel at a lower bound, Gaussian, h = 60
+    logical, parameter :: KG_LIN_LO_DEF = .true.
+    real(real64), parameter :: KG_LIN_LO_H = 60.0_real64
+    real(real64), parameter :: KG_LIN_LO_PDF(NKX) = [0.0_real64, 0.00217115513796063_real64, 0.0015257161719168268_real64,  &
+        0.00064639980261425932_real64, 0.0008447253115332321_real64, 0.00095367804579788405_real64,  &
+        0.00077728179292040609_real64, 0.00050767890247135395_real64, 0.00046629317024827165_real64]
+    real(real64), parameter :: KG_LIN_LO_CDF(NKX) = [0.0_real64, 0.0088683600258894317_real64, 0.28439499584295358_real64,  &
+        0.52603628335668484_real64, 0.56946568158515298_real64, 0.58520077273490123_real64, 0.8055051589624187_real64,  &
+        0.96764662366777798_real64, 0.97325270897770422_real64]
+
+    !> the linear kernel at an upper bound, box, h = 60: a kernel whose value jumps at its own edges and whose moments kink at the
+    !! correction edge
+    logical, parameter :: KG_LIN_HI_BOX_DEF = .true.
+    real(real64), parameter :: KG_LIN_HI_BOX_H = 60.0_real64
+    real(real64), parameter :: KG_LIN_HI_BOX_PDF(NKX) = [0.00044450120964712624_real64, 0.00074083534941187705_real64,  &
+        0.0013335036289413788_real64, 0.00074083534941187705_real64, 0.00088900241929425249_real64,  &
+        0.00088900241929425249_real64, 0.00088900241929425249_real64, 0.0016990634024326831_real64, 0.0_real64]
+    real(real64), parameter :: KG_LIN_HI_BOX_CDF(NKX) = [0.020619329503313272_real64, 0.048803976756426504_real64,  &
+        0.2722832424513662_real64, 0.51479283287574862_real64, 0.56481021690564548_real64, 0.57902606637902776_real64,  &
+        0.7979803039719835_real64, 0.99743414175468792_real64, 1.0_real64]
+
+    !> the linear kernel at both bounds, Epanechnikov, h = 60
+    logical, parameter :: KG_LIN_BOTH_DEF = .true.
+    real(real64), parameter :: KG_LIN_BOTH_H = 60.0_real64
+    real(real64), parameter :: KG_LIN_BOTH_PDF(NKX) = [0.0_real64, 0.0020504105947631111_real64, 0.0014537141942919402_real64,  &
+        0.00066058927630868963_real64, 0.00083901807059563868_real64, 0.00090094608104915731_real64,  &
+        0.00082023727819109866_real64, 0.0017690025763010782_real64, 0.0_real64]
+    real(real64), parameter :: KG_LIN_BOTH_CDF(NKX) = [0.0_real64, 0.0084565847828891698_real64, 0.27924213668590281_real64,  &
+        0.51941299791247408_real64, 0.56634186386435315_real64, 0.58154246253686837_real64, 0.80009443148623927_real64,  &
+        0.99730256298730202_real64, 1.0_real64]
+
+    !> the linear kernel at a lower bound, cubic B-spline, h = 60: its kernel's knots and its moments' knots both fall inside the
+    !! zone
+    logical, parameter :: KG_LIN_BSPL_DEF = .true.
+    real(real64), parameter :: KG_LIN_BSPL_H = 60.0_real64
+    real(real64), parameter :: KG_LIN_BSPL_PDF(NKX) = [0.0_real64, 0.0021661397194411994_real64, 0.0015080311311130344_real64,  &
+        0.00066518739042232557_real64, 0.0008490444171906043_real64, 0.00094854159395056452_real64,  &
+        0.00078373972427372139_real64, 0.00049604446115483888_real64, 0.00045355244587898274_real64]
+    real(real64), parameter :: KG_LIN_BSPL_CDF(NKX) = [0.0_real64, 0.0088553238209571859_real64, 0.28396665753480882_real64,  &
+        0.52576647058850923_real64, 0.57008418288117679_real64, 0.58581324314467087_real64, 0.80621250633695352_real64,  &
+        0.96775514659353379_real64, 0.97321839144410582_real64]
+
+    !> the linear kernel at h = 400 on [-470, 460]: the two zones meet, so every moment is two-sided and no part of the support is
+    !! the plain sum
+    logical, parameter :: KG_LIN_WIDE_DEF = .true.
+    real(real64), parameter :: KG_LIN_WIDE_H = 400.0_real64
+    real(real64), parameter :: KG_LIN_WIDE_PDF(NKX) = [0.0_real64, 0.0015885560826197653_real64, 0.0013261883025753854_real64,  &
+        0.0010551103398812242_real64, 0.0010038701010049395_real64, 0.00099051062374911204_real64,  &
+        0.00086414235908504201_real64, 0.00082829655193380515_real64, 0.0_real64]
+    real(real64), parameter :: KG_LIN_WIDE_CDF(NKX) = [0.0_real64, 0.0063684668304980017_real64, 0.24740129702829347_real64,  &
+        0.52931862672831542_real64, 0.59233896141813902_real64, 0.60978897451345782_real64, 0.82358699283823167_real64,  &
+        0.99875754905699055_real64, 1.0_real64]
+
+    !> the linear kernel under weights mod 5, reliability, at a lower bound
+    logical, parameter :: KG_LIN_W_DEF = .true.
+    real(real64), parameter :: KG_LIN_W_H = 60.0_real64
+    real(real64), parameter :: KG_LIN_W_PDF(NKX) = [0.0_real64, 0.0014244223277884492_real64, 0.0013415215813542527_real64,  &
+        0.00067440388195386352_real64, 0.0011261597115659651_real64, 0.0013428030948799332_real64,  &
+        0.00063302940700476627_real64, 0.00025291470726250656_real64, 0.00020854323330675182_real64]
+    real(real64), parameter :: KG_LIN_W_CDF(NKX) = [0.0_real64, 0.0057226223642557307_real64, 0.2481927661528357_real64,  &
+        0.46870053738319045_real64, 0.52032400504537946_real64, 0.54192104897783633_real64, 0.86204074729521996_real64,  &
+        0.98772714149587548_real64, 0.99037430415880512_real64]
+
+    !> the linear kernel where the clip acts at a probe: the two-component recipe under a lower bound at -470, more than two
+    !! bandwidths below its nearest point, so the raw estimate is negative at the probe -466 and the clipped one is exactly zero
+    !! there
+    logical, parameter :: KG_LIN_ZERO_DEF = .true.
+    real(real64), parameter :: KG_LIN_ZERO_H = 60.0_real64
+    real(real64), parameter :: KG_LIN_ZERO_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0044282391829142233_real64,  &
+        3.8274852270353798e-06_real64, 4.2812735414850598e-06_real64, 9.9336369322400599e-06_real64,  &
+        0.0011457637303930459_real64, 0.00042742041860258708_real64, 0.00034196408865721654_real64]
+    real(real64), parameter :: KG_LIN_ZERO_CDF(NKX) = [0.0_real64, 0.0_real64, 0.28254026838515484_real64,  &
+        0.65410340190434246_real64, 0.65423445317037976_real64, 0.65435254296166789_real64, 0.76416529025993329_real64,  &
+        0.98305208667059962_real64, 0.98746743697775996_real64]
+
+    !> both bounds a thousandth of a bandwidth apart (h = 9.3e5 on [-470, 460]), Gaussian: where the library forms the moments
+    !! centred on the interval's midpoint and this oracle takes the plain differences at fifty digits
+    logical, parameter :: KG_LIN_NARROW3_DEF = .true.
+    real(real64), parameter :: KG_LIN_NARROW3_H = 930000.0_real64
+    real(real64), parameter :: KG_LIN_NARROW3_PDF(NKX) = [0.0_real64, 0.0014631429275618942_real64,  &
+        0.0013234745762466026_real64, 0.0011225961706461511_real64, 0.0010710619240575873_real64, 0.0010563378539084265_real64,  &
+        0.00086071807763576848_real64, 0.00068529133085729543_real64, 0.0_real64]
+    real(real64), parameter :: KG_LIN_NARROW3_CDF(NKX) = [0.0_real64, 0.0058593027154285899_real64, 0.23714855536296486_real64,  &
+        0.52914825027177281_real64, 0.59632902941360699_real64, 0.61494377747061213_real64, 0.83780152904947414_real64,  &
+        0.99897300955085677_real64, 1.0_real64]
+
+    !> the adaptive kernel under the linear correction: the two-component recipe at a lower bound, alpha = 0.5, each point
+    !! corrected at ITS OWN bandwidth and the pilot the clipped linear estimate
+    logical, parameter :: KG_ADAPT_LIN_DEF = .true.
+    real(real64), parameter :: KG_ADAPT_LIN_H = 60.0_real64
+    real(real64), parameter :: KG_ADAPT_LIN_PDF(NKX) = [0.0_real64, 0.0_real64, 0.0061802404363307849_real64,  &
+        9.039997656138826e-06_real64, 4.1669372637916282e-05_real64, 6.0615572348971496e-05_real64,  &
+        0.0010589499970346508_real64, 0.00042562772928867181_real64, 0.0003639647804346983_real64]
+    real(real64), parameter :: KG_ADAPT_LIN_CDF(NKX) = [0.0_real64, 0.0_real64, 0.29385521582712942_real64,  &
+        0.66550120986754502_real64, 0.66684516410733297_real64, 0.6677318247454509_real64, 0.77294027337314009_real64,  &
+        0.97457356991418576_real64, 0.97910803725184281_real64]
+
+    !> both bounds a millionth of a bandwidth apart (h = 9.3e8), Epanechnikov: the estimate is the uniform density on the support
+    !! to twelve digits
+    logical, parameter :: KG_LIN_NARROW6_DEF = .true.
+    real(real64), parameter :: KG_LIN_NARROW6_H = 930000000.0_real64
+    real(real64), parameter :: KG_LIN_NARROW6_PDF(NKX) = [0.0_real64, 0.0014631429010962531_real64,  &
+        0.0013234745758770186_real64, 0.0011225961864427367_real64, 0.0010710619399386554_real64, 0.0010563378695089181_real64,  &
+        0.00086071807665669825_real64, 0.0006852912946795545_real64, 0.0_real64]
+    real(real64), parameter :: KG_LIN_NARROW6_CDF(NKX) = [0.0_real64, 0.0058593026080100358_real64, 0.23714855319679151_real64,  &
+        0.52914825044871205_real64, 0.59632903056914222_real64, 0.61494377890180851_real64, 0.83780153264356116_real64,  &
+        0.99897300960536539_real64, 1.0_real64]
+
 end module test_kde_golden ! GCOVR_EXCL_LINE

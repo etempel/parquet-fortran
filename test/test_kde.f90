@@ -50,7 +50,7 @@ module test_kde
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use parquet_kde
     use parquet_stats, only : pf_stddev, pf_iqr, pf_count_valid
-    use parquet_integrate, only : pf_integrand, pf_integrate
+    use parquet_integrate, only : pf_integrand, pf_integrate, pf_integration_info
     use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
     use parquet_columns, only : parquet_column, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64
     use test_kde_golden
@@ -84,6 +84,14 @@ module test_kde
     contains
         procedure :: eval => kde_density_eval !! `x**power` times the density at `x`
     end type kde_density
+
+    !> The squared error of a bounded estimate against the density `2x` on `[0, 1]`, for
+    !> `pf_integrate`: what the boundary corrections are compared by over a zone.
+    type, extends(pf_integrand) :: kde_sq_error
+        type(pf_kde) :: k !! the fitted estimate
+    contains
+        procedure :: eval => kde_sq_error_eval !! the squared error at `x`
+    end type kde_sq_error
 
     !> A grid's interpolated density as a function, `x**power * f(x)`, for `pf_integrate`.
     type, extends(pf_integrand) :: grid_density
@@ -140,6 +148,21 @@ contains
             new_unittest("the tokens and the accessors report the fit", test_tokens_and_accessors), &
             new_unittest("a refit replaces everything and %clear unfits", test_refit_and_clear), &
             new_unittest("%print writes the summary and says when there is none", test_print_writes), &
+            new_unittest("the linear correction reproduces the golden vectors", test_linear_golden_vectors), &
+            new_unittest("the grid counts weight beyond a free edge under linear", &
+                test_grid_linear_free_edge), &
+            new_unittest("an adaptive point wider than the grid poisons it under linear", &
+                test_grid_linear_reach_poisons), &
+            new_unittest("the pilot of a linear fit keeps R2", test_pilot_linear_keeps_r2), &
+            new_unittest("the linear estimate is never negative", test_linear_never_negative), &
+            new_unittest("at a rising bound the linear correction is closer than both simple ones", &
+                test_linear_beats_the_simple_corrections), &
+            new_unittest("%cdf is continuous across the zone edges and integrates %pdf", &
+                test_linear_cdf_across_zones), &
+            new_unittest("the scan finds a stretch between two close kernel edges", &
+                test_linear_scan_refinement), &
+            new_unittest("tied values and coinciding knots abort nothing", &
+                test_linear_tied_values_and_knots), &
             new_unittest("the guide's rising-density table is what the estimator answers", &
                 test_guide_boundary_table), &
             new_unittest("the grid converges to the exact estimate as step**2", test_grid_converges), &
@@ -197,6 +220,8 @@ contains
             new_unittest("parquet_debug_set_kde_pilot_cells forces the pilot's cells", &
                 test_pilot_cells_forced), &
             new_unittest("isj reproduces the golden vectors at 1024 cells", test_isj_golden), &
+            new_unittest("the zone sampler's fallback inverts the zone's integral", &
+                test_zone_sampler_fallback), &
             new_unittest("parquet_debug_set_kde_isj_cells sets the rule's grid, which moves it by under 1%", &
                 test_isj_cells_forced) &
             ]
@@ -283,6 +308,57 @@ contains
 
     end function kde_density_eval
 
+    !> The squared error against `2x` at `x`.
+    function kde_sq_error_eval(this, x) result(f)
+        class(kde_sq_error), intent(inout) :: this !! the estimate as a function
+        real(real64), intent(in)           :: x    !! where to evaluate
+        real(real64)                       :: f    !! the squared error
+
+        call this%k%pdf(x, f)
+        f = (f - 2.0_real64*x)**2
+
+    end function kde_sq_error_eval
+
+    !> Two hundred quantiles of the density `2x` on `[0, 1]`, `sqrt((i - 1/2)/n)`: the guide's
+    !> example, whose density vanishes at the lower bound, so that the raw linear estimate is
+    !> negative there and the clip has something to remove.
+    subroutine kde_rising(n, x)
+        integer, intent(in)       :: n    !! how many points
+        real(real64), intent(out) :: x(:) !! the quantiles
+        integer :: i
+
+        do i = 1, n
+            x(i) = sqrt((real(i, real64) - 0.5_real64)/real(n, real64))
+        end do
+
+    end subroutine kde_rising
+
+    !> The quantiles of `Exp(1)`, `-log(1 - (i - 1/2)/n)`: a density that is LARGE at its bound, so
+    !> that most of its mass -- and so most of a sample's draws -- lies inside the boundary zone.
+    subroutine kde_exponential(n, x)
+        integer, intent(in)       :: n    !! how many points
+        real(real64), intent(out) :: x(:) !! the quantiles
+        integer :: i
+
+        do i = 1, n
+            x(i) = -log(1.0_real64 - (real(i, real64) - 0.5_real64)/real(n, real64))
+        end do
+
+    end subroutine kde_exponential
+
+    !> The quantiles of the density `3(1 - x)**2` on `[0, 1]`, `1 - (1 - u)**(1/3)`: the mirror of
+    !> `kde_rising`, vanishing at the UPPER bound.
+    subroutine kde_falling(n, x)
+        integer, intent(in)       :: n    !! how many points
+        real(real64), intent(out) :: x(:) !! the quantiles
+        integer :: i
+
+        do i = 1, n
+            x(i) = 1.0_real64 - (1.0_real64 - (real(i, real64) - 0.5_real64)/real(n, real64))**(1.0_real64/3.0_real64)
+        end do
+
+    end subroutine kde_falling
+
     !> `x**power` times the grid's interpolated density at `x`.
     function grid_density_eval(this, x) result(f)
         class(grid_density), intent(inout) :: this !! the grid as a function
@@ -361,6 +437,7 @@ contains
         if (name == "ONE_H" .or. name == "ONE_RULE") n = 1_int64
         if (name(1:min(5, len(name))) == "ADAPT") n = 60_int64
         if (name(1:min(3, len(name))) == "ISJ" .and. name /= "ISJ_NO_ROOT") n = 60_int64
+        if (name == "LIN_ZERO") n = 60_int64
         if (n == 60_int64) then
             call kde_two_component(n, x)
         else
@@ -434,6 +511,32 @@ contains
             call k%fit(x, rule="isj", ok=ok)
         case ("ISJ_NO_ROOT")
             call k%fit(x, rule="isj", ok=ok)
+        case ("LIN_LO")
+            call k%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, boundary="linear", ok=ok)
+        case ("LIN_HI_BOX")
+            call k%fit(x, bandwidth=60.0_real64, kernel="box", upper=460.0_real64, boundary="linear", ok=ok)
+        case ("LIN_BOTH")
+            call k%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", lower=-470.0_real64, &
+                upper=460.0_real64, boundary="linear", ok=ok)
+        case ("LIN_BSPL")
+            call k%fit(x, bandwidth=60.0_real64, kernel="bspline", lower=-470.0_real64, &
+                boundary="linear", ok=ok)
+        case ("LIN_WIDE")
+            call k%fit(x, bandwidth=400.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+                boundary="linear", ok=ok)
+        case ("LIN_W")
+            call k%fit(x, bandwidth=60.0_real64, weights=w, lower=-470.0_real64, boundary="linear", ok=ok)
+        case ("LIN_ZERO")
+            call k%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, boundary="linear", ok=ok)
+        case ("ADAPT_LIN")
+            call k%fit(x, bandwidth=60.0_real64, adaptive=.true., lower=-470.0_real64, &
+                boundary="linear", ok=ok)
+        case ("LIN_NARROW3")
+            call k%fit(x, bandwidth=930000.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+                boundary="linear", ok=ok)
+        case ("LIN_NARROW6")
+            call k%fit(x, bandwidth=930000000.0_real64, kernel="epanechnikov", lower=-470.0_real64, &
+                upper=460.0_real64, boundary="linear", ok=ok)
         case default
             error stop "fit_golden_case: unknown case " // name
         end select
@@ -1159,7 +1262,7 @@ contains
         type(kde_density) :: fn
         real(real64), allocatable :: x(:), cuts(:)
         real(real64) :: mass, c_lo, c_hi, a, b, h, lo, hi
-        character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        character(len=11), parameter :: METHODS(3) = [character(len=11) :: "renormalise", "reflect", "linear"]
         integer :: kk, mm, side
         character(len=120) :: what
 
@@ -1170,7 +1273,7 @@ contains
         do kk = 1, 4
             ! Wide enough that every kernel reaches past the far bound from anywhere inside.
             h = 3.0_real64/RADIUS(kk)*2.0_real64
-            do mm = 1, 2
+            do mm = 1, 3
                 do side = 1, 3
                     select case (side)
                     case (1)
@@ -1190,15 +1293,16 @@ contains
                         b = hi
                     end select
                     write(what, '(a,1x,a,a,i0)') trim(KERNELS(kk)), trim(METHODS(mm)), " side ", side
-                    call kinks(fn%k, x, h*RADIUS(kk), a, b, side, cuts)
+                    call kinks(fn%k, x, h*RADIUS(kk), a, b, side, mm == 3, cuts)
                     fn%power = 0
                     if (size(cuts) > 0) then
                         mass = pf_integrate(fn, a, b, 1.0e-12_real64, breakpoints=cuts)
                     else
                         mass = pf_integrate(fn, a, b, 1.0e-12_real64)
                     end if
-                    call check(error, abs(mass - 1.0_real64) <= 1.0e-10_real64, &
-                        trim(what) // ": the density must integrate to one over the support")
+                    write(what, '(a,1x,a,a,i0,a,es22.15)') trim(KERNELS(kk)), trim(METHODS(mm)), " side ", &
+                        side, ": the density's integral over the support is ", mass
+                    call check(error, abs(mass - 1.0_real64) <= 1.0e-10_real64, trim(what))
                     if (allocated(error)) return
                     call fn%k%cdf(a + 1.0e-12_real64, c_lo)
                     call fn%k%cdf(b - 1.0e-12_real64, c_hi)
@@ -1213,13 +1317,14 @@ contains
 
         !> Every point inside `(a, b)` where some image's kernel starts or stops: the integrand's
         !> jumps (the box) and kinks, which `pf_integrate` is told about rather than left to find.
-        subroutine kinks(k, xs, reach, a, b, side, cuts)
+        subroutine kinks(k, xs, reach, a, b, side, linear, cuts)
             type(pf_kde), intent(in)               :: k       !! the estimate (unused; its settings)
             real(real64), intent(in)               :: xs(:)   !! the sample
             real(real64), intent(in)               :: reach   !! the support radius times `h`
             real(real64), intent(in)               :: a       !! the range's lower end
             real(real64), intent(in)               :: b       !! the range's upper end
             integer, intent(in)                    :: side    !! which bounds are set
+            logical, intent(in)                    :: linear  !! the linear correction, whose edges differ
             real(real64), allocatable, intent(out) :: cuts(:) !! sorted, distinct, inside
             real(real64), allocatable :: c(:)
             real(real64) :: v, t
@@ -1227,6 +1332,12 @@ contains
 
             if (.not. k%is_fitted()) return
             allocate(c(0))
+            ! Under `"linear"` there are no images, and the correction's own edges -- where a point
+            ! stops being corrected -- are where the density kinks instead.
+            if (linear) then
+                if (side /= 2) c = [c, lo + reach]
+                if (side /= 1) c = [c, hi - reach]
+            end if
             do i = 1, size(xs)
                 do j = 1, 3
                     select case (j)
@@ -1237,8 +1348,8 @@ contains
                     case default
                         v = 2.0_real64*hi - xs(i)
                     end select
-                    if (j == 2 .and. side == 2) cycle
-                    if (j == 3 .and. side == 1) cycle
+                    if (j == 2 .and. (side == 2 .or. linear)) cycle
+                    if (j == 3 .and. (side == 1 .or. linear)) cycle
                     ! The support's ends, and the B-spline's inner knots halfway out.
                     c = [c, v - reach, v + reach, v - 0.5_real64*reach, v + 0.5_real64*reach]
                 end do
@@ -1299,15 +1410,18 @@ contains
     end subroutine test_outside_excluded
 
     !> `%cdf(%quantile(p)) == p` at seven probabilities, unbounded and bounded, for every kernel;
-    !> the two ends of the support at `p = 0` and `p = 1`.
+    !> the two ends of the support at `p = 0` and `p = 1`. The adaptive arm: the ends are each
+    !> point's own reach, the smallest `x_j - R h_j` and the largest `x_j + R h_j`, not the widest
+    !> kernel's reach from the extreme points.
     subroutine test_quantile_inverts_cdf(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k
-        real(real64), allocatable :: x(:)
+        real(real64), allocatable :: x(:), hb(:), xs(:)
         real(real64), parameter :: PS(7) = [0.001_real64, 0.05_real64, 0.25_real64, 0.5_real64, &
             0.75_real64, 0.95_real64, 0.999_real64]
-        real(real64) :: q(7), c(7), q0, q1, lo_end, hi_end
-        integer :: kk, bounded
+        real(real64) :: q(7), c(7), q0, q1, lo_end, hi_end, c0, c1
+        character(len=120) :: what
+        integer :: kk, bounded, jmin
 
         call kde_fixture(50_int64, x)
         do kk = 1, 4
@@ -1346,6 +1460,60 @@ contains
                 if (allocated(error)) return
             end do
         end do
+
+        ! The adaptive arm. The two-component recipe's first point sits in the narrow cluster, whose
+        ! kernels are the narrowest, so the widest kernel's reach from it, `x(1) - R hmax`, lies well
+        ! below where the density starts; the precondition says so, and a fixture that stopped
+        ! discriminating fails it rather than passing. The ends are re-derived from `%bandwidths`,
+        ! to a few ulp for the reason the unbounded arm above gives.
+        call kde_two_component(60_int64, x)
+        call k%fit(x, rule="silverman", adaptive=.true.)
+        allocate(hb(60), xs(60))
+        call k%bandwidths(hb, xs)
+        call check(error, hb(1) < maxval(hb), &
+            "precondition: the first point's kernel must not be the widest, or the arm cannot tell F3's ends")
+        if (allocated(error)) return
+        jmin = minloc(xs - RADIUS(1)*hb, dim=1)
+        lo_end = xs(jmin) - RADIUS(1)*hb(jmin)
+        hi_end = maxval(xs + RADIUS(1)*hb)
+        call k%quantile(0.0_real64, q0)
+        call k%quantile(1.0_real64, q1)
+        call check(error, abs(q0 - lo_end) <= 4.0_real64*spacing(abs(lo_end)) .and. &
+            abs(q1 - hi_end) <= 4.0_real64*spacing(abs(hi_end)), &
+            "adaptive: p = 0 and 1 must be the smallest x_j - R h_j and the largest x_j + R h_j")
+        if (allocated(error)) return
+        call check(error, q0 > xs(1) - RADIUS(1)*maxval(hb), &
+            "adaptive: p = 0 must lie above the widest kernel's reach from the first point")
+        if (allocated(error)) return
+        ! Where the density starts: `%cdf` is zero there, to the rounding of one kernel's offset, and
+        ! positive one bandwidth of that kernel inside it.
+        call k%cdf(q0, c0)
+        call k%cdf(q0 + hb(jmin), c1)
+        call check(error, c0 <= 1.0e-15_real64 .and. c1 > 0.0_real64, &
+            "adaptive: %cdf must be zero at p = 0's answer and positive one bandwidth inside it")
+        if (allocated(error)) return
+
+        ! Under `"linear"` on the rising fixture the clip removes a stretch that starts at the
+        ! bound, so `%quantile(0)` is not the bound but the crossing where that stretch ends: the
+        ! density is zero below it and positive above it, and `%cdf` is zero at it.
+        deallocate(x)
+        allocate(x(200))
+        call kde_rising(200, x)
+        call k%fit(x, rule="silverman", lower=0.0_real64, boundary="linear")
+        call k%quantile(0.0_real64, q0)
+        write(what, '(a,es22.15)') "linear: p = 0 must answer a crossing above the bound, not ", q0
+        call check(error, q0 > 0.0_real64, trim(what))
+        if (allocated(error)) return
+        ! The clip removes everything below that crossing and nothing above it.
+        call k%pdf(q0 - 0.05_real64*k%bandwidth(), c0)
+        call k%pdf(q0 + 0.05_real64*k%bandwidth(), c1)
+        write(what, '(a,es12.5,a,es12.5)') "linear: %pdf below the crossing is ", c0, " and above it ", c1
+        call check(error, c0 == 0.0_real64 .and. c1 > 0.0_real64, trim(what))
+        if (allocated(error)) return
+        call k%cdf(q0, c0)
+        call k%quantile(1.0e-6_real64, q1)
+        write(what, '(a,es12.5,a,es22.15)') "linear: %cdf at the crossing is ", c0, " and the 1e-6 quantile ", q1
+        call check(error, c0 == 0.0_real64 .and. q1 > q0, trim(what))
 
     end subroutine test_quantile_inverts_cdf
 
@@ -1409,10 +1577,17 @@ contains
         real(real64), allocatable :: x(:)
         real(real64) :: f(NKX), c(NKX), q(3), v
         real(real64), parameter :: PS(3) = [0.1_real64, 0.5_real64, 0.9_real64]
-        integer :: i
+        integer :: i, arm
 
         call kde_fixture(32_int64, x)
-        call k%fit(x, bandwidth=50.0_real64, kernel="bspline", lower=-470.0_real64, boundary="reflect")
+        do arm = 1, 2
+        if (arm == 1) then
+            call k%fit(x, bandwidth=50.0_real64, kernel="bspline", lower=-470.0_real64, boundary="reflect")
+        else
+            ! Under `"linear"` each element of a bulk `%cdf` or `%quantile` integrates its own
+            ! window, so the two forms agreeing to the bit is what says an element is answered alone.
+            call k%fit(x, bandwidth=50.0_real64, kernel="bspline", lower=-470.0_real64, boundary="linear")
+        end if
         call k%pdf(KG_X, f)
         call k%cdf(KG_X, c)
         call k%quantile(PS, q)
@@ -1428,6 +1603,7 @@ contains
             call k%quantile(PS(i), v)
             call check(error, v == q(i), "%quantile's array form must equal its scalar form")
             if (allocated(error)) return
+        end do
         end do
 
     end subroutine test_array_forms_match_scalar
@@ -1499,6 +1675,23 @@ contains
         ! the text, so that a reworded label is not a failure while a dropped row is.
         call check(error, nlines == 11 .and. seen, "%print must write a heading and ten rows")
         if (allocated(error)) return
+        ! Under the other corrections there is no quadrature to report, and no row for one.
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call k%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "quadrature", seen)
+        call check(error, .not. seen, "%print must not write a quadrature row under renormalise")
+        if (allocated(error)) return
+        ! Under `"linear"` it reports what the fit's own integrals came to, which is `converged` on
+        ! every fixture here.
+        call k%fit(x, rule="silverman", lower=-480.0_real64, boundary="linear")
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call k%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "quadrature   converged", seen)
+        call check(error, nlines == 12 .and. seen, &
+            "%print under linear must write the quadrature row, saying converged")
+        if (allocated(error)) return
         open(newunit=u, file=PATH, status="replace", action="write")
         call empty%print(unit=u)
         close(u)
@@ -1506,6 +1699,451 @@ contains
         call check(error, nlines == 1 .and. seen, "an unfitted object must print one line saying so")
 
     end subroutine test_print_writes
+
+    !> The zone sampler's fallback draws from the same distribution as its rejection.
+    !>
+    !> `parquet_debug_set_kde_sample_tries(0)` sends every draw straight to its fallback -- in a zone
+    !> the inversion of the zone's own integral -- and those draws must still follow `%cdf` there:
+    !> their empirical distribution function stays within the Kolmogorov-Smirnov critical distance
+    !> at the 0.1 per cent level. The negative control is the same sample drawn first with the hook
+    !> clear, which takes the rejection and differs from it in its bits; and the hook restored with
+    !> a negative `n` reproduces that control exactly, which is what says the restore works.
+    subroutine test_zone_sampler_fallback(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer, parameter :: N = 1000
+        type(pf_kde) :: k
+        real(real64) :: xe(40), v_rej(N), v_inv(N), v_back(N), zlo, dks
+        character(len=200) :: msg
+        integer :: nzone
+
+        call kde_exponential(40, xe)
+        call k%fit(xe, rule="silverman", lower=0.0_real64, boundary="linear")
+        zlo = RADIUS(1)*k%bandwidth()
+        call k%sample(v_rej, 41_int64)
+        call parquet_debug_set_kde_sample_tries(0)
+        call k%sample(v_inv, 41_int64)
+        call parquet_debug_set_kde_sample_tries(-1)
+        call k%sample(v_back, 41_int64)
+        call check(error, any(v_inv /= v_rej), &
+            "with no attempt allowed the draws must be the fallback's, not the rejection's")
+        if (allocated(error)) return
+        call check(error, all(v_back == v_rej), &
+            "a negative n must restore the default, and the draws with it")
+        if (allocated(error)) return
+        call check(error, minval(v_inv) >= 0.0_real64, "no fallback draw may leave the support")
+        if (allocated(error)) return
+        call zone_ks_distance(k, v_inv, zlo, dks, nzone)
+        write(msg, '(a,i0,a,es12.5,a,es12.5)') "the fallback's ", nzone, " zone draws: KS distance ", dks, &
+            " against the critical ", 1.949_real64/sqrt(real(nzone, real64))
+        call check(error, nzone >= 200 .and. dks <= 1.949_real64/sqrt(real(nzone, real64)), trim(msg))
+
+    end subroutine test_zone_sampler_fallback
+
+    !> The grid counts the weight beyond a FREE edge by the plain kernel's mass there, which R2
+    !> keeps exact: beyond an edge a reach from the bound the correction is no longer acting. On a
+    !> grid over `[0, 2]` with `lower = 0`, over data reaching far beyond it, `%cdf` at the top edge
+    !> is the exact form's answer there to the grid's own discretisation.
+    subroutine test_grid_linear_free_edge(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64) :: xe(200), p_exact, p_grid, step
+        character(len=200) :: msg
+
+        call kde_exponential(200, xe)
+        call k%fit(xe, bandwidth=0.3_real64, lower=0.0_real64, boundary="linear")
+        call k%cdf(2.0_real64, p_exact)
+        call g%init(200, 0.0_real64, 2.0_real64, 0.3_real64, lower=0.0_real64, boundary="linear")
+        call g%add(xe)
+        call g%cdf(2.0_real64, p_grid)
+        step = g%step()
+        write(msg, '(a,es22.15,a,es22.15,a,es10.3)') "the grid's %cdf at its free edge is ", p_grid, &
+            ", the exact form's ", p_exact, ", the cell width squared ", step*step
+        call check(error, abs(p_grid - p_exact) <= 50.0_real64*step*step, trim(msg))
+        if (allocated(error)) return
+        call check(error, p_exact > 0.5_real64 .and. p_exact < 1.0_real64, &
+            "precondition: weight must lie beyond the free edge, or nothing is being counted there")
+
+    end subroutine test_grid_linear_free_edge
+
+    !> R3: under `"linear"`, on a grid with a FREE edge, a point whose own reach exceeds the range's
+    !> width poisons the grid rather than have its corrected weight counted beyond that edge by the
+    !> plain kernel's mass. Its two negative controls are `bandwidth_max` below the width, which
+    !> leaves the grid usable, and the same points on a grid bounded on BOTH sides, where no edge is
+    !> free and the rule does not apply. A poisoned grid merged with one a kept NaN poisoned prints
+    !> both reasons.
+    subroutine test_grid_linear_reach_poisons(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: pilot, g, gc, gb, gn
+        real(real64) :: xe(200), f(200), nan
+        integer :: u, nlines, n_in
+        logical :: seen
+        character(len=*), parameter :: PATH = "test_run/kde_linear_reach_poison.txt"
+
+        ! Every point of this sample lies inside `[0, 3]`, so the three grids below see exactly the
+        ! same points at exactly the same bandwidths and differ only in their bounds.
+        call kde_exponential(200, xe)
+        n_in = count(xe <= 3.0_real64)
+        call pilot%init(200, 0.0_real64, 3.0_real64, 0.3_real64, lower=0.0_real64, boundary="linear")
+        call pilot%add(xe(1:n_in))
+        ! Where the pilot's density is small -- the sparse tail -- the rule gives a point a bandwidth
+        ! several times the global one, whose reach passes the grid's own width.
+        call g%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, boundary="linear")
+        call g%add(xe(1:n_in))
+        call g%density(f)
+        call check(error, all(ieee_is_nan(f)), "R3 must poison the grid: every query answers NaN")
+        if (allocated(error)) return
+        ! Control one: a cap below the width leaves every reach inside it.
+        call gc%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            bandwidth_max=0.5_real64, lower=0.0_real64, boundary="linear")
+        call gc%add(xe(1:n_in))
+        call gc%density(f)
+        call check(error, .not. any(ieee_is_nan(f)) .and. any(f > 0.0_real64), &
+            "bandwidth_max below the width must leave the grid usable")
+        if (allocated(error)) return
+        ! Control two: the same points and the same pilot on a grid bounded at BOTH ends, where no
+        ! edge is free and nothing can be counted beyond one.
+        call gb%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, upper=3.0_real64, boundary="linear")
+        call gb%add(xe(1:n_in))
+        call gb%density(f)
+        call check(error, .not. any(ieee_is_nan(f)) .and. any(f > 0.0_real64), &
+            "with both bounds given R3 must not fire: no edge is free")
+        if (allocated(error)) return
+
+        ! The two reasons a grid can be poisoned survive a merge, and `%print` gives each its line.
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        call gn%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, boundary="linear")
+        call gn%add([nan], skipnan=.false.)
+        call g%merge(gn)
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call g%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "every query answers NaN", seen)
+        call check(error, seen, "the kept NaN's reason must survive the merge and be printed")
+        if (allocated(error)) return
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call g%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "a kernel wider than the grid", seen)
+        call check(error, seen, "R3's reason must be printed beside it")
+
+    end subroutine test_grid_linear_reach_poisons
+
+    !> The pilot an adaptive `"linear"` fit builds keeps R2: with one bound given, its free edge lies
+    !> at least one kernel reach from that bound, so that the copy `%pilot` hands back would pass
+    !> `%init`'s own rules. Without that, a sample whose every point lies within a bandwidth of the
+    !> bound gives a pilot only `x(m) + 4h` wide, which is narrower than the Gaussian's reach.
+    subroutine test_pilot_linear_keeps_r2(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(60), c(4096), x0, x1, width
+        integer :: i
+        character(len=200) :: msg
+
+        do i = 1, 60
+            x(i) = 0.05_real64*(real(i, real64) - 0.5_real64)/60.0_real64
+        end do
+        call k%fit(x, bandwidth=0.1_real64, adaptive=.true., lower=0.0_real64, boundary="linear")
+        call k%pilot(p)
+        call check(error, p%is_initialised() .and. p%ncells() <= 4096, "the pilot must be built")
+        if (allocated(error)) return
+        call p%grid(c(1:p%ncells()))
+        x0 = c(1) - 0.5_real64*p%step()
+        x1 = c(p%ncells()) + 0.5_real64*p%step()
+        width = x1 - x0
+        write(msg, '(a,es22.15,a,es22.15,a,es12.5)') "the pilot spans ", x0, " to ", x1, &
+            ", against one reach ", RADIUS(1)*0.1_real64
+        call check(error, abs(x0) <= 1.0e-12_real64 .and. width >= RADIUS(1)*0.1_real64, trim(msg))
+
+    end subroutine test_pilot_linear_keeps_r2
+
+    !> The scan finds a stretch that lies between two kernel edges closer together than its own
+    !> spacing, which only its refinement can see.
+    !>
+    !> The fixture is a box-kernel fit whose upper zone holds a far group -- whose terms there are
+    !> NEGATIVE, the correction's factor turning over for points well to the left -- and a near
+    !> cluster whose terms are positive. Each far point's kernel ENDS inside the zone, and the
+    !> estimate jumps up as each one switches off; between two such jumps, closer together than a
+    !> sixty-fourth of a bandwidth, the estimate dips below zero. `%cdf` counts a stretch the scan
+    !> misses while `%pdf` clips it, so the two are compared across the whole zone.
+    subroutine test_linear_scan_refinement(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(kde_density) :: fn
+        real(real64) :: x(280), zhi, c0, c1, got, want, h, cuts(560), v
+        type(pf_integration_info) :: info
+        type(pf_kde_grid) :: gdiag
+        real(real64) :: rawc(4000)
+        character(len=200) :: msg2
+        logical :: conv
+        integer :: i, j, ncut
+        character(len=200) :: msg
+
+        h = 0.03_real64
+        ! Two hundred points just below the zone's inner edge: near the bound their terms are
+        ! NEGATIVE (the factor turns over about one and a sixth bandwidths to the left) and each
+        ! one's kernel ENDS inside the zone, twenty-five millionths apart -- a twentieth of the
+        ! scan's own spacing. Eighty points at the bound make the sum hover about zero there, so it
+        ! dips below between two of those jumps.
+        do i = 1, 200
+            x(i) = 0.943_real64 + 0.005_real64*(real(i, real64) - 0.5_real64)/200.0_real64
+        end do
+        do i = 201, 280
+            x(i) = 0.99_real64 + 0.01_real64*(real(i - 200, real64) - 0.5_real64)/80.0_real64
+        end do
+        call fn%k%fit(x(1:280), bandwidth=h, kernel="box", upper=1.0_real64, boundary="linear")
+        fn%power = 0
+        zhi = 1.0_real64 - sqrt(3.0_real64)*h
+        call fn%k%cdf(zhi, c0)
+        call fn%k%cdf(1.0_real64, c1)
+        got = c1 - c0
+        ! The box's estimate JUMPS at every kernel edge, and a quadrature left to find four hundred
+        ! of them itself does not converge (measured: `abserr` 5e-6, which would swamp what this
+        ! test is looking for). The edges are where they are by construction, so they are passed.
+        ncut = 0
+        do i = 1, 280
+            do j = 1, 2
+                v = x(i) + merge(-1.0_real64, 1.0_real64, j == 1)*sqrt(3.0_real64)*h
+                if (.not. (v > zhi .and. v < 1.0_real64)) cycle
+                ncut = ncut + 1
+                cuts(ncut) = v
+            end do
+        end do
+        call sort_cuts(cuts, ncut)
+        want = pf_integrate(fn, zhi, 1.0_real64, 1.0e-12_real64, breakpoints=cuts(1:ncut), &
+            converged=conv, info=info)
+        write(msg, '(a,es12.5,a,es12.5,a,es10.3,a,l1,a,i0)') "across the zone %cdf gives ", got, &
+            " and the integral of %pdf ", want, ", differing by ", got - want, "; converged ", conv, &
+            ", cuts ", ncut
+        call check(error, conv .and. ncut > 100, "the reference integral must converge over the zone's edges")
+        if (allocated(error)) return
+        ! The precondition this test rests on: the raw estimate dips below zero inside the zone, and
+        ! over a width of about one scan spacing -- the cluster's size is what tunes that. The
+        ! grid's unnormalised cells, a twentieth of the spacing wide, are what shows it.
+        call gdiag%init(4000, 0.0_real64, 1.0_real64, h, kernel="box", upper=1.0_real64, boundary="linear")
+        call gdiag%add(x(1:280))
+        call gdiag%density(rawc, normalise=.false.)
+        write(msg2, '(a,i0,a,es10.3,a,es10.3)') "the raw estimate is negative in ", &
+            count(rawc < 0.0_real64), " cells of ", gdiag%step(), ", against a scan spacing of ", &
+            h/64.0_real64
+        call check(error, count(rawc < 0.0_real64) >= 1 .and. count(rawc < 0.0_real64) <= 4, trim(msg2))
+        if (allocated(error)) return
+        call check(error, abs(got - want) <= 1.0e-10_real64, trim(msg))
+
+    end subroutine test_linear_scan_refinement
+
+    !> Every golden case of the linear boundary correction: the density and the distribution
+    !> function at every probe, against the 50-digit oracle, which integrates the clipped SUM
+    !> between its knots and its sign changes rather than point by point as the library does.
+    subroutine test_linear_golden_vectors(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+
+        call check_golden_case(error, "LIN_LO", KG_LIN_LO_DEF, KG_LIN_LO_H, KG_LIN_LO_PDF, KG_LIN_LO_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_HI_BOX", KG_LIN_HI_BOX_DEF, KG_LIN_HI_BOX_H, KG_LIN_HI_BOX_PDF, &
+            KG_LIN_HI_BOX_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_BOTH", KG_LIN_BOTH_DEF, KG_LIN_BOTH_H, KG_LIN_BOTH_PDF, KG_LIN_BOTH_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_BSPL", KG_LIN_BSPL_DEF, KG_LIN_BSPL_H, KG_LIN_BSPL_PDF, KG_LIN_BSPL_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_WIDE", KG_LIN_WIDE_DEF, KG_LIN_WIDE_H, KG_LIN_WIDE_PDF, KG_LIN_WIDE_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_W", KG_LIN_W_DEF, KG_LIN_W_H, KG_LIN_W_PDF, KG_LIN_W_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_ZERO", KG_LIN_ZERO_DEF, KG_LIN_ZERO_H, KG_LIN_ZERO_PDF, KG_LIN_ZERO_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_NARROW3", KG_LIN_NARROW3_DEF, KG_LIN_NARROW3_H, KG_LIN_NARROW3_PDF, &
+            KG_LIN_NARROW3_CDF)
+        if (allocated(error)) return
+        call check_golden_case(error, "LIN_NARROW6", KG_LIN_NARROW6_DEF, KG_LIN_NARROW6_H, KG_LIN_NARROW6_PDF, &
+            KG_LIN_NARROW6_CDF)
+
+    end subroutine test_linear_golden_vectors
+
+    !> Under `"linear"` the density is never negative, and the clip is what keeps it so.
+    !>
+    !> A scan of two thousand points across the support of two fixtures whose density vanishes at a
+    !> bound -- `2x` at the lower one, `3(1 - x)**2` at the upper -- where the raw linear estimate
+    !> IS negative: `%pdf` is at no point below zero, and is exactly zero at the bound the density
+    !> vanishes at, which is what says the clip acted rather than the test passing vacuously.
+    subroutine test_linear_never_negative(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64) :: x(200), pts(2000), f(2000), raw(400)
+        integer :: i, fixture
+
+        do fixture = 1, 2
+            if (fixture == 1) then
+                call kde_rising(200, x)
+            else
+                call kde_falling(200, x)
+            end if
+            call k%fit(x, rule="silverman", lower=0.0_real64, upper=1.0_real64, boundary="linear")
+            do i = 1, 2000
+                pts(i) = (real(i, real64) - 1.0_real64)/1999.0_real64
+            end do
+            call k%pdf(pts, f)
+            call check(error, .not. any(f < 0.0_real64), &
+                merge("2x         ", "3(1 - x)**2", fixture == 1) // ": %pdf must never be negative under linear")
+            if (allocated(error)) return
+            if (fixture == 1) then
+                call check(error, f(1) == 0.0_real64 .and. f(2000) > 0.0_real64, &
+                    "2x: the clip must zero the density at the bound it vanishes at")
+            else
+                call check(error, f(2000) == 0.0_real64 .and. f(1) > 0.0_real64, &
+                    "3(1 - x)**2: the clip must zero the density at the bound it vanishes at")
+            end if
+            if (allocated(error)) return
+            ! What the clip removed: the RAW estimate, which the grid's `normalise = .false.`
+            ! answers as deposited, IS negative on these fixtures -- so the test above is not
+            ! passing on an estimate that was never negative in the first place.
+            call g%init(400, 0.0_real64, 1.0_real64, k%bandwidth(), lower=0.0_real64, &
+                upper=1.0_real64, boundary="linear")
+            call g%add(x)
+            call g%density(raw, normalise=.false.)
+            call check(error, any(raw < 0.0_real64), &
+                "the raw linear sum must be negative somewhere, or the clip has nothing to remove")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_linear_never_negative
+
+    !> At a bound the density rises from, the linear correction is far closer than either simple
+    !> one: on the guide's own fixture the integrated squared error over the boundary zone is below
+    !> a tenth of `"renormalise"`'s and of `"reflect"`'s, each by `pf_integrate` of the squared
+    !> error against the true density `2x`.
+    subroutine test_linear_beats_the_simple_corrections(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(kde_sq_error) :: fn
+        real(real64) :: x(200), ise(3), h
+        character(len=11), parameter :: METHODS(3) = [character(len=11) :: "renormalise", "reflect", "linear"]
+        integer :: mm
+
+        call kde_rising(200, x)
+        do mm = 1, 3
+            call fn%k%fit(x, rule="silverman", lower=0.0_real64, boundary=trim(METHODS(mm)))
+            h = fn%k%bandwidth()
+            ise(mm) = pf_integrate(fn, 0.0_real64, RADIUS(1)*h, 1.0e-10_real64)
+        end do
+        call check(error, ise(3) <= 0.1_real64*min(ise(1), ise(2)), &
+            "linear's zone error must be below a tenth of renormalise's and reflect's")
+        if (allocated(error)) return
+        call check(error, ise(3) > 0.0_real64, "the comparison must be over a positive error")
+
+    end subroutine test_linear_beats_the_simple_corrections
+
+    !> `%cdf` is one function across the zones' edges, and it integrates `%pdf` everywhere.
+    !>
+    !> Under `"linear"` `%cdf` is answered by three formulas -- the lower zone's per-point
+    !> integrals, a closed form between the zones, the upper zone's -- and they must agree where
+    !> they meet: at each edge the two sides are within `1e-12`. And on four intervals, one inside
+    !> each zone, one straddling an edge and one deep in the interior, `%cdf`'s difference equals
+    !> `pf_integrate` of `%pdf` to `1e-10`, which a wrong zone split or a window sum that counts a
+    !> point twice cannot pass. The fixture's lower zone holds hundreds of points.
+    subroutine test_linear_cdf_across_zones(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(kde_density) :: fn
+        real(real64) :: x(2000), h, zlo, zhi, d, c1, c2, got, want, s, t, cuts(1)
+        integer :: iv
+        character(len=160) :: what
+
+        call kde_rising(2000, x)
+        call fn%k%fit(x, rule="silverman", lower=0.0_real64, upper=1.0_real64, boundary="linear")
+        fn%power = 0
+        h = fn%k%bandwidth()
+        zlo = 0.0_real64 + RADIUS(1)*h
+        zhi = 1.0_real64 - RADIUS(1)*h
+        call check(error, zlo < zhi, "precondition: the two zones must not meet on this fixture")
+        if (allocated(error)) return
+        ! Either side of each edge, close enough that the density cannot move the answer: the two
+        ! formulas must agree there.
+        do iv = 1, 2
+            d = 8.0_real64*spacing(merge(zlo, zhi, iv == 1))
+            call fn%k%cdf(merge(zlo, zhi, iv == 1) - d, c1)
+            call fn%k%cdf(merge(zlo, zhi, iv == 1) + d, c2)
+            call check(error, abs(c1 - c2) <= 1.0e-12_real64, &
+                merge("z_lo", "z_hi", iv == 1) // ": %cdf must be continuous across the zone's edge")
+            if (allocated(error)) return
+        end do
+        do iv = 1, 4
+            select case (iv)
+            case (1)
+                s = 0.02_real64
+                t = 0.9_real64*zlo
+            case (2)
+                s = zlo - 0.05_real64
+                t = zlo + 0.05_real64
+            case (3)
+                s = 0.5_real64
+                t = 0.6_real64
+            case default
+                s = zhi - 0.05_real64
+                t = zhi + 0.05_real64
+            end select
+            cuts(1) = merge(zlo, zhi, iv <= 2)
+            if (cuts(1) > s .and. cuts(1) < t) then
+                want = pf_integrate(fn, s, t, 1.0e-12_real64, breakpoints=cuts)
+            else
+                want = pf_integrate(fn, s, t, 1.0e-12_real64)
+            end if
+            call fn%k%cdf(t, c2)
+            call fn%k%cdf(s, c1)
+            got = c2 - c1
+            write(what, '(a,i0,a,es12.5)') "interval ", iv, ": %cdf less the integral of %pdf is ", got - want
+            call check(error, abs(got - want) <= 1.0e-10_real64, trim(what))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_linear_cdf_across_zones
+
+    !> Tied values, and a knot of the kernel that falls exactly on a knot of its moments, abort
+    !> nothing: the per-point breakpoint lists are made distinct before `pf_integrate` sees them,
+    !> and it aborts on a repeated breakpoint.
+    !>
+    !> The first fit is over the two-component recipe rounded to multiples of 8, where values tie in
+    !> hundreds; the second places a cubic B-spline point exactly `2C` bandwidths above the bound, so
+    !> that its kernel's knot `x_j - C h` and its moments' knot `lower + C h` are the same number to
+    !> the bit. Every query answers, and the second fit's `%cdf` is the integral of its `%pdf`.
+    subroutine test_linear_tied_values_and_knots(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(kde_density) :: fn
+        real(real64), allocatable :: x(:)
+        real(real64) :: c, q, f, one(1), got, want, c0, c1
+        character(len=160) :: msg
+        logical :: ok
+
+        call kde_two_component(60_int64, x)
+        call kde_rounded(8.0_real64, x)
+        call fn%k%fit(x, bandwidth=60.0_real64, lower=-400.0_real64, upper=400.0_real64, &
+            boundary="linear", ok=ok)
+        call check(error, ok, "tied values must leave the linear fit defined")
+        if (allocated(error)) return
+        call fn%k%pdf(-100.0_real64, f)
+        call fn%k%cdf(-100.0_real64, c)
+        call fn%k%quantile(0.5_real64, q)
+        call check(error, f >= 0.0_real64 .and. c >= 0.0_real64 .and. c <= 1.0_real64 .and. &
+            q >= -400.0_real64 .and. q <= 400.0_real64, "every query must answer over tied values")
+        if (allocated(error)) return
+
+        ! The coinciding knots: `C = sqrt(3)` for the cubic B-spline, one point at `2C` bandwidths.
+        one(1) = 2.0_real64*sqrt(3.0_real64)
+        call fn%k%fit(one, bandwidth=1.0_real64, kernel="bspline", lower=0.0_real64, boundary="linear", ok=ok)
+        call check(error, ok, "the coinciding-knot fit must be defined")
+        if (allocated(error)) return
+        fn%power = 0
+        want = pf_integrate(fn, 0.0_real64, one(1) + 2.0_real64*sqrt(3.0_real64), 1.0e-12_real64)
+        call fn%k%cdf(one(1) + 2.0_real64*sqrt(3.0_real64), c1)
+        call fn%k%cdf(0.0_real64, c0)
+        got = c1 - c0
+        write(msg, '(a,es22.15,a,es22.15)') "the knot fit: %cdf's difference is ", got, ", the integral of %pdf ", want
+        call check(error, abs(got - want) <= 1.0e-10_real64 .and. abs(want - 1.0_real64) <= 1.0e-10_real64, trim(msg))
+
+    end subroutine test_linear_tied_values_and_knots
 
     !> The table in doc/pages/utilities/kernel-density.md, "Bounded support": two hundred points at
     !> the quantiles `sqrt((i - 1/2)/200)` of the density `2x` on `[0, 1]`, Silverman's rule, read at
@@ -1519,6 +2157,7 @@ contains
         real(real64), parameter :: NONE(4) = [0.058_real64, 0.122_real64, 0.207_real64, 0.400_real64]
         real(real64), parameter :: REN(4) = [0.068_real64, 0.137_real64, 0.221_real64, 0.405_real64]
         real(real64), parameter :: REF(4) = [0.117_real64, 0.143_real64, 0.212_real64, 0.400_real64]
+        real(real64), parameter :: LIN(4) = [0.000_real64, 0.100_real64, 0.202_real64, 0.402_real64]
         integer :: i
 
         do i = 1, 200
@@ -1538,6 +2177,10 @@ contains
         call k%fit(x, rule="silverman", lower=0.0_real64, boundary="reflect")
         call k%pdf(AT, got)
         call check(error, all(abs(got - REF) <= 5.0e-4_real64), "the page's reflect column")
+        if (allocated(error)) return
+        call k%fit(x, rule="silverman", lower=0.0_real64, boundary="linear")
+        call k%pdf(AT, got)
+        call check(error, all(abs(got - LIN) <= 5.0e-4_real64), "the page's linear column")
 
     end subroutine test_guide_boundary_table
 
@@ -1603,7 +2246,7 @@ contains
         type(pf_kde_grid) :: g
         real(real64), allocatable :: x(:), z(:), c(:), f(:), fe(:)
         real(real64) :: t(997), fx(997), fg(997), e(2), h, lo, hi
-        character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        character(len=11), parameter :: METHODS(3) = [character(len=11) :: "renormalise", "reflect", "linear"]
         integer :: kk, r, mm
         character(len=200) :: msg
 
@@ -1642,7 +2285,7 @@ contains
 
         call bounded_fixture(400_int64, z)
         call spread_points(0.02_real64, 0.98_real64, t)
-        do mm = 1, 2
+        do mm = 1, 3
             do kk = 1, 3, 2
                 call k%fit(z, bandwidth=0.05_real64, kernel=KERNELS(kk), lower=0.0_real64, &
                     upper=1.0_real64, boundary=METHODS(mm))
@@ -1935,8 +2578,8 @@ contains
     subroutine test_grid_merge(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde_grid) :: g_all, g1, g2, ge, gp
-        real(real64), allocatable :: x(:), w(:), r_all(:), r(:)
-        real(real64) :: f(30), ends(2), ends_all(2), q_before, q_after, p_low
+        real(real64), allocatable :: x(:), w(:), r_all(:), r(:), r1(:), r2(:), zz(:)
+        real(real64) :: f(30), fl(100), fl2(100), ends(2), ends_all(2), q_before, q_after, p_low
 
         call kde_fixture(101_int64, x)
         call kde_weights_mod5(101_int64, w)
@@ -1963,6 +2606,41 @@ contains
         call ge%merge(g_all)
         call raw_cells(ge, r)
         call check(error, all(r == r_all), "a merge into an empty grid must copy the other, to the bit")
+        if (allocated(error)) return
+
+        ! Under `"linear"` cells can go negative and the clip is applied at QUERY time, so a merge
+        ! of two grids and one grid over the concatenation hold the same cells and answer the same
+        ! density. A clip at deposit would make the two differ by the clipped mass.
+        allocate(zz(101))
+        call kde_rising(101, zz)
+        call g_all%init(100, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear")
+        call g_all%add(zz)
+        call g1%init(100, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear")
+        call g1%add(zz(1:50))
+        call g2%init(100, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear")
+        call g2%add(zz(51:101))
+        call raw_cells(g1, r1)
+        call raw_cells(g2, r2)
+        call g1%merge(g2)
+        call raw_cells(g_all, r_all)
+        call raw_cells(g1, r)
+        ! To rounding, not to the bit: the halves group the same additions differently, as the
+        ! weighted B-spline case below says. A clip at deposit would not be a rounding difference --
+        ! it would drop the negative half of every cell the two halves disagree in sign on.
+        call check(error, maxval(abs(r - r_all)) <= 1.0e-14_real64*maxval(abs(r_all)), &
+            "a linear grid merged must hold the cells of one grid over both halves, to rounding")
+        if (allocated(error)) return
+        call check(error, any(r < 0.0_real64) .and. &
+            any((r1 > 0.0_real64 .and. r2 < 0.0_real64) .or. (r1 < 0.0_real64 .and. r2 > 0.0_real64)), &
+            "precondition: a cell must be negative, and one must take opposite signs from the two halves")
+        if (allocated(error)) return
+        call g_all%density(fl)
+        call g1%density(fl2)
+        call check(error, maxval(abs(fl - fl2)) <= 1.0e-14_real64*maxval(fl2) .and. all(fl >= 0.0_real64), &
+            "and the two must answer the same clipped density")
         if (allocated(error)) return
 
         call g_all%init(30, -700.0_real64, 700.0_real64, 50.0_real64, kernel="bspline")
@@ -2323,7 +3001,7 @@ contains
         do j = 1, 9
             pp(j) = real(j, real64)/10.0_real64
         end do
-        do cfg = 1, 4
+        do cfg = 1, 5
             select case (cfg)
             case (1)
                 tag = "unbounded, Silverman's rule, Gaussian"
@@ -2351,6 +3029,16 @@ contains
                     upper=470.0_real64, boundary="reflect")
                 call k5%fit(x, bandwidth=400.0_real64, adaptive=.true., lower=-340.0_real64, &
                     upper=470.0_real64, boundary="reflect")
+            case default
+                ! Under `"linear"` every moment, every zone edge and every per-point integral is
+                ! formed at the point's OWN bandwidth, so `alpha = 0` is the strongest statement
+                ! that the adaptive path reads the same numbers as the fixed one.
+                tag = "the linear correction at a lower bound, Gaussian"
+                call kf%fit(x, bandwidth=60.0_real64, lower=-340.0_real64, boundary="linear")
+                call k0%fit(x, bandwidth=60.0_real64, adaptive=.true., alpha=0.0_real64, &
+                    lower=-340.0_real64, boundary="linear")
+                call k5%fit(x, bandwidth=60.0_real64, adaptive=.true., lower=-340.0_real64, &
+                    boundary="linear")
             end select
             call kf%pdf(t, ff)
             call k0%pdf(t, f0)
@@ -2614,14 +3302,14 @@ contains
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(kde_density) :: fn
         type(pf_kde_grid) :: p, g
-        real(real64), allocatable :: z(:), r(:)
+        real(real64), allocatable :: z(:), r(:), dens(:)
         real(real64) :: mass, c_top
-        character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        character(len=11), parameter :: METHODS(3) = [character(len=11) :: "renormalise", "reflect", "linear"]
         integer :: mm
         character(len=160) :: msg
 
         call bounded_fixture(300_int64, z)
-        do mm = 1, 2
+        do mm = 1, 3
             ! The B-spline, twice continuously differentiable, so that the quadrature needs no
             ! breakpoint at each of six hundred kernel edges.
             call fn%k%fit(z, bandwidth=0.06_real64, kernel="bspline", adaptive=.true., lower=0.0_real64, &
@@ -2640,9 +3328,23 @@ contains
             call g%init(200, 0.0_real64, 1.0_real64, 0.06_real64, kernel="bspline", pilot=p, lower=0.0_real64, &
                 upper=1.0_real64, boundary=METHODS(mm))
             call g%add(z)
-            call raw_cells(g, r)
-            call check(error, abs(sum(r)*g%step()/g%sum_weights() - 1.0_real64) <= 1.0e-13_real64, &
-                trim(METHODS(mm)) // ": an adaptive grid must deposit exactly its weight")
+            if (mm < 3) then
+                call raw_cells(g, r)
+                call check(error, abs(sum(r)*g%step()/g%sum_weights() - 1.0_real64) <= 1.0e-13_real64, &
+                    trim(METHODS(mm)) // ": an adaptive grid must deposit exactly its weight")
+            else
+                ! Under `"linear"` a point deposits its linear boundary mass, which is near but not
+                ! exactly its weight: the normalisation is the estimate's, once, at query time. What
+                ! must hold is that the density the grid answers is one over the range, the cells
+                ! clipped and divided by the mass they hold -- nothing lies beyond this range, both
+                ! bounds being its ends.
+                allocate(dens(g%ncells()))
+                call g%density(dens)
+                call check(error, abs(sum(dens)*g%step() - 1.0_real64) <= 1.0e-13_real64 .and. &
+                    all(dens >= 0.0_real64), &
+                    "linear: an adaptive grid's density must be clipped and integrate to one over its range")
+                deallocate(dens)
+            end if
             if (allocated(error)) return
         end do
 
@@ -2998,14 +3700,15 @@ contains
         real(real64), parameter :: KERNEL_KURT(4) = [3.0_real64, 15.0_real64/7.0_real64, 2.7_real64, &
             1.8_real64]
         character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        integer, parameter :: NL = 20000
         type(pf_kde) :: k
         type(kde_density) :: fn
-        real(real64), allocatable :: v(:)
-        real(real64) :: mean, var, kurt, var_k, want, se
-        integer :: kk, mm
+        real(real64), allocatable :: v(:), vl(:)
+        real(real64) :: mean, var, kurt, var_k, want, se, xe(200), zlo, hi_end, lo_end, cuts(1), dks
+        integer :: kk, mm, nzone
         character(len=200) :: msg
 
-        allocate(v(N))
+        allocate(v(N), vl(NL))
         do kk = 1, 4
             call k%fit([0.0_real64], bandwidth=1.0_real64, kernel=trim(KERNELS(kk)))
             call k%sample(v, 11_int64, kk)
@@ -3064,7 +3767,115 @@ contains
             if (allocated(error)) return
         end do
 
+        ! ---- the linear correction ----
+        ! A density that is large at its bound: with Silverman's rule about seventy per cent of
+        ! `Exp(1)`'s mass lies inside the zone, so most draws are zone draws, made by rejection
+        ! from the per-point envelope. The mean and the variance are the fit's own, by
+        ! `pf_integrate` of `x f` and `x**2 f`, and no draw may leave the support.
+        call kde_exponential(200, xe)
+        call fn%k%fit(xe, rule="silverman", lower=0.0_real64, boundary="linear")
+        zlo = RADIUS(1)*fn%k%bandwidth()
+        call fn%k%quantile(1.0_real64, hi_end)
+        cuts(1) = zlo
+        fn%power = 1
+        want = pf_integrate(fn, 0.0_real64, hi_end, 1.0e-12_real64, breakpoints=cuts)
+        fn%power = 2
+        var_k = pf_integrate(fn, 0.0_real64, hi_end, 1.0e-12_real64, breakpoints=cuts) - want*want
+        call fn%k%sample(vl, 31_int64)
+        call moments(vl, mean, var, kurt)
+        write(msg, '(a,4es13.5)') "linear, zone-heavy: the sample's mean and variance, and the fit's ", &
+            mean, var, want, var_k
+        call check(error, minval(vl) >= 0.0_real64 .and. maxval(vl) <= hi_end .and. &
+            abs(mean - want) <= 5.0_real64*sqrt(var_k/real(NL, real64)) .and. &
+            abs(var - var_k) <= 5.0_real64*var_k*sqrt(2.0_real64/real(NL, real64)), trim(msg))
+        if (allocated(error)) return
+        call check(error, count(vl <= zlo) > NL/2, &
+            "precondition: most draws must fall inside the zone, or the rejection sampler is barely exercised")
+        if (allocated(error)) return
+
+        ! The zone draws alone follow the estimate restricted to the zone: their empirical
+        ! distribution function stays within the Kolmogorov-Smirnov critical distance at the 0.1 per
+        ! cent level, `1.949/sqrt(n)`, of `%cdf` conditioned on the zone.
+        call zone_ks_distance(fn%k, vl, zlo, dks, nzone)
+        write(msg, '(a,i0,a,es12.5,a,es12.5)') "linear: ", nzone, " zone draws, KS distance ", dks, &
+            " against the critical ", 1.949_real64/sqrt(real(nzone, real64))
+        call check(error, dks <= 1.949_real64/sqrt(real(nzone, real64)), trim(msg))
+        if (allocated(error)) return
+
+        ! The mirror: a bound so far below the data that no kernel is corrected, so the zone is
+        ! empty and every draw is an interior one.
+        call kde_exponential(200, xe)
+        call fn%k%fit(xe, rule="silverman", lower=-20.0_real64, boundary="linear")
+        call fn%k%quantile(0.0_real64, lo_end)
+        call fn%k%quantile(1.0_real64, hi_end)
+        fn%power = 1
+        want = pf_integrate(fn, lo_end, hi_end, 1.0e-12_real64)
+        fn%power = 2
+        var_k = pf_integrate(fn, lo_end, hi_end, 1.0e-12_real64) - want*want
+        call fn%k%sample(vl, 32_int64)
+        call moments(vl, mean, var, kurt)
+        write(msg, '(a,4es13.5)') "linear, interior-heavy: the sample's mean and variance, and the fit's ", &
+            mean, var, want, var_k
+        call check(error, minval(vl) >= -20.0_real64 .and. &
+            abs(mean - want) <= 5.0_real64*sqrt(var_k/real(NL, real64)) .and. &
+            abs(var - var_k) <= 5.0_real64*var_k*sqrt(2.0_real64/real(NL, real64)), trim(msg))
+
     end subroutine test_sample_support_and_kernel
+
+    !> Sorts `cuts(1:n)` ascending and drops any repeat, so that `pf_integrate` -- which aborts on
+    !> a repeated breakpoint -- sees a list it accepts.
+    subroutine sort_cuts(cuts, n)
+        real(real64), intent(inout) :: cuts(:) !! the breakpoints
+        integer, intent(inout)      :: n       !! how many; reduced by the repeats dropped
+        real(real64) :: t
+        integer :: i, j, m
+
+        do i = 2, n
+            t = cuts(i)
+            j = i - 1
+            do while (j >= 1)
+                if (cuts(j) <= t) exit
+                cuts(j + 1) = cuts(j)
+                j = j - 1
+            end do
+            cuts(j + 1) = t
+        end do
+        m = 0
+        do i = 1, n
+            if (m >= 1) then
+                if (cuts(m) == cuts(i)) cycle
+            end if
+            m = m + 1
+            cuts(m) = cuts(i)
+        end do
+        n = m
+
+    end subroutine sort_cuts
+
+    !> The largest distance between the empirical distribution function of the draws that fell
+    !> inside `[lo, zlo]` and `%cdf` conditioned on that interval, over a grid of points across it.
+    subroutine zone_ks_distance(k, v, zlo, d, nzone)
+        type(pf_kde), intent(in)  :: k     !! the fitted estimate
+        real(real64), intent(in)  :: v(:)  !! the draws
+        real(real64), intent(in)  :: zlo   !! the zone's inner edge
+        real(real64), intent(out) :: d     !! the Kolmogorov-Smirnov distance
+        integer, intent(out)      :: nzone !! how many draws fell inside the zone
+        integer, parameter :: GRID = 400
+        real(real64) :: t, cz, ct, edf
+        integer :: i
+
+        nzone = count(v <= zlo)
+        d = 0.0_real64
+        if (nzone < 100) return
+        call k%cdf(zlo, cz)
+        do i = 1, GRID
+            t = zlo*(real(i, real64) - 0.5_real64)/real(GRID, real64)
+            call k%cdf(t, ct)
+            edf = real(count(v <= t), real64)/real(nzone, real64)
+            d = max(d, abs(edf - ct/cz))
+        end do
+
+    end subroutine zone_ks_distance
 
     !> The point a draw starts from is chosen in proportion to its weight, and its kernel has the
     !> point's own bandwidth: three quarters of the draws from a fit weighted 1 to 3 lie about the
@@ -3197,6 +4008,8 @@ contains
         if (allocated(error)) return
         call check_fine("ADAPT_W", KG_ADAPT_W_PDF)
         if (allocated(error)) return
+        call check_fine("ADAPT_LIN", KG_ADAPT_LIN_PDF)
+        if (allocated(error)) return
         call parquet_debug_set_kde_pilot_cells(262144)
         call check_adaptive_case(error, "ADAPT", KG_ADAPT_H, KG_ADAPT_PDF, KG_ADAPT_CDF, 1.0e-9_real64, &
             1.0e-10_real64)
@@ -3206,6 +4019,11 @@ contains
             KG_ADAPT_REF_CDF, 1.0e-9_real64, 1.0e-10_real64)
         if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_W", KG_ADAPT_W_H, KG_ADAPT_W_PDF, &
             KG_ADAPT_W_CDF, 1.0e-9_real64, 1.0e-10_real64)
+        ! Under `"linear"` each point's bandwidth is read from a pilot whose cells are the CLIPPED
+        ! estimate over its own mass, and every moment, zone edge and per-point integral is then
+        ! formed at that bandwidth: the same tolerance as the four above.
+        if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_LIN", KG_ADAPT_LIN_H, &
+            KG_ADAPT_LIN_PDF, KG_ADAPT_LIN_CDF, 1.0e-9_real64, 1.0e-10_real64)
         call parquet_debug_set_kde_pilot_cells(0)
 
     contains

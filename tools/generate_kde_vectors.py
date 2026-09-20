@@ -373,6 +373,71 @@ def kernel_pdf(kernel, z):
     raise SystemExit("unknown kernel %r" % kernel)
 
 
+def kernel_m1(kernel, z):
+    """The integral of `u K(u)` from minus the support radius to `z` standard deviations.
+
+    `u K(u)` is odd, so this is even in `z`, and zero over the whole support. The closed forms are
+    the library's (`kde_kernel_m1`, src/parquet_kde_core.f90); `--self-test` asserts each against
+    quadrature at 50 digits.
+    """
+    c = scale(kernel)
+    r = CUT if kernel == "gaussian" else radius(kernel)
+    t = -abs(z)
+    if t <= -r:
+        return mpf(0)
+    if kernel == "gaussian":
+        return (phi(CUT) - phi(t)) / gauss_mass()
+    v = t / c
+    if kernel == "epanechnikov":
+        return -(3 * c / 16) * (1 - v * v) ** 2
+    if kernel == "box":
+        return c * (v * v - 1) / 4
+    if kernel == "bspline":
+        if v <= -1:
+            w = 2 + v
+            return c * w ** 4 * (2 * w - 5) / 60
+        return c * (v * v / 3 - v ** 4 / 4 - v ** 5 / 10 - mpf(7) / 30)
+    raise SystemExit("unknown kernel %r" % kernel)
+
+
+def kernel_m2(kernel, z):
+    """The integral of `u**2 K(u)` from minus the support radius to `z` standard deviations.
+
+    `u**2 K(u)` is even, so the moment above zero is the kernel's variance less the moment below
+    `-z`; the variance is one but for the cut Gaussian, whose cut removes tail mass.
+    """
+    c = scale(kernel)
+    r = CUT if kernel == "gaussian" else radius(kernel)
+    var = 1 - 2 * CUT * phi(CUT) / gauss_mass() if kernel == "gaussian" else mpf(1)
+    t = -abs(z)
+    lower = mpf(0)
+    if t > -r:
+        if kernel == "gaussian":
+            lower = ((big_phi(t) - big_phi(-CUT)) - t * phi(t) - CUT * phi(CUT)) / gauss_mass()
+        else:
+            v = t / c
+            if kernel == "epanechnikov":
+                lower = (1 + v) ** 2 * (2 - 4 * v + 6 * v * v - 3 * v ** 3) / 4
+            elif kernel == "box":
+                lower = (1 + v) * (1 - v + v * v) / 2
+            elif kernel == "bspline":
+                if v <= -1:
+                    w = 2 + v
+                    lower = w ** 4 * (5 * w * w - 24 * w + 30) / 60
+                else:
+                    lower = mpf(1) / 2 + 2 * v ** 3 / 3 - 3 * v ** 5 / 5 - v ** 6 / 4
+            else:
+                raise SystemExit("unknown kernel %r" % kernel)
+    return var - lower if z > 0 else lower
+
+
+def radius(kernel):
+    """The kernel's support radius in standard deviations."""
+    if kernel == "gaussian":
+        return CUT
+    return scale(kernel) * (2 if kernel == "bspline" else 1)
+
+
 def kernel_cdf(kernel, z):
     """The kernel's mass at or below `z` standard deviations."""
     if kernel == "gaussian":
@@ -517,6 +582,139 @@ class Estimate:
         return acc / self.W
 
 
+class LinearEstimate:
+    """The linear boundary kernel's estimate over points `xs`, weights `ws`, bandwidths `hs`.
+
+    At a query `x` each point's kernel is replaced by `(a_2 - a_1 u) K(u)/D`, `u = (x - x_j)/h_j`
+    and `a_l` the kernel's moments over the part of its support inside the bounds, `D = a_0 a_2 -
+    a_1**2`. The moments are the closed forms `kernel_cdf`, `kernel_m1` and `kernel_m2`, formed as
+    plain differences at the working precision -- which is why the narrow cases are a check of the
+    library's centred form rather than a second copy of it.
+
+    `raw` is that sum, `clipped` it with its negative part set to zero, and `pdf` the clipped sum
+    over its own integral `Z`. Nothing here is decomposed point by point the way the library's
+    distribution function is: `Z` and every probe's CDF are quadratures of the SUM, between the
+    kernels' knots, the correction edges, the sign changes and the probes.
+    """
+
+    def __init__(self, xs, ws, hs, kernel, lo, hi):
+        self.xs, self.ws, self.hs = xs, ws, hs
+        self.kernel, self.lo, self.hi = kernel, lo, hi
+        self.W = sum(ws)
+        self.rad = radius(kernel)
+        self.bandwidths = sorted(set(hs))
+        self._nodes = None
+        self._cum = None
+
+    def factors(self, x):
+        """`(a_1, a_2, D)` per distinct bandwidth at `x`."""
+        out = {}
+        for h in self.bandwidths:
+            lo_z, hi_z = -self.rad, self.rad
+            if self.lo is not None:
+                hi_z = min(hi_z, (x - self.lo) / h)
+            if self.hi is not None:
+                lo_z = max(lo_z, -(self.hi - x) / h)
+            a0 = kernel_cdf(self.kernel, hi_z) - kernel_cdf(self.kernel, lo_z)
+            a1 = kernel_m1(self.kernel, hi_z) - kernel_m1(self.kernel, lo_z)
+            a2 = kernel_m2(self.kernel, hi_z) - kernel_m2(self.kernel, lo_z)
+            out[h] = (a1, a2, a0 * a2 - a1 * a1)
+        return out
+
+    def raw(self, x):
+        """The linear estimate before the clip and before `Z`; zero outside the support."""
+        if (self.lo is not None and x < self.lo) or (self.hi is not None and x > self.hi):
+            return mpf(0)
+        fac = self.factors(x)
+        acc = mpf(0)
+        for xj, w, h in zip(self.xs, self.ws, self.hs):
+            u = (x - xj) / h
+            if abs(u) > self.rad:
+                continue
+            a1, a2, d = fac[h]
+            acc += w * (a2 - a1 * u) * kernel_pdf(self.kernel, u) / (d * h)
+        return acc / self.W
+
+    def clipped(self, x):
+        v = self.raw(x)
+        return v if v > 0 else mpf(0)
+
+    def extent(self):
+        """The support, clipped to where the kernels reach."""
+        a = min(x - self.rad * h for x, h in zip(self.xs, self.hs))
+        b = max(x + self.rad * h for x, h in zip(self.xs, self.hs))
+        if self.lo is not None:
+            a = max(a, self.lo)
+        if self.hi is not None:
+            b = min(b, self.hi)
+        return a, b
+
+    def edges(self, a, b):
+        """Every point strictly inside `(a, b)` where the estimate is not smooth: each kernel's own
+        knots, and the knots of each point's moments, which sit a knot's distance from a bound."""
+        out = set()
+        for xj, h in zip(self.xs, self.hs):
+            for k in KNOTS[self.kernel]:
+                for t in (xj + k * h, ):
+                    if a < t < b:
+                        out.add(t)
+                if self.lo is not None and k > 0:
+                    t = self.lo + k * h
+                    if a < t < b:
+                        out.add(t)
+                if self.hi is not None and k > 0:
+                    t = self.hi - k * h
+                    if a < t < b:
+                        out.add(t)
+        return out
+
+    def crossings(self, a, b, per_h):
+        """Where the raw estimate changes sign, from a scan finer than the library's own.
+
+        The scan runs between the edges, at `per_h` points to the narrowest bandwidth, so that no
+        stretch the library can find is missed here; each sign change is then bisected. A jump
+        (the box kernel's edges) is a node of the scan, so a sign change across one is found too.
+        """
+        cuts = sorted({a, b} | self.edges(a, b))
+        step = min(self.hs) / per_h
+        out = []
+        for u, v in zip(cuts, cuts[1:]):
+            n = int((v - u) / step) + 2
+            n = min(n, 4096)
+            prev_t = u + (v - u) / (2 * n)
+            prev = self.raw(prev_t)
+            for i in range(1, n + 1):
+                t = u + (v - u) * (2 * i + 1) / (2 * n) if i < n else v - (v - u) / (2 * n)
+                cur = self.raw(t)
+                if (prev < 0) != (cur < 0):
+                    out.append(mp.findroot(self.raw, (prev_t, t), solver="bisect",
+                                           tol=mpf(10) ** -40, maxsteps=400))
+                prev_t, prev = t, cur
+        return out
+
+    def prepare(self, probes, per_h=128):
+        """The nodes the mass is integrated between, and the clipped mass up to each."""
+        a, b = self.extent()
+        nodes = {a, b} | self.edges(a, b)
+        nodes |= {t for t in self.crossings(a, b, per_h) if a < t < b}
+        nodes |= {mpf(t) for t in probes if a < mpf(t) < b}
+        self._nodes = sorted(nodes)
+        self._cum = [mpf(0)]
+        for u, v in zip(self._nodes, self._nodes[1:]):
+            self._cum.append(self._cum[-1] + quad(self.clipped, [u, v]))
+        return self._cum[-1]
+
+    def mass_to(self, t):
+        """The clipped estimate's mass from the support's start up to `t`."""
+        a, b = self._nodes[0], self._nodes[-1]
+        if t <= a:
+            return mpf(0)
+        if t >= b:
+            return self._cum[-1]
+        i = max(i for i, v in enumerate(self._nodes) if v <= t)
+        return self._cum[i] + quad(self.clipped, [self._nodes[i], t])
+
+
 def pilot_log_g(pilot, a, b, dps):
     """`log g`: the mean of `log p` over the pilot's own density on its range `[a, b]`.
 
@@ -542,6 +740,25 @@ def pilot_log_g(pilot, a, b, dps):
         num = sum(quad(plogp, [cuts[i], cuts[i + 1]]) for i in range(len(cuts) - 1))
     finally:
         mp.dps = saved
+    return num / den
+
+
+def linear_log_g(lin, z, a, b, dps):
+    """`log g` for a `"linear"` pilot: the mean of `log p` over the pilot's own density on `[a, b]`,
+    `p` the CLIPPED estimate over its whole mass -- which is what the library's pilot grid holds
+    there, cell by cell, under this correction.
+    """
+    cuts = sorted({a, b} | {t for t in lin._nodes if a < t < b})
+    saved = mp.dps
+    mp.dps = dps
+    try:
+        def plogp(t):
+            v = lin.clipped(t) / z
+            return v * mp.log(v) if v > 0 else mpf(0)
+        num = sum(quad(plogp, [cuts[i], cuts[i + 1]]) for i in range(len(cuts) - 1))
+    finally:
+        mp.dps = saved
+    den = (lin.mass_to(b) - lin.mass_to(a)) / z
     return num / den
 
 
@@ -578,7 +795,33 @@ def estimate(case):
             return False, None, None, None
     h *= mpf(case.get("adjust", 1.0))
     hs = [h] * len(xs)
-    if case.get("adaptive"):
+    if case.get("adaptive") and boundary == "linear":
+        # The pilot is the CLIPPED linear estimate at the global bandwidth, over its own mass, which
+        # is what the library's pilot grid holds under this correction; and its range starts at the
+        # bound and, with one bound, reaches at least a kernel's reach from it (7.3, R1 and R2).
+        pilot = LinearEstimate(xs, ws, hs, kernel, lo, hi)
+        zp = pilot.prepare(PROBES)
+        a = min(xs) - PILOT_REACH * h
+        b = max(xs) + PILOT_REACH * h
+        if lo is not None:
+            a = lo
+        if hi is not None:
+            b = hi
+        if (lo is None) != (hi is None):
+            rad = radius(kernel) * h
+            if b - a < rad:
+                if lo is not None:
+                    b = a + rad
+                else:
+                    a = b - rad
+        log_g = linear_log_g(pilot, zp, a, b, G_DPS)
+        alpha = mpf(case.get("alpha", 0.5))
+        cap = mpf(case["bandwidth_max"]) if "bandwidth_max" in case else None
+        hs = []
+        for x in xs:
+            hj = h * mp.exp(-alpha * (mp.log(pilot.clipped(x) / zp) - log_g))
+            hs.append(min(hj, cap) if cap is not None else hj)
+    elif case.get("adaptive"):
         # The pilot is the fixed estimate at the global bandwidth, read exactly at every point;
         # `log g` is its entropy over the range the library's pilot grid spans.
         pilot = Estimate(xs, ws, hs, kernel, boundary, lo, hi)
@@ -595,6 +838,23 @@ def estimate(case):
         for x in xs:
             hj = h * mp.exp(-alpha * (mp.log(pilot.pdf(x)) - log_g))
             hs.append(min(hj, cap) if cap is not None else hj)
+    if boundary == "linear":
+        # The clipped estimate over its own integral, both by quadrature of the SUM between its
+        # knots, its correction edges and its sign changes -- never point by point, which is how
+        # the library does it, so that the two share no arithmetic.
+        lin = LinearEstimate(xs, ws, hs, kernel, lo, hi)
+        if "negative_at" in case:
+            # The case exists to show the clip acting AT a probe: assert the raw estimate is
+            # negative there before emitting it, so that a case which stopped showing it fails here
+            # rather than passing as an ordinary one.
+            v = lin.raw(mpf(case["negative_at"]))
+            if not v < 0:
+                raise SystemExit("the raw linear estimate at %s is %s, not negative: this case no "
+                                 "longer shows the clip" % (case["negative_at"], mp.nstr(v, 6)))
+        z = lin.prepare(PROBES)
+        pdf = [lin.clipped(mpf(t)) / z for t in PROBES]
+        cdf = [lin.mass_to(mpf(t)) / z for t in PROBES]
+        return True, h, pdf, cdf
     est = Estimate(xs, ws, hs, kernel, boundary, lo, hi)
     pdf = [est.pdf(mpf(t)) for t in PROBES]
     cdf = [est.cdf(mpf(t)) for t in PROBES]
@@ -603,8 +863,10 @@ def estimate(case):
 
 #: One population and one configuration per case. The keys are `pf_kde%fit`'s own argument names,
 #: plus `n` (the recipe's length, default 32), `fixture` (`"two"` for the two-component recipe,
-#: `"two_rounded8"` for it rounded to multiples of 8) and `weights = "mod5"` (`w(i) = mod(i, 5)`, so
-#: every fifth weight is zero and removes its element). Every case names its rule or its bandwidth,
+#: `"two_rounded8"` for it rounded to multiples of 8), `weights = "mod5"` (`w(i) = mod(i, 5)`, so
+#: every fifth weight is zero and removes its element) and, for a `"linear"` case that exists to
+#: show the clip, `negative_at`, a probe the raw estimate must be negative at. Every case names its
+#: rule or its bandwidth,
 #: so that no expectation depends on the default. `test/test_kde.f90`'s `fit_golden_case` makes the
 #: same call for each name; the `ISJ` cases run at `ISJ_CELLS`, in the serial suite.
 CASES = [
@@ -667,6 +929,39 @@ CASES = [
      {"fixture": "two_rounded8", "n": 60, "rule": "isj"}),
     ("ISJ_NO_ROOT", "the ISJ rule over the recipe at n = 32: the fixed point is negative up to t = 1, "
      "so the rule finds no bandwidth and the estimate is undefined", {"rule": "isj"}),
+    ("LIN_LO", "the linear boundary kernel at a lower bound, Gaussian, h = 60",
+     {"bandwidth": 60.0, "lower": -470.0, "boundary": "linear"}),
+    ("LIN_HI_BOX", "the linear kernel at an upper bound, box, h = 60: a kernel whose value jumps at "
+     "its own edges and whose moments kink at the correction edge",
+     {"bandwidth": 60.0, "kernel": "box", "upper": 460.0, "boundary": "linear"}),
+    ("LIN_BOTH", "the linear kernel at both bounds, Epanechnikov, h = 60",
+     {"bandwidth": 60.0, "kernel": "epanechnikov", "lower": -470.0, "upper": 460.0, "boundary": "linear"}),
+    ("LIN_BSPL", "the linear kernel at a lower bound, cubic B-spline, h = 60: its kernel's knots and "
+     "its moments' knots both fall inside the zone",
+     {"bandwidth": 60.0, "kernel": "bspline", "lower": -470.0, "boundary": "linear"}),
+    ("LIN_WIDE", "the linear kernel at h = 400 on [-470, 460]: the two zones meet, so every moment is "
+     "two-sided and no part of the support is the plain sum",
+     {"bandwidth": 400.0, "lower": -470.0, "upper": 460.0, "boundary": "linear"}),
+    ("LIN_W", "the linear kernel under weights mod 5, reliability, at a lower bound",
+     {"bandwidth": 60.0, "weights": "mod5", "lower": -470.0, "boundary": "linear"}),
+    ("LIN_ZERO", "the linear kernel where the clip acts at a probe: the two-component recipe under a "
+     "lower bound at -470, more than two bandwidths below its nearest point, so the raw estimate is "
+     "negative at the probe -466 and the clipped one is exactly zero there",
+     {"fixture": "two", "n": 60, "bandwidth": 60.0, "lower": -470.0, "boundary": "linear",
+      "negative_at": -466.0}),
+    ("LIN_NARROW3", "both bounds a thousandth of a bandwidth apart (h = 9.3e5 on [-470, 460]), "
+     "Gaussian: where the library forms the moments centred on the interval's midpoint and this "
+     "oracle takes the plain differences at fifty digits",
+     {"bandwidth": 930000.0, "lower": -470.0, "upper": 460.0, "boundary": "linear"}),
+    ("ADAPT_LIN", "the adaptive kernel under the linear correction: the two-component recipe at a "
+     "lower bound, alpha = 0.5, each point corrected at ITS OWN bandwidth and the pilot the clipped "
+     "linear estimate",
+     {"fixture": "two", "n": 60, "adaptive": True, "bandwidth": 60.0, "lower": -470.0,
+      "boundary": "linear"}),
+    ("LIN_NARROW6", "both bounds a millionth of a bandwidth apart (h = 9.3e8), Epanechnikov: the "
+     "estimate is the uniform density on the support to twelve digits",
+     {"bandwidth": 930000000.0, "kernel": "epanechnikov", "lower": -470.0, "upper": 460.0,
+      "boundary": "linear"}),
 ]
 
 
@@ -771,8 +1066,22 @@ def self_test():
             want = quad(lambda t: kernel_pdf(kernel, t), [k for k in knots if k < z] + [z])
             if abs(kernel_cdf(kernel, z) - want) > mpf("1e-20"):
                 failures.append("%s: cdf(%s) is not the integral of the density" % (kernel, z))
+        # The truncated first and second moments of the linear boundary kernel, which the library
+        # carries as closed forms of its own (`kde_kernel_m1`, `kde_kernel_m2`): each against the
+        # same quadrature, split at every knot, at a dozen offsets across the support and beyond it.
+        for z in (-r * mpf("1.3"), -r, -r * mpf("0.99"), -r * mpf("0.7"), -r * mpf("0.35"),
+                  mpf("-0.3"), mpf(0), mpf("0.45"), r * mpf("0.35"), r * mpf("0.7"),
+                  r * mpf("0.99"), r, r * mpf("1.3")):
+            zc = max(-r, min(r, z))
+            pts = [k for k in knots if k < zc] + [zc]
+            for l, got in ((1, kernel_m1(kernel, z)), (2, kernel_m2(kernel, z))):
+                want = quad(lambda t, l=l: t ** l * kernel_pdf(kernel, t), pts) if zc > -r else mpf(0)
+                if abs(got - want) > mpf("1e-20"):
+                    failures.append("%s: m%d(%s) is %s, quadrature %s"
+                                    % (kernel, l, mp.nstr(z, 5), mp.nstr(got, 12), mp.nstr(want, 12)))
     mp.dps = 50
-    print("self-test: kernel mass, variance and CDF checked for %d kernels" % len(KERNELS))
+    print("self-test: kernel mass, variance, CDF and the two truncated moments checked for %d kernels"
+          % len(KERNELS))
 
     # The pilot's entropy integral at the generator's working precision against 30 digits.
     xs2 = [mpf(v) for v in two_component(60)]
@@ -836,6 +1145,29 @@ def self_test():
         if err > 1e-15:
             failures.append("KDEpy's per-point bandwidths differ from the adaptive sum by %.3g" % err)
         print("self-test: KDEpy with per-point bandwidths agrees with the adaptive sum to %.2g" % err)
+
+    # The linear correction's two defining behaviours, which no Python library here implements and
+    # which a transcription error in the kernel cannot reproduce: on the rising density `2x` the
+    # clipped estimate is essentially zero at the bound it vanishes at, and on a uniform -- where a
+    # local linear fit is exact -- it is one at the bound to a thousandth.
+    rising = [mpf(i) for i in range(1, 201)]
+    rising = [mp.sqrt((v - mpf(1) / 2) / 200) for v in rising]
+    h1 = rule_bandwidth("silverman", rising, [mpf(1)] * 200, False, "reliability")
+    lin1 = LinearEstimate(rising, [mpf(1)] * 200, [h1] * 200, "gaussian", mpf(0), None)
+    z1 = lin1.prepare([])
+    f_at_bound = lin1.clipped(mpf(0)) / z1
+    if not f_at_bound < mpf("1e-3"):
+        failures.append("the linear estimate at a bound the density vanishes at is %s, not ~0"
+                        % mp.nstr(f_at_bound, 5))
+    print("self-test: on the density 2x the clipped linear estimate at the bound is %s" % mp.nstr(f_at_bound, 3))
+    flat = [(mpf(i) - mpf(1) / 2) / 200 for i in range(1, 201)]
+    h2 = rule_bandwidth("silverman", flat, [mpf(1)] * 200, False, "reliability")
+    lin2 = LinearEstimate(flat, [mpf(1)] * 200, [h2] * 200, "gaussian", mpf(0), mpf(1))
+    z2 = lin2.prepare([])
+    f_flat = lin2.clipped(mpf(0)) / z2
+    if abs(f_flat - 1) > mpf("1e-3"):
+        failures.append("the linear estimate at a uniform's bound is %s, not 1" % mp.nstr(f_flat, 8))
+    print("self-test: on a uniform the linear estimate at the bound is %s, against one" % mp.nstr(f_flat, 8))
 
     failures += isj_self_test()
 

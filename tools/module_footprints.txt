@@ -261,6 +261,9 @@ parquet_columns_structural.f90
 parquet_columns_util.f90
 parquet_columns_validity.f90
 parquet_expkey.f90
+parquet_integrate.f90
+parquet_integrate_driver.f90
+parquet_integrate_engine.f90
 parquet_kde.f90
 parquet_kde_core.f90
 parquet_kde_fit.f90

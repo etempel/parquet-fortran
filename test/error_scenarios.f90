@@ -4141,6 +4141,10 @@ program error_scenarios
         call scenario_kde_grid_boundary_without_bound()
     case ("kde_grid_outside_support")
         call scenario_kde_grid_outside_support()
+    case ("kde_grid_linear_range_not_at_bound")
+        call scenario_kde_grid_linear_range_not_at_bound()
+    case ("kde_grid_linear_narrow")
+        call scenario_kde_grid_linear_narrow()
     case ("kde_grid_add_uninitialised")
         call scenario_kde_grid_add_uninitialised()
     case ("kde_grid_threads_zero")
@@ -34984,6 +34988,30 @@ contains
         call g%init(4, -0.5_real64, 1.0_real64, 0.1_real64, lower=0.0_real64)
         print '(a)', "accepted a range reaching below the support"
     end subroutine scenario_kde_grid_outside_support
+    !
+    !> Proves that pf_kde_grid%init refuses a range that does not start at the bound under
+    !> boundary="linear" (R1), having accepted the same grid whose range does.
+    subroutine scenario_kde_grid_linear_range_not_at_bound()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 3.0_real64, 0.1_real64, lower=0.0_real64, boundary="linear")
+        print '(a, es22.15)', "kde control initialised: ", g%step()
+        call g%init(4, 0.5_real64, 3.0_real64, 0.1_real64, lower=0.0_real64, boundary="linear")
+        print '(a)', "accepted a linear grid starting above its lower bound"
+    end subroutine scenario_kde_grid_linear_range_not_at_bound
+    !
+    !> Proves that pf_kde_grid%init refuses a range narrower than one kernel reach where an edge is
+    !> free under boundary="linear" (R2), having accepted a grid of the same width bounded at BOTH
+    !> ends, which has no free edge and which R2 does not apply to.
+    subroutine scenario_kde_grid_linear_narrow()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 0.2_real64, 0.1_real64, lower=0.0_real64, upper=0.2_real64, &
+            boundary="linear")
+        print '(a, es22.15)', "kde control initialised: ", g%step()
+        call g%init(4, 0.0_real64, 0.2_real64, 0.1_real64, lower=0.0_real64, boundary="linear")
+        print '(a)', "accepted a linear grid narrower than one kernel reach with a free edge"
+    end subroutine scenario_kde_grid_linear_narrow
     !
     !> Proves that pf_kde_grid%add refuses a grid that was never initialised.
     subroutine scenario_kde_grid_add_uninitialised()

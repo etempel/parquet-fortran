@@ -57,6 +57,20 @@
 #             again from the same kernel), and from a grid of four cells to a bandwidth (`grid`,
 #             one uniform and one quadratic per draw).
 #
+#   boundary  What each boundary correction costs, on `Exp(1)`'s quantiles with `lower = 0` -- a
+#             density large at its bound, so the zone holds most of the mass -- at three sample
+#             sizes: `%fit` in milliseconds, `%pdf`, `%cdf` inside the zone and between the zones
+#             and `%quantile` inside it, `%sample` per draw, and the grid's deposit per point,
+#             under `"renormalise"`, `"reflect"` and `"linear"`. Under `"linear"` a query inside a
+#             zone integrates each nearby point's corrected kernel, so `cdf zone` follows the
+#             window where `cdf mid` does not, and `fit` pays one such integral per point that
+#             reaches a zone; `fb us` is a draw with every rejection attempt refused
+#             (`parquet_debug_set_kde_sample_tries(0)`), which is the fallback inversion's own
+#             cost. The zone queries are taken at a few points only, one of them costing a tenth
+#             of a second at 1e5 points. It closes with the adaptive kernel with and without
+#             `bandwidth_max`, whose ratio of the widest bandwidth to the global one is what
+#             decides how wide the corrected zone is.
+#
 #   threads   `%add`, `%pdf` and `%sample` across a ladder of thread counts, 1, 2, 4, ... up to the
 #             threads OpenMP offers (at most 64): milliseconds per call, the speed-up over one
 #             thread, and the team each call actually opened (`parquet_debug_kde_threads_used`),
@@ -81,7 +95,7 @@
 #   MODE=grid bench/benchmark_kde.sh           # one of them
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=all          evaluate, grid, accuracy, adaptive, rules, sample, threads, or all.
+#   MODE=all          evaluate, grid, accuracy, adaptive, rules, sample, boundary, threads, or all.
 #   ROUNDS=5          Timed laps per figure; the FASTEST is kept, never the mean, because the slow
 #                     laps are the machine's other work rather than this code's.
 #   POINTS=100000     The sample's size in `evaluate`, `accuracy`, `adaptive`, `sample` and
@@ -108,9 +122,9 @@ GRID_POINTS="${GRID_POINTS:-1000000}"
 QUERIES="${QUERIES:-10000}"
 
 case "$MODE" in
-    evaluate|grid|accuracy|adaptive|rules|sample|threads|all) ;;
+    evaluate|grid|accuracy|adaptive|rules|sample|boundary|threads|all) ;;
     *) echo "benchmark_kde.sh: MODE must be evaluate, grid, accuracy, adaptive, rules, sample," \
-            "threads or all (got '$MODE')" >&2
+            "boundary, threads or all (got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -168,6 +182,12 @@ fi
 if [[ "$MODE" == "sample" || "$MODE" == "all" ]]; then
     fpm run benchmark_kde --profile release -- \
         --mode=sample --rounds="$ROUNDS" --points="$POINTS" --queries="$QUERIES"
+    echo
+fi
+
+if [[ "$MODE" == "boundary" || "$MODE" == "all" ]]; then
+    fpm run benchmark_kde --profile release -- \
+        --mode=boundary --rounds="$ROUNDS" --points="$POINTS" --queries="$QUERIES"
     echo
 fi
 

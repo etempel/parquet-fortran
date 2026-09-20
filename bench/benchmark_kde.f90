@@ -15,7 +15,8 @@
 program benchmark_kde
 
     use iso_fortran_env, only : real64, int64, error_unit
-    use parquet_kde, only : pf_kde, pf_kde_grid, parquet_debug_kde_fit_nanos, parquet_debug_kde_threads_used
+    use parquet_kde, only : pf_kde, pf_kde_grid, parquet_debug_kde_fit_nanos, parquet_debug_kde_threads_used, &
+        parquet_debug_set_kde_sample_tries
     use parquet_argsort, only : pf_argsort
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads
@@ -58,6 +59,8 @@ program benchmark_kde
         call run_sample(rounds, npoints, nqueries)
     case ("threads")
         call run_threads(rounds, npoints, nqueries, failures)
+    case ("boundary")
+        call run_boundary(rounds, npoints)
     case default
         write(error_unit, '(a)') "benchmark_kde: unknown mode '" // trim(mode) // "'"
         error stop 1
@@ -129,6 +132,233 @@ contains
     !> The sample: a pure function of the index over about `[-500, 500]`, dense at its two ends
     !> and thin in the middle, so that a query's window holds a very different number of points in
     !> different places.
+    !> What the three boundary corrections cost, and where `"linear"` differs from the other two.
+    !>
+    !> On `Exp(1)`'s quantiles with `lower = 0` -- a density that is large at its bound, so that the
+    !> boundary zone holds most of the mass -- at three sample sizes: `%fit`, `%pdf` and `%cdf`
+    !> inside the zone and between the zones, `%quantile` inside the zone, and `%sample`. Under
+    !> `"linear"` a query inside the zone integrates each nearby point's corrected kernel, so its
+    !> cost follows the WINDOW, and `%fit` pays one such integral per point that reaches the zone:
+    !> the columns are what feature_kde_boundary.md's cost model predicted, measured. The zone
+    !> queries are taken at a few points only, since one of them can cost a tenth of a second at
+    !> `1e5` points.
+    subroutine run_boundary(rounds, n)
+        integer, intent(in)        :: rounds !! timed laps per figure
+        integer(int64), intent(in) :: n      !! the largest sample
+
+        character(len=11), parameter :: METHODS(3) = [character(len=11) :: "renormalise", "reflect", "linear"]
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), qz(:), qm(:), pz(:), out(:), draws(:)
+        real(real64) :: h, reach, t0, t, fit_ms, pdf_us, cdf_z, cdf_m, quant_ms, draw_us, fb_us, dep_ns
+        real(real64) :: checksum, hb_max
+        real(real64), allocatable :: hb(:)
+        integer(int64) :: sizes(3), nn, i, reps, r, nq, nqq, nd
+        integer :: sz, mm, nc
+
+        sizes = [max(1000_int64, n/100_int64), max(1000_int64, n/10_int64), n]
+        checksum = 0.0_real64
+        print '(a)', "=== the boundary corrections: what each costs ==="
+        print '(a,i0,a)', "Exp(1) quantiles with lower = 0, Silverman's rule, fastest of ", rounds, " laps"
+        print '(a)', "pdf/cdf in microseconds per query point, quantile in milliseconds per probability, " // &
+            "sample in microseconds per draw"
+        print '(a)', "zone: within one kernel reach of the bound; mid: two to six reaches from it"
+        print '(a)', ""
+        print '(a)', "       n  correction    fit ms     pdf us  cdf zone   cdf mid  quant ms   draw us" // &
+            "    fb us   dep ns"
+        do sz = 1, 3
+            nn = sizes(sz)
+            if (sz > 1) then
+                if (nn <= sizes(sz - 1)) cycle
+            end if
+            call exp_sample(nn, x)
+            ! The zone queries are few where one of them is dear, and the draws likewise.
+            nq = 50_int64
+            if (nn >= 100000_int64) nq = 20_int64
+            if (nn >= 1000000_int64) nq = 5_int64
+            nqq = 2_int64
+            if (nn >= 100000_int64) nqq = 1_int64
+            nd = 200_int64
+            if (nn >= 100000_int64) nd = 50_int64
+            if (allocated(qz)) deallocate(qz, qm, pz, out, draws)
+            allocate(qz(nq), qm(nq), pz(nqq), out(max(nq, nqq)), draws(nd))
+            out = 0.0_real64
+            draws = 0.0_real64
+            do mm = 1, 3
+                ! The fit, timed on its own: under `"linear"` it also scans each zone and integrates
+                ! one term per point that reaches it.
+                reps = 1_int64
+                do
+                    t0 = clock()
+                    do r = 1_int64, reps
+                        call k%fit(x, rule="silverman", lower=0.0_real64, boundary=trim(METHODS(mm)), threads=1)
+                    end do
+                    t = clock() - t0
+                    if (t >= MIN_LAP .or. reps >= 64_int64) exit
+                    reps = 2_int64*reps
+                end do
+                fit_ms = 1000.0_real64*t/real(reps, real64)
+                h = k%bandwidth()
+                reach = 5.0_real64*h
+                call spread(0.02_real64*reach, 0.98_real64*reach, qz)
+                call spread(2.0_real64*reach, 6.0_real64*reach, qm)
+                do i = 1_int64, nqq
+                    pz(i) = 0.002_real64*real(i, real64)
+                end do
+                pdf_us = 1.0e6_real64*time_query(k, 1, qz, out(1:nq), rounds, checksum)/real(nq, real64)
+                cdf_z = 1.0e6_real64*time_query(k, 2, qz, out(1:nq), rounds, checksum)/real(nq, real64)
+                cdf_m = 1.0e6_real64*time_query(k, 2, qm, out(1:nq), rounds, checksum)/real(nq, real64)
+                quant_ms = 1000.0_real64*time_query(k, 3, pz, out(1:nqq), rounds, checksum)/real(nqq, real64)
+                draw_us = 1.0e6_real64*time_query(k, 4, pz, draws, rounds, checksum)/real(nd, real64)
+                ! The same draws with every attempt refused, which sends each one to its fallback:
+                ! the inversion of the zone's own integral, a quantile solve per draw.
+                fb_us = 0.0_real64
+                if (mm == 3 .and. nn <= 10000_int64) then
+                    call parquet_debug_set_kde_sample_tries(0)
+                    fb_us = 1.0e6_real64*time_query(k, 4, pz, draws(1:min(nd, 20_int64)), 2, checksum) &
+                        /real(min(nd, 20_int64), real64)
+                    call parquet_debug_set_kde_sample_tries(-1)
+                end if
+                ! The grid's deposit, per point, on a grid the correction's own rules accept.
+                nc = 400
+                reps = 1_int64
+                do
+                    t0 = clock()
+                    do r = 1_int64, reps
+                        call g%init(nc, 0.0_real64, maxval(x), h, lower=0.0_real64, boundary=trim(METHODS(mm)))
+                        call g%add(x, threads=1)
+                    end do
+                    t = clock() - t0
+                    if (t >= MIN_LAP .or. reps >= 16_int64) exit
+                    reps = 2_int64*reps
+                end do
+                dep_ns = 1.0e9_real64*t/(real(reps, real64)*real(nn, real64))
+                print '(i9,2x,a11,8f10.2)', nn, METHODS(mm), fit_ms, pdf_us, cdf_z, cdf_m, quant_ms, &
+                    draw_us, fb_us, dep_ns
+            end do
+        end do
+        print '(a)', ""
+
+        ! The adaptive kernel: a far tail's wide kernels widen the zone the correction acts in, and
+        ! `bandwidth_max` is what keeps it narrow.
+        print '(a)', "=== the adaptive kernel under linear: what bandwidth_max saves ==="
+        print '(a)', ""
+        print '(a)', "  bandwidth_max      fit ms   h_j max/h    cdf zone us"
+        nn = sizes(2)
+        call exp_sample(nn, x)
+        do mm = 1, 2
+            reps = 1_int64
+            do
+                t0 = clock()
+                do r = 1_int64, reps
+                    if (mm == 1) then
+                        call k%fit(x, rule="silverman", adaptive=.true., lower=0.0_real64, &
+                            boundary="linear", threads=1)
+                    else
+                        call k%fit(x, rule="silverman", adaptive=.true., bandwidth_max=2.0_real64*k%bandwidth(), &
+                            lower=0.0_real64, boundary="linear", threads=1)
+                    end if
+                end do
+                t = clock() - t0
+                if (t >= MIN_LAP .or. reps >= 8_int64) exit
+                reps = 2_int64*reps
+            end do
+            fit_ms = 1000.0_real64*t/real(reps, real64)
+            if (allocated(hb)) deallocate(hb)
+            allocate(hb(k%n_valid()))
+            call k%bandwidths(hb)
+            hb_max = maxval(hb)/k%bandwidth()
+            call spread(0.02_real64*5.0_real64*k%bandwidth(), 0.98_real64*5.0_real64*k%bandwidth(), qz)
+            cdf_z = 1.0e6_real64*time_query(k, 2, qz, out(1:nq), 2, checksum)/real(nq, real64)
+            if (mm == 1) then
+                print '(a,3f12.2)', "  none         ", fit_ms, hb_max, cdf_z
+            else
+                print '(a,3f12.2)', "  2h           ", fit_ms, hb_max, cdf_z
+            end if
+        end do
+        print '(a)', ""
+        print '(a,es22.14)', "checksum ", checksum
+
+    end subroutine run_boundary
+
+    !> The fastest of `rounds` laps of one query over `q`, in seconds per call; the answers are
+    !> folded into `checksum` outside the timed region. Job 1 is `%pdf`, 2 `%cdf`, 3 `%quantile`
+    !> and 4 `%sample` (which reads `out` alone). A lap over a second is repeated twice, not
+    !> `rounds` times: a zone `%quantile` on a large sample takes seconds.
+    function time_query(k, job, q, out, rounds, checksum) result(best)
+        type(pf_kde), intent(in)    :: k        !! the fitted estimate
+        integer, intent(in)         :: job      !! which query
+        real(real64), intent(in)    :: q(:)     !! the points or probabilities
+        real(real64), intent(inout) :: out(:)   !! the answers, written before any lap
+        integer, intent(in)         :: rounds   !! laps
+        real(real64), intent(inout) :: checksum !! the answers' fold
+        real(real64)                :: best     !! seconds per call
+
+        real(real64) :: t0, t
+        integer(int64) :: reps, r
+        integer :: lap, laps
+
+        reps = 1_int64
+        do
+            t0 = clock()
+            do r = 1_int64, reps
+                call one_query(k, job, q, out)
+            end do
+            t = clock() - t0
+            if (t >= MIN_LAP .or. reps >= 4096_int64) exit
+            reps = 2_int64*reps
+        end do
+        best = t/real(reps, real64)
+        laps = rounds
+        if (best > 1.0_real64) laps = 2
+        do lap = 2, laps
+            t0 = clock()
+            do r = 1_int64, reps
+                call one_query(k, job, q, out)
+            end do
+            t = (clock() - t0)/real(reps, real64)
+            if (t < best) best = t
+        end do
+        checksum = checksum + out(1) + out(size(out))
+
+    end function time_query
+
+    !> One query of the kind `job` on `k`.
+    subroutine one_query(k, job, q, out)
+        type(pf_kde), intent(in)    :: k      !! the fitted estimate
+        integer, intent(in)         :: job    !! which query
+        real(real64), intent(in)    :: q(:)   !! the points or probabilities
+        real(real64), intent(inout) :: out(:) !! the answers
+
+        select case (job)
+        case (1)
+            call k%pdf(q, out, threads=1)
+        case (2)
+            call k%cdf(q, out, threads=1)
+        case (3)
+            call k%quantile(q, out, threads=1)
+        case default
+            call k%sample(out, 20260920_int64, threads=1)
+        end select
+
+    end subroutine one_query
+
+    !> `n` quantiles of `Exp(1)`: a density that is large at its lower bound, where most of the
+    !> mass -- and so most of the boundary correction's work -- lies.
+    subroutine exp_sample(n, x)
+        integer(int64), intent(in)             :: n    !! how many
+        real(real64), allocatable, intent(out) :: x(:) !! the values, ascending
+
+        integer(int64) :: i
+
+        if (allocated(x)) deallocate(x)
+        allocate(x(n))
+        do i = 1_int64, n
+            x(i) = -log(1.0_real64 - (real(i, real64) - 0.5_real64)/real(n, real64))
+        end do
+
+    end subroutine exp_sample
+
     subroutine sample(n, x)
         integer(int64), intent(in)             :: n    !! how many
         real(real64), allocatable, intent(out) :: x(:) !! the values

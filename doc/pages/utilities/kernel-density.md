@@ -200,7 +200,7 @@ beyond that limit, and a kernel placed near it would put mass where none can be.
 - **The density is zero outside the support**, `%cdf` is exactly 0 at and below `lower` and exactly
   1 at and above `upper`.
 
-A kernel crossing a bound is corrected, in one of two ways chosen by `boundary=`:
+A kernel crossing a bound is corrected, in one of three ways chosen by `boundary=`:
 
 - **`"renormalise"`** (the default): the kernel is cut at the bounds and divided by the mass it
   keeps inside them, so every point contributes exactly one unit inside the support. It never
@@ -208,21 +208,49 @@ A kernel crossing a bound is corrected, in one of two ways chosen by `boundary=`
 - **`"reflect"`**: the point is mirrored about each bound within its reach, and the mirror image's
   mass is folded back inside. It is exact for a density that is flat at the bound -- the density of
   `abs(v)` for a `v` symmetric about zero, say -- and it forces the estimate flat there.
+- **`"linear"`**: within one kernel's reach of a bound each point's kernel is replaced by the
+  linear boundary kernel, the kernel of a local linear fit there: `(a_2 - a_1 u) K(u)` over the
+  moments `a_l` the support leaves it, which is the unique kernel of that form whose mass inside
+  the support is one and whose first moment is zero. Its bias at the bound is of the order of
+  `h**2`, the interior's, rather than `h`. It can go negative where the true density falls to zero
+  at a bound: those values are set to zero and the whole estimate divided by its own integral, so
+  `%pdf` is still a density and `%cdf` still its exact integral.
 
-Both corrections are biased near a bound by an amount proportional to `h` unless the true density
-is flat there, and each is the right choice for a different shape. Two hundred points drawn from the
-rising density `f(x) = 2x` on `[0, 1]`, fitted with Silverman's rule (`h = 0.0737`) and `lower=0`:
+The two simple corrections are biased near a bound by an amount proportional to `h` unless the true
+density is flat there, and each is the right choice for a different shape. Two hundred points drawn
+from the rising density `f(x) = 2x` on `[0, 1]`, fitted with Silverman's rule (`h = 0.0737`) and
+`lower=0`:
 
 ```
-   x     true    unbounded    "renormalise"   "reflect"
- 0.00    0.000     0.058          0.068          0.117
- 0.05    0.100     0.122          0.137          0.143
- 0.10    0.200     0.207          0.221          0.212
- 0.20    0.400     0.400          0.405          0.400
+   x     true    unbounded    "renormalise"   "reflect"    "linear"
+ 0.00    0.000     0.058          0.068          0.117       0.000
+ 0.05    0.100     0.122          0.137          0.143       0.100
+ 0.10    0.200     0.207          0.221          0.212       0.202
+ 0.20    0.400     0.400          0.405          0.400       0.402
 ```
 
 At the bound itself reflection forces the estimate flat and so roughly doubles it; the unbounded
 estimate is closest there only because it has lost mass below zero, which it never gets back.
+
+**Which to choose.** `"linear"` where the density rises or falls at the bound, which is what the
+table above shows and what the other two cannot follow. `"reflect"` where it is flat there, which
+reflection is exact for. `"renormalise"`, the default, where the estimate's cost matters more than
+its last per cent at the bound, or where many draws are wanted from `%sample`.
+
+**What `"linear"` costs.** Inside one kernel's reach of a bound, `%cdf` and `%quantile` integrate
+each nearby point's corrected kernel numerically, and `%sample` draws there from those kernels and
+keeps a draw by the estimate, so each costs many times what it costs elsewhere; `%pdf` costs about
+what it costs under the other corrections. `bench/benchmark_kde.sh` measures all of it
+(`MODE=boundary`). For many draws from a density whose mass sits near a bound, accumulate the
+estimate into a `pf_kde_grid` and sample that instead, which costs one quadratic solve per draw
+under every correction. Under the adaptive kernel a far tail's wide kernels widen the zone the
+correction acts in, and `bandwidth_max` is the remedy.
+
+**What the clip can miss.** The stretches where the raw estimate is negative are found at `%fit` by
+a scan about a sixty-fourth of a bandwidth apart, refined at the kernels' own edges where the
+estimate comes near zero. A dip below zero that begins and ends between two neighbouring scan
+points is not seen: `%pdf` still clips it, while `%cdf` counts its (small, negative) mass, so the
+two can disagree there by at most that mass.
 
 **Where the kernel is wider than the whole support** -- both bounds given and closer together than
 a kernel's reach -- a mirror image reaches the far bound too. Each point's kernel is then
@@ -231,6 +259,13 @@ to one.
 
 `%bounds(lo, hi)` answers the support, with `-Infinity`/`+Infinity` where no bound was given.
 `pf_kde_grid%init` takes the same three arguments, and its range must lie inside the support.
+**Under `"linear"` a grid takes three more rules**, so that the weight it counts beyond its own
+range is never weight the correction was acting on: its range must START at `lower` and END at
+`upper` where those are given (R1); where only one bound is given, its range must be at least one
+kernel's reach wide, so that the free edge lies outside the bound's zone (R2); and, with the
+adaptive kernel and a free edge, a point whose own reach exceeds the range's width poisons the grid
+rather than have that weight miscounted (R3), for which `bandwidth_max` is the remedy. With both
+bounds given no edge is free and only R1 applies.
 
 ## The adaptive kernel
 
@@ -304,8 +339,9 @@ one; `bench/benchmark_kde.sh` measures both (`MODE=adaptive`).
 - **`%cdf(x, p)`**: `P(X <= x)` at a point or at each point of an array, clamped to `[0, 1]`.
 - **`%quantile(p, x)`**: the smallest `x` at which `%cdf` reaches `p`, found by Newton's method on
   `%cdf` inside a bracket, with bisection whenever a step would leave it. `p = 0` and `p = 1` give
-  the two ends of the estimate's support: the extreme points minus and plus one kernel's reach,
-  clipped to the bounds. A `p` outside `[0, 1]` aborts.
+  the two ends of the estimate's support, where its density starts and stops: the smallest
+  `x_j - R h_j` and the largest `x_j + R h_j` over the retained points, `R h_j` being point `j`'s
+  kernel's reach at its own bandwidth, clipped to the bounds. A `p` outside `[0, 1]` aborts.
 - **`%curve(x, f, [xmin], [xmax], [cut], [threads])`**: fills `x` with `size(x)` equally spaced
   points, both ends exact, and `f` with the density at each. The default range is the sample's
   minimum minus `cut` bandwidths to its maximum plus `cut` bandwidths, `cut` defaulting to 3,
@@ -508,7 +544,12 @@ call g%sample(v, seed, [stream], [threads])
   then its kernel, at the point's own bandwidth, drawn about it. The draws follow `%pdf` exactly,
   the adaptive kernel's included. A draw beyond the Gaussian's cut is drawn again from the same
   kernel; under `"renormalise"` so is a draw beyond a bound, and under `"reflect"` it is mirrored
-  back inside, so the draws follow the corrected estimate and never leave the support.
+  back inside, so the draws follow the corrected estimate and never leave the support. Under
+  `"linear"` a draw first chooses between the two boundary zones and the interior by the mass each
+  holds: in the interior it is the bootstrap as above, truncated there, and in a zone it is drawn
+  from one point's own corrected kernel and kept with the probability the estimate gives it -- a
+  draw there costs many times an interior one, and `bench/benchmark_kde.sh` (`MODE=boundary`)
+  measures how many.
 - **`pf_kde_grid` draws from the density its `%pdf` describes** over `[xmin, xmax]`, each draw
   inverting the integral of that piecewise-linear density. Weight the grid counted beyond its range
   has no place in it, so no draw lands there: the draws follow the density inside the range,
@@ -608,7 +649,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `lower` or `upper` NaN or infinite | `pf_kde%fit: lower and upper must be finite` |
 | `lower >= upper` | `pf_kde%fit: lower must be below upper` |
 | `boundary=` with no bound | `pf_kde%fit: boundary= needs lower= or upper=` |
-| an unknown `boundary` | `pf_kde%fit: boundary must be "renormalise" or "reflect"` |
+| an unknown `boundary` | `pf_kde%fit: boundary must be "renormalise", "reflect" or "linear"` |
 | `is_valid` or `weights` of the wrong size | `pf_kde%fit: weights has 3 elements but values has 4` (the family's text) |
 | a negative, NaN or infinite weight | `pf_kde%fit: weight 2 is negative; weights must be finite and non-negative` (the family's text) |
 | an unknown `weight_type` | `pf_kde%fit: weight_type "..." is not recognised; ...` (the family's text) |
@@ -633,6 +674,8 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `xmin >= xmax` | `pf_kde_grid%init: xmin must be below xmax` |
 | a range wider than the largest number, or cells too narrow to represent | `pf_kde_grid%init: the cell width (xmax - xmin)/ncells must be a finite, positive number` |
 | `[xmin, xmax]` reaching outside `[lower, upper]` | `pf_kde_grid%init: the grid's range must lie inside the support` |
+| under `boundary="linear"`, a range that does not start at `lower` or end at `upper` (R1) | `pf_kde_grid%init: under boundary="linear" the grid's range must start at lower and end at upper` |
+| under `boundary="linear"` with one bound, a range narrower than one kernel's reach (R2) | `pf_kde_grid%init: under boundary="linear" the grid must be at least one kernel reach wide` |
 | `bandwidth`, `kernel`, `alpha`, `bandwidth_max`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
 | `alpha=` or `bandwidth_max=` without `pilot=` | `pf_kde_grid%init: alpha= and bandwidth_max= need pilot=` |
 | `pilot=` a grid never initialised | `pf_kde_grid%init: pilot must be an initialised grid` |
@@ -669,6 +712,8 @@ per thread merged at the end is how several threads accumulate one estimate.
 `use parquet_kde` compiles the statistics tier it is built on (`parquet_stats`, and beneath it the
 sorting tier), the random-number generator `%sample` draws from (`parquet_random`), the root finder
 and the discrete cosine transform the ISJ rule is built on (`parquet_root`, `parquet_transform`),
-and the module's own four files; no reader, writer or C++ boundary. It re-exports
+the adaptive quadrature `boundary="linear"` integrates each nearby point's corrected kernel with
+(`parquet_integrate`, three files), and the module's own four files; no reader, writer or C++
+boundary. It re-exports
 the verbosity and message-stream pair, which `%print` reads, so a program importing it alone can
 silence its output with `parquet_set_verbosity("silent")`.

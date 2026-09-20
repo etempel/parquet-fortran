@@ -333,7 +333,12 @@ def _const(name):
     if key not in _CONST:
         _CONST[key] = {"sqrt2": lambda: mpsqrt(2), "sqrt3": lambda: mpsqrt(3),
                        "sqrt5": lambda: mpsqrt(5), "sqrt2pi": lambda: mpsqrt(2 * pi),
-                       "gmass": lambda: erf(CUT / mpsqrt(2))}[name]()
+                       "gmass": lambda: erf(CUT / mpsqrt(2)),
+                       # The three values the cut Gaussian's moments read AT THE CUT, which every
+                       # one of the millions of calls below would otherwise re-evaluate: each is
+                       # spelled as the expression it replaces, so the arithmetic is unchanged.
+                       "phicut": lambda: phi(CUT), "bigphicut": lambda: big_phi(-CUT),
+                       "gvar": lambda: 1 - 2 * CUT * phi(CUT) / gauss_mass()}[name]()
     return _CONST[key]
 
 
@@ -386,7 +391,7 @@ def kernel_m1(kernel, z):
     if t <= -r:
         return mpf(0)
     if kernel == "gaussian":
-        return (phi(CUT) - phi(t)) / gauss_mass()
+        return (_const("phicut") - phi(t)) / gauss_mass()
     v = t / c
     if kernel == "epanechnikov":
         return -(3 * c / 16) * (1 - v * v) ** 2
@@ -408,12 +413,13 @@ def kernel_m2(kernel, z):
     """
     c = scale(kernel)
     r = CUT if kernel == "gaussian" else radius(kernel)
-    var = 1 - 2 * CUT * phi(CUT) / gauss_mass() if kernel == "gaussian" else mpf(1)
+    var = _const("gvar") if kernel == "gaussian" else mpf(1)
     t = -abs(z)
     lower = mpf(0)
     if t > -r:
         if kernel == "gaussian":
-            lower = ((big_phi(t) - big_phi(-CUT)) - t * phi(t) - CUT * phi(CUT)) / gauss_mass()
+            lower = ((big_phi(t) - _const("bigphicut")) - t * phi(t)
+                     - CUT * _const("phicut")) / gauss_mass()
         else:
             v = t / c
             if kernel == "epanechnikov":
@@ -445,7 +451,7 @@ def kernel_cdf(kernel, z):
             return mpf(0)
         if z >= CUT:
             return mpf(1)
-        return (big_phi(z) - big_phi(-CUT)) / gauss_mass()
+        return (big_phi(z) - _const("bigphicut")) / gauss_mass()
     u = z / scale(kernel)
     if kernel == "epanechnikov":
         if u <= -1:
@@ -582,6 +588,32 @@ class Estimate:
         return acc / self.W
 
 
+def quad_smooth(f, interval):
+    """`quad` over an interval the integrand is ANALYTIC on, by Gauss-Legendre.
+
+    `LinearEstimate.prepare` cuts the estimate at every kernel knot, correction edge and sign
+    change, so no interval it integrates carries a kink or an endpoint singularity -- the case
+    Gauss-Legendre converges geometrically on, at a fraction of the default tanh-sinh's
+    evaluations. The entropy integrals of `pilot_log_g` and `linear_log_g` keep the default:
+    `p log p` has an infinite derivative wherever the density vanishes, which is the endpoint
+    behaviour tanh-sinh exists for.
+    """
+    return quad(f, interval, method="gauss-legendre")
+
+
+def quad_entropy(f, cuts, dens):
+    """The integral of `p log p` over `cuts`, interval by interval, each by the rule that suits it.
+
+    `p` is analytic and strictly positive across a whole interval whenever it is positive at both
+    of its ends -- a sum of non-negative kernels vanishes only over a stretch the knots bound, so
+    it has no isolated interior zero -- and there `quad_smooth` applies. Where `p` vanishes at an
+    end, `p log p` has an infinite derivative there and the default tanh-sinh is kept.
+    """
+    at = [dens(t) > 0 for t in cuts]
+    return sum((quad_smooth(f, [cuts[i], cuts[i + 1]]) if at[i] and at[i + 1]
+                else quad(f, [cuts[i], cuts[i + 1]])) for i in range(len(cuts) - 1))
+
+
 class LinearEstimate:
     """The linear boundary kernel's estimate over points `xs`, weights `ws`, bandwidths `hs`.
 
@@ -602,36 +634,61 @@ class LinearEstimate:
         self.kernel, self.lo, self.hi = kernel, lo, hi
         self.W = sum(ws)
         self.rad = radius(kernel)
-        self.bandwidths = sorted(set(hs))
         self._nodes = None
         self._cum = None
+        # `(a_1, a_2, D)` over the kernel's WHOLE support, per working precision: what `factor`
+        # answers wherever neither bound clips the kernel, which is most of the support and every
+        # point of an unbounded side. Keyed on the precision because the pilot's entropy integral
+        # runs at `G_DPS` (`linear_log_g`).
+        self._whole = {}
+        # Each point's centre and reach in doubles, widened by a margin, so that `raw` skips the
+        # points whose kernel is exactly zero at `x` without dividing at all. A skip test only:
+        # every point that survives it is tested again, and summed, at full precision.
+        radf = 1.000001 * float(self.rad)
+        self._skip = [(float(x), radf * float(h) + 1e-300) for x, h in zip(xs, hs)]
 
-    def factors(self, x):
-        """`(a_1, a_2, D)` per distinct bandwidth at `x`."""
-        out = {}
-        for h in self.bandwidths:
-            lo_z, hi_z = -self.rad, self.rad
-            if self.lo is not None:
-                hi_z = min(hi_z, (x - self.lo) / h)
-            if self.hi is not None:
-                lo_z = max(lo_z, -(self.hi - x) / h)
-            a0 = kernel_cdf(self.kernel, hi_z) - kernel_cdf(self.kernel, lo_z)
-            a1 = kernel_m1(self.kernel, hi_z) - kernel_m1(self.kernel, lo_z)
-            a2 = kernel_m2(self.kernel, hi_z) - kernel_m2(self.kernel, lo_z)
-            out[h] = (a1, a2, a0 * a2 - a1 * a1)
-        return out
+    def moments(self, lo_z, hi_z):
+        """`(a_1, a_2, D)` from the kernel's moments between `lo_z` and `hi_z`."""
+        a0 = kernel_cdf(self.kernel, hi_z) - kernel_cdf(self.kernel, lo_z)
+        a1 = kernel_m1(self.kernel, hi_z) - kernel_m1(self.kernel, lo_z)
+        a2 = kernel_m2(self.kernel, hi_z) - kernel_m2(self.kernel, lo_z)
+        return (a1, a2, a0 * a2 - a1 * a1)
+
+    def factor(self, x, h):
+        """`(a_1, a_2, D)` at `x` for bandwidth `h`."""
+        lo_z, hi_z = -self.rad, self.rad
+        if self.lo is not None:
+            hi_z = min(hi_z, (x - self.lo) / h)
+        if self.hi is not None:
+            lo_z = max(lo_z, -(self.hi - x) / h)
+        if lo_z == -self.rad and hi_z == self.rad:
+            if mp.prec not in self._whole:
+                self._whole[mp.prec] = self.moments(lo_z, hi_z)
+            return self._whole[mp.prec]
+        return self.moments(lo_z, hi_z)
 
     def raw(self, x):
-        """The linear estimate before the clip and before `Z`; zero outside the support."""
+        """The linear estimate before the clip and before `Z`; zero outside the support.
+
+        The moments are taken per bandwidth that a point in reach of `x` actually carries, and
+        cached for the rest of this sum: with the adaptive kernel every point has a bandwidth of
+        its own, and forming all of them at every node of every quadrature is what dominates.
+        """
         if (self.lo is not None and x < self.lo) or (self.hi is not None and x > self.hi):
             return mpf(0)
-        fac = self.factors(x)
+        fac = {}
         acc = mpf(0)
-        for xj, w, h in zip(self.xs, self.ws, self.hs):
+        tf = float(x)
+        for (xf, rf), xj, w, h in zip(self._skip, self.xs, self.ws, self.hs):
+            if abs(tf - xf) > rf:
+                continue
             u = (x - xj) / h
             if abs(u) > self.rad:
                 continue
-            a1, a2, d = fac[h]
+            got = fac.get(h)
+            if got is None:
+                got = fac[h] = self.factor(x, h)
+            a1, a2, d = got
             acc += w * (a2 - a1 * u) * kernel_pdf(self.kernel, u) / (d * h)
         return acc / self.W
 
@@ -701,7 +758,7 @@ class LinearEstimate:
         self._nodes = sorted(nodes)
         self._cum = [mpf(0)]
         for u, v in zip(self._nodes, self._nodes[1:]):
-            self._cum.append(self._cum[-1] + quad(self.clipped, [u, v]))
+            self._cum.append(self._cum[-1] + quad_smooth(self.clipped, [u, v]))
         return self._cum[-1]
 
     def mass_to(self, t):
@@ -712,7 +769,9 @@ class LinearEstimate:
         if t >= b:
             return self._cum[-1]
         i = max(i for i, v in enumerate(self._nodes) if v <= t)
-        return self._cum[i] + quad(self.clipped, [self._nodes[i], t])
+        if t == self._nodes[i]:
+            return self._cum[i]                    # every probe is a node: an empty integral
+        return self._cum[i] + quad_smooth(self.clipped, [self._nodes[i], t])
 
 
 def pilot_log_g(pilot, a, b, dps):
@@ -737,7 +796,7 @@ def pilot_log_g(pilot, a, b, dps):
         def plogp(t):
             v = pilot.pdf(t)
             return v * mp.log(v) if v > 0 else mpf(0)
-        num = sum(quad(plogp, [cuts[i], cuts[i + 1]]) for i in range(len(cuts) - 1))
+        num = quad_entropy(plogp, cuts, pilot.pdf)
     finally:
         mp.dps = saved
     return num / den
@@ -755,7 +814,7 @@ def linear_log_g(lin, z, a, b, dps):
         def plogp(t):
             v = lin.clipped(t) / z
             return v * mp.log(v) if v > 0 else mpf(0)
-        num = sum(quad(plogp, [cuts[i], cuts[i + 1]]) for i in range(len(cuts) - 1))
+        num = quad_entropy(plogp, cuts, lin.clipped)
     finally:
         mp.dps = saved
     den = (lin.mass_to(b) - lin.mass_to(a)) / z

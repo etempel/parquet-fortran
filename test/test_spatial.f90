@@ -6296,9 +6296,14 @@ contains
     end subroutine read_los_phases
 
     !> The sweep's five phase timings add up: after a sweep every phase is non-negative, the sweep's
-    !> own is positive, and the five together lie between half and all of the time measured around
-    !> the call -- the lower bound is what catches a phase converted in the wrong unit, since the
-    !> readings telescope and nothing else runs inside the call. A second sweep adds to every phase,
+    !> own is positive, and the five together come to no more than the time measured around the call
+    !> and at least a twentieth of it. **The lower bound sizes a UNIT, not a share.** What it catches
+    !> is a phase converted in the wrong unit, which lands a factor of a thousand or more under the
+    !> elapsed time, so a twentieth clears that by fifty times over while leaving room for the thing
+    !> a share cannot control: the clock around the call also counts whatever the scheduler does
+    !> between the phases, and test-drive dispatches these suites in parallel, so a preempted run
+    !> inflates `elapsed` without adding to any phase. A share tight enough to read as "most of the
+    !> time" measures the machine's load rather than this library. A second sweep adds to every phase,
     !> and the reset returns all five to zero. Three thousand points keep the sweep far above the
     !> clock's resolution on every compiler. The mutation is the sweep's closing reading taken before
     !> its opening one.
@@ -6336,8 +6341,9 @@ contains
         call check(error, real(sum(ph1), kind=real64) <= elapsed + 5.0_real64, &
             "the phases cannot add up to more than the time around the call")
         if (allocated(error)) return
-        call check(error, real(sum(ph1), kind=real64) >= 0.5_real64 * elapsed, &
-            "the phases must account for most of the time around the call")
+        call check(error, real(sum(ph1), kind=real64) >= 0.05_real64 * elapsed, &
+            "the phases must account for a twentieth of the time around the call, which only a " // &
+            "phase measured in the wrong unit falls under")
         if (allocated(error)) return
         call sx%pairs_within_los(bp, bl, pi, pj, combine=PF_LINK_MEAN)
         call read_los_phases(ph2)

@@ -278,6 +278,7 @@ contains
     !> parquet_transform (pf_dct/pf_is_pow2),
     !> parquet_kde (pf_kde/pf_kde_grid),
     !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
+    !> parquet_cosmology (pf_cosmology/pf_z2zeta/pf_zeta2z/pf_z_combine),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
     !> parquet_prima (pf_minimize_bobyqa/pf_minimize_lincoa/pf_minimize_cobyla/
@@ -564,6 +565,19 @@ contains
             call plane%init(knots, [0.0_real64, 1.0_real64], grid_values, method="linear")
             call check(error, plane%eval(0.5_real64, 0.5_real64) == 2.5_real64, &
                 "pf_interp_2d must be reachable from use parquet alone and interpolate a plane")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_cosmology: a cosmology built and read, and the free redshift conversions.
+        block
+            type(pf_cosmology) :: cosmo
+            real(real64) :: dc
+            call cosmo%init("Planck18")
+            dc = cosmo%comoving_distance(1.0_real64)
+            call check(error, abs(dc - 3395.6_real64) < 1.0_real64 .and. cosmo%is_flat() .and. &
+                abs(pf_z_combine(1.0_real64, 1.0_real64) - 3.0_real64) < 1.0e-12_real64 .and. &
+                abs(pf_zeta2z(pf_z2zeta(2.0_real64)) - 2.0_real64) < 1.0e-12_real64, &
+                "pf_cosmology and the redshift conversions must be reachable from use parquet alone")
             if (allocated(error)) return
         end block
 

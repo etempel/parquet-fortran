@@ -242,6 +242,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_user_table_code.py` | A Role-A MAML into a named `parquet_table` extension type. **Consumer-facing.** |
 | `generate_random_golden_vectors.py` | The golden vectors freezing `parquet_random`'s bit contract. |
 | `generate_probit_reference.py` | `pf_probit` and the normal family's golden expectations, from a 50-digit `mpmath` oracle. |
+| `generate_cosmology_reference.py` | The golden rows pinning `parquet_cosmology`'s distances, times and volumes, from a 30-digit `mpmath` model of astropy's `w0waCDM`. |
 | `generate_healpix_reference.py` | The reference vectors pinning `parquet_healpix` against an independent model. |
 | `generate_sphere_reference.py` | The golden rows pinning `parquet_sphere`'s regions, draws and geometry, from a 60-digit model. |
 | `generate_skycoord_reference.py` | The golden rows pinning `parquet_skycoord`'s rotations, offsets and position angles, from a 60-digit model of each system's definition. |
@@ -300,6 +301,7 @@ drives a `.f90` program of the same name in the same directory.
 | `benchmark_arrow_release.sh` | Pins the Arrow-release figure `benchmark_table.sh` only reports, as an assertion. |
 | `benchmark_integrate.sh` | What `pf_integrate` costs: accuracy against evaluations per integrand class, and the per-call floor. |
 | `benchmark_kde.sh` | What `parquet_kde` costs: `pf_kde`'s exact queries against the bandwidth, `pf_kde_grid`'s deposit against the cells one kernel reaches under a conservation gate, its merge, and the grid's order of convergence. |
+| `benchmark_cosmology.sh` | What `parquet_cosmology` costs: a cosmology's build against its `zmax` with the integrand evaluations it made, a query inside the table against one beyond it and at a blueshift, each binding's own cost over the same column, and the two inverses with their round-trip error. |
 | `benchmark_interpolate.sh` | What `parquet_interpolate` costs: a table's build against its size, a query against the table's size, spacing and query order, with the arithmetic bracket timed against bisection on the same object under a bit-for-bit gate, a grid's build and query, and the one-shot `pf_interp` against an object. |
 | `benchmark_optimize.sh` | What `parquet_optimize` costs: evaluations per engine per reference function, what `threads=` buys on `pf_minimize_de` with a bit-for-bit gate on the answer, how DE's `np`/`f_weight`/`cr` trade against each other, and how many starts the multistart driver needs to find how many basins. |
 | `benchmark_spatial.sh` | `pf_spatial_index`: how good the chosen cell size is, what the probe costs, how a bulk sweep scales, and the 3D grid against the HEALPix backend on the sky. |

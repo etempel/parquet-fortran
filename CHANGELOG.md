@@ -133,6 +133,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   object may be shared read-only by any number of threads. Nothing is printed. An Arrow-free entry
   module. `bench/benchmark_interpolate.sh` measures it. See
   [Interpolation of tabulated data](doc/pages/utilities/interpolation.md).
+- **Distances and times in an expanding universe: `parquet_cosmology`.** `pf_cosmology` is built
+  once from one of eight named cosmologies (`Planck18`, `Planck15`, `Planck13`, `WMAP9`, `WMAP7`,
+  `WMAP5`, `WMAP3`, `WMAP1`, matched without regard to case) or from parameters of your own —
+  `h0`, `om0`, and optionally `ode0` (absent means flat, with `Ok0` exactly zero), `tcmb0`, `neff`,
+  `m_nu`, `ob0`, `w0` and `wa` — on astropy's `w0waCDM` definition with astropy 8.0.1's own
+  constants and Komatsu fit, so a `"Planck18"` agrees with astropy's to about `1e-8`. Every
+  binding that takes a redshift is `pure elemental`, so a whole column converts in one call:
+  `%comoving_distance`, `%comoving_transverse_distance`, `%luminosity_distance`,
+  `%angular_diameter_distance`, `%angular_diameter_distance_z1z2`, `%lookback_time`, `%age`,
+  `%efunc`, `%inv_efunc`, `%hubble`, `%distmod`, `%comoving_volume`,
+  `%differential_comoving_volume`, `%kpc_proper_per_arcmin`, `%kpc_comoving_per_arcmin`,
+  `%arcsec_per_kpc_proper`, `%arcsec_per_kpc_comoving`, and the inverses
+  `%z_at_comoving_distance` and `%z_at_lookback_time`; plus the model's own parameters and derived
+  values, `%is_flat`, `%has_massive_nu`, `%get_name`, `%describe`, `%m_nu` and `%clear`.
+  `%init` tabulates three integrals over a grid in `zeta = ln(1+z)`; a query beyond the table is
+  answered by a fixed 20-point Gauss-Legendre rule from its edge, so **no redshift is refused and
+  `zmax=` decides only how fast**. The age has its own table rather than being `age(0)` minus the
+  lookback time, which would keep no correct digit at high redshift. The domain runs from just
+  above `z = -1` to `z = 1e10`; outside it, and for a NaN, every binding answers NaN quietly
+  without raising an IEEE flag, so a catalogue's `-99` sentinels pass through an elemental call.
+  `%distmod(0)` is `-Infinity`, `%arcsec_per_kpc_*(0)` is `+Infinity`, and a model whose age
+  integral diverges answers `+Infinity` at every redshift. `%init` and `%clear` are the only
+  bindings that write an object, so one built cosmology may be evaluated from any number of
+  threads at once. The free functions `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` need no
+  cosmology and keep their digits where the obvious forms lose them. Arrow-free, settings-free and
+  silent.
 - **Random points on a sphere, in `parquet_random`.** `pf_random_direction_at` draws a uniform unit
   vector and `pf_random_radec_at` the same point as `(ra, dec)` in degrees; `pf_random_disc_at` and
   `pf_random_disc_radec_at` draw uniformly within an angular radius of a direction or a sky

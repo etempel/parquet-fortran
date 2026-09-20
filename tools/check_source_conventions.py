@@ -274,6 +274,7 @@ GENERATED_FILES = [
     TEST / "test_sphere_vectors.f90",
     TEST / "test_skycoord_vectors.f90",
     TEST / "test_kde_golden.f90",
+    TEST / "test_cosmology_vectors.f90",
     # test/test_healpix_vectors.f90 BELONGS here and is deliberately not listed yet. Adding it
     # fails immediately on a real gap -- its `end module` line carries no `! GCOVR_EXCL_LINE`,
     # which is fixed in tools/generate_healpix_reference.py but only reaches the file when
@@ -2451,6 +2452,22 @@ def check_parquet_skycoord_stays_arrow_free():
     return _check_stays_arrow_free(
         "parquet_skycoord",
         "Converting a sky position between coordinate systems must not require the Arrow stack.")
+
+
+def check_parquet_cosmology_stays_arrow_free():
+    """`use parquet_cosmology` must not drag the Arrow/Parquet C++ stack into a consumer's build.
+
+    Turning a redshift column into comoving distances is quadrature and interpolation over plain
+    reals: the module reaches `parquet_integrate`, `parquet_interpolate` and `parquet_utils`, and
+    nothing else. `parquet_sphere` is deliberately NOT imported -- the comoving Cartesian
+    coordinates a survey wants are three multiplications the guide shows, against the 15-file
+    graph, `parquet_random` included, that importing it would add to every consumer.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_cosmology",
+        "Turning a redshift into a distance must not require the Arrow stack.")
 
 
 def check_parquet_version_stays_arrow_free():

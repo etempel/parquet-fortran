@@ -5,6 +5,7 @@ ordered_subpage: statistics.md
 ordered_subpage: kernel-density.md
 ordered_subpage: integration.md
 ordered_subpage: interpolation.md
+ordered_subpage: cosmology.md
 ordered_subpage: optimization.md
 ordered_subpage: prima.md
 ordered_subpage: root-finding.md
@@ -26,7 +27,7 @@ Things beyond the file being read or written: a general-purpose sorting API over
 arrays and this library's own column types, statistical reductions over those same arrays, kernel density estimates of
 a sample's distribution, minimisation of a function you supply,
 finding where a function of one variable crosses zero, the discrete cosine transform,
-interpolation of tabulated data,
+interpolation of tabulated data, distances and times in an expanding universe,
 counter-based random numbers that survive a parallel loop — with the distributions and sampling
 built on them — spatial neighbour search over coordinate arrays, the HEALPix sphere pixelisation,
 random points in sky polygons and HEALPix masks with the RA/Dec geometry they need, celestial
@@ -73,6 +74,15 @@ helpers, and the two generators meant to be copied into your own project.
   beyond the table (the end value, the end segment continued, or NaN), a mask that drops points
   before building, and a one-shot form for a table queried only a few times. Every binding that
   reads an object is `pure`, so one object serves a whole team of threads. Nothing is printed.
+- [Distances and times in an expanding universe with parquet_cosmology](cosmology.html) — a
+  cosmology built once and evaluated over whole columns: the comoving, transverse, luminosity and
+  angular diameter distances, the lookback time and the age, the comoving volume and its element,
+  the distance modulus and the transverse angular scales, with the redshift at a given distance or
+  lookback time. Eight named cosmologies, or any flat, open, closed, `wCDM` or `w0waCDM` model of
+  your own, on astropy's `w0waCDM` definition with its literals. No redshift is ever refused: a
+  query beyond the table is answered by quadrature instead, so `zmax` decides only how fast. Every
+  binding that reads an object is `pure`, so one object serves a whole team of threads. Nothing is
+  printed.
 - [Optimisation: minimising a function of one or many variables](optimization.html) —
   four engines in two tiers: Brent's method on a bracket and the Nelder-Mead simplex from a start
   point for a local minimum, differential evolution over a whole box and a multistart driver over

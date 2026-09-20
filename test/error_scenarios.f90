@@ -3843,6 +3843,34 @@ program error_scenarios
         call scenario_interpolate_nan_in_y()
     case ("interpolate_inf_in_y")
         call scenario_interpolate_inf_in_y()
+    case ("cosmology_eval_before_init")
+        call scenario_cosmology_eval_before_init()
+    case ("cosmology_eval_after_clear")
+        call scenario_cosmology_eval_after_clear()
+    case ("cosmology_init_unknown_name")
+        call scenario_cosmology_init_unknown_name()
+    case ("cosmology_init_h0_out_of_range")
+        call scenario_cosmology_init_h0_out_of_range()
+    case ("cosmology_init_om0_negative")
+        call scenario_cosmology_init_om0_negative()
+    case ("cosmology_init_tcmb0_negative")
+        call scenario_cosmology_init_tcmb0_negative()
+    case ("cosmology_init_m_nu_size")
+        call scenario_cosmology_init_m_nu_size()
+    case ("cosmology_init_w0_out_of_range")
+        call scenario_cosmology_init_w0_out_of_range()
+    case ("cosmology_init_zmax_out_of_range")
+        call scenario_cosmology_init_zmax_out_of_range()
+    case ("cosmology_init_ob0_above_om0")
+        call scenario_cosmology_init_ob0_above_om0()
+    case ("cosmology_init_density_too_large")
+        call scenario_cosmology_init_density_too_large()
+    case ("cosmology_init_tcmb0_too_hot")
+        call scenario_cosmology_init_tcmb0_too_hot()
+    case ("cosmology_init_no_big_bang")
+        call scenario_cosmology_init_no_big_bang()
+    case ("cosmology_init_table_not_converged")
+        call scenario_cosmology_init_table_not_converged()
     case ("interpolate_eval_before_init")
         call scenario_interpolate_eval_before_init()
     case ("interpolate_context_reported")
@@ -33314,6 +33342,132 @@ contains
     !
     !> Evaluating an object that was never built. `%eval` is `pure`, so its result is printed: an
     !> unused pure call may be deleted, and the abort with it.
+    !> %comoving_distance on a fresh object.
+    subroutine scenario_cosmology_eval_before_init()
+        type(pf_cosmology) :: c
+        real(real64) :: v
+
+        v = c%comoving_distance(1.0_real64)
+        print '(a, es22.15)', "evaluated a cosmology that was never built: ", v
+    end subroutine scenario_cosmology_eval_before_init
+    !
+    !> The same after `%clear`.
+    subroutine scenario_cosmology_eval_after_clear()
+        type(pf_cosmology) :: c
+        real(real64) :: v
+
+        call c%init("Planck18")
+        call c%clear()
+        v = c%age(0.0_real64)
+        print '(a, es22.15)', "evaluated a cosmology that was cleared: ", v
+    end subroutine scenario_cosmology_eval_after_clear
+    !
+    !> A name that is not one of the eight.
+    subroutine scenario_cosmology_init_unknown_name()
+        type(pf_cosmology) :: c
+
+        call c%init("Plank18")
+        print '(a, l1)', "accepted an unknown cosmology name, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_unknown_name
+    !
+    !> `h0` outside `[1e-10, 1e10]`.
+    subroutine scenario_cosmology_init_h0_out_of_range()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=1.0e11_real64, om0=0.3_real64)
+        print '(a, l1)', "accepted an h0 above the range, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_h0_out_of_range
+    !
+    !> A negative `om0`.
+    subroutine scenario_cosmology_init_om0_negative()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=-0.1_real64)
+        print '(a, l1)', "accepted a negative om0, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_om0_negative
+    !
+    !> A negative `tcmb0`.
+    subroutine scenario_cosmology_init_tcmb0_negative()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, tcmb0=-1.0_real64)
+        print '(a, l1)', "accepted a negative tcmb0, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_tcmb0_negative
+    !
+    !> `m_nu` carrying other than `floor(neff)` masses.
+    subroutine scenario_cosmology_init_m_nu_size()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, neff=3.046_real64, &
+                    m_nu=[0.0_real64, 0.06_real64])
+        print '(a, l1)', "accepted an m_nu of the wrong size, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_m_nu_size
+    !
+    !> `w0` outside `[-3, 3]`.
+    subroutine scenario_cosmology_init_w0_out_of_range()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, w0=-4.0_real64)
+        print '(a, l1)', "accepted a w0 below the range, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_w0_out_of_range
+    !
+    !> `zmax` above `1e10`.
+    subroutine scenario_cosmology_init_zmax_out_of_range()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, zmax=1.0e11_real64)
+        print '(a, l1)', "accepted a zmax above the ceiling, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_zmax_out_of_range
+    !
+    !> `ob0` greater than `om0`.
+    subroutine scenario_cosmology_init_ob0_above_om0()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, ob0=0.4_real64)
+        print '(a, l1)', "accepted an ob0 above om0, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_ob0_above_om0
+    !
+    !> `ode0 = 1e300` passes every per-argument check and is refused by the DERIVED one.
+
+    !! Without that check this is an `IEEE_OVERFLOW` inside `E^2` at the redshift ceiling, which
+    !! ends the process under nagfor and is silent under gfortran and ifx.
+    subroutine scenario_cosmology_init_density_too_large()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, ode0=1.0e300_real64)
+        print '(a, l1)', "accepted an absurd ode0, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_density_too_large
+    !
+    !> `tcmb0 = 1e5` K, refused through `ogamma0` rather than a ceiling on `tcmb0`.
+
+    !! The negative control proving the check is on the DERIVED value.
+    subroutine scenario_cosmology_init_tcmb0_too_hot()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, tcmb0=1.0e5_real64)
+        print '(a, l1)', "accepted an absurd tcmb0, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_tcmb0_too_hot
+    !
+    !> A bouncing closed model whose `E^2` is negative on the table's range.
+    subroutine scenario_cosmology_init_no_big_bang()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, ode0=2.0_real64)
+        print '(a, l1)', "accepted a cosmology with no big bang, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_no_big_bang
+    !
+    !> An interval budget too small to converge, through the test-only hook.
+
+    !! `parquet_debug_set_cosmology_max_neval` is public for this alone; the suite's negative
+    !! control is every other `%init` here, made with the hook clear.
+    subroutine scenario_cosmology_init_table_not_converged()
+        type(pf_cosmology) :: c
+
+        call parquet_debug_set_cosmology_max_neval(21)
+        call c%init("Planck18")
+        print '(a, l1)', "accepted a table that did not converge, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_table_not_converged
+    !
     subroutine scenario_interpolate_eval_before_init()
         type(pf_interp_1d) :: c
         real(real64) :: v

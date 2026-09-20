@@ -23,7 +23,8 @@ settings. Every page below assumes that single import.
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
-`parquet_argsort`, `parquet_stats`, `parquet_kde`, `parquet_integrate`, `parquet_interpolate`, `parquet_optimize`,
+`parquet_argsort`, `parquet_stats`, `parquet_kde`, `parquet_integrate`, `parquet_interpolate`,
+`parquet_cosmology`, `parquet_optimize`,
 `parquet_prima`, `parquet_root`, `parquet_transform`,
 `parquet_sampling`, `parquet_spatial`,
 `parquet_healpix`, `parquet_sphere`, `parquet_skycoord`,
@@ -75,7 +76,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 46 pages, in reading order. (This list, each group's own page list and the
+All 47 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -118,6 +119,7 @@ All 46 pages, in reading order. (This list, each group's own page list and the
 - [Kernel density estimation with `parquet_kde`](utilities/kernel-density.html)
 - [Numerical integration with pf_integrate](utilities/integration.html)
 - [Interpolation of tabulated data with parquet_interpolate](utilities/interpolation.html)
+- [Distances and times in an expanding universe with parquet_cosmology](utilities/cosmology.html)
 - [Optimisation: minimising a function of one or many variables](utilities/optimization.html)
 - [Powell's derivative-free solvers with `parquet_prima`](utilities/prima.html)
 - [Root finding: solving f(x) = 0 in one variable](utilities/root-finding.html)

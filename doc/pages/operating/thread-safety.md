@@ -341,8 +341,8 @@ one answer rather than one per module.
 
 **A tier not listed here needs no rule**, which is why the list is shorter than the set of
 Arrow-free modules. `parquet_temporal`, `parquet_columns`, `parquet_list`, `parquet_map`,
-`parquet_struct`, `parquet_utils`, `parquet_integrate`, `parquet_interpolate`, `parquet_root` and
-`parquet_transform` share no state between calls and hold nothing a second thread
+`parquet_struct`, `parquet_utils`, `parquet_integrate`, `parquet_interpolate`, `parquet_cosmology`,
+`parquet_root` and `parquet_transform` share no state between calls and hold nothing a second thread
 can see: one object per thread, or one shared object nobody writes, is safe without anything being
 said about it.
 

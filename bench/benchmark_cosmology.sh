@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# What `parquet_cosmology` costs: building a cosmology against its `zmax`, a query inside the
+# table against one beyond it, each binding's own cost, and the two inverses.
+#
+# Four modes, all driving `bench/benchmark_cosmology.f90`:
+#
+#   build     `%init` at seven values of `zmax` from 1 to 1e10, in milliseconds, beside the
+#             table's node count and the integrand evaluations the build actually made (read from
+#             `parquet_debug_cosmology_neval`). The grid spacing in `ln(1+z)` is fixed, so the
+#             node count rises only as the LOGARITHM of `zmax`: the whole point of the coordinate
+#             is that reaching recombination costs a few hundred more nodes than reaching z = 1,
+#             not a thousand times more. The nanoseconds-per-evaluation column is the integrand's
+#             own cost, which is where a model with massive neutrinos pays its `pow`.
+#
+#   eval      `%comoving_distance` over a column of a million redshifts in random order, in
+#             nanoseconds per query, for four ranges: inside the table, one panel beyond it,
+#             sixteen panels beyond it (z = 1e10), and at a blueshift. The first row is an
+#             interpolant read; the rest add 20 evaluations of E per panel. This is the figure
+#             behind the guide's "tens of nanoseconds inside it, a few microseconds outside".
+#
+#   bindings  each binding over the same column, inside the table, in nanoseconds per query. They
+#             should differ by a few flops and one transcendental at most; a row far above the
+#             others is a binding doing more work than the design says it does.
+#
+#   inverse   `%z_at_comoving_distance` and `%z_at_lookback_time` over a column, with the worst
+#             relative round trip printed beside each. On the table an inverse is one interpolant
+#             read plus one Newton step; beyond it, a bracketed solve over the panel rule, which
+#             is the expensive case.
+#
+# USAGE
+#   bench/benchmark_cosmology.sh [build|eval|bindings|inverse|all] [queries]
+#
+# NAME THE MACHINE AND THE TOOLCHAIN on any figure taken from this; `tools/machine_report.sh`
+# prints both, and is run below. No guide page carries a machine name -- see
+# `.claude/rules/documentation.md`.
+set -euo pipefail
+
+finished=0
+trap '[ "$finished" = "1" ] || { echo "benchmark_cosmology.sh TERMINATED EARLY -- this run proves nothing" >&2; exit 2; }' EXIT
+
+MODE="${1:-all}"
+QUERIES="${2:-1000000}"
+
+case "$MODE" in
+    build|eval|bindings|inverse|all) ;;
+    *) echo "benchmark_cosmology.sh: unknown mode '$MODE'" >&2; exit 2 ;;
+esac
+
+cd "$(dirname "$0")/.."
+
+echo "=== benchmark_cosmology ==="
+echo "date    : $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+echo "commit  : $(git rev-parse --short HEAD 2>/dev/null || echo 'not a git checkout')," \
+     "$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ') path(s) modified"
+echo "queries : $QUERIES per timed column"
+echo
+echo "--- tools/machine_report.sh, in this shell ---"
+bash tools/machine_report.sh 2>&1 || true
+echo
+
+# Built once up front, so that no mode's output carries the build's.
+fpm build --profile release
+
+for mode in build eval bindings inverse; do
+    if [[ "$MODE" == "$mode" || "$MODE" == "all" ]]; then
+        echo
+        echo "load    : $(uptime | sed 's/.*load average[s]*: //')"
+        fpm run benchmark_cosmology --profile release -- "$mode" "$QUERIES"
+    fi
+done
+echo
+echo "load    : $(uptime | sed 's/.*load average[s]*: //') (at the end)"
+
+finished=1

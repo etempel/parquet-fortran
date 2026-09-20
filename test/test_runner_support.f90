@@ -269,6 +269,13 @@ contains
     !> collapsed to a team of one would be reported rather than pass. Serially it costs well under a
     !> second.
     !>
+    !> "cosmology_omp" is excluded for the same nested-team reason: parquet_cosmology's only
+    !> module variables are the two test-only debug hooks, which this suite deliberately never
+    !> touches, and it demonstrates the absence of any other shared state by reading one built
+    !> object and building four more on a whole team at once. Its third test asserts the team size,
+    !> so a region that collapsed to a team of one would be reported rather than pass. Serially it
+    !> costs well under a second.
+    !>
     !> "table_join_hash" is excluded because its collector forces the join's pair-list engine
     !> through a process-global hook (parquet_debug_set_join_engine) and every test then asserts,
     !> through the process-global observable parquet_debug_join_engine_used, that the hash engine
@@ -335,6 +342,7 @@ contains
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
             .or. name == "integrate_omp" .or. name == "interpolate_omp" .or. name == "optimize_omp" &
+            .or. name == "cosmology_omp" &
             .or. name == "prima_omp" .or. name == "sphere_omp" .or. name == "kde_serial" .or. name == "kde_omp" &
             .or. name == "stats" .or. name == "table_join_hash")
     end function suite_is_safe_to_parallelize

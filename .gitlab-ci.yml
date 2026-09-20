@@ -100,15 +100,19 @@ stages:
 # file that never made it back into the generator's template (see CLAUDE.md's "Some src/*.f90
 # files are generated" for why this class of bug is easy to introduce silently).
 #
-# generate_stats_vectors.py --check and generate_kde_vectors.py --check are the two entries here that
-# need a python LIBRARY (mpmath, installed by this job's own before_script above) rather than nothing
-# but the interpreter. They are not generated-source checks like their neighbours: what they
-# re-derive is test/test_stats_golden.f90 and test/test_kde_golden.f90, the 50-digit oracles
-# parquet_stats' and parquet_kde's accuracy claims are asserted against, so a hand-edit that
-# loosened one of those expectations would otherwise be invisible -- every test would still pass,
-# against numbers nobody computed. Their --self-tests (which validate each model against the Python
-# libraries) are deliberately NOT here: they need heavyweight packages and are steps to run when a
-# model changes, not on every push.
+# generate_stats_vectors.py --check, generate_kde_vectors.py --check and the two
+# generate_cosmology_reference.py entries are the ones here that need a python LIBRARY (mpmath,
+# installed by this job's own before_script above) rather than nothing but the interpreter. They are
+# not generated-source checks like their neighbours: what they re-derive is
+# test/test_stats_golden.f90, test/test_kde_golden.f90 and test/test_cosmology_vectors.f90, the
+# oracles parquet_stats', parquet_kde's and parquet_cosmology's accuracy claims are asserted
+# against, so a hand-edit that loosened one of those expectations would otherwise be invisible --
+# every test would still pass, against numbers nobody computed. The first two --self-tests (which
+# validate each model against the Python libraries) are deliberately NOT here: they need
+# heavyweight packages and are steps to run when a model changes, not on every push.
+# generate_cosmology_reference.py --self-test IS here, because it needs nothing beyond mpmath and
+# it is what holds src/parquet_cosmology.f90's constants and src/parquet_cosmology_eval.f90's
+# Gauss-Legendre rule to the generator's own values; its --verify-oracle needs astropy and is not.
 #
 # `tools/run_lint_check.sh` runs this same list locally (see CONTRIBUTING.md's "Other tools/
 # helpers"). Its own CHECKS array is kept in sync with the `script:` below BY HAND -- adding a
@@ -119,9 +123,10 @@ lint:
   before_script:
     - apt-get update -y
     # python3-mpmath is the ONE library dependency this job has, and it exists solely for
-    # generate_stats_vectors.py --check and generate_kde_vectors.py --check below: they re-derive
-    # the golden expectations at 50 decimal digits rather than comparing against a stored copy, so
-    # the oracle has to be present for them to mean anything. Ubuntu's own package is used rather
+    # generate_stats_vectors.py --check, generate_kde_vectors.py --check and the two
+    # generate_cosmology_reference.py entries below: they re-derive the golden expectations at 50
+    # decimal digits (30 for the cosmology) rather than comparing against a stored copy, so the
+    # oracle has to be present for them to mean anything. Ubuntu's own package is used rather
     # than a pip/pipx install because it needs no network beyond apt and no venv; if a future
     # image drops it, `pipx install --include-deps` cannot supply a LIBRARY -- use
     # `apt-get install -y python3-pip && pip install --break-system-packages mpmath` instead.
@@ -150,6 +155,8 @@ lint:
     - python3 tools/generate_random_perm_vectors.py --check
     - python3 tools/generate_sphere_reference.py --self-test
     - python3 tools/generate_sphere_reference.py --check
+    - python3 tools/generate_cosmology_reference.py --self-test
+    - python3 tools/generate_cosmology_reference.py --check
     - python3 tools/generate_skycoord_reference.py --self-test
     - python3 tools/generate_skycoord_reference.py --check
     - python3 tools/generate_path_reference.py --self-test

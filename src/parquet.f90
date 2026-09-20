@@ -62,6 +62,11 @@
 !>                          of one real64 variable over a finite or infinite
 !>                          range, with the integrand as an object carrying its
 !>                          own parameters or as a plain function.
+!>   * `parquet_cosmology` -- `pf_cosmology`: distances, times and volumes in an
+!>                          expanding universe, for the eight named cosmologies
+!>                          or a model of the caller's own, built once and
+!>                          evaluated elementally; with `pf_z2zeta`,
+!>                          `pf_zeta2z` and `pf_z_combine`.
 !>   * `parquet_interpolate` -- `pf_interp_1d`, `pf_interp_2d` and `pf_interp`:
 !>                          linear, cubic-spline and shape-preserving
 !>                          interpolation of a real64 table, with its derivatives
@@ -137,6 +142,7 @@ module parquet
     use parquet_utils
     use parquet_integrate
     use parquet_interpolate
+    use parquet_cosmology
     use parquet_optimize
     use parquet_prima
     use parquet_root

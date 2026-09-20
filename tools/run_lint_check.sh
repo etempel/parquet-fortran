@@ -30,13 +30,16 @@
 # The `CHECKS` array below is the list; it is not enumerated here as well, because a second copy of
 # it would go stale the first time one was added.
 #
-# TWO ENTRIES NEED A PYTHON LIBRARY RATHER THAN JUST THE INTERPRETER: `generate_stats_vectors.py
+# THREE ENTRIES NEED A PYTHON LIBRARY RATHER THAN JUST THE INTERPRETER: `generate_stats_vectors.py
 # --check` and `generate_kde_vectors.py --check` re-derive `parquet_stats`' and `parquet_kde`'s golden
-# expectations at 50 digits, so they need `mpmath` (`pip install mpmath`; CI's lint job installs
-# Ubuntu's `python3-mpmath` for the same reason). Without it those two checks fail and the rest
-# still run. Their `--self-test`s, which validate each model against the Python libraries, are
-# heavier still and are deliberately in neither list -- steps to run when a MODEL changes, not on
-# every push.
+# expectations at 50 digits, and `generate_cosmology_reference.py` re-derives `parquet_cosmology`'s
+# at 30, so all three need `mpmath` (`pip install mpmath`; CI's lint job installs Ubuntu's
+# `python3-mpmath` for the same reason). Without it those checks fail and the rest still run. The
+# first two `--self-test`s, which validate each model against the Python libraries, are heavier
+# still and are deliberately in neither list -- steps to run when a MODEL changes, not on every
+# push. `generate_cosmology_reference.py --self-test` IS in both lists: it needs nothing beyond
+# mpmath, and it is what holds the module's own constants and its Gauss-Legendre rule to the
+# generator's values. Its `--verify-oracle`, which needs astropy, is the one kept out.
 #
 # Apart from that one dependency it needs nothing but `python3` and
 # `bash` -- no fpm, no gfortran, no Arrow -- and takes about ten seconds, so it is worth running
@@ -100,6 +103,8 @@ CHECKS=(
     "python3 tools/generate_random_perm_vectors.py --check"
     "python3 tools/generate_sphere_reference.py --self-test"
     "python3 tools/generate_sphere_reference.py --check"
+    "python3 tools/generate_cosmology_reference.py --self-test"
+    "python3 tools/generate_cosmology_reference.py --check"
     "python3 tools/generate_skycoord_reference.py --self-test"
     "python3 tools/generate_skycoord_reference.py --check"
     "python3 tools/generate_path_reference.py --self-test"

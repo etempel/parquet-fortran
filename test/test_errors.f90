@@ -3255,6 +3255,34 @@ contains
                 test_interpolate_inf_in_y_aborts), &
             new_unittest("evaluating an interpolant that was never built aborts", &
                 test_interpolate_eval_before_init_aborts), &
+                new_unittest("cosmology_eval_before_init aborts", &
+                test_cosmology_eval_before_init_aborts), &
+                new_unittest("cosmology_eval_after_clear aborts", &
+                test_cosmology_eval_after_clear_aborts), &
+                new_unittest("cosmology_init_unknown_name aborts", &
+                test_cosmology_init_unknown_name_aborts), &
+                new_unittest("cosmology_init_h0_out_of_range aborts", &
+                test_cosmology_init_h0_out_of_range_aborts), &
+                new_unittest("cosmology_init_om0_negative aborts", &
+                test_cosmology_init_om0_negative_aborts), &
+                new_unittest("cosmology_init_tcmb0_negative aborts", &
+                test_cosmology_init_tcmb0_negative_aborts), &
+                new_unittest("cosmology_init_m_nu_size aborts", &
+                test_cosmology_init_m_nu_size_aborts), &
+                new_unittest("cosmology_init_w0_out_of_range aborts", &
+                test_cosmology_init_w0_out_of_range_aborts), &
+                new_unittest("cosmology_init_zmax_out_of_range aborts", &
+                test_cosmology_init_zmax_out_of_range_aborts), &
+                new_unittest("cosmology_init_ob0_above_om0 aborts", &
+                test_cosmology_init_ob0_above_om0_aborts), &
+                new_unittest("cosmology_init_density_too_large aborts", &
+                test_cosmology_init_density_too_large_aborts), &
+                new_unittest("cosmology_init_tcmb0_too_hot aborts", &
+                test_cosmology_init_tcmb0_too_hot_aborts), &
+                new_unittest("cosmology_init_no_big_bang aborts", &
+                test_cosmology_init_no_big_bang_aborts), &
+                new_unittest("cosmology_init_table_not_converged aborts", &
+                test_cosmology_init_table_not_converged_aborts), &
             new_unittest("a context reaches the interpolation abort message", &
                 test_interpolate_context_reported_aborts), &
             new_unittest("a long context is capped in the interpolation abort message", &
@@ -20289,6 +20317,104 @@ contains
             failure_message="an infinite ordinate was expected to error stop", &
             required_stderr="pf_interp_1d%init: y must be finite")
     end subroutine test_interpolate_inf_in_y_aborts
+    !
+    subroutine test_cosmology_eval_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_eval_before_init", expect_abort=.true., &
+            failure_message="evaluating an unbuilt cosmology was expected to error stop", &
+            required_stderr="pf_cosmology%comoving_distance: the cosmology is not initialised")
+    end subroutine test_cosmology_eval_before_init_aborts
+    !
+    subroutine test_cosmology_eval_after_clear_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_eval_after_clear", expect_abort=.true., &
+            failure_message="evaluating a cleared cosmology was expected to error stop", &
+            required_stderr="pf_cosmology%age: the cosmology is not initialised")
+    end subroutine test_cosmology_eval_after_clear_aborts
+    !
+    subroutine test_cosmology_init_unknown_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_unknown_name", expect_abort=.true., &
+            failure_message="an unknown cosmology name was expected to error stop", &
+            required_stderr="pf_cosmology%init: unknown cosmology")
+    end subroutine test_cosmology_init_unknown_name_aborts
+    !
+    subroutine test_cosmology_init_h0_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_h0_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range h0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: h0 must be finite and within [1e-10, 1e10] km/s/Mpc")
+    end subroutine test_cosmology_init_h0_out_of_range_aborts
+    !
+    subroutine test_cosmology_init_om0_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_om0_negative", expect_abort=.true., &
+            failure_message="a negative om0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: om0 must be finite and non-negative")
+    end subroutine test_cosmology_init_om0_negative_aborts
+    !
+    subroutine test_cosmology_init_tcmb0_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_tcmb0_negative", expect_abort=.true., &
+            failure_message="a negative tcmb0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: tcmb0 must be finite and non-negative")
+    end subroutine test_cosmology_init_tcmb0_negative_aborts
+    !
+    subroutine test_cosmology_init_m_nu_size_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_m_nu_size", expect_abort=.true., &
+            failure_message="an m_nu of the wrong size was expected to error stop", &
+            required_stderr="pf_cosmology%init: m_nu needs one finite, non-negative mass per species")
+    end subroutine test_cosmology_init_m_nu_size_aborts
+    !
+    subroutine test_cosmology_init_w0_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_w0_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range w0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: w0 must be finite and within [-3, 3]")
+    end subroutine test_cosmology_init_w0_out_of_range_aborts
+    !
+    subroutine test_cosmology_init_zmax_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_zmax_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range zmax was expected to error stop", &
+            required_stderr="pf_cosmology%init: zmax must be finite, positive and at most 1e10")
+    end subroutine test_cosmology_init_zmax_out_of_range_aborts
+    !
+    subroutine test_cosmology_init_ob0_above_om0_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_ob0_above_om0", expect_abort=.true., &
+            failure_message="an ob0 above om0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: ob0 must be finite, non-negative and at most om0")
+    end subroutine test_cosmology_init_ob0_above_om0_aborts
+    !
+    subroutine test_cosmology_init_density_too_large_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_density_too_large", expect_abort=.true., &
+            failure_message="an absurd ode0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: every density parameter must be at most 1e6 in magnitude")
+    end subroutine test_cosmology_init_density_too_large_aborts
+    !
+    subroutine test_cosmology_init_tcmb0_too_hot_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_tcmb0_too_hot", expect_abort=.true., &
+            failure_message="an absurd tcmb0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: every density parameter must be at most 1e6 in magnitude")
+    end subroutine test_cosmology_init_tcmb0_too_hot_aborts
+    !
+    subroutine test_cosmology_init_no_big_bang_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_no_big_bang", expect_abort=.true., &
+            failure_message="a cosmology with no big bang was expected to error stop", &
+            required_stderr="pf_cosmology%init: this cosmology has no big bang")
+    end subroutine test_cosmology_init_no_big_bang_aborts
+    !
+    subroutine test_cosmology_init_table_not_converged_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_table_not_converged", expect_abort=.true., &
+            failure_message="a table that could not converge was expected to error stop", &
+            required_stderr="table did not converge")
+    end subroutine test_cosmology_init_table_not_converged_aborts
     !
     subroutine test_interpolate_eval_before_init_aborts(error)
         type(error_type), allocatable, intent(out) :: error

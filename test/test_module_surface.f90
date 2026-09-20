@@ -1966,6 +1966,86 @@ contains
 
 end module test_module_surface_prima
 
+!> `parquet_cosmology` alone: both `%init` forms, one binding of each family, the three free
+!! functions, and the statement that the module re-exports no setting.
+module test_module_surface_cosmology
+    use parquet_cosmology                ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_cosmology_surface
+
+contains
+
+    !> Exercises each public name through `use parquet_cosmology` alone.
+    subroutine check_cosmology_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(pf_cosmology)            :: c, sim
+        character(len=:), allocatable :: text
+        real(real64), allocatable     :: masses(:)
+        real(real64)                  :: z(3), d(3)
+
+        what = ""
+
+        ! The named form, and one binding of each family over it.
+        call c%init("Planck18")
+        if (.not. c%is_initialised()) what = "%init(name)"
+        if (what == "" .and. abs(c%comoving_distance(1.0_real64) - 3395.63_real64) > 1.0_real64) &
+            what = "%comoving_distance"
+        if (what == "" .and. abs(c%age(0.0_real64) - 13.7869_real64) > 1.0e-3_real64) what = "%age"
+        if (what == "" .and. abs(c%efunc(0.0_real64) - 1.0_real64) > 1.0e-12_real64) what = "%efunc"
+        if (what == "" .and. abs(c%hubble(0.0_real64) - c%h0()) > 1.0e-9_real64) what = "%hubble"
+        if (what == "" .and. .not. c%is_flat()) what = "%is_flat"
+        if (what == "" .and. .not. c%has_massive_nu()) what = "%has_massive_nu"
+        if (what == "") then
+            call c%get_name(text)
+            if (text /= "Planck18") what = "%get_name"
+        end if
+        if (what == "") then
+            call c%describe(text)
+            if (len(text) < 20) what = "%describe"
+        end if
+        if (what == "") then
+            call c%m_nu(masses)
+            if (size(masses) /= 3) what = "%m_nu"
+        end if
+
+        ! The elemental shape, and the inverse.
+        z = [0.1_real64, 1.0_real64, 3.0_real64]
+        d = c%comoving_distance(z)
+        if (what == "" .and. abs(c%z_at_comoving_distance(d(2)) - 1.0_real64) > 1.0e-9_real64) &
+            what = "%z_at_comoving_distance"
+        if (what == "" .and. abs(c%z_at_lookback_time(c%lookback_time(2.0_real64)) - 2.0_real64) &
+            > 1.0e-9_real64) what = "%z_at_lookback_time"
+
+        ! The parameter form, and the parameter queries.
+        call sim%init(h0 = 70.0_real64, om0 = 0.3_real64, name = "my_sim")
+        if (what == "" .and. abs(sim%little_h() - 0.7_real64) > 1.0e-12_real64) what = "%little_h"
+        if (what == "" .and. sim%ok0() /= 0.0_real64) what = "%ok0"
+        if (what == "" .and. abs(sim%zmax() - 1100.0_real64) > 1.0e-12_real64) what = "%zmax"
+        if (what == "" .and. abs(sim%hubble_distance() - 4282.7494_real64) > 1.0e-3_real64) &
+            what = "%hubble_distance"
+        if (what == "" .and. abs(sim%hubble_time() - 13.9683_real64) > 1.0e-3_real64) &
+            what = "%hubble_time"
+
+        ! The three free functions.
+        if (what == "" .and. abs(pf_z2zeta(1.0_real64) - log(2.0_real64)) > 1.0e-15_real64) &
+            what = "pf_z2zeta"
+        if (what == "" .and. abs(pf_zeta2z(log(2.0_real64)) - 1.0_real64) > 1.0e-15_real64) &
+            what = "pf_zeta2z"
+        if (what == "" .and. abs(pf_z_combine(1.0_real64, 1.0_real64) - 3.0_real64) > 1.0e-15_real64) &
+            what = "pf_z_combine"
+
+        ! The module re-exports NO setting: it reads none and prints nothing at all. There is
+        ! therefore no knob to round-trip here, and that absence is the assertion.
+        call c%clear()
+        if (what == "" .and. c%is_initialised()) what = "%clear"
+
+    end subroutine check_cosmology_surface
+
+end module test_module_surface_cosmology
+
 !> `parquet_root` alone: the generic in both forms, the growth policy and its four modes, the info
 !! record and its three status codes, the history, and no settings knob at all.
 !!
@@ -2179,6 +2259,7 @@ module test_module_surface
     use test_module_surface_interpolate, only : check_interpolate_surface
     use test_module_surface_optimize, only : check_optimize_surface
     use test_module_surface_prima, only : check_prima_surface
+    use test_module_surface_cosmology, only : check_cosmology_surface
     use test_module_surface_root, only : check_root_surface
     use test_module_surface_transform, only : check_transform_surface
     use test_module_surface_kde, only : check_kde_surface
@@ -2316,6 +2397,8 @@ contains
                          test_prima_surface), &
             new_unittest("parquet_root alone solves in both forms and expands a bracket", &
                          test_root_surface), &
+            new_unittest("parquet_cosmology alone builds both ways and answers every family", &
+                         test_cosmology_surface), &
             new_unittest("parquet_transform alone transforms, inverts and chooses a length", &
                          test_transform_surface), &
             new_unittest("parquet_kde alone fits, queries and round-trips its output pair", &
@@ -2483,6 +2566,16 @@ contains
         call check(error, what == "", &
             "BOBYQA was not usable through `use parquet_prima` alone: " // what)
     end subroutine test_prima_surface
+
+    !> The test-drive wrapper over check_cosmology_surface.
+    subroutine test_cosmology_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_cosmology_surface(what)
+        call check(error, what == "", &
+            "a cosmology was not usable through `use parquet_cosmology` alone: " // what)
+    end subroutine test_cosmology_surface
 
     !> The test-drive wrapper over check_root_surface.
     subroutine test_root_surface(error)

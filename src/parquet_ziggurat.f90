@@ -26,7 +26,10 @@ module parquet_ziggurat
     use iso_fortran_env, only: int32, real64
 
     implicit none
-    public
+    private
+
+    public :: zig_layers, zig_r, zig_v, zig_accept_rate
+    public :: zig_w, zig_k, zig_f
 
     !> Layers, including the base strip at index 0. The index costs 8 bits of a
     !! 64-bit draw, which is why it is a power of two and why it is this one.

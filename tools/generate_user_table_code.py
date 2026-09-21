@@ -729,9 +729,19 @@ def render(schema, windows):
                                 "this type, deliberately, since it would skip the predefined "
                                 "columns."))
     w(f"module {schema.dataset}")
-    w("    use parquet")
+    # THE THREE ENTRY MODULES THIS EMITTED CODE NEEDS, rather than the `parquet` facade, so that
+    # embedding a table type costs a project reading/writing plus the table and column tiers and
+    # not the whole library (sorting, random, sampling, stats, the sky and numerics tiers). Each
+    # is load-bearing for every schema this script can emit: parquet_tables for parquet_table
+    # itself, parquet_columns for the PK_* discriminators and parquet_column, parquet_io for
+    # parquet_schema/parquet_filter/parquet_read_qc/parquet_sortkey and the string and temporal
+    # element types the accessors return. Code a user writes in the USER SECTIONs below may need
+    # more than these three; the `uses` window directly beneath is where it says so.
+    w("    use parquet_io")
+    w("    use parquet_tables")
+    w("    use parquet_columns")
     # The four kinds every constructor signature needs (row bounds, sample_fraction,
-    # sample_seed), plus whatever the accessors declare. `use parquet` does not re-export them.
+    # sample_seed), plus whatever the accessors declare. The imports above do not re-export them.
     w("    use iso_fortran_env, only : int32, int64, real32, real64")
     w("    implicit none")
     w("    private")

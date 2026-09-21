@@ -9,7 +9,6 @@ ships (see the last section), and needs no file, because `%init_empty` builds th
 
 ```fortran
 program generated_table_quickstart
-    use parquet
     use parquet_table_example, only : parquet_table_test   ! the generated module
     use iso_fortran_env, only : int64, real64
     implicit none

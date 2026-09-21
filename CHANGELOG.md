@@ -253,11 +253,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and totality are unchanged and `use parquet` sees no difference; a program that imported
   `parquet_healpix` alone for it now imports `parquet_skycoord`. `pf_angdist`, the vector form,
   stays in `parquet_healpix`.
-- **The embedded-schema module `tools/generate_parquet_maml.sh` emits imports from `parquet_io`**
-  rather than from `parquet`, so embedding schemas no longer brings the whole library surface into
-  a project that only reads and writes files. The script is now the consumer-facing generator
-  alone: its `base` mode has moved to `tools/generate_parquet_maml_base.sh`, which is internal to
-  this library. Regenerate and commit your own embedded-schema module to pick this up.
+- **Both consumer-facing generators emit narrow imports instead of `use parquet`.** The
+  embedded-schema module `tools/generate_parquet_maml.sh` writes now imports its four names from
+  `parquet_io`, and the table type `tools/generate_user_table_code.py` writes imports
+  `parquet_io`, `parquet_tables` and `parquet_columns` — so neither brings the whole library
+  surface into a project that only reads, writes and holds tables. `tools/generate_parquet_maml.sh`
+  is also the consumer-facing generator alone now: its `base` mode has moved to
+  `tools/generate_parquet_maml_base.sh`, which is internal to this library. Regenerate and commit
+  your own generated modules to pick this up; code you have written in a generated table type's
+  `USER SECTION` windows may need a `use` line of its own in the `uses` window.
 
 ### Fixed
 

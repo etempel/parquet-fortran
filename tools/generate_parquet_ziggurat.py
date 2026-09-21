@@ -421,7 +421,14 @@ def gen_module():
     L.append("    use iso_fortran_env, only: int32, real64")
     L.append("")
     L.append("    implicit none")
-    L.append("    public")
+    # PRIVATE by default, then one `public ::` per table. A default-`public` module re-exports
+    # what it imports, so the bare `public` this carried handed `int32` and `real64` to anyone
+    # importing it. Nothing does -- parquet_random reaches the tables with an `only:` list -- but
+    # every other module in this library states its surface, and a data-only leaf can afford to.
+    L.append("    private")
+    L.append("")
+    L.append("    public :: zig_layers, zig_r, zig_v, zig_accept_rate")
+    L.append("    public :: zig_w, zig_k, zig_f")
     L.append("")
     L.append("    !> Layers, including the base strip at index 0. The index costs 8 bits of a")
     L.append("    !! 64-bit draw, which is why it is a power of two and why it is this one.")

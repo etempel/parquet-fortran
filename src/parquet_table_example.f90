@@ -13,7 +13,9 @@
 !! unchanged. Open it with %init, %init_slice or %init_empty -- a plain parquet_open_table will not compile for this type,
 !! deliberately, since it would skip the predefined columns.
 module parquet_table_example
-    use parquet
+    use parquet_io
+    use parquet_tables
+    use parquet_columns
     use iso_fortran_env, only : int32, int64, real32, real64
     implicit none
     private

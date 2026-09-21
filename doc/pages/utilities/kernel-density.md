@@ -32,8 +32,8 @@ bracket:
 
 ```fortran
 call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [adaptive], [pilot], [alpha], &
-           [bandwidth_max], [lower], [upper], [boundary], [is_valid], [weights], [weight_type], &
-           [skipnan], [n_null], [n_nan], [n_outside], [ok], [threads])
+           [bandwidth_max], [spread_max], [lower], [upper], [boundary], [is_valid], [weights], &
+           [weight_type], [skipnan], [n_null], [n_nan], [n_outside], [ok], [threads])
 call k%pdf(x, f, [threads])
 call k%cdf(x, p, [threads])
 call k%quantile(p, x, [threads])
@@ -350,13 +350,24 @@ correction's edges cut, so their cost is known before a query starts and no tole
 `bench/benchmark_kde.sh` measures all of it (`MODE=boundary`). For many draws from a density whose mass sits near a bound, accumulate the
 estimate into a `pf_kde_grid` and sample that instead, which costs one quadratic solve per draw
 under every correction. Under the adaptive kernel a far tail's wide kernels widen the zone the
-correction acts in, and `bandwidth_max` is the remedy.
+correction acts in; `spread_max` bounds that automatically and `bandwidth_max` is the explicit
+remedy.
 
 **What the clip can miss.** The stretches where the raw estimate is negative are found at `%fit` by
-a scan about a sixty-fourth of a bandwidth apart, refined at the kernels' own edges where the
-estimate comes near zero. A dip below zero that begins and ends between two neighbouring scan
-points is not seen: `%pdf` still clips it, while `%cdf` counts its (small, negative) mass, so the
-two can disagree there by at most that mass.
+a scan about a sixty-fourth of the NARROWEST kernel apart -- of the narrowest, so that the spacing
+resolves every kernel in the sample -- refined at the kernels' own edges where the estimate comes
+near zero. A dip below zero that begins and ends between two neighbouring scan points is not seen:
+`%pdf` still clips it, while `%cdf` counts its (small, negative) mass, so the two can disagree
+there by at most that mass.
+
+The scan reads those samples from a binned grid of the same estimate wherever that grid is a
+comfortable margin away from zero, and from the exact sum everywhere else; every crossing it
+reports is still bisected on the exact estimate. So the grid decides only WHERE the exact
+estimator is asked, and the spacing above -- which is what the paragraph's guarantee rests on --
+is unchanged. It is used for the `"gaussian"` and `"bspline"` kernels, whose binned estimate
+converges as the square of the cell width, and not for the other two. Without it the scan sums
+every retained point at every sample, which is why an adaptive `"linear"` fit of a density that
+approaches zero used to cost time growing as the SQUARE of the sample size.
 
 **Where the kernel is wider than the whole support** -- both bounds given and closer together than
 a kernel's reach -- a mirror image reaches the far bound too. Each point's kernel is then
@@ -395,7 +406,7 @@ call k%fit(mag, adaptive=.true., alpha=0.3_real64, bandwidth_max=0.5_real64)
 Each point `x_j` takes the bandwidth
 
 ```
-h_j = h * (p(x_j)/g)**(-alpha)          at most bandwidth_max
+h_j = h * (p(x_j)/g)**(-alpha)          at most spread_max * h_min, and at most bandwidth_max
 ```
 
 where `h` is the global bandwidth -- a rule's or the number given, times `adjust`, and what
@@ -422,13 +433,45 @@ one, and a boundary correction applies to each kernel at its own bandwidth.
   `%bandwidth()` answers the widened number, which is the one every point's own bandwidth is built
   from. `bench/benchmark_kde.sh`'s `mise` mode is what the factor is measured by, and
   `rule="lscv"` is how to measure it on one particular sample instead.
-- **`bandwidth_max`** caps every point's bandwidth. An outlier has a pilot density near zero and
-  so a very wide kernel, and since every query sums the points within reach of the widest
-  kernel, one far outlier slows every query. The cap is the remedy. A cap BELOW the resolved global
-  bandwidth is accepted and then governs every point, which makes the estimate narrower everywhere
-  rather than only where the pilot is thin: it is a cap, not a check on the rule. `%bandwidth()`
-  still answers the resolved global bandwidth in that case, not the cap -- it reports what the rule
-  chose, and `%bandwidths()` reports what each point actually got, which is the cap.
+- **`bandwidth_max`** caps every point's bandwidth, in the data's own units. An outlier has a
+  pilot density near zero and so a very wide kernel, and since every query sums the points within
+  reach of the widest kernel, one far outlier slows every query. The cap is the remedy. A cap
+  BELOW the resolved global bandwidth is accepted and then governs every point, which makes the
+  estimate narrower everywhere rather than only where the pilot is thin: it is a cap, not a check
+  on the rule. `%bandwidth()` still answers the resolved global bandwidth in that case, not the
+  cap -- it reports what the rule chose, and `%bandwidths()` reports what each point actually got,
+  which is the cap.
+
+### `spread_max`, the cap that is always in force
+
+`spread_max` caps the SPREAD rather than the bandwidth: no point's kernel is wider than
+`spread_max` times `h_min`, the narrowest bandwidth the rule can give, which it gives at the
+pilot's densest cell. It defaults to **100**, and unlike `alpha` and `bandwidth_max` it applies
+whether it was named or not.
+
+There is a default because the rule is unbounded. `h_j = h * (p/g)**(-alpha)` grows without limit
+as the pilot density approaches zero, so any density that vanishes anywhere -- at a bound, or in a
+gap inside the support -- gives some point a kernel of unbounded width. Every later query then sums
+the points within reach of that kernel, and under `boundary="linear"` the corrected zone it opens
+is scanned at the resolution of the NARROWEST kernel, which makes such a fit quadratic in the
+sample's size rather than linear. The spread is what bounds that scan: the zone is one kernel reach
+of `h_max` wide and the step is a fixed fraction of `h_min`, so the scan's step count is at most a
+fixed multiple of `spread_max`, whatever the sample is. A cap on `h_max/h` would bound none of it,
+the step being set by `h_min`.
+
+The default is far too loose to change an ordinary estimate -- the library's own pilots stay inside
+a spread of a few -- and is there for the pathological case alone.
+
+- **Where both caps are given, the tighter one binds.** They answer different questions:
+  `spread_max` is a statement about the estimator's SHAPE ("never wider than this many times the
+  narrowest kernel") and `bandwidth_max` about the DATA's scale ("never wider than this"). Neither
+  overrides the other, and a caller with a physical reason for an absolute bound need not convert
+  it into a factor.
+- **The fit says when the DEFAULT cap binds**, as advice naming how many points took it. It stays
+  silent when the caller passed `spread_max` or `bandwidth_max` themselves: an explicit request
+  needs no advice. Advice goes quiet at `verbosity = "silent"`.
+- `%print` names the spread cap on every adaptive fit, given or not, since it is always what
+  produced the bandwidths.
 - **The pilot** is a `pf_kde_grid` that `%fit` builds at the global bandwidth over the population,
   with the same kernel and support, from four bandwidths below the lowest point to four above the
   highest (clipped to the support), a quarter of a bandwidth to the cell, and never fewer than 64
@@ -441,8 +484,8 @@ one, and a boundary correction applies to each kernel at its own bandwidth.
   near one on every bandwidth, which rescales `h`; this form needs no second pass over the points,
   which is what gives the streaming form the same estimate.
 - **A point the pilot reads as zero** -- which only a pilot built from other data can do -- takes
-  `bandwidth_max` when it is given, and otherwise the bandwidth of the pilot's smallest positive
-  density.
+  the cap, whichever of the two is tighter. A cap is always present, so there is no case in which
+  the rule has to invent a density for such a point.
 
 ### Applying one sample's smoothing to another
 
@@ -552,7 +595,7 @@ turns the bins into cells cannot start until the last point has arrived.
 
 ```fortran
 call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha], [bandwidth_max], &
-            [lower], [upper], [boundary], [method])
+            [spread_max], [lower], [upper], [boundary], [method])
 call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], &
            [n_overreach], [threads], [finish])
 call g%merge(other, [finish])
@@ -738,7 +781,8 @@ call dens%density(f, x=zc)
 
 - **The pilot is copied**, so it may be discarded or reused, and its range must cover the grid's.
   Its cells and bandwidth need not match the grid's: the pilot shapes only the bandwidths, and
-  the usual choice is the grid's own bandwidth. `alpha=` and `bandwidth_max=` are as for `%fit`.
+  the usual choice is the grid's own bandwidth. `alpha=`, `bandwidth_max=` and `spread_max=` are
+  as for `%fit`.
 - **`g` and every bandwidth are read exactly as `%fit` reads them**, so a grid given
   `pf_kde%pilot`'s copy reproduces that fit's adaptive estimate to the grid's resolution.
 - **A pilot with no density to read** -- one holding a kept NaN (`skipnan=.false.`), or nothing
@@ -924,7 +968,8 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `xmin` or `xmax` infinite or NaN | `pf_kde%curve: xmin and xmax must be finite` |
 | `xmin >= xmax` | `pf_kde%curve: xmin must be below xmax` |
 | `cut` negative or NaN | `pf_kde%curve: cut must not be negative` |
-| `alpha=` or `bandwidth_max=` without `adaptive=.true.` | `pf_kde%fit: alpha= and bandwidth_max= need adaptive=.true.` |
+| `alpha=`, `bandwidth_max=` or `spread_max=` without `adaptive=.true.` | `pf_kde%fit: alpha=, bandwidth_max= and spread_max= need adaptive=.true.` |
+| `spread_max` NaN, infinite or `< 1` | `pf_kde%fit: spread_max must be a finite number of at least 1` |
 | `alpha` outside `[0, 1]`, or NaN | `pf_kde%fit: alpha must lie in [0, 1]` |
 | `bandwidth_max` NaN, infinite or `<= 0` | `pf_kde%fit: bandwidth_max must be a finite, positive number` |
 | `%bandwidths` with an output of the wrong size | `pf_kde%bandwidths: h must have one element per retained point` (`x must have ...` for the points) |
@@ -946,7 +991,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `pilot=` a grid built over another support | `pf_kde%fit: the pilot must have the same support as this fit` |
 | under `boundary="linear"` with one bound, a range narrower than one kernel's reach (R2) | `pf_kde_grid%init: under boundary="linear" the grid must be at least one kernel reach wide` |
 | `bandwidth`, `kernel`, `alpha`, `bandwidth_max`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
-| `alpha=` or `bandwidth_max=` without `pilot=` | `pf_kde_grid%init: alpha= and bandwidth_max= need pilot=` |
+| `alpha=`, `bandwidth_max=` or `spread_max=` without `pilot=` | `pf_kde_grid%init: alpha=, bandwidth_max= and spread_max= need pilot=` |
 | `pilot=` a grid never initialised | `pf_kde_grid%init: pilot must be an initialised grid` |
 | `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0`, a column of another kind, `is_valid=` beside a column | `%fit`'s texts, naming `pf_kde_grid%add` (`pf_kde_grid%sample` for its `threads`) |
 | a query, accessor, `%add` or `%merge` before `%init` | `pf_kde_grid%pdf: the grid has not been initialised` |

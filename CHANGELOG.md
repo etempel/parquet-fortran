@@ -117,8 +117,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   degree-zero and degree-one members of the local-polynomial boundary kernel, each dividing the
   summed kernels by the mass a kernel centred at the QUERY point keeps inside the support and then
   by the estimate's own integral, `"linear"` additionally setting negative values to zero.
+  Under a corrected boundary the fit's scan for the stretches the clip removes reads a binned grid
+  of the same estimate wherever that grid is safely away from zero and the exact sum elsewhere,
+  with every crossing still bisected on the exact estimate.
   `adaptive=.true.` selects the sample-point adaptive kernel (each
-  point's bandwidth from a pilot density, sensitivity `alpha=`, capped by `bandwidth_max=`, read
+  point's bandwidth from a pilot density, sensitivity `alpha=`, capped by `bandwidth_max=` in the
+  data's units and by `spread_max=` as a multiple of the narrowest bandwidth the rule can give --
+  the latter always in force, at 100, the tighter of the two binding and the fit saying when the
+  default one does -- read
   back through `%bandwidths`, `%bandwidth_at` and `%pilot`), given a rule rather than a number it
   widens that rule's bandwidth to the one the adaptive estimator itself calls for, and both forms
   take a smoothing measured on another sample from a `pilot=` grid, whose range need not cover

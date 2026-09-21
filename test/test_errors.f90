@@ -3743,6 +3743,12 @@ contains
                 test_kde_alpha_without_adaptive_aborts), &
             new_unittest("pf_kde%fit refuses bandwidth_max= with adaptive=.false.", &
                 test_kde_bandwidth_max_without_adaptive_aborts), &
+            new_unittest("pf_kde%fit refuses spread_max= with adaptive=.false.", &
+                test_kde_spread_max_without_adaptive_aborts), &
+            new_unittest("pf_kde%fit refuses a spread_max below one", &
+                test_kde_spread_max_below_one_aborts), &
+            new_unittest("the default spread cap says when it binds, and the caller's own does not", &
+                test_kde_spread_cap_advice), &
             new_unittest("pf_kde%fit refuses alpha above one", &
                 test_kde_alpha_above_one_aborts), &
             new_unittest("pf_kde%fit refuses a NaN alpha", &
@@ -21882,14 +21888,41 @@ contains
     subroutine test_kde_alpha_without_adaptive_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_alpha_without_adaptive", &
-            "pf_kde%fit: alpha= and bandwidth_max= need adaptive=.true.")
+            "pf_kde%fit: alpha=, bandwidth_max= and spread_max= need adaptive=.true.")
     end subroutine test_kde_alpha_without_adaptive_aborts
     !
     subroutine test_kde_bandwidth_max_without_adaptive_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_bandwidth_max_without_adaptive", &
-            "pf_kde%fit: alpha= and bandwidth_max= need adaptive=.true.")
+            "pf_kde%fit: alpha=, bandwidth_max= and spread_max= need adaptive=.true.")
     end subroutine test_kde_bandwidth_max_without_adaptive_aborts
+    !
+    subroutine test_kde_spread_max_without_adaptive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_spread_max_without_adaptive", &
+            "pf_kde%fit: alpha=, bandwidth_max= and spread_max= need adaptive=.true.")
+    end subroutine test_kde_spread_max_without_adaptive_aborts
+    !
+    subroutine test_kde_spread_max_below_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_spread_max_below_one", &
+            "pf_kde%fit: spread_max must be a finite number of at least 1")
+    end subroutine test_kde_spread_max_below_one_aborts
+    !
+    !> Both arms, because an advice nothing has been seen to emit is a comment: the default cap
+    !> binding is said, and the same binding cap named by the caller is not.
+    subroutine test_kde_spread_cap_advice(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "kde_spread_cap_advice_default", &
+            expect_abort=.false., &
+            failure_message="the default spread cap scenario was not expected to abort", &
+            required_stderr="NOTE: pf_kde%fit: the default spread cap bound at")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "kde_spread_cap_advice_explicit", &
+            expect_abort=.false., &
+            failure_message="the explicit spread cap scenario was not expected to abort", &
+            forbidden_text="the default spread cap bound at")
+    end subroutine test_kde_spread_cap_advice
     !
     subroutine test_kde_alpha_above_one_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -21936,13 +21969,13 @@ contains
     subroutine test_kde_grid_alpha_without_pilot_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_grid_alpha_without_pilot", &
-            "pf_kde_grid%init: alpha= and bandwidth_max= need pilot=")
+            "pf_kde_grid%init: alpha=, bandwidth_max= and spread_max= need pilot=")
     end subroutine test_kde_grid_alpha_without_pilot_aborts
     !
     subroutine test_kde_grid_bandwidth_max_without_pilot_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_grid_bandwidth_max_without_pilot", &
-            "pf_kde_grid%init: alpha= and bandwidth_max= need pilot=")
+            "pf_kde_grid%init: alpha=, bandwidth_max= and spread_max= need pilot=")
     end subroutine test_kde_grid_bandwidth_max_without_pilot_aborts
     !
     subroutine test_kde_grid_alpha_negative_aborts(error)

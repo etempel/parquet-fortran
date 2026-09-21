@@ -16,7 +16,8 @@ program benchmark_kde
 
     use iso_fortran_env, only : real64, int64, error_unit
     use parquet_kde, only : pf_kde, pf_kde_grid, pf_kde_bandwidth, parquet_debug_kde_fit_nanos, &
-        parquet_debug_kde_threads_used, parquet_debug_set_kde_sample_tries
+        parquet_debug_kde_threads_used, parquet_debug_set_kde_sample_tries, &
+        parquet_debug_kde_scan_counts
     use parquet_argsort, only : pf_argsort
     use parquet_random, only : pf_random_at, pf_random_normal_at, pf_random_key
 #ifdef _OPENMP
@@ -80,6 +81,8 @@ program benchmark_kde
         call run_threads(rounds, npoints, nqueries, failures)
     case ("boundary")
         call run_boundary(rounds, npoints)
+    case ("scan")
+        call run_scan(rounds, npoints)
     case ("mise")
         call run_mise(npoints)
     case default
@@ -128,7 +131,7 @@ contains
             case default
                 write(error_unit, '(a)') "benchmark_kde: unknown option '" // trim(arg(1:eq - 1)) // "'"
                 write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|binned|accuracy|adaptive|" // &
-                    "rules|sample|threads|boundary|mise] [--rounds=N] [--points=N] [--queries=N]"
+                    "rules|sample|threads|boundary|scan|mise] [--rounds=N] [--points=N] [--queries=N]"
                 error stop 1
             end select
         end do
@@ -301,6 +304,171 @@ contains
         print '(a,es22.14)', "checksum ", checksum
 
     end subroutine run_boundary
+
+    !> Where the boundary scan's time goes, over the sample size, and what the bandwidth spread is.
+    !>
+    !> The workload is `feature_kde_speedup.md`'s: the quantiles of the linear density
+    !> `f(x) = x/2` on `[0, 2]` with `lower = 0`, `upper = 2` and the B-spline kernel. That density
+    !> VANISHES at its lower bound, so the adaptive rule's bandwidth `h*(p/g)**(-alpha)` rises
+    !> without bound there, the widest kernel reaches across most of the support, and the corrected
+    !> zone the `"linear"` correction scans is the whole domain rather than a boundary -- scanned at
+    !> the resolution of the NARROWEST kernel. That is the combination this mode exists to watch:
+    !> `adaptive = .true.` with `boundary = "linear"` is the row whose `lookup` grows faster than
+    !> the sample, and the other rows are its controls.
+    !>
+    !> `sort`, `pilot` and `lookup` are the fit's phases as the library times them
+    !> (`parquet_debug_kde_fit_nanos`); a fixed fit builds no pilot, so its `pilot` is reported as
+    !> zero rather than as whatever the last adaptive fit left in the counter. `h_max/h` is the
+    !> widest bandwidth over the global one -- what `bandwidth_max` caps -- and `h_max/h_min` is the
+    !> bandwidth SPREAD, which is what sets the scan's step count: the zone is `R*h_max` wide and
+    !> the step is `h_min/KDE_LINEAR_SCAN_PER_H`, so the steps number at most
+    !> `KDE_LINEAR_SCAN_PER_H*R*(h_max/h_min)` however large the sample is.
+    !>
+    !> The last block reports the target `feature_kde_speedup.md` sets for the adaptive linear fit
+    !> at the largest size. It is a TARGET and not a gate: the mode never exits nonzero on it,
+    !> because a timing on a machine with other work on it is not a pass/fail property of the code.
+    subroutine run_scan(rounds, n)
+        integer, intent(in)        :: rounds !! timed laps per figure
+        integer(int64), intent(in) :: n      !! the largest sample
+
+        !> The corrections, the expensive one first so that the row under watch leads each block.
+        character(len=11), parameter :: METHODS(3) = [character(len=11) :: "linear", "renormalise", &
+            "reflect"]
+        !> The two rules the document measures: a plug-in rule and the cross-validated one.
+        character(len=4), parameter :: RULES(2) = [character(len=4) :: "isj", "lscv"]
+        !> The support's upper bound, as `analyse_kde` has it.
+        real(real64), parameter :: XMAX = 2.0_real64
+        !> What the document calls usable in practice, for the largest adaptive linear fit.
+        real(real64), parameter :: TARGET_MS = 1000.0_real64
+
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:), hb(:)
+        real(real64) :: best, fit_ms, hh, hmax, hmin, checksum, target_fit(2), exact_pc
+        integer(int64) :: sizes(3), nn, ns(3), sc(2)
+        integer :: sz, ru, ad, mm
+
+        sizes = [max(1000_int64, n/100_int64), max(1000_int64, n/10_int64), n]
+        checksum = 0.0_real64
+        target_fit = -1.0_real64
+        print '(a)', "=== the boundary scan: what the adaptive linear fit costs, and why ==="
+        print '(a,i0,a)', "the linear density f(x) = x/2 on [0, 2] at its own quantiles, bspline " // &
+            "kernel, lower = 0, upper = 2, fastest of ", rounds, " laps (one lap once a fit passes a second)"
+        print '(a)', "fit and the three phases in milliseconds, one thread; h_max/h_min is the " // &
+            "bandwidth spread, which bounds the scan's step count"
+        print '(a)', "steps: samples the boundary scan took; exact%: those of them the grid could " // &
+            "not decide and the exact estimator answered"
+        print '(a)', ""
+        print '(a)', "        n  rule  adapt  boundary        fit ms   sort ms  pilot ms lookup ms" // &
+            "     h_max/h h_max/h_min     steps  exact%"
+        do sz = 1, 3
+            nn = sizes(sz)
+            if (sz > 1) then
+                if (nn <= sizes(sz - 1)) cycle
+            end if
+            call linear_sample(nn, x)
+            if (allocated(hb)) deallocate(hb)
+            allocate(hb(nn))
+            do ru = 1, 2
+                do ad = 1, 2
+                    do mm = 1, 3
+                        best = time_scan_fit(k, x, trim(RULES(ru)), ad == 2, trim(METHODS(mm)), &
+                            XMAX, rounds, ns)
+                        call parquet_debug_kde_scan_counts(sc(1), sc(2))
+                        fit_ms = 1000.0_real64*best
+                        hh = k%bandwidth()
+                        call k%bandwidths(hb)
+                        hmax = maxval(hb)
+                        hmin = minval(hb)
+                        checksum = checksum + hh
+                        ! A fixed fit never enters the pilot phase, so the counter still holds the
+                        ! last adaptive fit's: report the zero the phase actually cost.
+                        if (ad == 1) ns(2) = 0_int64
+                        ! How much of the boundary scan the grid could not decide: a band that
+                        ! almost never falls back needs no refining, and one that falls back
+                        ! everywhere has removed nothing.
+                        exact_pc = 0.0_real64
+                        if (sc(1) > 0_int64) exact_pc = 100.0_real64*real(sc(2), real64)/real(sc(1), real64)
+                        print '(i9,2x,a4,2x,a5,2x,a11,4f10.2,2f12.3,i10,f8.1)', nn, RULES(ru), &
+                            merge("yes  ", "no   ", ad == 2), METHODS(mm), fit_ms, &
+                            1.0e-6_real64*real(ns(1), real64), 1.0e-6_real64*real(ns(2), real64), &
+                            1.0e-6_real64*real(ns(3), real64), hmax/hh, hmax/hmin, sc(1), exact_pc
+                        if (sz == 3 .and. ad == 2 .and. mm == 1) target_fit(ru) = fit_ms
+                    end do
+                end do
+            end do
+            print '(a)', ""
+        end do
+
+        print '(a,i0,a)', "=== the target: the adaptive linear fit at ", sizes(3), " points ==="
+        print '(a)', "feature_kde_speedup.md's acceptance criterion for the grid-assisted scan, " // &
+            "which it states at 100 000 points. A target, not a gate:"
+        print '(a)', "this mode never exits nonzero on it, since a timing on a shared machine is " // &
+            "not a property of the code."
+        print '(a)', ""
+        print '(a)', "  rule        n     fit ms    target      verdict"
+        do ru = 1, 2
+            if (target_fit(ru) < 0.0_real64) cycle
+            print '(2x,a4,i9,2f10.2,6x,a)', RULES(ru), sizes(3), target_fit(ru), TARGET_MS, &
+                merge("met   ", "MISSED", target_fit(ru) <= TARGET_MS)
+        end do
+        print '(a)', ""
+        print '(a,es22.14)', "checksum ", checksum
+
+    end subroutine run_scan
+
+    !> One `{rule, adaptive, boundary}` fit of `x`, the fastest of `rounds` laps, in seconds, with
+    !> the fastest lap's three phase timings in `ns`. A lap already past `SCAN_LAP_CAP` is not
+    !> repeated: the quadratic cells cost a minute each and the machine's other work moves them by
+    !> far less than the difference the mode is looking at.
+    function time_scan_fit(k, x, rule, adaptive, boundary, xmax, rounds, ns) result(best)
+        type(pf_kde), intent(inout)  :: k        !! the estimate; refitted every lap
+        real(real64), intent(in)     :: x(:)     !! the sample
+        character(len=*), intent(in) :: rule     !! the bandwidth rule's token
+        logical, intent(in)          :: adaptive !! fit the adaptive kernel
+        character(len=*), intent(in) :: boundary !! the boundary correction's token
+        real(real64), intent(in)     :: xmax     !! the support's upper bound
+        integer, intent(in)          :: rounds   !! laps
+        integer(int64), intent(out)  :: ns(3)    !! the fastest lap's sort, pilot and lookup nanos
+        real(real64)                 :: best     !! seconds, the fastest lap
+
+        real(real64), parameter :: SCAN_LAP_CAP = 1.0_real64
+        real(real64) :: t0, t
+        integer(int64) :: cur(3)
+        integer :: lap
+
+        best = huge(1.0_real64)
+        ns = 0_int64
+        do lap = 1, max(1, rounds)
+            t0 = clock()
+            call k%fit(x, rule=rule, kernel="bspline", adaptive=adaptive, lower=0.0_real64, &
+                upper=xmax, boundary=boundary, threads=1)
+            t = clock() - t0
+            call parquet_debug_kde_fit_nanos(cur(1), cur(2), cur(3))
+            if (t < best) then
+                best = t
+                ns = cur
+            end if
+            if (best > SCAN_LAP_CAP) exit
+        end do
+
+    end function time_scan_fit
+
+    !> The quantiles of the linear density `f(x) = x/2` on `[0, 2]`, ascending: its cumulative is
+    !> `(x/2)**2`, so the inverse is `2 sqrt(u)`. The same distribution `analyse_kde` draws from,
+    !> at its quantiles rather than at random, so that a run repeats exactly.
+    subroutine linear_sample(n, x)
+        integer(int64), intent(in)             :: n    !! how many
+        real(real64), allocatable, intent(out) :: x(:) !! the values, ascending
+
+        integer(int64) :: i
+
+        if (allocated(x)) deallocate(x)
+        allocate(x(n))
+        do i = 1_int64, n
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/real(n, real64))
+        end do
+
+    end subroutine linear_sample
 
     !> The fastest of `rounds` laps of one query over `q`, in seconds per call; the answers are
     !> folded into `checksum` outside the timed region. Job 1 is `%pdf`, 2 `%cdf`, 3 `%quantile`

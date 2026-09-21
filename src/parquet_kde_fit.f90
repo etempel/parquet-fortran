@@ -72,7 +72,7 @@ contains
     module procedure kde_fit_f64
 
         call kde_fit_core(self, x, .false., bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
-            bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+            bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
             n_null, n_nan, n_outside, ok, threads)
 
     end procedure kde_fit_f64
@@ -83,11 +83,13 @@ contains
         real(real64), allocatable :: keep_x(:), keep_w(:)
         integer(int64), allocatable :: perm(:)
         integer(int64) :: nv, nnull, nnan, nout, m, i, c0, c1, rate
-        real(real64) :: v, hh, adj, a_alpha, a_bmax, one(1), infl, h_start
+        real(real64) :: v, hh, adj, a_alpha, a_bmax, a_smax, one(1), infl, h_start, hcap
+        integer(int64) :: ncap
         logical :: saw_nan, freq, want_adaptive, built, found, usable
 
         call kde_clear(self)
         kde_fit_ns = 0_int64
+        kde_scan_ns = 0_int64
 
         ! ---- the caller's contract, checked before anything is read ----
         if (present(threads)) then
@@ -119,16 +121,17 @@ contains
             self%lo, self%has_upper, self%hi, self%boundary_code)
         want_adaptive = .false.
         if (present(adaptive)) want_adaptive = adaptive
-        if (present(alpha) .or. present(bandwidth_max)) then
-            if (.not. want_adaptive) call kde_abort(EP, "alpha= and bandwidth_max= need adaptive=.true.")
+        if (present(alpha) .or. present(bandwidth_max) .or. present(spread_max)) then
+            if (.not. want_adaptive) &
+                call kde_abort(EP, "alpha=, bandwidth_max= and spread_max= need adaptive=.true.")
         end if
         if (present(pilot)) then
             if (.not. want_adaptive) call kde_abort(EP, "pilot= needs adaptive=.true.")
             ! A pilot must be a grid, and must describe the same estimate this fit is building: a
             ! bandwidth read from a pilot of another kernel, support or correction is a number from
             ! a different density. Its RANGE need not cover this sample -- a point outside it reads
-            ! no density there, which the rule already answers with the cap or the pilot's smallest
-            ! positive density. What the pilot HOLDS is data: one with nothing to read leaves this
+            ! no density there, which the rule already answers with the cap. What the pilot HOLDS
+            ! is data: one with nothing to read leaves this
             ! fit undefined, quietly, as every other data condition does.
             if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid")
             if (.not. pilot%finished) call kde_abort(EP, "pilot must be a finished grid; call %finish on it")
@@ -158,6 +161,16 @@ contains
                 call kde_abort(EP, "bandwidth_max must be a finite, positive number")
             a_bmax = bandwidth_max
         end if
+        ! In force whether the caller named it or not, unlike the other two: `KDE_SPREAD_MAX` says
+        ! why. A spread below one would ask the widest kernel to be narrower than the narrowest.
+        a_smax = KDE_SPREAD_MAX
+        if (present(spread_max)) then
+            if (.not. kde_positive_finite(spread_max)) &
+                call kde_abort(EP, "spread_max must be a finite number of at least 1")
+            if (spread_max < 1.0_real64) &
+                call kde_abort(EP, "spread_max must be a finite number of at least 1")
+            a_smax = spread_max
+        end if
         call stats_weight_kind(EP, weight_type, freq)
         ! The rule is on from here, whatever the population turns out to be, so that `%is_adaptive`
         ! reports what was asked for; its table is filled once there is a pilot to read.
@@ -165,6 +178,7 @@ contains
         self%adapt%alpha = a_alpha
         self%adapt%has_bmax = present(bandwidth_max)
         self%adapt%bmax = a_bmax
+        self%adapt%smax = a_smax
 
         ! ---- the population: the family's exclusions, then the support ----
         ! `stats_compact` checks the array sizes and every weight it examines, in the family's
@@ -318,7 +332,7 @@ contains
                 self%h = ieee_value(1.0_real64, ieee_quiet_nan)
                 return
             end if
-            call kde_adapt_set(self%adapt, self%pilot_grid, a_alpha, present(bandwidth_max), a_bmax)
+            call kde_adapt_set(self%adapt, self%pilot_grid, a_alpha, present(bandwidth_max), a_bmax, a_smax)
             call system_clock(count=c1)
             call add_phase(2, c0, c1, rate)
             call system_clock(count=c0)
@@ -332,18 +346,31 @@ contains
                 end if
             end do
             self%hmax = self%hb(1)
-            do i = 2_int64, m
+            ncap = 0_int64
+            ! The cap `rule_bandwidth` applied, re-formed here so that the fit can say whether it
+            ! bound: a capped bandwidth IS the cap, exactly, so counting them needs no tolerance.
+            hcap = hh*self%adapt%capf
+            if (self%adapt%has_bmax) then
+                if (self%adapt%bmax < hcap) hcap = self%adapt%bmax
+            end if
+            do i = 1_int64, m
                 if (self%hb(i) > self%hmax) self%hmax = self%hb(i)
+                if (self%hb(i) == hcap) ncap = ncap + 1_int64
             end do
-            ! A pilot measured on ANOTHER sample can give this one's tail a bandwidth orders of
-            ! magnitude above the global one, where the two populations reach differently. Nothing
-            ! is wrong with the answer -- an exact estimate has no range for such a kernel to
-            ! overrun, unlike a grid, which R3 poisons -- but every later query sums the points
-            ! within reach of the WIDEST kernel, so one transferred outlier makes every `%pdf`
-            ! expensive. ADVICE, not a warning: it is a remark about how the call was configured
-            ! rather than a finding about the data, so `verbosity = "silent"` takes it.
-            if (present(pilot) .and. .not. present(bandwidth_max)) then
-                if (self%hmax > KDE_PILOT_SPREAD_ADVICE*hh) call advise_transferred_spread(self%hmax/hh)
+            ! The DEFAULT cap binding is worth saying: the rule wanted a spread the library cut
+            ! back, which is the one case where the answer is not the one the arguments describe.
+            ! It covers a pilot measured on ANOTHER sample -- which can give this sample's tail a
+            ! kernel orders of magnitude wider than the global one -- and a self-built pilot over a
+            ! density that approaches zero, in one place rather than two.
+            !
+            ! Silent when the CALLER capped, by either argument: an explicit request needs no
+            ! advice, and a caller who sets `spread_max` low to buy speed would otherwise be
+            ! advised on every fit, which is the shape that trains people to silence advice.
+            !
+            ! ADVICE, not a warning: it is a remark about how the call was configured rather than a
+            ! finding about the data, so `verbosity = "silent"` takes it.
+            if (.not. present(bandwidth_max) .and. .not. present(spread_max)) then
+                if (ncap > 0_int64) call advise_capped_spread(ncap, m, a_smax)
             end if
             allocate(self%hr(m))
             do i = 1_int64, m
@@ -374,6 +401,12 @@ contains
         end if
         ! ---- under a local-polynomial correction, the zones, their tables and `Z` ----
         if (kde_is_corrected(self%boundary_code)) then
+            ! Said BEFORE the scan rather than after it: the advice is what tells a caller why the
+            ! call they are waiting on is taking so long.
+            if (self%has_lower .and. self%has_upper) then
+                if (2.0_real64*self%reach > self%hi - self%lo) &
+                    call advise_zone_covers_support(self%reach, self%hi - self%lo)
+            end if
             call build_corrected(self)
             ! The clipped estimate holding no mass leaves nothing to normalise by: a data condition,
             ! answered as every other undefined estimate is.
@@ -443,8 +476,8 @@ contains
         allocate(xw(size(x, kind=int64)))
         xw = real(x, real64)
         call kde_fit_f64(self, xw, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, bandwidth_max, &
-            lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, &
-            threads)
+            spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, n_nan, &
+            n_outside, ok, threads)
 
     end procedure kde_fit_f32
 
@@ -456,8 +489,8 @@ contains
         ! The column's validity becomes `is_valid`: unallocated when it has no null, and so absent.
         call kde_widen_column("pf_kde%fit", x, is_valid, wide, mask)
         call kde_fit_f64(self, wide, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, bandwidth_max, &
-            lower, upper, boundary, mask, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, &
-            threads)
+            spread_max, lower, upper, boundary, mask, weights, weight_type, skipnan, n_null, n_nan, &
+            n_outside, ok, threads)
 
     end procedure kde_fit_col
 
@@ -875,6 +908,9 @@ contains
         if (self%adapt%on) then
             write(u, '(2x,a,es24.16e3)') kde_label("alpha"), self%adapt%alpha
             if (self%adapt%has_bmax) write(u, '(2x,a,es24.16e3)') kde_label("bandwidth_max"), self%adapt%bmax
+            ! Always printed: the spread cap is in force whether the caller named it or not, so a
+            ! printed estimate that omitted it would not say what produced its bandwidths.
+            write(u, '(2x,a,es24.16e3)') kde_label("spread_max"), self%adapt%smax
             if (self%pilot_grid%initialised) write(u, '(2x,a,i0,a,es24.16e3,a,es24.16e3)') kde_label("pilot"), &
                 self%pilot_grid%nc, " cells over", self%pilot_grid%x0, " to", self%pilot_grid%x1
             if (self%defined) then
@@ -935,25 +971,57 @@ contains
     ! Private helpers
     ! ==========================================================================================
 
-    !> Aborts unless the object has been fitted. Impure deliberately, like every guard here.
-    !> Says that a transferred pilot gave some point a kernel far wider than the global bandwidth.
+    !> Says that the DEFAULT spread cap bound: the adaptive rule wanted a wider spread than
+    !! `KDE_SPREAD_MAX` and the library cut it back, so the answer is not quite the one the
+    !! arguments describe. Silent where the caller capped it themselves, and silent where the cap
+    !! did not bind.
     !!
     !! ADVICE and not a warning: nothing about the DATA is wrong -- an exact estimate has no range
-    !! for a wide kernel to overrun -- and what is worth saying is about the CONFIGURATION, that
-    !! every later query will sum the points within reach of that kernel. By
+    !! for a wide kernel to overrun -- and what is worth saying is about the CONFIGURATION. By
     !! `.claude/rules/api-conventions.md` that class goes quiet at `verbosity = "silent"`, unlike
     !! `pf_kde_grid%add`'s R3 warning, which is a finding about the data and survives it.
-    subroutine advise_transferred_spread(ratio)
-        real(real64), intent(in) :: ratio !! the widest transferred bandwidth over the global one
+    subroutine advise_capped_spread(ncap, m, smax)
+        integer(int64), intent(in) :: ncap !! how many points took the cap
+        integer(int64), intent(in) :: m    !! how many points there are
+        real(real64), intent(in)   :: smax !! the spread the cap allows
+
+        character(len=32) :: ncap_text, m_text, smax_text
+
+        write (ncap_text, "(i0)") ncap
+        write (m_text, "(i0)") m
+        write (smax_text, "(i0)") int(smax, int64)
+        call parquet_emit_advice("pf_kde%fit: the default spread cap bound at " // trim(ncap_text) // &
+            " of " // trim(m_text) // " points, whose kernel is therefore " // trim(smax_text) // &
+            " times the narrowest rather than what the pilot asked for, and every query sums the " // &
+            "points within reach of the widest. Set spread_max= or bandwidth_max= to choose the cap " // &
+            "yourself.")
+
+    end subroutine advise_capped_spread
+
+    !> Says when the corrected boundary zones cover the whole support, so that the scan the fit is
+    !! about to run is not a boundary correction but a pass over the entire domain.
+    !!
+    !! Each zone is `KDE_RADIUS*h_max` wide, so the two cover the support once `2*R*h_max` reaches
+    !! `upper - lower`. The fit is still right there; it is simply far dearer than the arguments
+    !! suggest, and nothing else says so. Only where BOTH bounds are given: with one bound there is
+    !! no support width to compare against.
+    !!
+    !! ADVICE, and not a warning, on the same reasoning as the cap's: it is a remark about the
+    !! configuration, not a finding about the data.
+    subroutine advise_zone_covers_support(reach, width)
+        real(real64), intent(in) :: reach !! one zone's width, `KDE_RADIUS*h_max`
+        real(real64), intent(in) :: width !! the support's width
 
         character(len=32) :: ratio_text
 
-        write (ratio_text, "(i0)") int(ratio, int64)
-        call parquet_emit_advice("pf_kde%fit: the pilot gives some point a bandwidth about " // &
-            trim(ratio_text) // " times the global one, so every query sums the points within reach " // &
-            "of that kernel. Set bandwidth_max= to bound it.")
+        write (ratio_text, "(i0)") int(min(2.0_real64*reach/width, 1.0e18_real64), int64)
+        call parquet_emit_advice('pf_kde%fit: under boundary="linear" the corrected zones span ' // &
+            'about ' // trim(ratio_text) // ' times the whole support, so the fit scans the entire ' // &
+            'domain at the narrowest kernel''s resolution rather than correcting a boundary. Narrow ' // &
+            'the widest kernel with spread_max= or bandwidth_max=, or use %curve(method="binned") ' // &
+            'or pf_kde_grid for a grid estimate.')
 
-    end subroutine advise_transferred_spread
+    end subroutine advise_zone_covers_support
 
     !> Which method `%curve` fills itself by when the caller named none: `"binned"` only where it is
     !! as accurate as the exact sum, `"exact"` everywhere else.
@@ -1002,6 +1070,7 @@ contains
 
     end function default_curve_method
 
+    !> Aborts unless the object has been fitted. Impure deliberately, like every guard here.
     subroutine require_fitted(self, entry)
         class(pf_kde), intent(in)    :: self  !! the estimate
         character(len=*), intent(in) :: entry !! the binding, for the message
@@ -2025,11 +2094,13 @@ contains
         type(kde_corr_kernel) :: cf
         integer(int64) :: j, jb
         real(real64) :: r, rprev, u, k, hj, near, rad
+        logical :: plain
 
         acc = 0.0_real64
         if (present(env)) env = 0.0_real64
         near = 0.0_real64
         rprev = 0.0_real64
+        plain = .true.
         rad = KDE_RADIUS(self%kernel_code)
         jb = 1_int64 + (first - 1_int64)*self%hstride
         do j = first, last
@@ -2039,18 +2110,28 @@ contains
             u = (t - self%x(j))*r
             ! A kernel sitting exactly on its edge is worth nothing here and everything to the
             ! scan's spacing, which must resolve the kernel that STARTS at the point it is standing
-            ! on: the reach decides `hnear`, the value decides the sum.
-            if (abs(u) <= rad) then
-                if (near == 0.0_real64 .or. hj < near) near = hj
-            end if
+            ! on: the reach decides `hnear`, the value decides the sum. Outside the radius
+            ! `kde_kernel_pdf` is exactly zero -- the Gaussian's cut is inclusive and `KDE_RADIUS`
+            ! carries it -- so the window's unreaching points cost no call. Written
+            ! `.not. (abs(u) <= rad)`, not `abs(u) > rad`: the two differ on a NaN, and only this
+            ! one leaves `near` alone and cycles, as the call it replaces did.
+            if (.not. (abs(u) <= rad)) cycle
+            if (near == 0.0_real64 .or. hj < near) near = hj
             k = kde_kernel_pdf(self%kernel_code, u)
             if (k == 0.0_real64) cycle
             if (r /= rprev) then
-                cf = kde_corr_factor(self%boundary_code, self%kernel_code, self%has_lower, &
-                    self%lo, self%has_upper, self%hi, t, r)
+                ! `kde_corr_factor`'s own plain test, inline: it is reached once per point on an
+                ! adaptive fit, where every point has its own `r`, and deep in a zone most points
+                ! are plain. The test is made on the PRODUCT `(t - lo)*r`, as `plain_at` explains,
+                ! or it lands on the other side of the boundary by a last bit.
+                plain = .true.
+                if (self%has_lower) plain = .not. ((t - self%lo)*r < rad)
+                if (plain .and. self%has_upper) plain = .not. ((self%hi - t)*r < rad)
+                if (.not. plain) cf = kde_corr_factor(self%boundary_code, self%kernel_code, &
+                    self%has_lower, self%lo, self%has_upper, self%hi, t, r)
                 rprev = r
             end if
-            k = kde_corr_value(cf, u, k)
+            if (.not. plain) k = kde_corr_value(cf, u, k)
             ! The sum is divided by the global bandwidth by the caller, so a kernel of any other is
             ! scaled here by `h/h_j` and one of the global bandwidth is left exactly as it is.
             if (r /= self%hinv) k = k*(self%h*r)
@@ -2357,9 +2438,12 @@ contains
             t1 = t + hnear/KDE_LINEAR_SCAN_PER_H
             if (t1 > s1) t1 = s1
             ! A kernel narrower than the step, starting inside it: the scan lands on its start and
-            ! steps by its own bandwidth from there.
+            ! steps by its own bandwidth from there. Only a point with `hj < hnear` can qualify, and
+            ! its start `x(j) - rad*hj` must fall below `t1`, so `x(j) < t1 + rad*hnear` -- a much
+            ! nearer bound than the widest kernel's reach, and a superset of what qualifies, since
+            ! `t1` only ever shrinks inside the loop.
             first = first_at_or_above(self%x, t)
-            last = last_at_or_below(self%x, t1 + reach)
+            last = last_at_or_below(self%x, t1 + rad*hnear)
             jb = 1_int64 + (first - 1_int64)*self%hstride
             do j = first, last
                 hj = self%hb(jb)
@@ -2425,6 +2509,130 @@ contains
     !! bisected. What it can still miss is a dip of a smooth piece that starts and ends between two
     !! neighbouring points, whose mass is at most the cube of the spacing times the raw estimate's
     !! curvature over twelve.
+    !> The raw corrected estimate over `[s0, s1]` on a uniform grid, by linear binning and one
+    !! transform: what the scan below reads instead of summing every point at every step.
+    !!
+    !! **The spacing is the exact scan's own guarantee, applied everywhere.** That scan resolves the
+    !! estimate to `h_near(t)/KDE_LINEAR_SCAN_PER_H`, `h_near` being the narrowest kernel reaching
+    !! `t`; `h_min <= h_near(t)` at every `t`, so a uniform spacing of `h_min/KDE_LINEAR_SCAN_PER_H`
+    !! is at least as fine as the exact scan is anywhere. It is usually much COARSER in step count,
+    !! because the exact scan also stops at every kernel's start -- one stop per point -- which is
+    !! what makes it quadratic rather than the spacing.
+    !!
+    !! The values are the SIGNED accumulation, `normalise=.false.`: under `"linear"` a cell can hold
+    !! a negative value, and finding where it does is the scan's whole purpose. They are in the
+    !! grid's own units, a positive multiple of what `raw_density` answers, which is all the sign
+    !! test and the relative band below need.
+    !!
+    !! `ok` is `.false.` where the grid is declined and the caller must scan exactly: a kernel whose
+    !! binned estimate does not converge as the square of the cell width (the Epanechnikov kernel
+    !! has kinks and the box steps, the same two `%curve`'s default method refuses), a spacing that
+    !! would need more cells than `KDE_SCAN_GRID_MAX`, or a transform `kde_binned_setup` declines as
+    !! too long for the cells asked of it.
+    subroutine zone_grid(self, s0, s1, nc, dx, gv, band, ok)
+        class(pf_kde), intent(in)              :: self  !! the fitted estimate
+        real(real64), intent(in)               :: s0    !! the zone's lower end
+        real(real64), intent(in)               :: s1    !! its upper end
+        integer, intent(out)                   :: nc    !! how many samples, the ends included
+        real(real64), intent(out)              :: dx    !! the spacing between them
+        real(real64), allocatable, intent(out) :: gv(:) !! the signed estimate at each
+        real(real64), intent(out)              :: band  !! below which a value's sign is not trusted
+        logical, intent(out)                   :: ok    !! the grid was built
+
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: cb(:), one(:)
+        real(real64) :: hmin, hhi, below, above, steps, peak
+        integer(int64) :: j, m
+
+        ok = .false.
+        nc = 0
+        dx = 0.0_real64
+        band = 0.0_real64
+        if (.not. kde_scan_grid_on) return
+        if (self%kernel_code /= KDE_GAUSSIAN .and. self%kernel_code /= KDE_BSPLINE) return
+        if (.not. (s1 > s0)) return
+        m = size(self%x, kind=int64)
+        if (m < 1_int64) return
+        hmin = self%hb(1)
+        hhi = self%hb(1)
+        if (self%hstride /= 0_int64) then
+            do j = 1_int64, m
+                if (self%hb(j) < hmin) hmin = self%hb(j)
+                if (self%hb(j) > hhi) hhi = self%hb(j)
+            end do
+        end if
+        if (.not. (hmin > 0.0_real64)) return
+        ! Formed in real64 and compared before any conversion: the quotient can be far past the
+        ! largest integer on a sample the spread cap was not asked to bound, and `int()` of that is
+        ! undefined rather than large.
+        steps = (s1 - s0)*KDE_LINEAR_SCAN_PER_H/hmin
+        if (.not. (steps <= real(KDE_SCAN_GRID_MAX - 2, real64))) return
+        nc = max(2, int(steps) + 2)
+        dx = (s1 - s0)/real(nc - 1, real64)
+
+        ! The grid is filled by hand rather than through `%init`, as `binned_curve` is and for the
+        ! same two reasons: its range runs half a spacing past the support where the zone starts at
+        ! a bound, which `%init` refuses, and the bandwidths are the FIT's own, one per point, where
+        ! a grid reads them from a pilot. KEEP THE TWO IN STEP.
+        g%initialised = .true.
+        g%nc = nc
+        g%dx = dx
+        g%x0 = s0 - 0.5_real64*dx
+        g%x1 = g%x0 + real(nc, real64)*dx
+        g%h = self%h
+        g%kernel_code = self%kernel_code
+        g%boundary_code = self%boundary_code
+        g%has_lower = self%has_lower
+        g%has_upper = self%has_upper
+        g%lo = self%lo
+        g%hi = self%hi
+        g%method_code = KDE_METHOD_BINNED
+        allocate(g%acc(nc))
+        g%acc = 0.0_real64
+        call kde_binned_setup(g, "pf_kde%fit", hmin, hhi, ok)
+        if (.not. ok) then
+            nc = 0
+            dx = 0.0_real64
+            return
+        end if
+        allocate(g%bins(g%ntr, g%nclass), cb(g%ntr))
+        g%bins = 0.0_real64
+        call kde_padded_centres(g, cb)
+        below = 0.0_real64
+        above = 0.0_real64
+        if (self%weighted) then
+            call kde_bin_range(g, cb, self%x, self%w, .true., self%hb, self%hstride, 1_int64, m, &
+                g%bins, below, above)
+        else
+            allocate(one(1))
+            one(1) = 1.0_real64
+            call kde_bin_range(g, cb, self%x, one, .false., self%hb, self%hstride, 1_int64, m, &
+                g%bins, below, above)
+        end if
+        g%w_below = below
+        g%w_above = above
+        g%w_total = self%w_total
+        call grid_finish(g)
+        allocate(gv(nc))
+        call grid_density(g, gv, normalise=.false.)
+        ! A relative band, so that it means the same thing whatever the sample's scale. Anything
+        ! nearer zero than this is read exactly instead, which is why the band is generous: the
+        ! estimate is near zero exactly where a stretch can be, and the cost of refusing to trust
+        ! the grid there is one exact evaluation, while the cost of trusting it wrongly is a
+        ! stretch the clip never removes.
+        peak = 0.0_real64
+        do j = 1_int64, int(nc, int64)
+            if (abs(gv(j)) > peak) peak = abs(gv(j))
+        end do
+        band = KDE_SCAN_GRID_BAND*peak
+        if (.not. (peak > 0.0_real64)) then
+            ok = .false.
+            nc = 0
+            dx = 0.0_real64
+        end if
+
+    end subroutine zone_grid
+
     subroutine scan_zone(self, s0, s1, z, pos_before, pos_after)
         class(pf_kde), intent(in)     :: self       !! the fitted estimate
         real(real64), intent(in)      :: s0         !! the zone's lower end
@@ -2433,10 +2641,10 @@ contains
         logical, intent(out)          :: pos_before !! a positive value before the first stretch
         logical, intent(out)          :: pos_after  !! a positive value after the last
 
-        real(real64), allocatable :: ss(:), ee(:), edges(:)
-        real(real64) :: t, t1, f0, f1, hn0, hn1, eb, px, cx, cf, start
-        integer :: ns, nedge, i
-        logical :: open_stretch
+        real(real64), allocatable :: ss(:), ee(:), edges(:), gv(:)
+        real(real64) :: t, t1, f0, f1, hn0, hn1, eb, px, cx, cf, start, dx, band
+        integer :: ns, nedge, i, nc, ic
+        logical :: open_stretch, use_grid, c0g, c1g, e0, e1, sharp
 
         allocate(ss(8), ee(8), edges(16))
         ns = 0
@@ -2444,7 +2652,26 @@ contains
         pos_before = .false.
         pos_after = .false.
         start = s0
-        call raw_at(self, s0, f0, hn0)
+        hn0 = 0.0_real64
+        hn1 = 0.0_real64
+        ! One binned grid over the zone, read wherever it is safely away from zero: the exact
+        ! estimator still decides every value near zero and every crossing, so what the grid
+        ! changes is only WHERE the exact estimator is asked.
+        call zone_grid(self, s0, s1, nc, dx, gv, band, use_grid)
+        ic = 1
+        c0g = .false.
+        e0 = .true.
+        if (use_grid) then
+            c0g = abs(gv(1)) > band
+            e0 = .not. c0g
+        end if
+        kde_scan_ns(1) = kde_scan_ns(1) + 1_int64
+        if (c0g) then
+            f0 = gv(1)
+        else
+            kde_scan_ns(2) = kde_scan_ns(2) + 1_int64
+            call raw_at(self, s0, f0, hn0)
+        end if
         if (f0 < 0.0_real64) then
             open_stretch = .true.
         else if (f0 > 0.0_real64) then
@@ -2453,13 +2680,52 @@ contains
         end if
         t = s0
         do while (t < s1)
-            call step_to(self, t, hn0, s1, t1)
+            if (use_grid) then
+                ic = ic + 1
+                t1 = s0 + real(ic - 1, real64)*dx
+                if (ic >= nc) t1 = s1
+                c1g = abs(gv(ic)) > band
+                e1 = .not. c1g
+                kde_scan_ns(1) = kde_scan_ns(1) + 1_int64
+                if (c1g) then
+                    f1 = gv(ic)
+                else
+                    kde_scan_ns(2) = kde_scan_ns(2) + 1_int64
+                    call raw_at(self, t1, f1, hn1)
+                end if
+            else
+                call step_to(self, t, hn0, s1, t1)
+                if (.not. (t1 > t)) exit
+                kde_scan_ns(1) = kde_scan_ns(1) + 1_int64
+                kde_scan_ns(2) = kde_scan_ns(2) + 1_int64
+                call raw_at(self, t1, f1, hn1)
+                c1g = .false.
+                e1 = .true.
+            end if
             if (.not. (t1 > t)) exit
-            call raw_at(self, t1, f1, hn1)
-            call step_edges(self, t, t1, edges, nedge, eb)
-            ! Away from zero by more than twice what the edges inside can do, no jump or kink can
-            ! hide a stretch, and the interval is taken as it is.
-            if (min(f0, f1) > 2.0_real64*eb) nedge = 0
+            ! The edges, and the bound on what they can do, are only worth forming where the
+            ! interval can hold a stretch at all -- which is where an end is near zero. Both ends
+            ! are then read exactly, so the refinement below and the crossings it feeds read the
+            ! same estimate, never the grid's approximation to it.
+            nedge = 0
+            eb = 0.0_real64
+            sharp = .not. (c0g .and. c1g)
+            if (sharp) then
+                if (.not. e0) then
+                    kde_scan_ns(2) = kde_scan_ns(2) + 1_int64
+                    call raw_at(self, t, f0, hn0)
+                    e0 = .true.
+                end if
+                if (.not. e1) then
+                    kde_scan_ns(2) = kde_scan_ns(2) + 1_int64
+                    call raw_at(self, t1, f1, hn1)
+                    e1 = .true.
+                end if
+                call step_edges(self, t, t1, edges, nedge, eb)
+                ! Away from zero by more than twice what the edges inside can do, no jump or kink
+                ! can hide a stretch, and the interval is taken as it is.
+                if (min(f0, f1) > 2.0_real64*eb) nedge = 0
+            end if
             px = t
             do i = 1, 2*nedge + 1
                 if (i <= 2*nedge) then
@@ -2500,6 +2766,8 @@ contains
             t = t1
             f0 = f1
             hn0 = hn1
+            c0g = c1g
+            e0 = e1
         end do
         if (open_stretch) call push_stretch(ss, ee, ns, start, s1)
         z%ns = ns

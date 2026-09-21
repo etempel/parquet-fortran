@@ -41,9 +41,11 @@
 !! nothing.
 !!
 !! Two suites. `kde` is pure in-memory work and runs concurrently. `kde_serial` holds the tests
-!! that write process-global state -- they silence `%print` through the `verbosity` setting, or
-!! force the pilot's or the ISJ rule's cells through `parquet_debug_set_kde_pilot_cells` and
-!! `parquet_debug_set_kde_isj_cells` -- and is on `suite_is_safe_to_parallelize`'s exclusion list.
+!! that write process-global state -- they silence `%print` through the `verbosity` setting, force
+!! the pilot's or the ISJ rule's cells through `parquet_debug_set_kde_pilot_cells` and
+!! `parquet_debug_set_kde_isj_cells`, or turn the boundary scan's grid off through
+!! `parquet_debug_set_kde_scan_grid` and read the counters back through
+!! `parquet_debug_kde_scan_counts` -- and is on `suite_is_safe_to_parallelize`'s exclusion list.
 !! Both are registered in `run_tester_pf.f90`, the runner that executes no `bind(C)` call.
 module test_kde
 
@@ -223,6 +225,8 @@ contains
             new_unittest("the adaptive bandwidths follow the pilot", test_adaptive_bandwidths_follow_pilot), &
             new_unittest("the adaptive golden case", test_adaptive_golden), &
             new_unittest("bandwidth_max caps every h_j", test_bandwidth_max_caps), &
+            new_unittest("spread_max caps h_max/h_min, and the tighter of the two caps binds", &
+                test_spread_max_caps), &
             new_unittest("%pilot returns the grid the fit used", test_pilot_is_the_fits), &
             new_unittest("%fit(pilot=) applies a smoothing measured on another sample", &
                 test_fit_takes_a_pilot), &
@@ -284,7 +288,9 @@ contains
             new_unittest("parquet_debug_set_kde_isj_cells sets the rule's grid, which moves it by under 1%", &
                 test_isj_cells_forced), &
             new_unittest("the binned adaptive kernel splits each point between two bandwidth classes", &
-                test_binned_adaptive) &
+                test_binned_adaptive), &
+            new_unittest("the boundary scan's grid changes where the exact estimator is asked, " // &
+                "not what the fit answers", test_scan_grid_agrees) &
             ]
 
     end subroutine collect_tests_kde_serial
@@ -4107,6 +4113,160 @@ contains
     !> bandwidth widens, because the pilot built at that bandwidth is smoother. On this recipe the
     !> spread is about `[0.72, 1.19]`, so a cap at `1.05` binds on a third of the points and the
     !> vacuity guard below has room on both sides; at `1.2` it binds on none and the guard fires.
+    !> `spread_max` caps the SPREAD rather than the bandwidth, and where both caps are given the
+    !! tighter one binds.
+    !!
+    !! The cap is `spread_max` times the NARROWEST bandwidth the rule can give, which is reached at
+    !! the pilot's densest cell -- a closed form, so the rule needs no second pass to apply it. The
+    !! test re-derives that number from the pilot rather than reading it back off the bandwidths,
+    !! which would only assert the cap against itself.
+    !!
+    !! The default cap is released with `spread_max=1e6` rather than measured by omitting it: the
+    !! default is in force whether it is named or not, so there is no uncapped fit to compare
+    !! against, and a fixture whose spread exceeds the default is what makes the comparison mean
+    !! anything.
+    subroutine test_spread_max_caps(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k, kc, kb, kr
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), h0(:), hc(:), hbb(:), hr(:), f(:)
+        real(real64) :: capv, want, lg, hmin, smax
+        integer :: i
+
+        call kde_two_component(60_int64, x)
+        ! The default cap does not bind on this fixture, which is what makes the comparisons below
+        ! comparisons against the RULE's own bandwidths rather than against another cap. Asserted
+        ! rather than assumed: `spread_max=1e6` releases the cap, and the two must agree bit for
+        ! bit.
+        call k%fit(x, rule="silverman", adaptive=.true., spread_max=1.0e6_real64)
+        allocate(h0(k%n_valid()), hr(k%n_valid()))
+        call k%bandwidths(h0)
+        call kr%fit(x, rule="silverman", adaptive=.true.)
+        call kr%bandwidths(hr)
+        call check(error, all(h0 == hr), &
+            "the default cap must not bind on this fixture, or the comparisons below are against a cap")
+        if (allocated(error)) return
+
+        ! The NARROWEST bandwidth the rule can give, in closed form from the pilot the fit hands
+        ! back: `h * (pmax/g)**(-alpha)`, reached at the pilot's densest cell. The spread cap is
+        ! `spread_max` times it, so a `spread_max` is chosen here that lands the cap in the middle
+        ! of the bandwidths the rule actually produced -- a cap outside their range would bind on
+        ! all of them or on none, and assert nothing either way.
+        call k%pilot(g)
+        allocate(f(g%ncells()))
+        call g%density(f)
+        lg = pilot_log_g(g)
+        hmin = k%bandwidth()*exp(-0.5_real64*(log(maxval(f)) - lg))
+        smax = 0.5_real64*(minval(h0) + maxval(h0))/hmin
+        call check(error, smax > 1.0_real64, "the chosen spread cap must be a cap at all")
+        if (allocated(error)) return
+
+        call kc%fit(x, rule="silverman", adaptive=.true., spread_max=smax)
+        allocate(hc(kc%n_valid()))
+        call kc%bandwidths(hc)
+        call check(error, kc%bandwidth() == k%bandwidth(), "a cap must not move the global bandwidth")
+        if (allocated(error)) return
+        want = smax*hmin
+        capv = maxval(hc)
+        call check(error, abs(capv - want) <= 1.0e-12_real64*want, &
+            "the spread cap must be spread_max times the bandwidth at the pilot's densest cell")
+        if (allocated(error)) return
+        call check(error, count(h0 > capv) >= 3 .and. count(h0 < capv) >= 3, &
+            "the cap must bind on some points and not on others, or this test is vacuous")
+        if (allocated(error)) return
+        do i = 1, size(h0)
+            if (h0(i) < capv) then
+                call check(error, hc(i) == h0(i), "a bandwidth below the spread cap must be left as it is")
+            else
+                call check(error, hc(i) == capv, "a bandwidth above the spread cap must be the cap exactly")
+            end if
+            if (allocated(error)) return
+        end do
+
+        ! Both caps: neither overrides the other, the smaller binds.
+        allocate(hbb(kc%n_valid()))
+        call kb%fit(x, rule="silverman", adaptive=.true., spread_max=smax, &
+            bandwidth_max=0.5_real64*capv)
+        call kb%bandwidths(hbb)
+        call check(error, maxval(hbb) == 0.5_real64*capv, &
+            "with both caps given, an absolute cap below the spread cap must bind")
+        if (allocated(error)) return
+        call kb%fit(x, rule="silverman", adaptive=.true., spread_max=smax, &
+            bandwidth_max=2.0_real64*capv)
+        call kb%bandwidths(hbb)
+        call check(error, maxval(hbb) == capv, &
+            "with both caps given, a spread cap below the absolute one must bind")
+
+    end subroutine test_spread_max_caps
+
+    !> The grid-assisted boundary scan answers what the exact scan answers.
+    !!
+    !! Under `boundary="linear"` the fit scans each zone for the stretches where the raw estimate
+    !! is negative, which the clip removes. The scan reads a binned grid wherever that grid is
+    !! safely away from zero and the exact estimator everywhere else, so what it changes is WHERE
+    !! the exact estimator is asked. The only way to show that from inside one process is to run
+    !! both arms: `parquet_debug_set_kde_scan_grid(.false.)` turns the grid off, and the two fits
+    !! must agree.
+    !!
+    !! The tolerance is not zero and cannot be. A crossing is bisected to neighbouring numbers from
+    !! whichever bracket the scan hands it, and the two arms sample at different points, so a
+    !! stretch's ends can differ in their last bits and the normalising mass with them. What must
+    !! not differ is which stretches were found at all, which a loose tolerance still sees: a
+    !! missed stretch leaves a visible bump of negative density behind.
+    !!
+    !! It asserts the grid arm actually used the grid first. A run in which the grid was declined
+    !! would compare the exact scan with itself and pass while testing nothing.
+    subroutine test_scan_grid_agrees(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kg, ke
+        real(real64), allocatable :: x(:)
+        real(real64) :: t(120), fg(120), fe(120), cg(120), ce(120), peak
+        integer(int64) :: steps, exact, steps_e, exact_e
+        integer :: i
+
+        ! A density that vanishes at its lower bound, which is what makes the adaptive rule widen
+        ! there and the corrected zone cover the support: the case the grid exists for.
+        allocate(x(2000))
+        do i = 1, 2000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/2000.0_real64)
+        end do
+        call spread_points(0.0_real64, 2.0_real64, t)
+
+        call parquet_debug_set_kde_scan_grid(.true.)
+        call kg%fit(x, rule="silverman", kernel="bspline", adaptive=.true., lower=0.0_real64, &
+            upper=2.0_real64, boundary="linear")
+        call parquet_debug_kde_scan_counts(steps, exact)
+        call kg%pdf(t, fg)
+        call kg%cdf(t, cg)
+
+        call parquet_debug_set_kde_scan_grid(.false.)
+        call ke%fit(x, rule="silverman", kernel="bspline", adaptive=.true., lower=0.0_real64, &
+            upper=2.0_real64, boundary="linear")
+        call parquet_debug_kde_scan_counts(steps_e, exact_e)
+        call ke%pdf(t, fe)
+        call ke%cdf(t, ce)
+        call parquet_debug_set_kde_scan_grid(.true.)
+
+        call check(error, steps > 0_int64 .and. exact < steps, &
+            "the grid arm must have read its grid for some samples, or this test compares the " // &
+            "exact scan with itself")
+        if (allocated(error)) return
+        call check(error, steps_e > 0_int64 .and. exact_e == steps_e, &
+            "the control arm must have read every sample exactly")
+        if (allocated(error)) return
+        call check(error, kg%bandwidth() == ke%bandwidth(), "both arms must fit the same bandwidth")
+        if (allocated(error)) return
+        peak = maxval(fe)
+        call check(error, peak > 0.0_real64, "the control fit must have a density to compare against")
+        if (allocated(error)) return
+        call check(error, maxval(abs(fg - fe)) <= 1.0e-9_real64*peak, &
+            "the grid-assisted scan must answer the exact scan's density")
+        if (allocated(error)) return
+        call check(error, maxval(abs(cg - ce)) <= 1.0e-9_real64, &
+            "the grid-assisted scan must answer the exact scan's distribution")
+
+    end subroutine test_scan_grid_agrees
+
     subroutine test_bandwidth_max_caps(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k, kc
@@ -4152,7 +4312,7 @@ contains
         type(pf_kde) :: k, kempty
         type(pf_kde_grid) :: g
         real(real64), allocatable :: x(:), hb(:), xs(:), c(:), f(:)
-        real(real64) :: h, lg, p, want, far, pmin, a, b, empty(0)
+        real(real64) :: h, lg, p, want, far, pmax, a, b, empty(0)
         integer :: j, nc
 
         call kde_two_component(60_int64, x)
@@ -4187,11 +4347,15 @@ contains
             if (allocated(error)) return
         end do
         call g%density(f)
-        pmin = minval(f, mask=f > 0.0_real64)
+        ! A point the pilot reads no density at takes the CAP, which is always in force: the
+        ! default spread cap (`KDE_SPREAD_MAX`, 100) times the NARROWEST bandwidth the rule can
+        ! give, which is reached at the pilot's densest cell. The pilot's smallest positive
+        ! density, which once stood in for `p` here, is no longer reachable.
+        pmax = maxval(f)
         call k%bandwidth_at(1.0e4_real64, far)
-        want = h*exp(-0.5_real64*(log(pmin) - lg))
+        want = 100.0_real64*h*exp(-0.5_real64*(log(pmax) - lg))
         call check(error, abs(far - want) <= 1.0e-12_real64*want, &
-            "a point the pilot reads as zero must take its smallest positive density instead")
+            "a point the pilot reads as zero must take the default spread cap")
         if (allocated(error)) return
 
         call kempty%fit(empty, adaptive=.true.)
@@ -4668,9 +4832,17 @@ contains
         call k%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "bandwidth_max", seen)
-        ! The heading and the fixed summary's nine rows, then alpha, the cap, the pilot and the two
-        ! ends of the bandwidths.
-        call check(error, nlines == 15 .and. seen, "%print must add the adaptive rule's five rows")
+        ! The heading and the fixed summary's nine rows, then alpha, the two caps, the pilot and
+        ! the two ends of the bandwidths. `spread_max` is printed whether it was given or not,
+        ! being always in force.
+        call check(error, nlines == 16 .and. seen, "%print must add the adaptive rule's six rows")
+        if (allocated(error)) return
+        ! `read_back` deletes what it read, so the second needle needs the file written again.
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call k%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "spread_max", seen)
+        call check(error, seen, "%print must name the spread cap, which is in force whether it was given or not")
         if (allocated(error)) return
 
         call k%clear()

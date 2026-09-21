@@ -91,6 +91,36 @@ PILOT_REACH = mpf(4)
 #: and not the other makes every adaptive case here disagree, which is what these vectors are for.
 ADAPT_INFLATE = mpf("1.5")
 
+#: The default cap on the adaptive rule's SPREAD (`KDE_SPREAD_MAX` in `src/parquet_kde.f90`): no
+#: point's bandwidth exceeds this many times the narrowest the rule can give.
+#:
+#: **This oracle cannot mirror it, and must not have to.** The library forms the cap from the
+#: LARGEST CELL DENSITY of its pilot grid, while every pilot here is the exact continuous estimate:
+#: the two maxima differ by the grid's own discretisation, so a fixture whose spread reached the cap
+#: would be capped at two slightly different numbers and the vectors would disagree for a reason
+#: that is not a defect. Every adaptive case here is therefore required to stay BELOW the cap, and
+#: `check_spread_below_cap` fails loudly if one ever stops doing so, rather than letting the
+#: omission go quiet. The cap itself is pinned by `test_spread_max_caps` in `test/test_kde.f90`,
+#: which re-derives it from the pilot the library hands back.
+SPREAD_MAX = mpf("100")
+
+
+def check_spread_below_cap(case, hs):
+    """Refuses a case whose adaptive spread reaches the library's default cap.
+
+    `hs` are the per-point bandwidths this oracle formed, uncapped by anything but an explicit
+    `bandwidth_max`. See `SPREAD_MAX` for why a case at or above the cap cannot be emitted here.
+    """
+    if not hs:
+        return
+    lo, hi = min(hs), max(hs)
+    if lo > 0 and hi / lo >= SPREAD_MAX:
+        raise SystemExit(
+            "the case %r has an adaptive spread of %s, at or above the default spread cap of %s: "
+            "the library would cap it from its pilot's cell maximum, which this oracle cannot "
+            "reproduce. Narrow the fixture, or give it an explicit bandwidth_max."
+            % (case, mp.nstr(hi / lo, 6), mp.nstr(SPREAD_MAX, 6)))
+
 #: The digits the pilot's entropy integral is taken to. `log g` is read to about `1e-12` by the
 #: tightest test (a bandwidth moves by `alpha` times its error), and a quadrature at 50 digits
 #: would cost minutes; `--self-test` confirms this one against 30.
@@ -910,6 +940,7 @@ def estimate(case):
         for x in xs:
             hj = h * mp.exp(-alpha * (mp.log(pilot.clipped(x) / zp) - log_g))
             hs.append(min(hj, cap) if cap is not None else hj)
+        check_spread_below_cap(case, hs)
     elif case.get("adaptive"):
         # The pilot is the fixed estimate at the global bandwidth, read exactly at every point;
         # `log g` is its entropy over the range the library's pilot grid spans.
@@ -927,6 +958,7 @@ def estimate(case):
         for x in xs:
             hj = h * mp.exp(-alpha * (mp.log(pilot.pdf(x)) - log_g))
             hs.append(min(hj, cap) if cap is not None else hj)
+        check_spread_below_cap(case, hs)
     if corrected:
         # The clipped estimate over its own integral, both by quadrature of the SUM between its
         # knots, its correction edges and its sign changes -- never point by point, which is how

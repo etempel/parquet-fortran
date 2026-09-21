@@ -70,6 +70,7 @@ contains
         real(real64) :: hmax, span, need, cap
         integer :: j
 
+        if (present(ok)) ok = .true.
         self%method_code = KDE_METHOD_BINNED
         call class_ladder(self, hlo, hhi, hmax)
         ! The pad: far enough that the cosine basis's own reflection at the array's ends cannot
@@ -91,13 +92,31 @@ contains
         cap = real(KDE_BINNED_L_MAX, real64)*real(self%nc, real64)
         ! Formed in real64 and compared before any conversion: `span/dx` can be far past the largest
         ! integer, and `int()` of that is undefined rather than large.
-        if (.not. (2.0_real64*(need + 2.0_real64) + real(self%nc, real64) <= cap)) call binned_too_long(self, entry)
+        if (.not. (2.0_real64*(need + 2.0_real64) + real(self%nc, real64) <= cap)) then
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
+            call binned_too_long(self, entry)
+        end if
         j = int(ceiling(need)) + 1
         need = real(self%nc, real64) + 2.0_real64*real(j, real64)
-        if (.not. (need <= cap)) call binned_too_long(self, entry)
+        if (.not. (need <= cap)) then
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
+            call binned_too_long(self, entry)
+        end if
         self%pad = j
         self%ntr = pf_next_pow2(self%nc + 2*j)
-        if (.not. (real(self%ntr, real64) <= cap)) call binned_too_long(self, entry)
+        if (.not. (real(self%ntr, real64) <= cap)) then
+            if (present(ok)) then
+                ok = .false.
+                return
+            end if
+            call binned_too_long(self, entry)
+        end if
         self%nclass = size(self%hclass)
 
     end procedure kde_binned_setup
@@ -341,6 +360,8 @@ contains
         a%has_bmax = has_bmax
         a%bmax = 0.0_real64
         if (has_bmax) a%bmax = bmax
+        a%smax = smax
+        a%capf = 0.0_real64
         a%nc = pilot%nc
         a%x0 = pilot%x0
         a%x1 = pilot%x1
@@ -404,6 +425,16 @@ contains
             return
         end if
         a%logg = s2/s1
+        ! ---- the spread cap, in units of the global bandwidth ----
+        ! The rule is `h*exp(-alpha*(log p - log g))` and `interp_cells` interpolates linearly
+        ! between the cells, so no density it reads exceeds `pmax` and the NARROWEST bandwidth the
+        ! rule can give is `h*exp(-alpha*(log pmax - log g))`, reached at the pilot's densest cell.
+        ! That is a closed form, so `spread_max*h_min` is known before the first point is looked at
+        ! and the rule stays ONE pass; it is also deterministic, depending on the pilot rather than
+        ! on where the sample's points happen to fall. `log g` is a `p`-weighted mean of `log p`,
+        ! so `pmax >= g`, the exponent is never positive, and `capf <= smax`: the product below
+        ! cannot overflow.
+        a%capf = a%smax*exp(-a%alpha*(log(a%pmax) - a%logg))
 
     end procedure kde_adapt_set
 
@@ -497,7 +528,7 @@ contains
     module procedure grid_init
 
         character(len=*), parameter :: EP = "pf_kde_grid%init"
-        real(real64) :: step, lo, hi, a_alpha, a_bmax
+        real(real64) :: step, lo, hi, a_alpha, a_bmax, a_smax
         integer :: kcode, bcode, mcode
         logical :: has_lo, has_hi
         type(kde_adapt) :: rule
@@ -554,24 +585,24 @@ contains
         end if
 
         ! ---- the adaptive rule ----
-        if (present(alpha) .or. present(bandwidth_max)) then
-            if (.not. present(pilot)) call kde_abort(EP, "alpha= and bandwidth_max= need pilot=")
+        if (present(alpha) .or. present(bandwidth_max) .or. present(spread_max)) then
+            if (.not. present(pilot)) call kde_abort(EP, "alpha=, bandwidth_max= and spread_max= need pilot=")
         end if
-        call check_adaptive_settings(EP, alpha, bandwidth_max, a_alpha, a_bmax)
+        call check_adaptive_settings(EP, alpha, bandwidth_max, spread_max, a_alpha, a_bmax, a_smax)
         if (present(pilot)) then
             ! A pilot must be a grid. What it holds is data: one with no density to read, a kept
             ! NaN or nothing in its cells, makes this grid answer NaN, quietly.
             !
             ! Its range need NOT cover this grid's. A point outside the pilot reads no density
-            ! there, which is the case the rule already answers: it takes `bandwidth_max` where one
-            ! was given and the pilot's smallest positive density otherwise. Extending that from
+            ! there, which is the case the rule already answers: it takes the cap, which is always
+            ! present. Extending that from
             ! "no density here" to "no pilot here" is the same statement about the same absence,
             ! and refusing it instead would block the natural remedy for R3 -- widening the grid so
             ! that the widest kernel has room -- leaving a cap as the only way out.
             if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid")
             if (.not. pilot%finished) call kde_abort(EP, "pilot must be a finished grid; call %finish on it")
             ! The table is read out of the pilot before this grid is touched.
-            call kde_adapt_set(rule, pilot, a_alpha, present(bandwidth_max), a_bmax)
+            call kde_adapt_set(rule, pilot, a_alpha, present(bandwidth_max), a_bmax, a_smax)
         end if
 
         ! ---- the method ----
@@ -1152,6 +1183,9 @@ contains
         if (self%adapt%on) then
             write(u, '(2x,a,es24.16e3)') kde_label("alpha"), self%adapt%alpha
             if (self%adapt%has_bmax) write(u, '(2x,a,es24.16e3)') kde_label("bandwidth_max"), self%adapt%bmax
+            ! Always printed: the spread cap is in force whether the caller named it or not, so a
+            ! printed estimate that omitted it would not say what produced its bandwidths.
+            write(u, '(2x,a,es24.16e3)') kde_label("spread_max"), self%adapt%smax
             write(u, '(2x,a,i0,a,es24.16e3,a,es24.16e3)') kde_label("pilot"), self%adapt%nc, " cells over", &
                 self%adapt%x0, " to", self%adapt%x1
         end if
@@ -1347,6 +1381,7 @@ contains
         if (a%has_bmax) then
             if (a%bmax /= b%bmax) return
         end if
+        if (a%smax /= b%smax) return
         if (a%nc /= b%nc .or. a%x0 /= b%x0 .or. a%x1 /= b%x1 .or. a%wt /= b%wt) return
         if (a%unreadable .neqv. b%unreadable) return
         ! Two tables that differ almost always differ here, and then no cell is looked at. A match
@@ -1362,12 +1397,14 @@ contains
     !> The adaptive rule's settings `%init` checks, in the canonical order, with their defaults
     !! filled in: `alpha` in `[0, 1]`, 0.5 when absent, and `bandwidth_max` a finite positive
     !! number, when given.
-    subroutine check_adaptive_settings(entry, alpha, bandwidth_max, a_alpha, a_bmax)
+    subroutine check_adaptive_settings(entry, alpha, bandwidth_max, spread_max, a_alpha, a_bmax, a_smax)
         character(len=*), intent(in)       :: entry         !! the binding, for the message
         real(real64), intent(in), optional :: alpha         !! the caller's sensitivity
-        real(real64), intent(in), optional :: bandwidth_max !! the caller's cap
+        real(real64), intent(in), optional :: bandwidth_max !! the caller's absolute cap
+        real(real64), intent(in), optional :: spread_max    !! the caller's cap on `h_max/h_min`
         real(real64), intent(out)          :: a_alpha       !! the sensitivity to use
-        real(real64), intent(out)          :: a_bmax        !! the cap, or 0 when absent
+        real(real64), intent(out)          :: a_bmax        !! the absolute cap, or 0 when absent
+        real(real64), intent(out)          :: a_smax        !! the spread cap, `KDE_SPREAD_MAX` when absent
 
         a_alpha = KDE_ALPHA_DEFAULT
         if (present(alpha)) then
@@ -1381,6 +1418,16 @@ contains
             if (.not. kde_positive_finite(bandwidth_max)) &
                 call kde_abort(entry, "bandwidth_max must be a finite, positive number")
             a_bmax = bandwidth_max
+        end if
+        ! Always in force, unlike the other two: a spread below one would ask the widest kernel to
+        ! be narrower than the narrowest, which is not a cap but a contradiction.
+        a_smax = KDE_SPREAD_MAX
+        if (present(spread_max)) then
+            if (.not. kde_positive_finite(spread_max)) &
+                call kde_abort(entry, "spread_max must be a finite number of at least 1")
+            if (spread_max < 1.0_real64) &
+                call kde_abort(entry, "spread_max must be a finite number of at least 1")
+            a_smax = spread_max
         end if
 
     end subroutine check_adaptive_settings
@@ -1475,7 +1522,7 @@ contains
         real(real64), intent(in), optional :: given_hi !! the widest
         real(real64), intent(out)          :: hmax     !! the widest class's bandwidth
 
-        real(real64) :: hlo, hhi, lim, e
+        real(real64) :: hlo, hhi, lim, e, cap
         integer :: c, i
 
         if (allocated(self%hclass)) deallocate(self%hclass)
@@ -1492,12 +1539,15 @@ contains
             ! give a point of this grid.
             hlo = rule_h(self, self%adapt%pmax)
             hhi = rule_h(self, self%adapt%pmin)
-            ! A point the pilot reads zero density at takes the cap where there is one, and `pmin`
-            ! where there is not; both are already inside the bracket.
+            ! Every bandwidth is capped, so the bracket is too, at whichever cap is tighter -- the
+            ! same `min` `rule_bandwidth` takes, and for the same reason. A point the pilot reads
+            ! zero density at takes that cap, which is inside the bracket.
+            cap = self%h*self%adapt%capf
             if (self%adapt%has_bmax) then
-                if (hlo > self%adapt%bmax) hlo = self%adapt%bmax
-                if (hhi > self%adapt%bmax) hhi = self%adapt%bmax
+                if (self%adapt%bmax < cap) cap = self%adapt%bmax
             end if
+            if (hlo > cap) hlo = cap
+            if (hhi > cap) hhi = cap
         end if
         ! A bandwidth the rule could only overflow to belongs to a point that poisons the grid at
         ! `%add`, so the ladder stops at the widest one an estimate could be built from.
@@ -1558,6 +1608,8 @@ contains
         to%alpha = from%alpha
         to%has_bmax = from%has_bmax
         to%bmax = from%bmax
+        to%smax = from%smax
+        to%capf = from%capf
         to%nc = from%nc
         to%x0 = from%x0
         to%x1 = from%x1
@@ -2461,9 +2513,16 @@ contains
     !! `h * (p(t)/g)**(-alpha)`, formed as `h * exp(-alpha * (log p - log g))` with the exponent
     !! tested before it is raised, so that a bandwidth too large to represent is `+Infinity`
     !! without an overflow (which would stop a program under nagfor). Exactly `h` at `alpha = 0`,
-    !! then capped at `bandwidth_max`. Where the pilot reads zero, the cap is the answer; without
-    !! one, the pilot's smallest positive cell density stands in for `p`. NaN from a table with
-    !! nothing to read, whatever `alpha`.
+    !! then capped -- at `spread_max` times the narrowest bandwidth the rule can give, and at
+    !! `bandwidth_max` where the caller gave one, whichever is TIGHTER. Where the pilot reads
+    !! zero the cap is the answer; the pilot's smallest positive cell density no longer stands in
+    !! for `p` there, a cap being the better answer for "the pilot says nothing here" and a cap
+    !! being always present. NaN from a table with nothing to read, whatever `alpha`.
+    !!
+    !! **The spread cap is always in force**, which is what bounds the corrected boundary scan:
+    !! its zone is `KDE_RADIUS*h_max` wide and its step is `h_min/KDE_LINEAR_SCAN_PER_H`, so
+    !! without a bound on `h_max/h_min` the scan's step count is unbounded. `KDE_SPREAD_MAX` says
+    !! why the default is where it is.
     function rule_bandwidth(a, h, elim, t) result(hj)
         type(kde_adapt), intent(in) :: a    !! the rule
         real(real64), intent(in)    :: h    !! the global bandwidth
@@ -2471,21 +2530,26 @@ contains
         real(real64), intent(in)    :: t    !! the point
         real(real64)                :: hj   !! its bandwidth
 
-        real(real64) :: p, e
+        real(real64) :: p, e, cap
 
         hj = ieee_value(1.0_real64, ieee_quiet_nan)
         if (a%unreadable) return
         if (t /= t) return
+        ! The tighter of the two caps. `capf` is the spread cap in units of `h`, formed once by
+        ! `kde_adapt_set`; `bmax` is the caller's absolute one. Both are statements about
+        ! different things -- the estimator's shape and the data's scale -- so neither overrides
+        ! the other and the smaller binds.
+        cap = h*a%capf
+        if (a%has_bmax) then
+            if (a%bmax < cap) cap = a%bmax
+        end if
         if (a%alpha == 0.0_real64) then
             hj = h
         else
             p = interp_cells(a%nc, a%x0, a%x1, a%dx, a%acc, a%wt, t, .false.)
             if (.not. (p > 0.0_real64)) then
-                if (a%has_bmax) then
-                    hj = a%bmax
-                    return
-                end if
-                p = a%pmin
+                hj = cap
+                return
             end if
             e = -a%alpha*(log(p) - a%logg)
             if (e > elim) then
@@ -2494,9 +2558,7 @@ contains
                 hj = h*exp(e)
             end if
         end if
-        if (a%has_bmax) then
-            if (hj > a%bmax) hj = a%bmax
-        end if
+        if (hj > cap) hj = cap
 
     end function rule_bandwidth
 

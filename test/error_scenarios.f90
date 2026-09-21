@@ -4251,6 +4251,14 @@ program error_scenarios
         call scenario_kde_alpha_nan()
     case ("kde_bandwidth_max_zero")
         call scenario_kde_bandwidth_max_zero()
+    case ("kde_spread_max_without_adaptive")
+        call scenario_kde_spread_max_without_adaptive()
+    case ("kde_spread_max_below_one")
+        call scenario_kde_spread_max_below_one()
+    case ("kde_spread_cap_advice_default")
+        call scenario_kde_spread_cap_advice_default()
+    case ("kde_spread_cap_advice_explicit")
+        call scenario_kde_spread_cap_advice_explicit()
     case ("kde_bandwidths_size")
         call scenario_kde_bandwidths_size()
     case ("kde_bandwidths_x_size")
@@ -35696,6 +35704,82 @@ contains
     end subroutine scenario_kde_alpha_nan
     !
     !> Proves that pf_kde%fit refuses a zero bandwidth_max.
+    !> `spread_max=` without `adaptive=.true.` is refused, like the other two adaptive settings.
+    subroutine scenario_kde_spread_max_without_adaptive()
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., spread_max=10.0_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.false., spread_max=10.0_real64)
+        print '(a)', "accepted spread_max= with adaptive=.false."
+    end subroutine scenario_kde_spread_max_without_adaptive
+
+    !> A spread below one asks the widest kernel to be narrower than the narrowest, which is not a
+    !> cap but a contradiction; exactly one is the tightest cap that means anything.
+    subroutine scenario_kde_spread_max_below_one()
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., spread_max=1.0_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., spread_max=0.5_real64)
+        print '(a)', "accepted a spread_max below one"
+    end subroutine scenario_kde_spread_max_below_one
+
+    !> The DEFAULT spread cap binding is advised; the same fit with the caller's own cap is silent.
+    !>
+    !> Both arms are scenarios rather than assertions in the suite because an advice goes to the
+    !> message stream of a whole process. The two differ in one argument, so a difference in what
+    !> they print is the advice and nothing else.
+    subroutine scenario_kde_spread_cap_advice_default()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: pilot
+
+        call spread_cap_pilot(pilot)
+        call k%fit(spread_cap_sample(), bandwidth=0.05_real64, adaptive=.true., pilot=pilot)
+        print '(a, l1)', "kde default-cap fit: ", k%is_adaptive()
+    end subroutine scenario_kde_spread_cap_advice_default
+
+    !> The silent arm: the same sample and the same pilot, with the caller naming the cap.
+    subroutine scenario_kde_spread_cap_advice_explicit()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: pilot
+
+        call spread_cap_pilot(pilot)
+        call k%fit(spread_cap_sample(), bandwidth=0.05_real64, adaptive=.true., pilot=pilot, &
+            spread_max=100.0_real64)
+        print '(a, l1)', "kde explicit-cap fit: ", k%is_adaptive()
+    end subroutine scenario_kde_spread_cap_advice_explicit
+
+    !> A pilot measured over `[0, 1]` alone, which the sample below reaches well beyond.
+    subroutine spread_cap_pilot(pilot)
+        type(pf_kde_grid), intent(inout) :: pilot !! the pilot, finished
+        real(real64) :: y(200)
+        integer :: i
+
+        do i = 1, 200
+            y(i) = (real(i, real64) - 0.5_real64)/200.0_real64
+        end do
+        call pilot%init(64, 0.0_real64, 1.0_real64, 0.05_real64)
+        call pilot%add(y)
+        call pilot%finish()
+    end subroutine spread_cap_pilot
+
+    !> A sample whose upper half lies outside that pilot's range, where it reads no density at all
+    !> and the rule answers with the cap -- so the cap binds for certain rather than by arithmetic
+    !> that a change to the pilot grid could move.
+    function spread_cap_sample() result(x)
+        real(real64) :: x(100) !! the sample
+        integer :: i
+
+        do i = 1, 100
+            x(i) = 0.02_real64*real(i, real64)
+        end do
+    end function spread_cap_sample
+
     subroutine scenario_kde_bandwidth_max_zero()
         type(pf_kde) :: k
 

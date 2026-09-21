@@ -108,6 +108,7 @@ module parquet_kde
     public :: pf_kde, pf_kde_grid
     public :: pf_kde_bandwidth
     public :: parquet_debug_kde_threads_used, parquet_debug_set_kde_pilot_cells, parquet_debug_kde_fit_nanos
+    public :: parquet_debug_kde_scan_counts, parquet_debug_set_kde_scan_grid
     public :: parquet_debug_set_kde_isj_cells, parquet_debug_set_kde_sample_tries
     public :: parquet_debug_set_kde_binned_classes
     public :: parquet_set_verbosity, parquet_get_verbosity
@@ -244,6 +245,26 @@ module parquet_kde
     !! piece narrower than the spacing.
     real(real64), parameter :: KDE_LINEAR_SCAN_PER_H = 64.0_real64
 
+    !> The most samples the corrected boundary scan's grid may carry. A zone is at most one reach of
+    !! the widest kernel wide and the spacing is a fixed fraction of the narrowest, so the count is
+    !! bounded by `KDE_LINEAR_SCAN_PER_H*KDE_RADIUS*spread_max` -- about 22 000 at the default cap
+    !! and at the widest kernel's reach. This is the guard for a caller who raised `spread_max`
+    !! themselves: past it the scan falls back to summing every point at every step, which is slow
+    !! but is what the library did before the grid existed.
+    integer, parameter :: KDE_SCAN_GRID_MAX = 1000000
+
+    !> How far from zero, as a fraction of the zone's own largest value, the boundary scan's grid
+    !! has to be before its sign is taken without checking. Nearer zero than this the exact
+    !! estimator is asked instead.
+    !!
+    !! Generous on purpose, and the asymmetry is the reason. The binned estimate converges as the
+    !! SQUARE of the cell width and the cells here are a fixed fraction of the narrowest bandwidth,
+    !! so its error is orders below this band; but the estimate is near zero exactly where a
+    !! negative stretch can be, so the cost of refusing to trust the grid there is one exact
+    !! evaluation, while the cost of trusting it wrongly is a stretch the clip never removes.
+    !! `bench/benchmark_kde.sh`'s `scan` mode reports how often the fallback fires.
+    real(real64), parameter :: KDE_SCAN_GRID_BAND = 1.0e-2_real64
+
     !> Breakpoints one per-point integral can carry: its kernel's knots, its moments' knots, its two
     !! correction edges and, for the sampler, its sign change.
     integer, parameter :: KDE_CORR_MAX_BREAKS = 8
@@ -338,14 +359,26 @@ module parquet_kde
     !! compromise and a run that moves it by a few per cent has not found a defect.
     real(real64), parameter :: KDE_ADAPT_INFLATE = 1.5_real64
 
-    !> How many times the global bandwidth the WIDEST transferred bandwidth may reach before
-    !! `pf_kde%fit(pilot=)` says so. A pilot measured on another sample can give this one's tail a
-    !! kernel orders of magnitude wider than the global one; the answer is still right, but every
-    !! later query sums the points within reach of the widest kernel, so the fit costs more than
-    !! the caller is likely to expect. Recorded here rather than tuned: anything of this order
-    !! separates "the two samples reach differently" from ordinary adaptive spread, which on the
-    !! library's own pilots stays inside a factor of a few.
-    real(real64), parameter :: KDE_PILOT_SPREAD_ADVICE = 100.0_real64
+    !> How many times the NARROWEST kernel the widest one may reach, when the caller caps neither
+    !! `spread_max` nor `bandwidth_max`. The adaptive rule `h*(p/g)**(-alpha)` is unbounded as the
+    !! pilot density goes to zero, so ANY density approaching zero anywhere -- at a bound or inside
+    !! the support -- gives some point a kernel of unbounded width. Every later query then sums the
+    !! points within reach of that kernel, and under a corrected boundary the zone it opens is
+    !! SCANNED at the resolution of the narrowest kernel, which is what makes such a fit quadratic
+    !! in the sample's size rather than linear.
+    !!
+    !! The SPREAD is the quantity that bounds that scan, which is why the default is written as one
+    !! rather than as a multiple of the global bandwidth: the zone is `KDE_RADIUS*h_max` wide and
+    !! the step is `h_min/KDE_LINEAR_SCAN_PER_H`, so the scan takes at most
+    !! `KDE_LINEAR_SCAN_PER_H*KDE_RADIUS*KDE_SPREAD_MAX` steps whatever the sample is. A cap on
+    !! `h_max/h` bounds nothing of the sort, the step being set by `h_min`.
+    !!
+    !! Loose on purpose, and not a tuning parameter. The library's own pilots stay inside a spread
+    !! of a few, so the default bounds the pathological case and changes an ordinary estimate not
+    !! at all; a caller who wants a cap that BINDS passes `spread_max=` or `bandwidth_max=`, and is
+    !! not advised about it. `bench/benchmark_kde.sh`'s `scan` mode reports the spread each fit
+    !! actually reaches.
+    real(real64), parameter :: KDE_SPREAD_MAX = 100.0_real64
 
     ! ---- the cross-validation rule -------------------------------------------------------------
 
@@ -483,6 +516,16 @@ module parquet_kde
     !! and unsynchronised, like the team counter.
     integer(int64), save :: kde_fit_ns(3) = 0_int64
 
+    !> How many samples the most recent `pf_kde%fit`'s corrected boundary scan took, and how many of
+    !! them it had to read from the exact estimator rather than from its grid
+    !! (`parquet_debug_kde_scan_counts`). Process-global and unsynchronised, like the phase timers.
+    integer(int64), save :: kde_scan_ns(2) = 0_int64
+
+    !> Whether the corrected boundary scan may read its binned grid
+    !! (`parquet_debug_set_kde_scan_grid`). Test-only, process-global and unsynchronised: the test
+    !! that turns it off runs serially, and turns it back on.
+    logical, save :: kde_scan_grid_on = .true.
+
     ! ---- the types --------------------------------------------------------------------------
 
     !> The adaptive rule's state, which both forms hold: the pilot's cells, copied as a look-up
@@ -495,8 +538,17 @@ module parquet_kde
     type :: kde_adapt
         logical :: on = .false.                   !! the rule is in use
         real(real64) :: alpha = KDE_ALPHA_DEFAULT !! the sensitivity, in `[0, 1]`
-        logical :: has_bmax = .false.             !! a cap was given
-        real(real64) :: bmax = 0.0_real64         !! the cap on every point's bandwidth
+        logical :: has_bmax = .false.             !! an absolute cap was given
+        real(real64) :: bmax = 0.0_real64         !! that cap, on every point's bandwidth
+        real(real64) :: smax = KDE_SPREAD_MAX     !! the cap on the SPREAD `h_max/h_min`: the caller's
+                                                  !! `spread_max`, or `KDE_SPREAD_MAX`. Always in force,
+                                                  !! which is what bounds the corrected scan's step count
+        real(real64) :: capf = 0.0_real64         !! the spread cap in units of the global bandwidth,
+                                                  !! `smax*exp(-alpha*(log pmax - log g))`: `h_min` is
+                                                  !! reached at the pilot's densest cell, so the cap is
+                                                  !! known before the first point is looked at and the
+                                                  !! rule stays one pass. Never above `smax`, since
+                                                  !! `pmax >= g`
         integer :: nc = 0                         !! the pilot's number of cells
         real(real64) :: x0 = 0.0_real64           !! the pilot's first cell's left edge
         real(real64) :: x1 = 0.0_real64           !! the pilot's last cell's right edge
@@ -881,8 +933,9 @@ module parquet_kde
     interface
 
         !> Fits the estimate to a `real64` sample: `call k%fit(x, [bandwidth], [rule], [adjust],
-        !! [kernel], [adaptive], [alpha], [bandwidth_max], [lower], [upper], [boundary], [is_valid],
-        !! [weights], [weight_type], [skipnan], [n_null], [n_nan], [n_outside], [ok], [threads])`.
+        !! [kernel], [adaptive], [alpha], [bandwidth_max], [spread_max], [lower], [upper],
+        !! [boundary], [is_valid], [weights], [weight_type], [skipnan], [n_null], [n_nan],
+        !! [n_outside], [ok], [threads])`.
         !!
         !! `x` is the sample, retained as a sorted copy of its population. `bandwidth` is the
         !! kernel's standard deviation, a finite positive number; without it the bandwidth comes
@@ -895,7 +948,18 @@ module parquet_kde
         !! .true.` gives each point its own bandwidth, `h * (p(x_j)/g)**(-alpha)`, from a pilot
         !! estimate at the global bandwidth `h`: `alpha` in `[0, 1]` (default 0.5) sets how far
         !! the bandwidths follow the pilot, `0` being the fixed estimate, and `bandwidth_max` caps
-        !! every one; both need `adaptive = .true.`. Given a rule rather than a number, an adaptive
+        !! every one; both need `adaptive = .true.`.
+        !!
+        !! `spread_max` caps the SPREAD instead: no point's bandwidth exceeds `spread_max` times
+        !! the narrowest the rule can give. Unlike the other two it is in force whether it was
+        !! named or not, at `KDE_SPREAD_MAX = 100` -- the adaptive rule is unbounded as the pilot
+        !! density goes to zero, and an uncapped spread makes a `boundary = "linear"` fit quadratic
+        !! in the sample's size. The default is far too loose to change an ordinary estimate. Where
+        !! both caps are given the TIGHTER one binds, each being a statement about something
+        !! different: `spread_max` about the estimator's shape, `bandwidth_max` about the data's
+        !! scale. A cap that binds is reported by `%bandwidths`, and the fit advises when the
+        !! DEFAULT one binds -- never when the caller set a cap themselves, an explicit request
+        !! needing no advice. Given a rule rather than a number, an adaptive
         !! fit widens that rule's bandwidth, because a rule answers the question the fixed
         !! estimator asks and the adaptive kernel's own optimum is larger; an explicit `bandwidth`
         !! is never widened.
@@ -919,7 +983,7 @@ module parquet_kde
         !! is undefined. `threads` is the team for the sort, the rules' statistics and the pilot;
         !! the answer does not depend on it. Tokens are matched without regard to case.
         module subroutine kde_fit_f64(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
-                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+                bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
                 n_null, n_nan, n_outside, ok, threads)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
@@ -933,6 +997,7 @@ module parquet_kde
                                                                     !! instead of building one here
             real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: spread_max    !! caps the spread `h_max/h_min`
             real(real64), intent(in), optional     :: lower         !! the support's lower bound
             real(real64), intent(in), optional     :: upper         !! the support's upper bound
             character(len=*), intent(in), optional :: boundary      !! the boundary correction
@@ -955,7 +1020,7 @@ module parquet_kde
         !! themselves are the part the two entry points must agree on to the bit, and the only way
         !! to guarantee that is for there to be one of each rather than two written alike.
         module subroutine kde_fit_core(self, x, bandwidth_only, bandwidth, rule, adjust, kernel, adaptive, &
-                pilot, alpha, bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, &
+                pilot, alpha, bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, &
                 skipnan, n_null, n_nan, n_outside, ok, threads)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
@@ -970,6 +1035,7 @@ module parquet_kde
                                                                     !! instead of building one here
             real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: spread_max    !! caps the spread `h_max/h_min`
             real(real64), intent(in), optional     :: lower         !! the support's lower bound
             real(real64), intent(in), optional     :: upper         !! the support's upper bound
             character(len=*), intent(in), optional :: boundary      !! the boundary correction
@@ -1060,7 +1126,7 @@ module parquet_kde
         !> The `real32` sample, widened to `real64` first; every other argument as the `real64`
         !! form.
         module subroutine kde_fit_f32(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
-                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+                bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
                 n_null, n_nan, n_outside, ok, threads)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
@@ -1074,6 +1140,7 @@ module parquet_kde
                                                                     !! instead of building one here
             real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: spread_max    !! caps the spread `h_max/h_min`
             real(real64), intent(in), optional     :: lower         !! the support's lower bound
             real(real64), intent(in), optional     :: upper         !! the support's upper bound
             character(len=*), intent(in), optional :: boundary      !! the boundary correction
@@ -1092,7 +1159,7 @@ module parquet_kde
         !! `float64`, and any other kind aborts, naming it. The column's own validity is the null
         !! mask, so `is_valid` cannot be given beside it; every other argument as the `real64` form.
         module subroutine kde_fit_col(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
-                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+                bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
                 n_null, n_nan, n_outside, ok, threads)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
@@ -1106,6 +1173,7 @@ module parquet_kde
                                                                     !! instead of building one here
             real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: spread_max    !! caps the spread `h_max/h_min`
             real(real64), intent(in), optional     :: lower         !! the support's lower bound
             real(real64), intent(in), optional     :: upper         !! the support's upper bound
             character(len=*), intent(in), optional :: boundary      !! the boundary correction
@@ -1420,7 +1488,7 @@ module parquet_kde
     interface
 
         !> Fixes the grid: `call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha],
-        !! [bandwidth_max], [lower], [upper], [boundary], [method])`.
+        !! [bandwidth_max], [spread_max], [lower], [upper], [boundary], [method])`.
         !!
         !! `ncells` cells of width `step = (xmax - xmin)/ncells` span `[xmin, xmax]`, cell `i`
         !! centred on `xmin + (i - 1/2)*step`. `bandwidth` is the kernel's standard deviation and is
@@ -1429,8 +1497,9 @@ module parquet_kde
         !! each point `%add` accepts takes the bandwidth `bandwidth * (p(x)/g)**(-alpha)`; it is
         !! copied, so the caller may discard it. A pilot with no density to read -- nothing in its
         !! cells, or a kept NaN -- makes every answer of this grid NaN, as a data condition does
-        !! everywhere else. `alpha` (default 0.5) and `bandwidth_max` are
-        !! as `pf_kde%fit` takes them and need `pilot`. `kernel`, `lower`, `upper` and `boundary`
+        !! everywhere else. `alpha` (default 0.5), `bandwidth_max` and `spread_max` are
+        !! as `pf_kde%fit` takes them; `alpha` and `bandwidth_max` need `pilot`, and `spread_max`
+        !! is in force whether it was named or not. `kernel`, `lower`, `upper` and `boundary`
         !! are as `pf_kde%fit` takes them, and the range must lie inside the support; under
         !! `boundary="linear"` it must also START at `lower` and END at `upper` where those are
         !! given, and, where only one of them is given, be at least one kernel's reach wide, because
@@ -1446,7 +1515,7 @@ module parquet_kde
         !! the transform it would need is longer than `KDE_BINNED_L_MAX` times `ncells`. Every
         !! accumulated point and count is discarded; a grid may be initialised again.
         module subroutine grid_init(self, ncells, xmin, xmax, bandwidth, kernel, pilot, alpha, &
-                bandwidth_max, lower, upper, boundary, method)
+                bandwidth_max, spread_max, lower, upper, boundary, method)
             implicit none
             class(pf_kde_grid), intent(inout)       :: self          !! the grid; reset
             integer, intent(in)                     :: ncells        !! cells, at least 1; held in memory
@@ -1457,6 +1526,7 @@ module parquet_kde
             type(pf_kde_grid), intent(in), optional :: pilot         !! the pilot of the adaptive kernel
             real(real64), intent(in), optional      :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional      :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional      :: spread_max    !! caps the spread `h_max/h_min`
             real(real64), intent(in), optional      :: lower         !! the support's lower bound
             real(real64), intent(in), optional      :: upper         !! the support's upper bound
             character(len=*), intent(in), optional  :: boundary      !! the boundary correction
@@ -1611,12 +1681,16 @@ module parquet_kde
         !! `hlo` and `hhi` bracket every bandwidth a point can take. Absent, they are read from
         !! the grid's own adaptive rule, which is where a grid's bandwidths come from; the binned
         !! curve passes the FIT's own, one per retained point.
-        module subroutine kde_binned_setup(self, entry, hlo, hhi)
+        module subroutine kde_binned_setup(self, entry, hlo, hhi, ok)
             implicit none
             class(pf_kde_grid), intent(inout)  :: self  !! the grid; its binned geometry is filled
             character(len=*), intent(in)       :: entry !! the binding, for the message
             real(real64), intent(in), optional :: hlo   !! the narrowest bandwidth, when known
             real(real64), intent(in), optional :: hhi   !! the widest, when known
+            logical, intent(out), optional     :: ok    !! present: `.false.` where the transform would
+                                                        !! be too long, instead of aborting. For a
+                                                        !! caller with somewhere else to go; absent,
+                                                        !! the call aborts as a caller's mistake
         end subroutine kde_binned_setup
 
         !> The transform array's cell centres, `%ntr` of them: the grid's own centres extended by
@@ -1955,13 +2029,15 @@ module parquet_kde
         !! positive cell density, the stand-in for a point the pilot reads as zero. A pilot with no
         !! density to read -- poisoned, or no cell holding a positive density -- gives a table
         !! marked unreadable, from which every bandwidth is NaN.
-        module subroutine kde_adapt_set(a, pilot, alpha, has_bmax, bmax)
+        module subroutine kde_adapt_set(a, pilot, alpha, has_bmax, bmax, smax)
             implicit none
             type(kde_adapt), intent(out)  :: a        !! the rule
             type(pf_kde_grid), intent(in) :: pilot    !! the pilot
             real(real64), intent(in)      :: alpha    !! the sensitivity, in `[0, 1]`
-            logical, intent(in)           :: has_bmax !! a cap was given
-            real(real64), intent(in)      :: bmax     !! the cap
+            logical, intent(in)           :: has_bmax !! an absolute cap was given
+            real(real64), intent(in)      :: bmax     !! that cap
+            real(real64), intent(in)      :: smax     !! the cap on the spread `h_max/h_min`, always in
+                                                      !! force; `KDE_SPREAD_MAX` when the caller named none
         end subroutine kde_adapt_set
 
         !> The bandwidth the adaptive rule `a` gives each point of `x` under the global bandwidth
@@ -2492,6 +2568,33 @@ module parquet_kde
             integer(int64), intent(out) :: pilot  !! building the pilot and its look-up table
             integer(int64), intent(out) :: lookup !! each point's bandwidth and mass inside the support
         end subroutine parquet_debug_kde_fit_nanos
+
+        !> How many samples the most recent `pf_kde%fit`'s corrected boundary scan took, over both
+        !! zones, and how many of those it read from the exact estimator rather than from its
+        !! binned grid. Both zero for a fit with no corrected boundary.
+        !!
+        !! Test-and-bench only, and public for that reason: `bench/benchmark_kde.sh`'s `scan` mode
+        !! reports `exact/steps` as the share of the scan the grid could not decide, which is what
+        !! says whether `KDE_SCAN_GRID_BAND` is where it should be -- a band that almost never
+        !! falls back needs no refining, and one that falls back everywhere has removed nothing.
+        !! Process-global and unsynchronised: read it from a serial context straight after the fit.
+        module subroutine parquet_debug_kde_scan_counts(steps, exact)
+            implicit none
+            integer(int64), intent(out) :: steps !! samples the scan took, over both zones
+            integer(int64), intent(out) :: exact !! those of them the exact estimator answered
+        end subroutine parquet_debug_kde_scan_counts
+
+        !> Turns the corrected boundary scan's binned grid off, so that every sample is read from
+        !! the exact estimator, and on again.
+        !!
+        !! Test-only, and public for that reason: it is the control arm for the grid. A test fits
+        !! with it on, fits again with it off and compares, which is the only way from inside one
+        !! process to show that the grid changed WHERE the exact estimator is asked and not WHAT
+        !! the fit answers. Process-global and unsynchronised; turn it back on.
+        module subroutine parquet_debug_set_kde_scan_grid(on)
+            implicit none
+            logical, intent(in) :: on !! `.false.` scans every sample exactly
+        end subroutine parquet_debug_set_kde_scan_grid
 
     end interface
 

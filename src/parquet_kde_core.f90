@@ -967,10 +967,15 @@ contains
         logical, intent(out)        :: ok            !! the criterion could be formed
         real(real64)                :: crit          !! the criterion's value
 
+        !> The widest separation a pair can be seen across, in units of the widest bandwidth: the
+        !! integral term's own width is `sqrt(h_i**2 + h_j**2) <= sqrt(2) h_max` and the
+        !! leave-one-out term's is `h_j <= h_max`, so the wider of the two bounds both.
+        real(real64), parameter :: WIN_FACTOR = KDE_NORM_CUT*sqrt(2.0_real64)
+
         type(pf_kde_grid) :: pilot
         type(kde_adapt) :: rule
-        real(real64) :: sw, s_int, s_loo, dz, si, wij, one(1)
-        integer(int64) :: i, j
+        real(real64) :: sw, s_int, s_loo, dz, si, wij, one(1), hmax, win
+        integer(int64) :: i, j, jlo, jhi
         logical :: built
 
         ok = .false.
@@ -980,7 +985,10 @@ contains
             call kde_build_pilot(pilot, y(1:m), v(1:m), .true., h, kernel_code, has_lower, lo, &
                 has_upper, hi, boundary_code, w_total, threads_serial(), built)
             if (.not. built) return
-            call kde_adapt_set(rule, pilot, alpha, .false., 0.0_real64)
+            ! The criterion scores the estimator the fit will build, so it takes the same default
+            ! spread cap; a caller's own `spread_max` is not threaded in, the rule being asked for
+            ! the bandwidth of an estimate whose other arguments it does not see either.
+            call kde_adapt_set(rule, pilot, alpha, .false., 0.0_real64, KDE_SPREAD_MAX)
             if (rule%unreadable) return
             call kde_adapt_bandwidths(rule, h, y(1:m), hj(1:m))
             do i = 1_int64, m
@@ -998,10 +1006,39 @@ contains
         end do
         if (.not. (sw > 0.0_real64)) return
 
+        ! ---- the window each point's partners lie in ----
+        ! `kde_norm_at` is EXACTLY zero beyond `KDE_NORM_CUT` standard deviations, and adding
+        ! `w*0.0` to a finite sum changes no bit of it, so a pair outside the window contributes
+        ! exactly nothing: skipping it is bit-for-bit, not merely equivalent, and no summation
+        ! order moves -- each accumulator still sees its terms `i`-major and `j` ascending. `y` is
+        ! ascending, so each `i`'s contributing partners form one contiguous run that two monotone
+        ! pointers find with no search, and `jlo <= i <= jhi` always, the point being its own
+        ! partner. The per-pair cut stays inside the window, which is what keeps the adaptive arm
+        ! exact where the bandwidths differ; the window only has to be conservative.
+        !
+        ! `WIN_FACTOR*hmax` overflowing would need a bandwidth above 2e307, an order of magnitude
+        ! past where `hj(i)*hj(i)` in the integral term below overflows first: the window adds no
+        ! failure mode of its own.
+        hmax = hj(1)
+        do i = 2_int64, m
+            if (hj(i) > hmax) hmax = hj(i)
+        end do
+        win = WIN_FACTOR*hmax
+
         s_int = 0.0_real64
         s_loo = 0.0_real64
+        jlo = 1_int64
+        jhi = 0_int64
         do i = 1_int64, m
-            do j = 1_int64, m
+            do while (jlo < m)
+                if (.not. (y(i) - y(jlo) > win)) exit
+                jlo = jlo + 1_int64
+            end do
+            do while (jhi < m)
+                if (y(jhi + 1_int64) - y(i) > win) exit
+                jhi = jhi + 1_int64
+            end do
+            do j = jlo, jhi
                 wij = v(i)*v(j)
                 dz = y(i) - y(j)
                 ! The integral term: the two kernels' product integrates to one normal density of
@@ -1100,6 +1137,15 @@ contains
         pilot = kde_fit_ns(2)
         lookup = kde_fit_ns(3)
     end procedure parquet_debug_kde_fit_nanos
+
+    module procedure parquet_debug_kde_scan_counts
+        steps = kde_scan_ns(1)
+        exact = kde_scan_ns(2)
+    end procedure parquet_debug_kde_scan_counts
+
+    module procedure parquet_debug_set_kde_scan_grid
+        kde_scan_grid_on = on
+    end procedure parquet_debug_set_kde_scan_grid
 
     module procedure kde_term_integral
 

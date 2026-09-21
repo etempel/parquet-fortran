@@ -101,6 +101,22 @@
 #             `bandwidth_max`, whose ratio of the widest bandwidth to the global one is what
 #             decides how wide the corrected zone is.
 #
+#   scan      Where the boundary scan's time goes, on the workload feature_kde_speedup.md is
+#             written against: the quantiles of the linear density `f(x) = x/2` on `[0, 2]`, the
+#             bspline kernel, `lower = 0`, `upper = 2`. That density VANISHES at its lower bound,
+#             so the adaptive rule widens without bound there and the corrected zone the `"linear"`
+#             correction scans is the whole support, stepped at the resolution of the narrowest
+#             kernel: `adaptive = yes` + `linear` is the row whose `lookup` grows faster than the
+#             sample does, and every other row is its control. `{isj, lscv}` x `{fixed, adaptive}`
+#             x `{linear, renormalise, reflect}` at three sizes, with the fit's three phases
+#             (`parquet_debug_kde_fit_nanos`) and two spread columns: `h_max/h`, what
+#             `bandwidth_max` caps, and `h_max/h_min`, the bandwidth SPREAD, which is what bounds
+#             the scan's step count and what the default cap binds on. It closes with the target
+#             feature_kde_speedup.md sets -- a 100 000-point adaptive linear fit under a second --
+#             reported as a verdict, never as a gate: the mode does not exit nonzero on a timing.
+#             The slow cells are the adaptive linear ones; `MODE=scan POINTS=10000` is the quick
+#             form.
+#
 #   threads   `%add`, `%pdf` and `%sample` across a ladder of thread counts, 1, 2, 4, ... up to the
 #             threads OpenMP offers (at most 64): milliseconds per call, the speed-up over one
 #             thread, and the team each call actually opened (`parquet_debug_kde_threads_used`),
@@ -125,7 +141,7 @@
 #   MODE=grid bench/benchmark_kde.sh           # one of them
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=all          evaluate, grid, binned, accuracy, adaptive, rules, sample, boundary,
+#   MODE=all          evaluate, grid, binned, accuracy, adaptive, rules, sample, boundary, scan,
 #                     threads, mise, or all.
 #   ROUNDS=5          Timed laps per figure; the FASTEST is kept, never the mean, because the slow
 #                     laps are the machine's other work rather than this code's.
@@ -156,9 +172,9 @@ QUERIES="${QUERIES:-10000}"
 MISE_POINTS="${MISE_POINTS:-1000}"
 
 case "$MODE" in
-    evaluate|grid|binned|accuracy|adaptive|rules|sample|boundary|threads|mise|all) ;;
+    evaluate|grid|binned|accuracy|adaptive|rules|sample|boundary|scan|threads|mise|all) ;;
     *) echo "benchmark_kde.sh: MODE must be evaluate, grid, binned, accuracy, adaptive, rules," \
-            "sample, boundary, threads, mise or all (got '$MODE')" >&2
+            "sample, boundary, scan, threads, mise or all (got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -234,6 +250,12 @@ fi
 if [[ "$MODE" == "boundary" || "$MODE" == "all" ]]; then
     fpm run benchmark_kde --profile release -- \
         --mode=boundary --rounds="$ROUNDS" --points="$POINTS" --queries="$QUERIES"
+    echo
+fi
+
+if [[ "$MODE" == "scan" || "$MODE" == "all" ]]; then
+    fpm run benchmark_kde --profile release -- \
+        --mode=scan --rounds="$ROUNDS" --points="$POINTS"
     echo
 fi
 

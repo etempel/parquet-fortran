@@ -3109,7 +3109,7 @@ STATS_OPTIONAL_ORDER = (
 #: where it belongs here, which is safe exactly when every existing procedure stays a subsequence.
 KDE_OPTIONAL_ORDER = (
     ["bandwidth", "rule", "adjust", "kernel", "adaptive", "pilot", "alpha", "bandwidth_max",
-     "hlo", "hhi", "lower", "upper", "boundary"]
+     "spread_max", "hlo", "hhi", "lower", "upper", "boundary"]
     + ["xmin", "xmax", "cut", "x", "normalise", "stream"]
     + ["is_valid", "weights", "weight_type", "skipnan", "n_null", "n_nan", "n_outside",
        "n_overreach", "rule_used", "ok", "threads"]

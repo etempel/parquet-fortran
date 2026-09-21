@@ -94,6 +94,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import generate_random_golden_vectors as rgv  # noqa: E402
+from gen_parallel import map_cases  # noqa: E402  the shared case map
 
 try:
     import mpmath as mp
@@ -558,12 +559,31 @@ def big_array(decl, name, size_expr, items):
     return out
 
 
+def _row_of(job):
+    """One `(model, z)` job's stage-1 row. Module-level so that `map_cases` can pickle it."""
+    model, z = job
+    return model.row(z)
+
+
+def _pair_of(job):
+    """One `(model, z1, z2)` job's angular diameter distance. Module-level for the same reason."""
+    model, z1, z2 = job
+    return model.angular_diameter_z1z2(z1, z2)
+
+
 def gen_module():
     ms = models()
-    rows = [(m, z, m.row(z)) for m in ms for z in REDSHIFTS]
+    row_jobs = [(m, z) for m in ms for z in REDSHIFTS]
     by_label = {m.label: m for m in ms}
-    pairs = [(label, z1, z2, by_label[label].angular_diameter_z1z2(z1, z2))
-             for label in PAIR_MODELS for z1, z2 in PAIRS]
+    pair_jobs = [(by_label[label], z1, z2) for label in PAIR_MODELS for z1, z2 in PAIRS]
+    # Every row and every pair is an independent quadrature over its own model, and together they
+    # are effectively this generator's whole run time. `map_cases` keeps the order, so `rows` and
+    # `pairs` are assembled exactly as the comprehensions they replace built them.
+    row_values = map_cases(_row_of, row_jobs)
+    pair_values = map_cases(_pair_of, pair_jobs)
+    rows = [(m, z, value) for (m, z), value in zip(row_jobs, row_values)]
+    pairs = [(model.label, z1, z2, value)
+             for (model, z1, z2), value in zip(pair_jobs, pair_values)]
 
     L = [BANNER]
     L.append("!> Golden rows for `parquet_cosmology`, derived from a %d-digit mpmath model of"

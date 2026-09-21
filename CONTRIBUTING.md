@@ -253,6 +253,7 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_stats_vectors.py` | `parquet_stats`' golden expectations, from a 50-digit `mpmath` oracle. |
 | `generate_kde_vectors.py` | `parquet_kde`'s golden expectations, from a 50-digit `mpmath` oracle. |
 | `generate_interpolate_vectors.py` | `parquet_interpolate`'s golden expectations, from an exact-rational model. |
+| `gen_parallel.py` | The shared process-parallel case map the high-precision generators derive their cases through. |
 | `generate_fixtures.cpp` | The hand-built Arrow fixtures — see [above](#regenerating-the-test-fixtures). |
 | `generate_pandas_fixture.py` | The one fixture pandas itself writes — see [above](#regenerating-the-test-fixtures). |
 | `run_generate_fixtures.sh` | Builds and runs that generator. |

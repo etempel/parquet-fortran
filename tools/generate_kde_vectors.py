@@ -68,6 +68,7 @@ except ImportError:                                            # pragma: no cove
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import generate_stats_vectors as gsv                           # noqa: E402  the one population model
+from gen_parallel import map_cases                             # noqa: E402  the shared case map
 
 mp.dps = 50
 
@@ -1295,8 +1296,8 @@ def emit():
     out.append("    !> Where every case is probed.")
     out += gsv.wrap_array("    real(real64), parameter :: KG_X(NKX) =",
                           [gsv.fortran_real(v) for v in PROBES])
-    for name, doc, case in CASES:
-        defined, h, pdf, cdf = estimate(case)
+    for (name, doc, _), (defined, h, pdf, cdf) in zip(CASES, map_cases(
+            estimate, [case for _, _, case in CASES])):
         out.append("")
         lines = textwrap.wrap(doc, width=124)
         out.append("    !> %s" % lines[0])
@@ -1307,8 +1308,8 @@ def emit():
             items = [gsv.fortran_real(v) for v in (vals or [None] * len(PROBES))]
             out += gsv.wrap_array("    real(real64), parameter :: KG_%s_%s(NKX) =" % (name, tag),
                                   items)
-    for name, doc, case in BINNED_CASES:
-        cells = binned_cells(case)
+    for (name, doc, case), cells in zip(BINNED_CASES, map_cases(
+            binned_cells, [case for _, _, case in BINNED_CASES])):
         out.append("")
         lines = textwrap.wrap(doc, width=124)
         out.append("    !> %s" % lines[0])

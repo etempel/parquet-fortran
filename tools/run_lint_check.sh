@@ -42,14 +42,26 @@
 # generator's values. Its `--verify-oracle`, which needs astropy, is the one kept out.
 #
 # Apart from that one dependency it needs nothing but `python3` and
-# `bash` -- no fpm, no gfortran, no Arrow -- and takes about ten seconds, so it is worth running
-# before every push. Most of that is three checks doing real arithmetic rather than pattern
-# matching: `check_source_conventions.py` walks every source file, and the ziggurat and golden-
-# vector generators re-derive their contracts from scratch (the ziggurat's twice, at two working
-# precisions -- see Risk-130 for why that second derivation is the check with power):
+# `bash` -- no fpm, no gfortran, no Arrow -- and is meant to stay inside about a minute, so that it
+# is worth running before every push. THE CHECKS RUN IN PARALLEL, `RUN_LINT_CHECK_JOBS` at a time
+# (default: the core count), because most of the run is a handful of checks doing real arithmetic
+# rather than pattern matching, and the rest are idle while they finish: the two mpmath oracles
+# re-derive `parquet_kde`'s and `parquet_cosmology`'s golden expectations, and the ziggurat and
+# golden-vector generators re-derive their contracts from scratch (the ziggurat's twice, at two
+# working precisions -- see Risk-130 for why that second derivation is the check with power).
+# The checks write nothing and share no state, which is what makes that safe; each one's output is
+# captured whole and reported in the `CHECKS` order below, never interleaved. `RUN_LINT_CHECK_JOBS=1`
+# forces the plain serial run.
+#
+# WHEN A CHECK GETS SLOW ENOUGH TO NOTICE, MEASURE BEFORE TOUCHING ITS ARITHMETIC. An oracle's
+# precision and scan density are what it certifies and are not tuning parameters; the two heavy
+# generators were brought down by mapping their independent cases across processes
+# (`tools/gen_parallel.py`, which also records the `gmpy2` route), and `check_source_conventions.py`
+# by deriving each file's comment-stripped form once instead of once per check. All three left
+# every answer identical, which is the bar.
 #
 #     tools/run_lint_check.sh              # run every check, then list any that failed
-#     tools/run_lint_check.sh --fail-fast  # stop at the first failure, like CI does
+#     tools/run_lint_check.sh --fail-fast  # stop at the first failure, like CI does (serial)
 # By default it runs every check even after one fails and lists the failures together at the end,
 # which differs deliberately from CI (whose `script:` stops at the first nonzero command): locally
 # it is more useful to see every problem in one pass. The verdict is the same either way -- it exits
@@ -63,6 +75,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 FAIL_FAST=0
+# `__worker__` is this script re-entering itself for one check (see the worker block below, which
+# has to sit under `CHECKS`); it is not a user-facing argument, so it skips the parsing here
+# rather than being rejected by it.
+if [ "${1:-}" != "__worker__" ]; then
 for arg in "$@"; do
     case "$arg" in
         --fail-fast) FAIL_FAST=1 ;;
@@ -76,6 +92,7 @@ for arg in "$@"; do
             ;;
     esac
 done
+fi
 
 # One entry per check, in .gitlab-ci.yml's own order. Each is a full command
 # line, run from the repository root.
@@ -117,22 +134,99 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 2
 fi
 
+# ---- worker mode ------------------------------------------------------------------------------
+# Re-entry for one check, dispatched by the parallel run below: `$0 __worker__ <dir> <index>`.
+# The whole script is re-read, so `CHECKS` above is the one definition either way. Output is
+# captured to a file rather than written to the terminal, because several workers run at once and
+# a check's report is only readable whole.
+if [ "${1:-}" = "__worker__" ]; then
+    results_dir="$2"
+    index="$3"
+    set +e
+    eval "${CHECKS[$index]}" > "$results_dir/$index.out" 2>&1
+    echo "$?" > "$results_dir/$index.rc"
+    exit 0
+fi
+
+# How many checks to run at once. The checks share no state and write nothing (each generator's
+# `--check` re-derives its output in memory and compares), so they are safe to run together, and
+# on a developer machine that is the difference between a minute and a quarter of one. Two of them
+# are themselves process-parallel (`tools/gen_parallel.py`), so the pool is deliberately not
+# widened beyond the core count. `--fail-fast` runs serially: stopping at the first failure is
+# only meaningful in a defined order.
+jobs="${RUN_LINT_CHECK_JOBS:-}"
+if [ -z "$jobs" ]; then
+    jobs="$( (command -v nproc >/dev/null 2>&1 && nproc) \
+            || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+fi
+case "$jobs" in
+    ''|*[!0-9]*) jobs=1 ;;
+esac
+[ "$jobs" -lt 1 ] && jobs=1
+[ "$FAIL_FAST" -eq 1 ] && jobs=1
+
 failed=()
-for check in "${CHECKS[@]}"; do
-    echo "=== $check"
-    # `set -e` is deliberately suspended for the check itself: a nonzero exit is
-    # a result to record, not a reason to abandon the remaining checks.
-    if eval "$check"; then
-        echo "--- PASS"
-    else
-        echo "--- FAIL (exit $?)"
-        failed+=("$check")
-        if [ "$FAIL_FAST" -eq 1 ]; then
-            break
+if [ "$jobs" -gt 1 ]; then
+    results_dir="$(mktemp -d "${TMPDIR:-/tmp}/run_lint_check.XXXXXX")"
+    trap 'rm -rf "$results_dir"' EXIT
+    total="${#CHECKS[@]}"
+    echo "Running $total lint checks, $jobs at a time..."
+    indices=()
+    i=0
+    while [ "$i" -lt "$total" ]; do
+        indices+=("$i")
+        i=$((i + 1))
+    done
+    printf '%s\n' "${indices[@]}" | xargs -P "$jobs" -n 1 "$0" __worker__ "$results_dir" &
+    dispatch_pid=$!
+    reported=0
+    while kill -0 "$dispatch_pid" 2>/dev/null; do
+        sleep 2
+        done_n="$(find "$results_dir" -name '*.rc' | wc -l | tr -d ' ')"
+        if [ "$done_n" -gt "$reported" ] && [ "$done_n" -lt "$total" ]; then
+            printf "  ... %d/%d checks done\n" "$done_n" "$total"
+            reported="$done_n"
         fi
-    fi
+    done
+    wait "$dispatch_pid"
     echo
-done
+    # Reported in the CHECKS order, not the order they happened to finish, so that two runs of the
+    # same tree read identically.
+    i=0
+    while [ "$i" -lt "$total" ]; do
+        echo "=== ${CHECKS[$i]}"
+        if [ -f "$results_dir/$i.out" ]; then
+            cat "$results_dir/$i.out"
+        fi
+        rc="$(cat "$results_dir/$i.rc" 2>/dev/null)"
+        if [ "$rc" = "0" ]; then
+            echo "--- PASS"
+        else
+            # An absent .rc means the worker never recorded one: reported as a failure, because a
+            # check whose verdict was not written is a check that did not pass.
+            echo "--- FAIL (exit ${rc:-unknown -- the worker recorded no exit status})"
+            failed+=("${CHECKS[$i]}")
+        fi
+        echo
+        i=$((i + 1))
+    done
+else
+    for check in "${CHECKS[@]}"; do
+        echo "=== $check"
+        # `set -e` is deliberately suspended for the check itself: a nonzero exit is
+        # a result to record, not a reason to abandon the remaining checks.
+        if eval "$check"; then
+            echo "--- PASS"
+        else
+            echo "--- FAIL (exit $?)"
+            failed+=("$check")
+            if [ "$FAIL_FAST" -eq 1 ]; then
+                break
+            fi
+        fi
+        echo
+    done
+fi
 
 if [ ${#failed[@]} -eq 0 ]; then
     echo "All ${#CHECKS[@]} lint checks passed."

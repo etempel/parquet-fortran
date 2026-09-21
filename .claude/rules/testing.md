@@ -210,6 +210,25 @@ as caught). Rules for reading a result:
   `tools/machine_report.sh`) and prints `SKIPPED -- '<x>' not found` rather than returning quietly.
   A tool's silence is evidence about the tool; run the thing by name before reporting it absent.
   `tools/machine_report.sh` describes the shell it ran in — run it inside each activated shell.
+- **Read a file through `source_text`/`source_lines`/`stripped_lines`/`stripped_text`, never
+  `path.read_text()` with a per-line `strip_comment`**; they are cached per run, and a check that
+  re-derives a file's comment-stripped form makes every other check pay for the tree again. Derive
+  a whole-tree structure through a cached helper too (`procedure_scopes`, `_logical_lines`,
+  `_src_import_graph`) and return it frozen, so no check can mutate what the next one reads.
+  `check_comment_stripper_fast_paths_agree` holds `strip_comment`'s fast paths to
+  `strip_comment_by_loop`.
+
+## The lint stage is meant to stay near a minute
+
+`tools/run_lint_check.sh` runs its `CHECKS` `RUN_LINT_CHECK_JOBS` at a time (default: the core
+count; `1` forces serial, as `--fail-fast` does). The checks write nothing and share no state,
+which is what makes that safe — keep it that way.
+
+- **Measure before touching a slow check's arithmetic.** An oracle's precision, scan density and
+  cell count are what it certifies, not tuning knobs. Make a heavy generator faster by mapping its
+  independent cases across processes (`tools/gen_parallel.py`, which also records the `gmpy2`
+  route), and let its own `--check` prove the output did not move.
+- A new `tools/*.py` file needs a row in CONTRIBUTING.md's index (`check_contributing_is_an_index`).
 
 ## `tools/*.sh` checks
 

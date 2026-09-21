@@ -225,9 +225,14 @@ docstring and in the message it prints:
     anything. Names are derived by shape from the `select case` itself, and an empty result is a
     failure, so the check cannot go blind the way an enumerated list would.
   * No scenario is named twice in `tools/run_error_scenarios.sh`. A repeat cannot be seen by
-    reading a two-thousand-entry array, and it makes the entry count and the number of distinct
-    scenarios disagree -- which `tools/coverage.sh` compares against the capture files priming
-    leaves in `test_run/.primed` to decide whether it still has to replay the whole list.
+    reading a two-thousand-entry array, and it costs a duplicated out-of-process run in every
+    driver of that list: CI's whole-array pass, `prime_error_scenarios`' parallel priming, and
+    `tools/coverage.sh`'s pass over what priming did not reach.
+  * `strip_comment`'s fast paths must agree with `strip_comment_by_loop` on every line in the
+    tree. Almost every check in this file matches against comment-stripped source, so a fast path
+    that gets a line wrong does not fail -- it quietly removes that line from another check's view
+    and the run still prints `[ok]` for it. The loop is the definition; the fast paths are why a
+    full run takes seconds rather than a minute, and this is what keeps them honest.
   * Every `omp_*` reference in `src/` and `test/` must sit inside `#ifdef _OPENMP`. A build without
     OpenMP compiles the `!$omp` directives away -- they are comments -- but not the ordinary Fortran
     around them, so an unguarded `use omp_lib`, `omp_get_thread_num()` or `omp_lock_kind` is an
@@ -243,6 +248,7 @@ Run it after touching the table layer or a generator template (it is also part o
     tools/check_source_conventions.py
 """
 import difflib
+import functools
 import re
 import sys
 from pathlib import Path
@@ -295,8 +301,12 @@ GENERATED_FILES = [
 GENERATED_MARKERS = ("GENERATED FILE -- DO NOT EDIT BY HAND", "automatically generated")
 
 
-def strip_comment(line):
-    """Return `line` with any trailing Fortran comment removed, respecting quoted strings."""
+def strip_comment_by_loop(line):
+    """The DEFINITION of "strip a Fortran comment": scan for a `!` that is not inside a string.
+
+    `strip_comment` is what every caller uses; this is the answer it must give.
+    `check_comment_stripper_fast_paths_agree` runs both over every line in the repository.
+    """
     quote = None
     for i, ch in enumerate(line):
         if quote:
@@ -307,6 +317,121 @@ def strip_comment(line):
         elif ch == "!":
             return line[:i]
     return line
+
+
+def strip_comment(line):
+    """Return `line` with any trailing Fortran comment removed, respecting quoted strings.
+
+    The two fast paths are not a different answer, they are `strip_comment_by_loop`'s answer
+    reached without the character loop, and they carry this whole file's run time: stripping is
+    called once per line per check, tens of millions of times in a full run, and 95% of this
+    repository's lines take one of them. A line with no `!` has no comment to strip whatever its
+    quoting; a line with no quote character at all cannot have a `!` inside a string, so the first
+    one found is the comment marker. A line carrying both falls through to the loop.
+
+    Do not trust a review of this by eye -- a wrong answer here does not fail anything, it
+    silently stops some other check from seeing a line. `check_comment_stripper_fast_paths_agree`
+    is what holds the three arms together.
+    """
+    cut = line.find("!")
+    if cut < 0:
+        return line
+    if "'" not in line and '"' not in line:
+        return line[:cut]
+    return strip_comment_by_loop(line)
+
+
+def check_comment_stripper_fast_paths_agree():
+    """`strip_comment`'s fast paths must answer exactly what `strip_comment_by_loop` answers.
+
+    Every check in this file matches against comment-stripped source, so a fast path that gets one
+    line wrong does not fail anything -- it removes that line from some other check's view, or
+    hands it a fragment of a string literal to match against, and the check goes on reporting
+    `[ok]`. There is no symptom to notice, which is why the equivalence is asserted rather than
+    reasoned about.
+
+    The corpus is every Fortran line in the repository, so the check is only as strong as the tree
+    is varied; it covers the shapes that actually occur, which is what the fast paths have to be
+    right about. The three synthetic lines below pin the cases the tree may not contain today: a
+    bang inside a string with no comment after it, a bang inside a string followed by a real
+    comment, and an apostrophe inside a double-quoted string.
+    """
+    problems = []
+    probes = [
+        """    call sub("a!b")""",
+        """    call sub("a!b")  ! real comment""",
+        """    msg = "it's here" ! tail""",
+        """    msg = 'say "hi"!' ! tail""",
+        """    x = 1""",
+        """! whole-line comment""",
+    ]
+    for line in probes:
+        if strip_comment(line) != strip_comment_by_loop(line):
+            problems.append("strip_comment disagrees with strip_comment_by_loop on the probe %r: "
+                            "%r vs %r" % (line, strip_comment(line), strip_comment_by_loop(line)))
+    # Both functions are pure functions of the line, so a line repeated in the tree cannot tell us
+    # anything the first copy did not: comparing the DISTINCT lines is the same assertion over
+    # every line, for 40% less work. The first place each was seen is kept so that a failure still
+    # names a file and a line rather than only a string.
+    where = {}
+    roots = [SRC, TEST, TOOLS, REPO_ROOT / "app", REPO_ROOT / "bench"]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.f90")):
+            for number, line in enumerate(source_lines(path), 1):
+                where.setdefault(line, (path.name, number))
+    for line, (name, number) in where.items():
+        if strip_comment(line) != strip_comment_by_loop(line):
+            problems.append(
+                "%s:%d: strip_comment's fast path answers %r where the loop answers %r"
+                % (name, number, strip_comment(line), strip_comment_by_loop(line)))
+    if len(where) < 1000:
+        problems.append("only %d distinct source lines were compared -- this check has gone blind, "
+                        "and the comment stripper every other check depends on is now unverified"
+                        % len(where))
+    return problems
+
+
+@functools.lru_cache(maxsize=None)
+def source_text(path):
+    """`path`'s text, read once per run.
+
+    Every check here is a pure reader of a tree nothing writes while it runs, and a full run
+    otherwise reads the same files a hundred times over (1.4 GB of `read_text` for a 12 MB tree).
+    Cached by path object, so a caller passing a `Path` built two different ways still shares the
+    entry as long as both are absolute -- which every caller here does, since they all come from
+    the `SRC`/`TEST`/`TOOLS` constants above or a `glob` of one.
+    """
+    # errors="replace" matches the more forgiving of the two spellings this file used before the
+    # readers were shared. Nothing in the tree needs it today (every source file is strict UTF-8),
+    # so it only decides what a future mojibake commit does: report a findable oddity on one line
+    # rather than take the whole lint stage down with a UnicodeDecodeError.
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+@functools.lru_cache(maxsize=None)
+def source_lines(path):
+    """`path`'s lines, split once per run. A tuple, because callers share the one list."""
+    return tuple(source_text(path).split("\n"))
+
+
+@functools.lru_cache(maxsize=None)
+def stripped_lines(path):
+    """`path`'s lines with every Fortran comment removed. Index-for-index with `source_lines`."""
+    return tuple(strip_comment(ln) for ln in source_lines(path))
+
+
+@functools.lru_cache(maxsize=None)
+def stripped_text(path):
+    """`path`'s text with every Fortran comment removed, derived once per run.
+
+    The comment-free form of a file is what most checks here actually match against, and deriving
+    it is the single most expensive thing this file does. `strip_comment` never joins or drops a
+    line, so line numbers are preserved and a match's line index means the same here as in
+    `source_text`.
+    """
+    return "\n".join(stripped_lines(path))
 
 
 def type_body_lines(path, type_name):
@@ -5212,13 +5337,18 @@ def check_maml_keys_case_insensitive():
     return problems
 
 
+@functools.lru_cache(maxsize=None)
 def _logical_lines(path):
-    """Yield (lineno of the first physical line, joined code) with comments and `&` folded away."""
+    """(lineno of the first physical line, joined code) with comments and `&` folded away.
+
+    Cached: six checks ask for the same file's logical lines, and folding them is not cheap.
+    The result is a tuple so that the six cannot tread on each other.
+    """
     out = []
     buf = ""
     start = None
-    for lineno, raw in enumerate(path.read_text().split("\n"), start=1):
-        code = strip_comment(raw).strip()
+    for lineno, code in enumerate(stripped_lines(path), start=1):
+        code = code.strip()
         if not code and not buf:
             continue
         if start is None:
@@ -5231,7 +5361,7 @@ def _logical_lines(path):
             out.append((start, buf.strip()))
         buf = ""
         start = None
-    return out
+    return tuple(out)
 
 
 def _split_args(text):
@@ -5819,7 +5949,13 @@ def check_openmp_calls_are_guarded():
     what is inside them -- so without this the check reports six violations that are text.
     """
     def blank_strings(text):
-        """`text` with the contents of every quoted literal replaced by spaces."""
+        """`text` with the contents of every quoted literal replaced by spaces.
+
+        A line with no quote character has no literal to blank, which is most of them; the
+        character loop below is the answer, and the early return is that same answer.
+        """
+        if "'" not in text and '"' not in text:
+            return text
         out = []
         quote = None
         for ch in text:
@@ -6103,19 +6239,40 @@ EXPECTED_HANDLE_BINDINGS = {
 }
 
 
+#: `_procedure_scopes`' two patterns, compiled once. The opener's leading `[\w()=:,*\s]+?\s??`
+#: backtracks hard, so it is kept off every line that cannot possibly match (see below).
+_SCOPE_OPENER = re.compile(r"^\s*(?:(?:pure|impure|elemental|recursive|module)\s+)*"
+                           r"(?:[\w()=:,*\s]+?\s)??(?:subroutine|function)\s+\w+\s*\(", re.I)
+_SCOPE_CLOSER = re.compile(r"^\s*end\s*(?:subroutine|function)\b", re.I)
+
+
 def _procedure_scopes(lines):
-    """Yield `(first, last)` 0-based line index pairs, one per procedure body in `lines`."""
-    opener = re.compile(r"^\s*(?:(?:pure|impure|elemental|recursive|module)\s+)*"
-                        r"(?:[\w()=:,*\s]+?\s)??(?:subroutine|function)\s+\w+\s*\(", re.I)
-    closer = re.compile(r"^\s*end\s*(?:subroutine|function)\b", re.I)
+    """Yield `(first, last)` 0-based line index pairs, one per procedure body in `lines`.
+
+    Both patterns require the literal `subroutine` or `function`, so a line containing neither
+    cannot match either of them and the substring test decides it without running a regex. That
+    matters because the opener is the most expensive pattern in this file and about 95% of lines
+    are not procedure headers; `str.lower` plus two `in` tests are C-speed where the regex is not.
+    """
     stack, scopes = [], []
-    for i, raw in enumerate(lines):
-        code = strip_comment(raw)
-        if opener.match(code):
+    for i, code in enumerate(lines):
+        low = code.lower()
+        if "subroutine" not in low and "function" not in low:
+            continue
+        if _SCOPE_OPENER.match(code):
             stack.append(i)
-        elif closer.match(code) and stack:
+        elif _SCOPE_CLOSER.match(code) and stack:
             scopes.append((stack.pop(), i))
     return scopes
+
+
+@functools.lru_cache(maxsize=None)
+def procedure_scopes(path):
+    """`_procedure_scopes` over `path`, derived once per run.
+
+    Takes comment-stripped lines, which is what every caller passed anyway.
+    """
+    return tuple(_procedure_scopes(stripped_lines(path)))
 
 
 def check_open_table_arguments_are_forwarded():
@@ -6387,9 +6544,9 @@ def _handle_returning_bindings():
     impls = {}          # type -> {implementing procedure name, ...}
     notes = []
     for path in sorted(SRC.glob("*.f90")):
-        lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
-        for first, last in _procedure_scopes(lines):
-            body = [strip_comment(r) for r in lines[first:last + 1]]
+        lines = stripped_lines(path)
+        for first, last in procedure_scopes(path):
+            body = lines[first:last + 1]
             if not any(assign.search(r) for r in body):
                 continue
             m = re.match(r"^\s*(?:(?:pure|impure|elemental|recursive|module)\s+)*"
@@ -6506,18 +6663,18 @@ def check_view_call_sites_declare_target():
     paths = sorted(p for root in roots if root.is_dir() for p in root.glob("*.f90"))
     seen_any_call = False
     for path in paths:
-        lines = path.read_text().split("\n")
-        for first, last in _procedure_scopes(lines):
+        lines = stripped_lines(path)
+        for first, last in procedure_scopes(path):
             body = lines[first:last + 1]
             viewed = set()
-            for raw in body:
-                for m in call.finditer(strip_comment(raw)):
+            for code in body:
+                for m in call.finditer(code):
                     viewed.add(m.group(1).lower())
             if not viewed:
                 continue
             seen_any_call = True
-            for offset, raw in enumerate(body):
-                m = decl.match(strip_comment(raw))
+            for offset, code in enumerate(body):
+                m = decl.match(code)
                 if not m:
                     continue
                 attrs = m.group(2).lower()
@@ -6533,7 +6690,7 @@ def check_view_call_sites_declare_target():
                     "returned handle's pointer undefined; gfortran, ifx and flang run it anyway "
                     "and only nagfor's `-C=dangling` reports it. Add `, target`:\n    %s"
                     % (path.relative_to(REPO_ROOT), first + offset + 1, ", ".join(hit),
-                       m.group(1), raw.strip()))
+                       m.group(1), source_lines(path)[first + offset].strip()))
     if not seen_any_call:
         problems.append(
             "no handle-returning call site found under src/, test/, app/ or bench/ -- the handle "
@@ -6543,20 +6700,24 @@ def check_view_call_sites_declare_target():
 
 
 
-def _module_import_closure(seed_modules):
-    """Every src/ module reachable from `seed_modules`, submodules attached to their ancestor.
+@functools.lru_cache(maxsize=None)
+def _src_import_graph():
+    """{top-level module: frozenset of modules its whole subtree uses}, built once per run.
 
     fpm never prunes a submodule separately from the module it belongs to (the rule
     `tools/module_footprints.txt` documents), so a submodule's imports count as its ancestor's.
     Without that attachment the walk misses exactly the imports that matter -- most of this
     library's `use parquet_bindings` lines live in submodule files, not in module specs.
+
+    Split out of `_module_import_closure` and cached because it is a property of `src/` alone,
+    while the closure it serves is asked for once per test suite: rebuilding the graph per seed
+    set re-parsed the whole of `src/` some forty times and was the slowest thing in this file by a
+    wide margin. The values are frozen so that a caller cannot mutate the shared graph.
     """
     owner = {}          # program unit -> the top-level module it belongs to
     imports = {}        # top-level module -> set of modules used, anywhere in its subtree
-    bodies = {}
     for path in sorted(SRC.glob("*.f90")):
-        text = path.read_text(encoding="utf-8")
-        code = "\n".join(strip_comment(ln) for ln in text.splitlines())
+        code = stripped_text(path)
         m = re.search(r"^\s*submodule\s*\(\s*([a-z0-9_]+)", code, re.M | re.I)
         if m:
             root = m.group(1).lower()
@@ -6567,7 +6728,6 @@ def _module_import_closure(seed_modules):
                 continue
             root = m2.group(1).lower()
             unit = m2
-        bodies[path.name] = code
         owner[unit.group(1).lower() if unit else path.stem] = root
         used = {u.lower() for u in re.findall(r"^\s*use\s+([a-z0-9_]+)", code, re.M | re.I)}
         imports.setdefault(root, set()).update(used)
@@ -6581,6 +6741,12 @@ def _module_import_closure(seed_modules):
                 if r != u and r not in used:
                     used.add(r)
                     changed = True
+    return {root: frozenset(used) for root, used in imports.items()}
+
+
+def _module_import_closure(seed_modules):
+    """Every src/ module reachable from `seed_modules`, submodules attached to their ancestor."""
+    imports = _src_import_graph()
     seen, stack = set(), [m.lower() for m in seed_modules]
     while stack:
         n = stack.pop()
@@ -8386,11 +8552,11 @@ def check_no_array_temporary_at_an_explicit_shape_dummy():
                 "check proves nothing" % (explicit_dummies, len(array_functions), len(paths))]
     problems, resolved = [], 0
     for path in paths:
-        lines = path.read_text().split("\n")
-        for first, last in _procedure_scopes(lines):
+        lines = stripped_lines(path)
+        for first, last in procedure_scopes(path):
             in_scope = {}
-            for raw in lines[first:last + 1]:
-                for name, shape in _entity_shapes(strip_comment(raw).strip()):
+            for code in lines[first:last + 1]:
+                for name, shape in _entity_shapes(code.strip()):
                     in_scope[name] = shape
             for lineno, code in _joined_lines(lines, first, last):
                 for found in _CALL_OR_REFERENCE.finditer(code):
@@ -8432,10 +8598,13 @@ def check_no_array_temporary_at_an_explicit_shape_dummy():
 
 
 def _joined_lines(lines, first, last):
-    """(lineno, code) over `lines[first:last]`, comments stripped and `&` continuations folded."""
+    """(lineno, code) over `lines[first:last]`, `&` continuations folded.
+
+    `lines` is already comment-stripped (`stripped_lines`), so this only folds.
+    """
     out, buffer, start = [], "", None
     for index in range(first, last + 1):
-        code = strip_comment(lines[index]).strip()
+        code = lines[index].strip()
         if not code and not buffer:
             continue
         if start is None:
@@ -8449,6 +8618,8 @@ def _joined_lines(lines, first, last):
 
 
 CHECKS = (
+    ("the comment stripper's fast paths agree with its loop",
+     check_comment_stripper_fast_paths_agree),
     ("every instruction citation names the file that carries the topic",
      check_instruction_citations_resolve),
     ("feature_risks.md is a short register of open risks, and only open ones are cited",

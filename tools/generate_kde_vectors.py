@@ -1078,6 +1078,195 @@ module test_kde_golden
 '''
 
 
+
+# ======================================================================================
+# The binned method's oracle
+# ======================================================================================
+
+BINNED_CASES = [
+    ("BIN_GAUSS", "binned, the Gaussian kernel at h = 60, unbounded, 32 cells over [-600, 600]",
+     {"bandwidth": 60.0, "cells": 32, "xmin": -600.0, "xmax": 600.0}),
+    ("BIN_EPAN", "binned, the Epanechnikov kernel at h = 60, unbounded: a compact kernel, whose "
+     "sampled filter differs from the kernel's own transform by far more than rounding",
+     {"bandwidth": 60.0, "kernel": "epanechnikov", "cells": 32, "xmin": -600.0, "xmax": 600.0}),
+    ("BIN_BOX", "binned, the box kernel at h = 60, unbounded",
+     {"bandwidth": 60.0, "kernel": "box", "cells": 32, "xmin": -600.0, "xmax": 600.0}),
+    ("BIN_BSPL", "binned, the cubic B-spline at h = 60, unbounded",
+     {"bandwidth": 60.0, "kernel": "bspline", "cells": 32, "xmin": -600.0, "xmax": 600.0}),
+    ("BIN_REF", "binned and reflected at both bounds with the range EQUAL to the support and a "
+     "power-of-two cell count: the unpadded path, where the cosine basis is the correction",
+     {"bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
+      "upper": 460.0, "boundary": "reflect"}),
+    ("BIN_REF_IN", "binned and reflected with the range INSIDE the support: the padded path, "
+     "where the images are gathered in explicitly",
+     {"bandwidth": 60.0, "kernel": "epanechnikov", "cells": 30, "xmin": -400.0, "xmax": 400.0,
+      "lower": -470.0, "upper": 460.0, "boundary": "reflect"}),
+    ("BIN_REN", "binned and renormalised at a lower bound: the per-cell division by the mass a "
+     "kernel centred there keeps inside the support",
+     {"bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
+      "boundary": "renormalise"}),
+    ("BIN_LIN", "binned under the local linear correction at both bounds: the second convolution, "
+     "against the odd kernel, read back through the inverse sine transform",
+     {"bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
+      "upper": 460.0, "boundary": "linear"}),
+]
+
+
+def next_pow2(n):
+    """The smallest power of two at or above `n`."""
+    p = 1
+    while p < n:
+        p *= 2
+    return p
+
+
+def binned_cells(case):
+    """The density a binned grid holds in each cell, at full precision.
+
+    The library reaches this through one cosine transform per bandwidth class, multiplying by the
+    sampled filter's own multiplier; this sums the convolution directly instead, so the two share
+    the definition and nothing else. The extension the transform implies -- half-sample even about
+    each end of the array, period `2L` -- is written out here, because the unpadded reflecting case
+    is exactly the case where it reaches the cells.
+    """
+    n = case.get("n", 32)
+    values = two_component(n) if case.get("fixture") == "two" else gsv.fixture(n)
+    weights = gsv.weights_mod5(n) if case.get("weights") == "mod5" else None
+    kernel = case.get("kernel", "gaussian")
+    lower, upper = case.get("lower"), case.get("upper")
+    lo = mpf(lower) if lower is not None else None
+    hi = mpf(upper) if upper is not None else None
+    boundary = case.get("boundary", "reflect" if (lower is not None or upper is not None)
+                        else "none")
+    xs, ws, _ = population(values, weights, lo, hi)
+    if not xs:
+        return None
+    h = mpf(case["bandwidth"])
+    nc = case["cells"]
+    x0, x1 = mpf(case["xmin"]), mpf(case["xmax"])
+    dx = (x1 - x0) / nc
+    rad = radius(kernel)
+    span = rad * h
+    if boundary == "reflect":
+        span *= 2
+    aligned = (boundary == "reflect" and lo is not None and hi is not None
+               and lo == x0 and hi == x1 and nc >= 2 and (nc & (nc - 1)) == 0)
+    if aligned:
+        pad, ntr = 0, nc
+    else:
+        pad = int(mp.ceil(span / dx)) + 1
+        ntr = next_pow2(nc + 2 * pad)
+    cb = [x0 + (mpf(k - pad) - mpf(1) / 2) * dx for k in range(1, ntr + 1)]
+
+    # ---- linear binning, and what lies beyond the array altogether ----
+    b = [mpf(0)] * ntr
+    below, above = mpf(0), mpf(0)
+    for x, w in zip(xs, ws):
+        if x < cb[0]:
+            if pad == 0:
+                b[0] += w
+            else:
+                below += w
+            continue
+        if x > cb[-1]:
+            if pad == 0:
+                b[-1] += w
+            else:
+                above += w
+            continue
+        u = (x - cb[0]) / dx
+        k = int(mp.floor(u))
+        if k >= ntr - 1:
+            k = ntr - 2
+        f = u - k
+        b[k] += w * (1 - f)
+        b[k + 1] += w * f
+
+    # ---- the sampled filter, normalised by its own mass ----
+    taps = min(int(mp.floor(rad * h / dx)) + 2, ntr)
+    hd = [dx * kernel_pdf(kernel, mpf(d) * dx / h) / h for d in range(0, taps + 1)]
+    d0 = hd[0] + 2 * sum(hd[1:])
+    hn = [t / d0 for t in hd]
+    gn = [dx * (mpf(d) * dx / h) * kernel_pdf(kernel, mpf(d) * dx / h) / h / d0
+          for d in range(0, taps + 1)]
+
+    def bext(j):
+        """`b` under the transform's own extension: half-sample even at both ends, period `2L`."""
+        m = j % (2 * ntr)
+        if m >= ntr:
+            m = 2 * ntr - 1 - m
+        return b[m]
+
+    val = []
+    val1 = []
+    for i in range(ntr):
+        s0 = mpf(0)
+        s1 = mpf(0)
+        for d in range(-taps, taps + 1):
+            bj = bext(i - d)
+            if bj == 0:
+                continue
+            s0 += bj * hn[abs(d)]
+            s1 += bj * (gn[d] if d >= 0 else -gn[-d])
+        val.append(s0)
+        val1.append(s1)
+
+    def outside(t):
+        return (lo is not None and t < lo) or (hi is not None and t > hi)
+
+    # ---- the per-cell correction ----
+    if boundary in ("renormalise", "linear"):
+        poly = PolyEstimate(xs, ws, [h] * len(xs), kernel, lo, hi,
+                            1 if boundary == "linear" else 0)
+        for k in range(ntr):
+            if outside(cb[k]):
+                val[k] = mpf(0)
+                continue
+            a1, a2, det = poly.factor(cb[k], h)
+            val[k] = (a2 * val[k] - a1 * val1[k]) / det
+
+    # ---- the reflecting images, gathered where the basis did not supply them ----
+    if boundary == "reflect" and pad > 0:
+        def gather(p):
+            u = (p - cb[0]) / dx
+            if u < 0 or u > ntr - 1:
+                return mpf(0)
+            k = int(mp.floor(u))
+            if k >= ntr - 1:
+                return val[ntr - 1]
+            f = u - k
+            return val[k] * (1 - f) + val[k + 1] * f
+        fold = []
+        for k in range(ntr):
+            if outside(cb[k]):
+                fold.append(mpf(0))
+                continue
+            v = val[k]
+            if lo is not None:
+                v += gather(2 * lo - cb[k])
+            if hi is not None:
+                v += gather(2 * hi - cb[k])
+            fold.append(v)
+        val = fold
+
+    # ---- the cells, the two counters, and the mass the density is over ----
+    acc = [val[pad + i] / dx for i in range(nc)]
+    for k in range(pad):
+        if not outside(cb[k]):
+            below += val[k]
+    for k in range(pad + nc, ntr):
+        if not outside(cb[k]):
+            above += val[k]
+    corrected = boundary in ("renormalise", "linear")
+    cells = [max(a, mpf(0)) if corrected else a for a in acc]
+    if corrected:
+        mass = dx * sum(cells) + below + above
+    else:
+        mass = sum(ws)
+    if mass <= 0:
+        return None
+    return [c / mass for c in cells]
+
 def emit():
     """Return the whole generated file as text."""
     out = [HEADER.replace("@NKX@", str(len(PROBES)))]
@@ -1107,6 +1296,19 @@ def emit():
             items = [gsv.fortran_real(v) for v in (vals or [None] * len(PROBES))]
             out += gsv.wrap_array("    real(real64), parameter :: KG_%s_%s(NKX) =" % (name, tag),
                                   items)
+    for name, doc, case in BINNED_CASES:
+        cells = binned_cells(case)
+        out.append("")
+        lines = textwrap.wrap(doc, width=124)
+        out.append("    !> %s" % lines[0])
+        out += ["    !! %s" % line for line in lines[1:]]
+        out.append("    integer, parameter :: KG_%s_NC = %d" % (name, case["cells"]))
+        out.append("    real(real64), parameter :: KG_%s_XMIN = %s"
+                   % (name, gsv.fortran_real(mpf(case["xmin"]))))
+        out.append("    real(real64), parameter :: KG_%s_XMAX = %s"
+                   % (name, gsv.fortran_real(mpf(case["xmax"]))))
+        out += gsv.wrap_array("    real(real64), parameter :: KG_%s_F(KG_%s_NC) =" % (name, name),
+                              [gsv.fortran_real(v) for v in cells])
     out.append("")
     out.append("end module test_kde_golden ! GCOVR_EXCL_LINE")
     return "\n".join(out) + "\n"

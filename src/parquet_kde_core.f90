@@ -144,6 +144,20 @@ contains
 
     end procedure kde_resolve_boundary
 
+    module procedure kde_resolve_method
+
+        select case (kde_fold(token))
+        case ("exact")
+            code = KDE_METHOD_EXACT
+        case ("binned")
+            code = KDE_METHOD_BINNED
+        case default
+            code = KDE_METHOD_EXACT
+            call kde_abort(entry, 'method must be "exact" or "binned"')
+        end select
+
+    end procedure kde_resolve_method
+
     module procedure kde_resolve_setup
 
         kernel_code = KDE_GAUSSIAN
@@ -422,6 +436,76 @@ contains
         end if
 
     end procedure kde_kernel_m2
+
+    module procedure kde_dct_filter
+
+        real(real64), allocatable :: z(:), k(:), r(:)
+        real(real64) :: s, d0
+        integer :: nl, j
+
+        nl = size(lam)
+        allocate(z(nl + 1), k(nl + 1), r(nl))
+        ! The filter's taps: `h(d) = dx K(d dx/h)/h`, the kernel's value at an offset of `d` whole
+        ! cells, times the cell width. Every one beyond the kernel's reach is zero.
+        s = dx/hj
+        do j = 0, nl
+            z(j + 1) = real(j, real64)*s
+        end do
+        call kde_kernel_pdf_many(code, z, k)
+        ! The symmetric convolution of a unit at index 0 with the filter, the basis being
+        ! half-sample even about index -1/2: `r(m) = h(m) + h(m+1)`.
+        do j = 1, nl
+            r(j) = (k(j) + k(j + 1))*s
+        end do
+        call pf_dct(r, lam, context="the binned method's kernel filter")
+        do j = 1, nl
+            lam(j) = lam(j)/(2.0_real64*cos(KDE_PI*real(j - 1, real64)/(2.0_real64*real(nl, real64))))
+        end do
+        ! One at zero frequency, whatever the sampled kernel's own mass is. A bandwidth far narrower
+        ! than a cell has a mass far above one, and dividing by it leaves a filter that is a unit at
+        ! one tap -- which is where the exact deposit puts such a point too.
+        d0 = lam(1)
+        do j = 1, nl
+            lam(j) = lam(j)/d0
+        end do
+
+    end procedure kde_dct_filter
+
+    module procedure kde_dst_filter
+
+        real(real64), allocatable :: z(:), k(:), y(:), sc(:)
+        real(real64) :: s, d0
+        integer :: nl, j
+
+        nl = size(lam)
+        allocate(z(nl + 1), k(nl + 1), y(nl), sc(nl))
+        s = dx/hj
+        do j = 0, nl
+            z(j + 1) = real(j, real64)*s
+        end do
+        call kde_kernel_pdf_many(code, z, k)
+        ! The ODD filter's taps, `g(d) = dx (d dx/h) K(d dx/h)/h`, odd in `d` and zero at `d = 0`;
+        ! and the symmetric convolution of a unit at index 0 with it, `g(m) + g(m+1)`.
+        do j = 1, nl
+            y(j) = s*(z(j)*k(j) + z(j + 1)*k(j + 1))
+        end do
+        ! The EVEN filter's mass, which both convolutions are divided by: a scale they must share,
+        ! or their ratio is not the correction the exact deposit applies.
+        d0 = k(1)
+        do j = 2, nl + 1
+            d0 = d0 + 2.0_real64*k(j)
+        end do
+        d0 = d0*s
+        call pf_dst(y, sc, context="the binned method's odd kernel filter")
+        ! Coefficient `j` of `pf_dct` carries frequency `j - 1`, and `sc(j)` of `pf_dst` carries
+        ! frequency `j`: the multiplier at cosine position `j` is the sine coefficient one below.
+        lam(1) = 0.0_real64
+        do j = 2, nl
+            lam(j) = sc(j - 1)/(2.0_real64*cos(KDE_PI*real(j - 1, real64)/(2.0_real64*real(nl, real64))))
+            lam(j) = lam(j)/d0
+        end do
+
+    end procedure kde_dst_filter
 
     module procedure kde_corr_factor
 
@@ -730,6 +814,10 @@ contains
             "n must be a power of two from 16 to 1048576")
         kde_isj_cells_forced = n
     end procedure parquet_debug_set_kde_isj_cells
+
+    module procedure parquet_debug_set_kde_binned_classes
+        kde_binned_classes_forced = max(0, min(n, KDE_BINNED_CLASSES_MAX))
+    end procedure parquet_debug_set_kde_binned_classes
 
     module procedure parquet_debug_set_kde_sample_tries
         ! A negative `n` restores the default; every other value, zero included, is the cap.

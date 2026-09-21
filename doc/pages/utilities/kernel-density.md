@@ -37,7 +37,7 @@ call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [adaptive], [alpha], [ban
 call k%pdf(x, f, [threads])
 call k%cdf(x, p, [threads])
 call k%quantile(p, x, [threads])
-call k%curve(x, f, [xmin], [xmax], [cut], [threads])
+call k%curve(x, f, [xmin], [xmax], [cut], [threads], [method])
 call k%sample(v, seed, [stream], [threads])
 call k%bandwidths(h, [x])
 call k%bandwidth_at(x, h)
@@ -76,7 +76,9 @@ in proportion to the number of points within one kernel's reach rather than to t
   group at a time, a stream, or pieces accumulated on separate threads and merged at the end. Its
   density is the estimate at each cell centre, interpolated between them, and converges to the
   exact estimate as the square of the cell width. The bandwidth is chosen before the first point
-  arrives, and the adaptive kernel takes a second pass. See
+  arrives, and the adaptive kernel takes a second pass. There are two ways to fill it -- depositing
+  every kernel, or binning and one transform -- and
+  [Two ways to fill a grid](#two-ways-to-fill-a-grid) says which to reach for. See
   [Streaming into a grid](#streaming-into-a-grid-pf_kde_grid).
 
 ## Kernels, and what `bandwidth` means
@@ -373,10 +375,16 @@ one; `bench/benchmark_kde.sh` measures both (`MODE=adaptive`).
   the two ends of the estimate's support, where its density starts and stops: the smallest
   `x_j - R h_j` and the largest `x_j + R h_j` over the retained points, `R h_j` being point `j`'s
   kernel's reach at its own bandwidth, clipped to the bounds. A `p` outside `[0, 1]` aborts.
-- **`%curve(x, f, [xmin], [xmax], [cut], [threads])`**: fills `x` with `size(x)` equally spaced
-  points, both ends exact, and `f` with the density at each. The default range is the sample's
-  minimum minus `cut` bandwidths to its maximum plus `cut` bandwidths, `cut` defaulting to 3,
-  clipped to the support; `xmin=` and `xmax=` replace either end.
+- **`%curve(x, f, [xmin], [xmax], [cut], [threads], [method])`**: fills `x` with `size(x)`
+  equally spaced points, both ends exact, and `f` with the density at each. The default range is
+  the sample's minimum minus `cut` bandwidths to its maximum plus `cut` bandwidths, `cut`
+  defaulting to 3, clipped to the support; `xmin=` and `xmax=` replace either end. `method=` takes
+  the same two tokens `pf_kde_grid%init` takes and means the same thing: `"binned"` splits the
+  retained sample between the curve's own points and fills them with one transform, which is the
+  cheap way to draw a curve of a large sample. It honours the fit's boundary correction, because a
+  curve is `%pdf` on equally spaced points and the two must not disagree about what correction is
+  in force, and it needs at least two points. `threads=` governs the exact form only: a binned
+  curve is one pass over the sample and one transform, with no per-point work for a team to share.
 - **`threads=`** on the array forms of `%pdf`, `%cdf` and `%quantile`, and on `%curve`, shares the
   points among a team. Each point is answered by one thread alone, so the answer is the same bits at
   every thread count, and a team opens only where the points within the kernels' reach make the
@@ -396,11 +404,12 @@ the cells and is forgotten, so the grid's memory is its cells whatever the sampl
 between filling it and reading it, so the seam is named: `%finish` closes the accumulation, and
 only then do the queries answer. A query before it aborts, `%add` and `%merge` after it abort, and
 `%clear` reopens the grid, empty. `finish=.true.` on the last `%add` or `%merge` is the one-line
-form.
+form. The seam is also what the binned method needs: binning streams, but the one convolution that
+turns the bins into cells cannot start until the last point has arrived.
 
 ```fortran
 call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha], [bandwidth_max], &
-            [lower], [upper], [boundary])
+            [lower], [upper], [boundary], [method])
 call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], [threads], [finish])
 call g%merge(other, [finish])
 call g%finish()
@@ -410,13 +419,16 @@ call g%cdf(x, p, [threads])
 call g%quantile(p, x, [threads])
 call g%sample(v, seed, [stream], [threads])
 call g%grid(x)
+call g%method(name)
 ```
 
 - **`%init`** makes cells of width `step = (xmax - xmin)/ncells`, cell `i` centred on
   `xmin + (i - 1/2)*step`. The bandwidth is always a number, since a grid has seen no data when it
   is set up: to use a rule, fit a `pf_kde` to a subsample and pass its `%bandwidth()`. `kernel`,
   `lower`, `upper` and `boundary` are as for `%fit`, and `[xmin, xmax]` must lie inside the support.
-  A second `%init` discards everything, the finished state included.
+  A second `%init` discards everything, the finished state included. `method` chooses how the
+  cells are filled, and is the one argument that changes what the grid costs rather than what it
+  means -- see [Two ways to fill a grid](#two-ways-to-fill-a-grid).
 - **`%add`** takes one point or an array, `real64` or `real32`, or a numeric `parquet_column` as
   `%fit` does, under the population rules of `%fit`. `n_null`, `n_nan` and `n_outside` report what that call excluded, and the accessors
   (`%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%n_outside()`, `%sum_weights()`) the totals over
@@ -426,11 +438,16 @@ call g%grid(x)
   queries need a finished grid.
 - **Each point adds exactly its weight**, to rounding, at every cell width. Its kernel is evaluated
   at every cell centre it reaches and scaled so that the values sum to the point's weight, and a
-  kernel crossing a bound is corrected onto the cells inside it as `boundary=` says.
+  kernel crossing a bound is corrected onto the cells inside it as `boundary=` says. Under
+  `method="binned"` it holds of the whole deposit rather than point by point: the cells and the two
+  beyond-range counts still sum to the weight added, because the convolution leaves the total
+  untouched, but no single point's share of the cells is exactly its own weight.
 - **Weight beyond the range is counted, not located.** The part of a kernel reaching past `xmin` or
   `xmax` goes into a count at that end. The cells still hold the estimate over every point, and
   `%cdf` below `xmin` is the counted share: the grid knows how much weight lies beyond each end, not
-  where.
+  where. Under `method="binned"` it is located first and then summed -- the transform's array
+  extends past both ends, and the count is what its cells there hold -- which is a stronger
+  statement of the same promise, not a weaker one.
 - **A bandwidth narrower than a cell is used as given.** Such a kernel reaches one or two centres,
   or none when it falls between two, and its weight lands whole in the cells it reaches or in the
   cell holding the point: the grid, not the kernel, then sets the smoothing. Nothing is widened, and
@@ -455,8 +472,46 @@ Reading it:
   answers `xmin`, one only the share above `xmax` reaches answers `xmax`, and `p = 0` and `p = 1`
   answer where the accumulated density starts and ends inside the range.
 - `%grid(x)` fills the centres, `%ncells()` and `%step()` answer the geometry, and `%bandwidth()`,
-  `%kernel(name)` and `%bounds(lo, hi)` the settings. `%clear()` empties the grid and keeps its
+  `%kernel(name)`, `%method(name)` and `%bounds(lo, hi)` the settings; `%is_finished()` says whether
+  the queries are open. `%clear()` empties the grid and keeps its
   geometry and settings; `%print([unit])` writes all of it as one block.
+
+### Two ways to fill a grid
+
+`method=` on `%init` chooses between them, and `"exact"` is the default: nothing a caller has
+today changes.
+
+- **`method="exact"`** evaluates each point's kernel at every cell centre it reaches. It is the
+  accurate one, and what to reach for when plot-grade is not enough.
+- **`method="binned"`** splits each point between the two centres around it -- the share in
+  proportion to its nearness to each -- and fills the cells with one cosine transform when
+  `%finish` is called. Binning still streams, so `%add`, `%merge`, `threads=` and the grid's memory
+  are what they are under `"exact"`; only the convolution waits for the end.
+
+**What the binned method approximates.** It answers the exact estimate of a sample whose points
+have been moved to the cell centres. That error falls as the SQUARE of the cell width for the
+Gaussian and the cubic B-spline; the Epanechnikov kernel's first derivative jumps at the edge of
+its support and the box kernel steps there, so moving a point by half a cell moves that edge, and
+both converge more slowly -- the box by far the slowest of the four. Nothing else is approximated:
+the boundary corrections are applied cell by cell exactly as the deposit applies them, the weight
+beyond each end is the transform's own pad, and `%pdf`, `%cdf`, `%quantile` and `%sample` read the
+filled cells without knowing which method filled them.
+
+**The adaptive kernel is bucketed.** A convolution has exactly one kernel width, so the binned
+method sorts the per-point bandwidths into geometrically spaced classes and convolves each class
+at its own width, splitting every point's weight between the two classes around its own bandwidth.
+The class count follows the bandwidth SPREAD, so the accuracy is the same whatever the data does,
+and `%print` reports the count in force. **The binned adaptive estimate is about an order coarser
+than the binned fixed one**: bucketing, not binning, is then the dominant error. `bandwidth_max=`
+bounds the spread and so bounds both the class count and the error, which matters more here than
+it does under `"exact"`.
+
+**What it costs.** Binning is one pass over the points whatever the bandwidth, where a deposit
+costs a pass over the cells each kernel reaches, so the saving grows with the bandwidth and with
+the cell count and is largest on the big samples a grid exists for. Against it stands one transform
+per bandwidth class, and two under `boundary="linear"`, whose cost depends on the cells and not at
+all on the points. `bench/benchmark_kde.sh MODE=binned` measures both halves and compares the two
+methods at matched cell counts and at matched accuracy.
 
 **How close the grid comes to the exact estimate.** At a cell centre the grid's density differs
 from `pf_kde%pdf` only by how finely the cells sample each kernel, and between centres `%pdf` adds
@@ -724,6 +779,9 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | a range wider than the largest number, or cells too narrow to represent | `pf_kde_grid%init: the cell width (xmax - xmin)/ncells must be a finite, positive number` |
 | `[xmin, xmax]` reaching outside `[lower, upper]` | `pf_kde_grid%init: the grid's range must lie inside the support` |
 | under `boundary="linear"`, a range that does not start at `lower` or end at `upper` (R1) | `pf_kde_grid%init: under boundary="linear" the grid's range must start at lower and end at upper` |
+| an unknown `method` | `pf_kde_grid%init: method must be "exact" or "binned"` (or `pf_kde%curve`) |
+| `method="binned"` with a bandwidth whose padded transform would be too long | `pf_kde_grid%init: method="binned" needs a transform longer than ... cells can carry` |
+| `%curve(method="binned")` on a single point | `pf_kde%curve: method="binned" needs at least two points` |
 | under `boundary="linear"` with one bound, a range narrower than one kernel's reach (R2) | `pf_kde_grid%init: under boundary="linear" the grid must be at least one kernel reach wide` |
 | `bandwidth`, `kernel`, `alpha`, `bandwidth_max`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
 | `alpha=` or `bandwidth_max=` without `pilot=` | `pf_kde_grid%init: alpha= and bandwidth_max= need pilot=` |

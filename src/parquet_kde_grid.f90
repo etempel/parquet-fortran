@@ -55,6 +55,279 @@ submodule (parquet_kde) parquet_kde_grid
 contains
 
     ! ==========================================================================================
+    ! The binned method's workers; above every call to them, as nagfor requires
+    ! ==========================================================================================
+
+    !> Resolves everything the binned method fixes at `%init`: the bandwidth classes, the pad and
+    !! the transform's length, with the two refusals of that geometry. Called after `set_geometry`
+    !! and the rule, both of which it reads, and before `empty_grid`, which allocates from it.
+    !!
+    !! **Every refusal is an `%init` refusal**, which is the good place for one: the binned method
+    !! decides nothing from the data, so a grid that cannot be transformed says so before the caller
+    !! has streamed a file.
+    module procedure kde_binned_setup
+
+        real(real64) :: hmax, span, need, cap
+        integer :: j
+
+        self%method_code = KDE_METHOD_BINNED
+        call class_ladder(self, hlo, hhi, hmax)
+        ! The pad: far enough that the cosine basis's own reflection at the array's ends cannot
+        ! reach a cell the caller asked for. Under `"reflect"` the mirrored sample is binned into
+        ! the array too, and a mirror sits up to one reach beyond its bound, so the pad is doubled.
+        span = KDE_RADIUS(self%kernel_code)*hmax
+        if (self%boundary_code == KDE_BOUNDARY_REFLECT) span = 2.0_real64*span
+        ! The aligned reflecting grid needs no pad at all: the type II cosine transform is
+        ! half-sample even about the array's own ends, which are then exactly the two bounds, so
+        ! the basis IS the correction. It needs a legal transform length, which `ncells` is only
+        ! when it is a power of two.
+        self%pad = 0
+        if (aligned_reflect(self)) then
+            self%ntr = self%nc
+            self%nclass = size(self%hclass)
+            return
+        end if
+        need = span/self%dx
+        cap = real(KDE_BINNED_L_MAX, real64)*real(self%nc, real64)
+        ! Formed in real64 and compared before any conversion: `span/dx` can be far past the largest
+        ! integer, and `int()` of that is undefined rather than large.
+        if (.not. (2.0_real64*(need + 2.0_real64) + real(self%nc, real64) <= cap)) call binned_too_long(self, entry)
+        j = int(ceiling(need)) + 1
+        need = real(self%nc, real64) + 2.0_real64*real(j, real64)
+        if (.not. (need <= cap)) call binned_too_long(self, entry)
+        self%pad = j
+        self%ntr = pf_next_pow2(self%nc + 2*j)
+        if (.not. (real(self%ntr, real64) <= cap)) call binned_too_long(self, entry)
+        self%nclass = size(self%hclass)
+
+    end procedure kde_binned_setup
+    !> The transform array's cell centres, `L` of them: the grid's own centres extended by `pad`
+    !! cells at each end, so that centre `pad + i` is cell `i`'s. The one spelling of the binned
+    !! method's geometry, read by the binning, the read-back and the pad sums alike.
+    module procedure kde_padded_centres
+
+        integer :: k
+
+        do k = 1, self%ntr
+            cb(k) = centre_at(self%x0, self%dx, k - self%pad)
+        end do
+
+    end procedure kde_padded_centres
+    !> Bins the points `x(jlo:jhi)` into `bins`, one column per bandwidth class, and adds what lies
+    !! beyond the transform array altogether to `below` and `above`.
+    !!
+    !! **The position split is `pf_bin_linear`'s**, not a copy of it: its `volatile` residual makes
+    !! the two shares sum to the weight exactly, and its comment forbids simplifying that. The
+    !! BANDWIDTH split is this routine's, and it is the same trick in `log h`: a point a fraction
+    !! `f` of the way from class `c` to class `c+1` gives `w (1 - f)` to one and `w f` to the other,
+    !! so the bucketing error falls as the square of the class count where rounding to the nearest
+    !! class would leave it falling as the count itself.
+    module procedure kde_bin_range
+
+        real(real64), allocatable :: gx(:), gw(:), mass(:)
+        real(real64) :: wj, lstep, u, f, lo_c
+        integer(int64) :: j, g
+        integer :: c, cj, k, nk
+        logical :: split
+
+        nk = self%ntr
+        allocate(gx(jhi - jlo + 1_int64), gw(jhi - jlo + 1_int64), mass(nk))
+        split = self%nclass > 1
+        lstep = 1.0_real64
+        lo_c = 0.0_real64
+        if (split) then
+            lo_c = log(self%hclass(1))
+            lstep = log(self%hclass(self%nclass)/self%hclass(1))/real(self%nclass - 1, real64)
+        end if
+        do c = 1, self%nclass
+            g = 0_int64
+            do j = jlo, jhi
+                wj = 1.0_real64
+                if (weighted) wj = w(j)
+                ! Beyond the array's first or last centre the point's kernel cannot reach a cell
+                ! the caller asked for -- the pad is one reach and half a cell wider than that --
+                ! so its whole weight is counted at that end rather than binned.
+                if (x(j) < cb(1)) then
+                    if (c == 1) then
+                        if (self%pad == 0) then
+                            ! With no pad the array's edge IS the bound, and the half cell beyond
+                            ! the first centre lies inside the support: the point lands whole on
+                            ! that centre, which is where the reflecting basis puts it.
+                            bins(1, 1) = bins(1, 1) + wj
+                        else
+                            below = below + wj
+                        end if
+                    end if
+                    cycle
+                end if
+                if (x(j) > cb(nk)) then
+                    if (c == 1) then
+                        if (self%pad == 0) then
+                            bins(nk, 1) = bins(nk, 1) + wj
+                        else
+                            above = above + wj
+                        end if
+                    end if
+                    cycle
+                end if
+                f = 1.0_real64
+                if (split) then
+                    u = (log(hb(1_int64 + (j - 1_int64)*hstride)) - lo_c)/lstep
+                    if (.not. (u > 0.0_real64)) u = 0.0_real64
+                    if (u > real(self%nclass - 1, real64)) u = real(self%nclass - 1, real64)
+                    cj = int(u) + 1
+                    if (cj >= self%nclass) cj = self%nclass - 1
+                    ! The share this class takes: `1 - f` for the class below the point, `f` for the
+                    ! one above, and nothing at all for every other class.
+                    if (c == cj) then
+                        f = 1.0_real64 - (u - real(cj - 1, real64))
+                    else if (c == cj + 1) then
+                        f = u - real(cj - 1, real64)
+                    else
+                        cycle
+                    end if
+                    if (f == 0.0_real64) cycle
+                end if
+                g = g + 1_int64
+                gx(g) = x(j)
+                gw(g) = wj*f
+            end do
+            if (g == 0_int64) cycle
+            call pf_bin_linear(gx(1:g), cb, mass, weights=gw(1:g))
+            do k = 1, nk
+                bins(k, c) = bins(k, c) + mass(k)
+            end do
+        end do
+
+    end procedure kde_bin_range
+    !> Fills the cells from the bins: the one operation of the binned method that cannot stream.
+    !!
+    !! Per bandwidth class: transform the bins with `pf_dct`, multiply coefficient `k` by the
+    !! kernel's own transform at `pi k/(L step)`, invert with `pf_idct`, and apply that class's
+    !! per-cell boundary correction. The classes are summed, the reflecting images are folded in,
+    !! and the interior is read back as the cells while the pad becomes the two beyond-range
+    !! counters.
+    !!
+    !! **The coefficient at zero frequency is multiplied by exactly one**, every kernel's transform
+    !! being one there, so the convolution conserves the binned weight to the bit: the cells and
+    !! the two counters still sum to what was deposited.
+    !!
+    !! `parquet_transform`'s header warns that the transform of a padded sequence is not a padded
+    !! transform and its coefficients mean something else. That warning is about READING the
+    !! coefficients, which the ISJ rule does and this does not: here they are multiplied and
+    !! immediately inverted, and the padding is there precisely so that the periodic images the
+    !! transform implies stay `pad` cells away from the data.
+    module procedure kde_binned_transform
+
+        real(real64), allocatable :: cb(:), co(:), wk(:), lam(:), s0(:), val(:), fold(:)
+        real(real64), allocatable :: mu(:), sc(:), s1(:)
+        type(kde_corr_kernel) :: cf
+        real(real64) :: rc, v
+        integer :: nl, np, c, k, i
+        logical :: linear
+
+        nl = self%ntr
+        np = self%pad
+        linear = self%boundary_code == KDE_BOUNDARY_LINEAR
+        allocate(cb(nl), co(nl), wk(nl), lam(nl), s0(nl), val(nl))
+        ! The local linear correction needs a SECOND convolution, against the odd kernel `u K(u)`:
+        ! its equivalent kernel is `(a2 - a1 u) K(u)/(a0 a2 - a1**2)`, and the `a1 u` term is a sum
+        ! the cosine transform cannot give. The odd kernel's transform is a sine, so that sum comes
+        ! back through `pf_idst`.
+        if (linear) allocate(mu(nl), sc(nl), s1(nl))
+        call kde_padded_centres(self, cb)
+        val = 0.0_real64
+        do c = 1, self%nclass
+            call kde_dct_filter(self%kernel_code, self%hclass(c), self%dx, lam)
+            call pf_dct(self%bins(:, c), co, context="pf_kde_grid%finish")
+            do k = 1, nl
+                wk(k) = co(k)*lam(k)
+            end do
+            call pf_idct(wk, s0, context="pf_kde_grid%finish")
+            if (linear) then
+                call kde_dst_filter(self%kernel_code, self%hclass(c), self%dx, mu)
+                ! The shift the guide page writes out: cosine coefficient `k` carries frequency
+                ! `k - 1` and sine coefficient `k` carries frequency `k`, so the spectrum moves
+                ! down one position and the top frequency has no sine coefficient at all.
+                do k = 1, nl - 1
+                    sc(k) = co(k + 1)*mu(k + 1)
+                end do
+                sc(nl) = 0.0_real64
+                call pf_idst(sc, s1, context="pf_kde_grid%finish")
+            end if
+            if (kde_is_corrected(self%boundary_code)) then
+                ! The correction is per CELL: the moments are the CENTRE's own, formed at this
+                ! class's bandwidth, so a cell inside a zone gets the weight the exact form gives
+                ! it there. `"renormalise"` divides by `a0` alone; `"linear"` combines the two
+                ! convolutions, `(a2 + a1 c) S0 - a1 S1` over the moments' determinant, which is
+                ! `kde_corr_value` summed over the points.
+                rc = 1.0_real64/self%hclass(c)
+                do k = 1, nl
+                    if (outside_support(self, cb(k))) then
+                        s0(k) = 0.0_real64
+                    else if (.not. plain_at(self, cb(k), rc)) then
+                        cf = kde_corr_factor(self%boundary_code, self%kernel_code, self%has_lower, &
+                            self%lo, self%has_upper, self%hi, cb(k), rc)
+                        if (linear) then
+                            s0(k) = cf%dinv*((cf%a + cf%b*cf%c)*s0(k) - cf%b*s1(k))
+                        else
+                            s0(k) = s0(k)*cf%dinv
+                        end if
+                    end if
+                end do
+            end if
+            do k = 1, nl
+                val(k) = val(k) + s0(k)
+            end do
+        end do
+
+        ! ---- the reflecting images, where the basis did not already supply them ----
+        ! With no pad the array's own ends ARE the bounds and the cosine basis has reflected about
+        ! them already, to every order. With a pad the images are read in explicitly, and they are
+        ! GATHERED rather than scattered: the reflection estimator is `S(x) + S(2 lo - x) +
+        ! S(2 hi - x)` inside the support, so a cell takes the value the plain estimate has at its
+        ! mirror. Scattering each outside cell onto its mirror instead conserves the weight exactly
+        ! but answers HALF at a cell sitting on the bound, whose mirror is itself -- and the exact
+        ! deposit doubles there, its image kernel landing on the point's own.
+        if (self%boundary_code == KDE_BOUNDARY_REFLECT .and. np > 0) then
+            allocate(fold(nl))
+            do k = 1, nl
+                if (outside_support(self, cb(k))) then
+                    fold(k) = 0.0_real64
+                    cycle
+                end if
+                v = val(k)
+                if (self%has_lower) v = v + gather_at(self, cb, val, 2.0_real64*self%lo - cb(k))
+                if (self%has_upper) v = v + gather_at(self, cb, val, 2.0_real64*self%hi - cb(k))
+                fold(k) = v
+            end do
+            do k = 1, nl
+                val(k) = fold(k)
+            end do
+        end if
+
+        ! ---- the cells, and the two beyond-range counters ----
+        do i = 1, self%nc
+            self%acc(i) = val(np + i)/self%dx
+        end do
+        do k = 1, np
+            v = val(k)
+            if (v == 0.0_real64) cycle
+            if (outside_support(self, cb(k))) cycle
+            self%w_below = self%w_below + v
+        end do
+        do k = np + self%nc + 1, nl
+            v = val(k)
+            if (v == 0.0_real64) cycle
+            if (outside_support(self, cb(k))) cycle
+            self%w_above = self%w_above + v
+        end do
+        ! The bins have become the cells and are not read again; a `%clear` gives them back.
+        deallocate(self%bins)
+
+    end procedure kde_binned_transform
+
+    ! ==========================================================================================
     ! The adaptive rule, for both forms; above every call to it, as nagfor requires
     ! ==========================================================================================
 
@@ -102,6 +375,7 @@ contains
         end do
         a%logg = 0.0_real64
         a%pmin = 0.0_real64
+        a%pmax = 0.0_real64
         if (a%unreadable) return
 
         ! `log g` is the mean of `log p` over the pilot's own density: the population form of the
@@ -118,6 +392,7 @@ contains
             s1 = s1 + p
             s2 = s2 + p*log(p)
             if (p < a%pmin) a%pmin = p
+            if (p > a%pmax) a%pmax = p
         end do
         ! A pilot with no positive density in any cell -- nothing added, only weight beyond its
         ! range, or cells too small against the total to register -- has nothing to read: a data
@@ -125,6 +400,7 @@ contains
         if (.not. (s1 > 0.0_real64)) then
             a%unreadable = .true.
             a%pmin = 0.0_real64
+            a%pmax = 0.0_real64
             return
         end if
         a%logg = s2/s1
@@ -222,7 +498,7 @@ contains
 
         character(len=*), parameter :: EP = "pf_kde_grid%init"
         real(real64) :: step, lo, hi, a_alpha, a_bmax
-        integer :: kcode, bcode
+        integer :: kcode, bcode, mcode
         logical :: has_lo, has_hi
         type(kde_adapt) :: rule
 
@@ -293,8 +569,13 @@ contains
             call kde_adapt_set(rule, pilot, a_alpha, present(bandwidth_max), a_bmax)
         end if
 
+        ! ---- the method ----
+        mcode = KDE_METHOD_EXACT
+        if (present(method)) call kde_resolve_method(EP, method, mcode)
+
         call set_geometry(self, ncells, xmin, xmax, bandwidth, kcode, bcode, has_lo, lo, has_hi, hi)
         call move_adapt(rule, self%adapt)
+        if (mcode == KDE_METHOD_BINNED) call kde_binned_setup(self, EP)
         call empty_grid(self)
 
     end procedure grid_init
@@ -410,8 +691,15 @@ contains
             end do
         end if
 
-        ! ---- the deposit ----
-        if (weighted) then
+        ! ---- the deposit, or the binning that stands in for it ----
+        if (self%method_code == KDE_METHOD_BINNED) then
+            if (weighted) then
+                call bin_points(self, keep_x, keep_w, .true., hb, stride, m, threads)
+            else
+                one(1) = 1.0_real64
+                call bin_points(self, keep_x, one, .false., hb, stride, m, threads)
+            end if
+        else if (weighted) then
             call deposit(self, keep_x, keep_w, .true., hb, stride, m, threads)
         else
             one(1) = 1.0_real64
@@ -472,7 +760,7 @@ contains
     module procedure grid_merge
 
         character(len=*), parameter :: EP = "pf_kde_grid%merge"
-        integer :: i
+        integer :: i, j
 
         call require_initialised(self, EP)
         call require_unfinished(self, EP)
@@ -483,11 +771,22 @@ contains
         if (self%kernel_code /= other%kernel_code) call kde_abort(EP, "the two grids differ in kernel")
         if (.not. same_support(self, other)) call kde_abort(EP, "the two grids differ in support")
         if (self%boundary_code /= other%boundary_code) call kde_abort(EP, "the two grids differ in boundary")
+        if (self%method_code /= other%method_code) call kde_abort(EP, "the two grids differ in method")
         if (.not. same_rule(self%adapt, other%adapt)) call kde_abort(EP, "the two grids differ in pilot")
 
         do i = 1, self%nc
             self%acc(i) = self%acc(i) + other%acc(i)
         end do
+        ! Under `"binned"` the accumulation is in the bins, not the cells, until `%finish` runs.
+        ! Binning is linear, so two bin arrays add exactly as two deposits do; the geometry checked
+        ! above and the shared pilot fix the ladder, so the two shapes cannot disagree.
+        if (self%method_code == KDE_METHOD_BINNED) then
+            do j = 1, self%nclass
+                do i = 1, self%ntr
+                    self%bins(i, j) = self%bins(i, j) + other%bins(i, j)
+                end do
+            end do
+        end if
         self%w_below = self%w_below + other%w_below
         self%w_above = self%w_above + other%w_above
         self%w_total = self%w_total + other%w_total
@@ -508,6 +807,11 @@ contains
         ! A second `%finish` is a no-op: a caller who cannot tell whether a helper already closed
         ! the grid may call it again.
         if (self%finished) return
+        ! Under `"binned"` the cells hold nothing until here: the accumulation is in the bins, and
+        ! this is the one operation of the method that cannot stream, needing the last point to
+        ! have arrived. A poisoned grid answers NaN whatever the cells hold, so nothing is
+        ! transformed for it.
+        if (self%method_code == KDE_METHOD_BINNED .and. .not. grid_poisoned(self)) call kde_binned_transform(self)
         ! Everything a query would otherwise rebuild per call, computed once here. The grid cannot
         ! change between `%finish` and a query -- `%add` and `%merge` are shut, and `%clear` is what
         ! reopens it -- so the stored values are always current. This is what turns `%density` from
@@ -726,6 +1030,11 @@ contains
         end select
     end procedure grid_kernel_name
 
+    module procedure grid_method_name
+        call require_initialised(self, "pf_kde_grid%method")
+        name = trim(method_token(self%method_code))
+    end procedure grid_method_name
+
     module procedure grid_bounds
         call require_initialised(self, "pf_kde_grid%bounds")
         lo = ieee_value(1.0_real64, ieee_negative_inf)
@@ -809,6 +1118,9 @@ contains
         if (self%has_lower) write(u, '(2x,a,es24.16e3)') kde_label("lower"), self%lo
         if (self%has_upper) write(u, '(2x,a,es24.16e3)') kde_label("upper"), self%hi
         write(u, '(2x,a,a)') kde_label("boundary"), trim(boundary_token(self%boundary_code))
+        write(u, '(2x,a,a)') kde_label("method"), trim(method_token(self%method_code))
+        if (self%method_code == KDE_METHOD_BINNED .and. self%nclass > 1) &
+            write(u, '(2x,a,i0)') kde_label("h classes"), self%nclass
         if (self%adapt%on) then
             write(u, '(2x,a,es24.16e3)') kde_label("alpha"), self%adapt%alpha
             if (self%adapt%has_bmax) write(u, '(2x,a,es24.16e3)') kde_label("bandwidth_max"), self%adapt%bmax
@@ -900,6 +1212,13 @@ contains
         self%finished = .false.
         self%mass_total = 0.0_real64
         if (allocated(self%cum)) deallocate(self%cum)
+        ! The bins are what `%add` fills under `"binned"` and `%finish` transforms away, so `%clear`
+        ! has to give them back: a cleared grid accumulates again exactly as a new one does.
+        if (self%method_code == KDE_METHOD_BINNED) then
+            if (allocated(self%bins)) deallocate(self%bins)
+            allocate(self%bins(self%ntr, self%nclass))
+            self%bins = 0.0_real64
+        end if
         self%poisoned = self%adapt%on .and. self%adapt%unreadable
         self%reach_poisoned = .false.
         self%w_total = 0.0_real64
@@ -932,6 +1251,22 @@ contains
         end select
 
     end function boundary_token
+
+    !> A method's own token, as `%init` took it: the one spelling `%method` answers, `%print`
+    !! reports and the refusals name, so that none of the three can drift from
+    !! `kde_resolve_method`'s vocabulary.
+    pure function method_token(mcode) result(name)
+        integer, intent(in) :: mcode !! the method's code
+        character(len=8)    :: name  !! its token, blank-padded
+
+        select case (mcode)
+        case (KDE_METHOD_BINNED)
+            name = "binned"
+        case default
+            name = "exact"
+        end select
+
+    end function method_token
 
     !> `.true.` when two grids have the same support: the same bounds given, at the same values.
     pure function same_support(a, b) result(res)
@@ -1029,10 +1364,141 @@ contains
         self%has_upper = has_hi
         self%lo = lo
         self%hi = hi
+        ! The exact method, which `setup_binned` overrides where `%init` was given the other one:
+        ! the pilot builder reaches this routine too, and its grids are always exact.
+        self%method_code = KDE_METHOD_EXACT
+        self%pad = 0
+        self%ntr = 0
+        self%nclass = 0
+        if (allocated(self%hclass)) deallocate(self%hclass)
+        if (allocated(self%bins)) deallocate(self%bins)
         if (allocated(self%acc)) deallocate(self%acc)
         allocate(self%acc(ncells))
 
     end subroutine set_geometry
+
+
+    !> `.true.` for the one binned case that needs no padding: `"reflect"` with both bounds given
+    !! and the range exactly the support, on a power-of-two cell count. The transform's implicit
+    !! half-sample symmetry is then the reflection itself, at both ends, exactly.
+    pure function aligned_reflect(self) result(res)
+        class(pf_kde_grid), intent(in) :: self !! the grid
+        logical                        :: res  !! the unpadded path applies
+
+        res = self%boundary_code == KDE_BOUNDARY_REFLECT .and. self%has_lower .and. self%has_upper
+        if (.not. res) return
+        ! `pf_dct` takes a power-of-two length, and `pf_bin_linear` a grid of at least two points,
+        ! so the unpadded path needs both of `ncells`.
+        res = self%lo == self%x0 .and. self%hi == self%x1 .and. self%nc >= 2 .and. pf_is_pow2(self%nc)
+
+    end function aligned_reflect
+
+    !> The refusal of a transform longer than `KDE_BINNED_L_MAX` times `ncells`, naming the three
+    !! numbers that produced it: a bandwidth about twice the whole range reaches it, and a grid
+    !! whose bandwidth is twice its own range is telling the user something.
+    subroutine binned_too_long(self, entry)
+        class(pf_kde_grid), intent(in) :: self  !! the grid
+        character(len=*), intent(in)   :: entry !! the binding, for the message
+
+        character(len=64) :: hs, rs
+        character(len=32) :: cs
+
+        write(cs, '(i0)') self%nc
+        write(hs, '(es16.8e3)') self%h
+        write(rs, '(es16.8e3)') self%x1 - self%x0
+        call kde_abort(entry, 'method="binned" needs a transform longer than ' // &
+            trim(adjustl(cs)) // ' cells can carry: the bandwidth ' // trim(adjustl(hs)) // &
+            ' reaches past a range of ' // trim(adjustl(rs)) // '; use method="exact"')
+
+    end subroutine binned_too_long
+
+    !> Fills `%hclass`, the bandwidth classes the binned method convolves at, and answers the
+    !! widest of them, which is what sets the pad.
+    !!
+    !! A fixed bandwidth is one class. The adaptive rule's bandwidths are bracketed at `%init` from
+    !! the PILOT's density extremes, which is where they come from, so no pass over the data is
+    !! needed and `%merge` cannot meet a grid with a different ladder. The classes are geometric
+    !! with ratio `KDE_BINNED_H_STEP`: what sets the bucketing error is the ratio between
+    !! neighbours, so fixing it makes the accuracy the same whatever spread the data produces, and
+    !! the COUNT follows the spread up to `KDE_BINNED_CLASSES_MAX`.
+    subroutine class_ladder(self, given_lo, given_hi, hmax)
+        class(pf_kde_grid), intent(inout)  :: self     !! the grid, its rule already set
+        real(real64), intent(in), optional :: given_lo !! the narrowest bandwidth, when the caller knows it
+        real(real64), intent(in), optional :: given_hi !! the widest
+        real(real64), intent(out)          :: hmax     !! the widest class's bandwidth
+
+        real(real64) :: hlo, hhi, lim, e
+        integer :: c, i
+
+        if (allocated(self%hclass)) deallocate(self%hclass)
+        hlo = self%h
+        hhi = self%h
+        if (present(given_lo) .and. present(given_hi)) then
+            ! The caller's own bracket, which the binned curve takes from the fit's per-point
+            ! bandwidths: the rule that produced them is not a pilot this grid holds.
+            hlo = given_lo
+            hhi = given_hi
+        else if (self%adapt%on .and. self%adapt%alpha /= 0.0_real64 .and. .not. self%adapt%unreadable) then
+            ! `h (p/g)**(-alpha)`: the pilot's largest density gives the narrowest bandwidth and
+            ! its smallest the widest, so the two extremes bracket every bandwidth the rule can
+            ! give a point of this grid.
+            hlo = rule_h(self, self%adapt%pmax)
+            hhi = rule_h(self, self%adapt%pmin)
+            ! A point the pilot reads zero density at takes the cap where there is one, and `pmin`
+            ! where there is not; both are already inside the bracket.
+            if (self%adapt%has_bmax) then
+                if (hlo > self%adapt%bmax) hlo = self%adapt%bmax
+                if (hhi > self%adapt%bmax) hhi = self%adapt%bmax
+            end if
+        end if
+        ! A bandwidth the rule could only overflow to belongs to a point that poisons the grid at
+        ! `%add`, so the ladder stops at the widest one an estimate could be built from.
+        lim = huge(1.0_real64)/(2.0_real64*KDE_RADIUS(self%kernel_code))
+        if (.not. (hhi >= hlo)) hhi = hlo
+        if (.not. (hhi <= lim)) hhi = lim
+        if (.not. (hlo >= tiny(1.0_real64))) hlo = tiny(1.0_real64)
+        if (hlo > hhi) hlo = hhi
+        c = 1
+        if (hhi > hlo) then
+            e = log(hhi/hlo)/log(KDE_BINNED_H_STEP)
+            if (e >= real(KDE_BINNED_CLASSES_MAX - 1, real64)) then
+                c = KDE_BINNED_CLASSES_MAX
+            else
+                c = int(ceiling(e)) + 1
+            end if
+            if (kde_binned_classes_forced > 0) c = kde_binned_classes_forced
+        end if
+        allocate(self%hclass(c))
+        self%hclass(1) = hlo
+        self%hclass(c) = hhi
+        ! Geometric between the two ends, both ends exact, so that the widest class is the number
+        ! the pad was sized from and the narrowest is a bandwidth a point can actually take.
+        do i = 2, c - 1
+            self%hclass(i) = hlo*exp(real(i - 1, real64)*log(hhi/hlo)/real(c - 1, real64))
+        end do
+        hmax = hhi
+
+    end subroutine class_ladder
+
+    !> The adaptive rule's bandwidth at a pilot density `p`, without the per-point plumbing:
+    !! `h (p/g)**(-alpha)`, clamped where the exponential would overflow.
+    pure function rule_h(self, p) result(hj)
+        class(pf_kde_grid), intent(in) :: self !! the grid, its rule set
+        real(real64), intent(in)       :: p    !! the pilot's density, positive
+        real(real64)                   :: hj   !! the bandwidth there
+
+        real(real64) :: e
+
+        hj = self%h
+        if (.not. (p > 0.0_real64)) return
+        e = -self%adapt%alpha*(log(p) - self%adapt%logg)
+        if (e > log(huge(1.0_real64)) - log(self%h) - 1.0_real64) then
+            hj = huge(1.0_real64)
+        else
+            hj = self%h*exp(e)
+        end if
+
+    end function rule_h
 
     !> Moves an adaptive rule into a grid, leaving the source empty; an absent rule is `off`.
     subroutine move_adapt(from, to)
@@ -1052,6 +1518,7 @@ contains
         to%unreadable = from%unreadable
         to%logg = from%logg
         to%pmin = from%pmin
+        to%pmax = from%pmax
         to%digest = from%digest
         if (allocated(from%acc)) call move_alloc(from%acc, to%acc)
 
@@ -1216,6 +1683,119 @@ contains
         end do
 
     end subroutine deposit
+
+
+    !> `.true.` where the estimate is zero by definition: beyond a bound of the support. Only the
+    !! pad can be there, the grid's own range lying inside the support by `%init`'s rule.
+    pure function outside_support(self, t) result(res)
+        class(pf_kde_grid), intent(in) :: self !! the grid
+        real(real64), intent(in)       :: t    !! the position
+        logical                        :: res  !! it is outside the support
+
+        res = .false.
+        if (self%has_lower) res = t < self%lo
+        if (res) return
+        if (self%has_upper) res = t > self%hi
+
+    end function outside_support
+
+    !> The transform array's value at the position `p`, interpolated linearly between the two
+    !! centres around it: what a cell's reflected image contributes to it. Exact wherever the bound
+    !! sits on the half-grid, which is every aligned case; second order otherwise, the same order
+    !! the binning itself carries. A position beyond the array's ends is zero, which needs a kernel
+    !! wider than the whole support to reach.
+    pure function gather_at(self, cb, val, p) result(v)
+        class(pf_kde_grid), intent(in) :: self   !! the grid
+        real(real64), intent(in)       :: cb(:)  !! the array's centres
+        real(real64), intent(in)       :: val(:) !! the array, before the fold
+        real(real64), intent(in)       :: p      !! where the image is read
+        real(real64)                   :: v      !! its value there
+
+        real(real64) :: u, f
+        integer :: k
+
+        v = 0.0_real64
+        u = (p - cb(1))/self%dx
+        if (.not. (u >= 0.0_real64)) return
+        if (u > real(self%ntr - 1, real64)) return
+        k = int(u) + 1
+        if (k >= self%ntr) then
+            v = val(self%ntr)
+            return
+        end if
+        f = u - real(k - 1, real64)
+        v = val(k)*(1.0_real64 - f) + val(k + 1)*f
+
+    end function gather_at
+
+
+    !> Bins the survivors `x(1:m)` under `method="binned"`: the same shape `deposit` has, and the
+    !! same promise -- a static share of the points per thread, a private bin array each, summed in
+    !! thread order, so the answer is bit-identical at a given thread count.
+    subroutine bin_points(self, x, w, weighted, hb, hstride, m, threads)
+#ifdef _OPENMP
+        use omp_lib, only : omp_get_thread_num, omp_get_num_threads
+#endif
+        class(pf_kde_grid), intent(inout) :: self     !! the grid
+        real(real64), intent(in)          :: x(:)     !! the survivors, inside the support
+        real(real64), intent(in)          :: w(:)     !! their weights, when weighted
+        logical, intent(in)               :: weighted !! `w` holds one weight per survivor
+        real(real64), intent(in)          :: hb(:)    !! the bandwidths, one per survivor or one for all
+        integer(int64), intent(in)        :: hstride  !! 1 for one per survivor, 0 for one for all
+        integer(int64), intent(in)        :: m        !! how many survivors
+        integer, intent(in), optional     :: threads  !! the caller's request
+
+        real(real64), allocatable :: cb(:), part(:, :, :), pbelow(:), pabove(:)
+        integer(int64) :: team, lo_t, hi_t
+        integer :: t, nt, i, c
+
+        allocate(cb(self%ntr))
+        call kde_padded_centres(self, cb)
+        team = add_team(self, threads, m)
+        if (team <= 1_int64) then
+            kde_team_used = 1
+            call kde_bin_range(self, cb, x, w, weighted, hb, hstride, 1_int64, m, self%bins, self%w_below, &
+                self%w_above)
+            return
+        end if
+
+        ! One partial bin array per thread, in a shared array allocated before the region and
+        ! indexed by the thread number; each thread fills its own page and nothing else.
+        allocate(part(self%ntr, self%nclass, team), pbelow(team), pabove(team))
+        nt = 1
+        t = 1
+        lo_t = 1_int64
+        hi_t = m
+        !$omp parallel num_threads(int(team)) default(shared) private(t, lo_t, hi_t)
+#ifdef _OPENMP
+        t = omp_get_thread_num() + 1
+        !$omp single
+        nt = omp_get_num_threads()
+        kde_team_used = nt
+        !$omp end single
+        lo_t = (m*int(t - 1, int64))/int(nt, int64) + 1_int64
+        hi_t = (m*int(t, int64))/int(nt, int64)
+#endif
+        part(:, :, t) = 0.0_real64
+        pbelow(t) = 0.0_real64
+        pabove(t) = 0.0_real64
+        if (hi_t >= lo_t) call kde_bin_range(self, cb, x, w, weighted, hb, hstride, lo_t, hi_t, part(:, :, t), &
+            pbelow(t), pabove(t))
+        !$omp end parallel
+
+        ! Summed in thread order: the grouping is fixed by the survivor count and the team size.
+        do t = 1, nt
+            do c = 1, self%nclass
+                do i = 1, self%ntr
+                    self%bins(i, c) = self%bins(i, c) + part(i, c, t)
+                end do
+            end do
+            self%w_below = self%w_below + pbelow(t)
+            self%w_above = self%w_above + pabove(t)
+        end do
+
+    end subroutine bin_points
+
 
     !> Deposits the points `x(jlo:jhi)`, with the weights `w` when `weighted` and the bandwidth of
     !! point `j` at `hb(1 + (j - 1)*hstride)`, into `acc`, and the weight their kernels put below

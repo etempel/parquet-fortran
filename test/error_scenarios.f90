@@ -4177,6 +4177,12 @@ program error_scenarios
         call scenario_kde_grid_bandwidth_unusable()
     case ("kde_grid_query_unfinished")
         call scenario_kde_grid_query_unfinished()
+    case ("kde_grid_method_token")
+        call scenario_kde_grid_method_token()
+    case ("kde_grid_binned_too_long")
+        call scenario_kde_grid_binned_too_long()
+    case ("kde_curve_binned_one_point")
+        call scenario_kde_curve_binned_one_point()
     case ("kde_grid_add_after_finish")
         call scenario_kde_grid_add_after_finish()
     case ("kde_grid_merge_after_finish")
@@ -35217,6 +35223,46 @@ contains
         call g%density(f)
         print '(a)', "queried a grid that was never finished"
     end subroutine scenario_kde_grid_query_unfinished
+
+    !> `pf_kde_grid%init` refuses a `method=` token it does not know, naming the two it accepts.
+    !! The control is the same call with a token it does, in the other case.
+    subroutine scenario_kde_grid_method_token()
+        type(pf_kde_grid) :: g
+        character(len=:), allocatable :: token
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, method="BINNED")
+        call g%method(token)
+        print '(a, a)', "kde control initialised: ", token
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, method="fft")
+        print '(a)', "accepted a method token that is neither exact nor binned"
+    end subroutine scenario_kde_grid_method_token
+
+    !> `method="binned"` refuses a bandwidth whose padded transform would be longer than
+    !! `KDE_BINNED_L_MAX` times the cells: padding grows the length with the kernel's reach over
+    !! the range, and a bandwidth about twice the whole range reaches the ceiling. The control is
+    !! the same grid at a bandwidth a tenth as wide, which is admitted.
+    subroutine scenario_kde_grid_binned_too_long()
+        type(pf_kde_grid) :: g
+
+        call g%init(64, 0.0_real64, 1.0_real64, 0.1_real64, method="binned")
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(64, 0.0_real64, 1.0_real64, 40.0_real64, method="binned")
+        print '(a)', "accepted a binned grid whose transform is longer than the ceiling"
+    end subroutine scenario_kde_grid_binned_too_long
+
+    !> `pf_kde%curve(method="binned")` refuses a single point: the binned curve is one transform
+    !! over the whole curve, so it needs two points to have a spacing at all. The control is the
+    !! same single-point curve computed exactly, which is well defined.
+    subroutine scenario_kde_curve_binned_one_point()
+        type(pf_kde) :: k
+        real(real64) :: x(1), f(1)
+
+        call k%fit([0.25_real64, 0.5_real64, 0.75_real64], bandwidth=0.1_real64)
+        call k%curve(x, f, xmin=0.0_real64, xmax=1.0_real64)
+        print '(a, es22.15)', "kde control curved: ", f(1)
+        call k%curve(x, f, xmin=0.0_real64, xmax=1.0_real64, method="binned")
+        print '(a)', "accepted a binned curve of one point"
+    end subroutine scenario_kde_curve_binned_one_point
 
     !> `%add` after `%finish` aborts, naming `%clear` as the way back. The control is the same
     !! `%add` before it.

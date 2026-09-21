@@ -227,7 +227,26 @@ contains
             new_unittest("%sample is addressed by (seed, stream, k)", test_sample_addressing), &
             new_unittest("%sample respects the support and the kernel", test_sample_support_and_kernel), &
             new_unittest("%sample draws each point's own weight and bandwidth", test_sample_weights_and_bandwidths), &
-            new_unittest("the grid's %sample follows its %pdf inside its range", test_grid_sample) &
+            new_unittest("the grid's %sample follows its %pdf inside its range", test_grid_sample), &
+            new_unittest('method="exact" is the default bit for bit, and %method round-trips', &
+                test_binned_method_token), &
+            new_unittest("the binned grid converges to the exact estimate as the square of the cell width", &
+                test_binned_converges), &
+            new_unittest("the binned grid reproduces the exact estimate for every kernel", &
+                test_binned_every_kernel), &
+            new_unittest("the binned grid's cells and counters hold the weight deposited", &
+                test_binned_conserves_weight), &
+            new_unittest("the binned grid carries the boundary correction at both bounds", &
+                test_binned_boundaries), &
+            new_unittest("the binned grid finishes once, clears and merges", test_binned_lifecycle), &
+            new_unittest("a binned grid's cells do not depend on the thread count", test_binned_threads), &
+            new_unittest('%curve(method="binned") reproduces the exact curve at matched points', &
+                test_binned_curve), &
+            new_unittest('binned boundary="linear" matches the exact grid at both bounds', &
+                test_binned_linear), &
+            new_unittest('binned adaptive with boundary="linear" matches the exact grid', &
+                test_binned_adaptive_linear), &
+            new_unittest("the binned grid reproduces the golden vectors", test_binned_golden) &
             ]
 
     end subroutine collect_tests_kde
@@ -246,7 +265,9 @@ contains
             new_unittest("the zone sampler's fallback inverts the zone's integral", &
                 test_zone_sampler_fallback), &
             new_unittest("parquet_debug_set_kde_isj_cells sets the rule's grid, which moves it by under 1%", &
-                test_isj_cells_forced) &
+                test_isj_cells_forced), &
+            new_unittest("the binned adaptive kernel splits each point between two bandwidth classes", &
+                test_binned_adaptive) &
             ]
 
     end subroutine collect_tests_kde_serial
@@ -3267,15 +3288,15 @@ contains
         call g%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "sum_weights", seen)
-        ! The heading, twelve rows, the lower bound and the correction.
-        call check(error, nlines == 16 .and. seen, "%print must write a heading and fifteen rows")
+        ! The heading, twelve rows, the lower bound, the correction and the method.
+        call check(error, nlines == 17 .and. seen, "%print must write a heading and sixteen rows")
         if (allocated(error)) return
         call g%clear()
         open(newunit=u, file=PATH, status="replace", action="write")
         call g%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "nothing accumulated", seen)
-        call check(error, nlines == 17 .and. seen, "an empty grid must say so")
+        call check(error, nlines == 18 .and. seen, "an empty grid must say so")
         if (allocated(error)) return
         open(newunit=u, file=PATH, status="replace", action="write")
         call fresh%print(unit=u)
@@ -4617,5 +4638,603 @@ contains
         call check(error, k%bandwidth() == h_default, "n <= 0 must restore the default grid")
 
     end subroutine test_isj_cells_forced
+
+    ! ==========================================================================================
+    ! The binned method
+    ! ==========================================================================================
+
+    !> `method="exact"` named explicitly answers what a grid with no `method=` answers, bit for
+    !> bit, cell for cell and counter for counter: the binned path is an addition, and the default
+    !> is unchanged. `%method` round-trips both tokens and `%print` carries the one in force.
+    subroutine test_binned_method_token(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g, e
+        real(real64), allocatable :: x(:), fg(:), fe(:)
+        character(len=:), allocatable :: token
+        character(len=512) :: line
+        integer :: u, ios
+        logical :: seen
+
+        call kde_fixture(400_int64, x)
+        call g%init(64, -100.0_real64, 100.0_real64, 40.0_real64)
+        call g%add(x, finish=.true.)
+        call e%init(64, -100.0_real64, 100.0_real64, 40.0_real64, method="exact")
+        call e%add(x, finish=.true.)
+        allocate(fg(64), fe(64))
+        call g%density(fg)
+        call e%density(fe)
+        call check(error, all(fg == fe), 'method="exact" must answer the default bit for bit')
+        if (allocated(error)) return
+        call check(error, g%sum_weights() == e%sum_weights(), 'method="exact" must count the same weight')
+        if (allocated(error)) return
+
+        call e%method(token)
+        call check(error, token == "exact", '%method must answer "exact"')
+        if (allocated(error)) return
+        ! The token is matched case-insensitively, like every other one in the module.
+        call e%init(64, -100.0_real64, 100.0_real64, 40.0_real64, method="BiNnEd")
+        call e%method(token)
+        call check(error, token == "binned", "%method must fold the case of its token")
+        if (allocated(error)) return
+
+        open(newunit=u, status="scratch", action="readwrite")
+        call e%print(unit=u)
+        rewind(u)
+        seen = .false.
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, "binned") > 0) seen = .true.
+        end do
+        close(u)
+        call check(error, seen, "the grid's %print must name the method in force: binned")
+
+    end subroutine test_binned_method_token
+
+    !> An unbounded binned grid against the exact estimate at every cell centre: the error falls
+    !> as the SQUARE of the cell width, which is the order `pf_kde_grid` already promises.
+    !>
+    !> The first and last cells carry the assertion that matters for the padding: the transform's
+    !> basis is half-sample even about the array's own ends, so a pad one cell too narrow folds
+    !> weight back onto exactly those cells and nowhere else.
+    subroutine test_binned_converges(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: f(:), c(:), t(:)
+        real(real64) :: x(400), e(2), ratio
+        character(len=200) :: msg
+        integer :: nc, r
+
+        call spread_points(-300.0_real64, 300.0_real64, x)
+        call k%fit(x, bandwidth=40.0_real64)
+        do r = 1, 2
+            nc = 120*r
+            if (allocated(f)) deallocate(f, c, t)
+            allocate(f(nc), c(nc), t(nc))
+            call g%init(nc, -700.0_real64, 700.0_real64, 40.0_real64, method="binned")
+            call g%add(x, finish=.true.)
+            call g%density(f, x=c)
+            call k%pdf(c, t)
+            e(r) = rms(f - t)
+        end do
+        call check(error, e(1) > 0.0_real64, "the coarse binned grid must differ from the exact estimate, " // &
+            "or the convergence claim is vacuous")
+        if (allocated(error)) return
+        ratio = e(1)/e(2)
+        write(msg, '(a,f8.4)') "halving the binned grid's cells must divide the RMS error by four; " // &
+            "the ratio is ", ratio
+        call check(error, ratio > 3.6_real64 .and. ratio < 4.4_real64, trim(msg))
+
+    end subroutine test_binned_converges
+
+    !> Every kernel: a binned grid against the EXACT grid at matched cells, on a fixture with
+    !> structure at the bandwidth's own scale, so that the kernel's WIDTH is visible in the answer.
+    !>
+    !> This is what pins each kernel's own filter. The mutation it catches is one kernel sampled at
+    !> another's scale -- the four scales are 1, `sqrt(5)`, `sqrt(3)` and `sqrt(3)` -- which leaves
+    !> the mass right and the width wrong, and so survives every check on an integral. On a broad,
+    !> featureless sample a wrong width is nearly invisible; on two clusters it is not.
+    !>
+    !> **The bound is one part in a thousand of the peak for the three kernels that VANISH at their
+    !> support edge, and one part in a hundred for the box, which steps there.** Moving a point to
+    !> a cell centre moves its kernel's edge by up to half a cell: where the kernel vanishes there
+    !> that costs the square of the cell width, and where it steps it changes which cells the point
+    !> covers at all.
+    subroutine test_binned_every_kernel(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g, e
+        real(real64), allocatable :: x(:), f(:), t(:)
+        real(real64) :: peak, worst, bound
+        character(len=12), parameter :: KERNELS(4) = [character(len=12) :: "gaussian", "epanechnikov", &
+            "bspline", "box"]
+        character(len=200) :: msg
+        integer :: kk
+
+        call kde_two_component(2000_int64, x)
+        allocate(f(1024), t(1024))
+        do kk = 1, 4
+            call g%init(1024, -700.0_real64, 700.0_real64, 40.0_real64, kernel=KERNELS(kk), method="binned")
+            call g%add(x, finish=.true.)
+            call e%init(1024, -700.0_real64, 700.0_real64, 40.0_real64, kernel=KERNELS(kk))
+            call e%add(x, finish=.true.)
+            call g%density(f)
+            call e%density(t)
+            peak = maxval(t)
+            worst = maxval(abs(f - t))/peak
+            bound = 1.0e-3_real64
+            if (KERNELS(kk) == "box") bound = 1.0e-2_real64
+            write(msg, '(3a,es10.3)') "binned ", trim(KERNELS(kk)), &
+                " must reproduce the exact grid; the largest gap over the peak is ", worst
+            call check(error, worst <= bound, trim(msg))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_binned_every_kernel
+
+    !> The cells, the weight below `xmin` and the weight above `xmax` sum to the weight deposited:
+    !> the convolution multiplies the coefficient at zero frequency by exactly one, so no weight is
+    !> created or lost. Asserted where the kernels reach well past both ends, and again on a grid
+    !> whose range is the whole support under `"reflect"`, where the counters must be exactly zero.
+    subroutine test_binned_conserves_weight(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), z(:), f(:)
+        real(real64) :: total, p0, p1
+
+        call kde_fixture(400_int64, x)
+        call g%init(256, -100.0_real64, 100.0_real64, 40.0_real64, method="binned")
+        call g%add(x, finish=.true.)
+        allocate(f(256))
+        call g%density(f, normalise=.false.)
+        call g%cdf(-100.0_real64, p0)
+        call g%cdf(100.0_real64, p1)
+        call check(error, p0 > 0.2_real64 .and. p1 < 0.8_real64, &
+            "the fixture must put a good part of its weight beyond each end, or this test is vacuous")
+        if (allocated(error)) return
+        total = sum(f)*g%step() + p0*g%sum_weights() + (1.0_real64 - p1)*g%sum_weights()
+        call check(error, abs(total - g%sum_weights()) <= 1.0e-10_real64*g%sum_weights(), &
+            "the binned cells plus the two beyond-range counters must be the weight deposited")
+        if (allocated(error)) return
+
+        ! The range IS the support, so nothing may be counted beyond either end at all.
+        call bounded_fixture(400_int64, z)
+        call g%init(256, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="reflect", method="binned")
+        call g%add(z, finish=.true.)
+        if (allocated(f)) deallocate(f)
+        allocate(f(256))
+        call g%density(f, normalise=.false.)
+        call g%cdf(0.0_real64, p0)
+        call g%cdf(1.0_real64, p1)
+        call check(error, p0 == 0.0_real64 .and. p1 == 1.0_real64, &
+            "a reflecting grid whose range is the support must count nothing beyond either end")
+        if (allocated(error)) return
+        call check(error, abs(sum(f)*g%step() - g%sum_weights()) <= 1.0e-10_real64*g%sum_weights(), &
+            "the reflecting binned grid's cells must hold the whole weight")
+
+    end subroutine test_binned_conserves_weight
+
+    !> Each boundary correction under the binned method against the exact grid it mirrors, at the
+    !> bound where a correction either works or does not. `"reflect"` is tested twice: once where
+    !> the range is the support and the basis supplies the correction unpadded, and once where the
+    !> range is a strict subset and the images are folded in explicitly.
+    subroutine test_binned_boundaries(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g, e
+        real(real64), allocatable :: z(:), fb(:), fe(:)
+        real(real64) :: peak
+        character(len=11), parameter :: CORR(2) = [character(len=11) :: "reflect", "renormalise"]
+        integer :: mm
+
+        call bounded_fixture(4000_int64, z)
+        allocate(fb(512), fe(512))
+        do mm = 1, 2
+            ! The range is the whole support: the aligned case.
+            call g%init(512, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+                boundary=CORR(mm), method="binned")
+            call g%add(z, finish=.true.)
+            call e%init(512, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+                boundary=CORR(mm))
+            call e%add(z, finish=.true.)
+            call g%density(fb)
+            call e%density(fe)
+            peak = maxval(fe)
+            call check(error, abs(fb(1) - fe(1)) <= 5.0e-3_real64*peak, &
+                "the binned grid must carry the correction at the lower bound under " // trim(CORR(mm)))
+            if (allocated(error)) return
+            call check(error, abs(fb(512) - fe(512)) <= 5.0e-3_real64*peak, &
+                "the binned grid must carry the correction at the upper bound under " // trim(CORR(mm)))
+            if (allocated(error)) return
+            call check(error, maxval(abs(fb - fe)) <= 5.0e-3_real64*peak, &
+                "the binned grid must reproduce the exact grid under " // trim(CORR(mm)))
+            if (allocated(error)) return
+        end do
+
+        ! The range inside the support, so the reflecting images are folded in explicitly rather
+        ! than coming from the basis, and the two counters are not zero.
+        call g%init(512, 0.1_real64, 0.9_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="reflect", method="binned")
+        call g%add(z, finish=.true.)
+        call e%init(512, 0.1_real64, 0.9_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="reflect")
+        call e%add(z, finish=.true.)
+        call g%density(fb)
+        call e%density(fe)
+        peak = maxval(fe)
+        call check(error, maxval(abs(fb - fe)) <= 1.0e-2_real64*peak, &
+            "a reflecting binned grid whose range is inside the support must reproduce the exact grid")
+
+    end subroutine test_binned_boundaries
+
+    !> The binned lifecycle: `%finish` transforms once and a second call changes nothing, `%clear`
+    !> reopens the grid and a re-`%add` gives the same cells back, and `%merge` of two binned
+    !> partials is one grid over the concatenation.
+    subroutine test_binned_lifecycle(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g, a, b
+        real(real64), allocatable :: x(:), f1(:), f2(:), f3(:)
+        integer(int64) :: half
+
+        call kde_fixture(400_int64, x)
+        allocate(f1(128), f2(128), f3(128))
+        call g%init(128, -400.0_real64, 400.0_real64, 40.0_real64, method="binned")
+        call g%add(x)
+        call check(error, .not. g%is_finished(), "a binned grid is not finished until %finish runs")
+        if (allocated(error)) return
+        call g%finish()
+        call check(error, g%is_finished(), "%finish must close a binned grid")
+        if (allocated(error)) return
+        call g%density(f1)
+        call g%finish()
+        call g%density(f2)
+        call check(error, all(f1 == f2), "a second %finish must not transform the cells again")
+        if (allocated(error)) return
+
+        call g%clear()
+        call check(error, .not. g%is_finished(), "%clear must reopen a binned grid")
+        if (allocated(error)) return
+        call g%add(x, finish=.true.)
+        call g%density(f2)
+        call check(error, all(f1 == f2), "a cleared binned grid must accumulate again from empty")
+        if (allocated(error)) return
+
+        ! All but the last point, merged with the last: the one split whose bins add in the same
+        ! order the single call sums them in, so the claim can be made to the bit. Two halves agree
+        ! to rounding and not to the bit, as they do under the exact deposit.
+        half = size(x, kind=int64) - 1_int64
+        call a%init(128, -400.0_real64, 400.0_real64, 40.0_real64, method="binned")
+        call a%add(x(1:half))
+        call b%init(128, -400.0_real64, 400.0_real64, 40.0_real64, method="binned")
+        call b%add(x(half + 1:))
+        call a%merge(b, finish=.true.)
+        call a%density(f3)
+        call check(error, all(f1 == f3), "two merged binned partials must be one grid over the concatenation")
+
+    end subroutine test_binned_lifecycle
+
+    !> `%add(threads=)` at one, two and eight threads gives bit-identical cells: each thread gets a
+    !> static share of the points and a private bin array, and the partials are summed in thread
+    !> order.
+    subroutine test_binned_threads(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), f1(:), f(:)
+        integer, parameter :: TEAMS(3) = [1, 2, 8]
+        integer :: t
+
+        call kde_fixture(4000_int64, x)
+        allocate(f1(128), f(128))
+        do t = 1, 3
+            call g%init(128, -400.0_real64, 400.0_real64, 40.0_real64, method="binned")
+            call g%add(x, threads=TEAMS(t), finish=.true.)
+            if (t == 1) then
+                call g%density(f1)
+            else
+                call g%density(f)
+                call check(error, all(f == f1), &
+                    "a binned grid's cells must not depend on the thread count")
+                if (allocated(error)) return
+            end if
+        end do
+
+    end subroutine test_binned_threads
+
+    !> The binned adaptive kernel: one transform per bandwidth class, each point's weight split
+    !> between the two classes around its own bandwidth, linearly in `log h`.
+    !>
+    !> **The split is what is under test, not the bucketing.** Rounding each point to its NEAREST
+    !> class is the obvious scheme and it is an order worse: the error then falls as the class
+    !> count, where splitting makes it fall as the SQUARE of the count -- the same trick linear
+    !> binning already applies to position. Doubling the classes must therefore divide the error by
+    !> about four, and a nearest-class assignment halves it instead.
+    !>
+    !> Serial, because it forces the class count through a process-global hook.
+    subroutine test_binned_adaptive(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, g, e
+        real(real64), allocatable :: x(:), f(:), t(:)
+        real(real64) :: err(2), peak, ratio
+        character(len=200) :: msg
+        integer :: r
+
+        call kde_two_component(2000_int64, x)
+        call p%init(128, -700.0_real64, 700.0_real64, 60.0_real64)
+        call p%add(x, finish=.true.)
+        call e%init(512, -700.0_real64, 700.0_real64, 60.0_real64, pilot=p, alpha=0.5_real64, &
+            bandwidth_max=180.0_real64)
+        call e%add(x, finish=.true.)
+        allocate(f(512), t(512))
+        call e%density(t)
+        peak = maxval(t)
+        do r = 1, 2
+            call parquet_debug_set_kde_binned_classes(4*2**(r - 1))
+            call g%init(512, -700.0_real64, 700.0_real64, 60.0_real64, pilot=p, alpha=0.5_real64, &
+                bandwidth_max=180.0_real64, method="binned")
+            call g%add(x, finish=.true.)
+            call g%density(f)
+            err(r) = rms(f - t)/peak
+        end do
+        call parquet_debug_set_kde_binned_classes(0)
+        call check(error, err(1) > 1.0e-4_real64, &
+            "four bandwidth classes must leave a measurable bucketing error, or this test is vacuous")
+        if (allocated(error)) return
+        ratio = err(1)/err(2)
+        write(msg, '(a,f8.4)') "doubling the bandwidth classes must divide the bucketing error by " // &
+            "about four, which a nearest-class assignment would not; the ratio is ", ratio
+        call check(error, ratio >= 3.0_real64, trim(msg))
+        if (allocated(error)) return
+
+        ! At the count the rule's own spread gives, the binned adaptive grid is the exact adaptive
+        ! grid to the accuracy the guide promises for it: about an order coarser than the fixed
+        ! binned estimate, and plot-grade.
+        call g%init(512, -700.0_real64, 700.0_real64, 60.0_real64, pilot=p, alpha=0.5_real64, &
+            bandwidth_max=180.0_real64, method="binned")
+        call g%add(x, finish=.true.)
+        call g%density(f)
+        write(msg, '(a,es10.3)') "the binned adaptive grid must reproduce the exact one; the largest " // &
+            "gap over the peak is ", maxval(abs(f - t))/peak
+        call check(error, maxval(abs(f - t))/peak <= 5.0e-3_real64, trim(msg))
+        if (allocated(error)) return
+
+        ! `alpha = 0` gives every point the global bandwidth, so one class carries them all and the
+        ! adaptive binned grid is the fixed binned grid.
+        call g%init(512, -700.0_real64, 700.0_real64, 60.0_real64, pilot=p, alpha=0.0_real64, &
+            method="binned")
+        call g%add(x, finish=.true.)
+        call g%density(f)
+        call e%init(512, -700.0_real64, 700.0_real64, 60.0_real64, method="binned")
+        call e%add(x, finish=.true.)
+        call e%density(t)
+        call check(error, all(f == t), "alpha = 0 must make the binned adaptive grid the fixed binned grid")
+
+    end subroutine test_binned_adaptive
+
+    !> `%curve(method="binned")` against the exact curve, at matched points, unbounded and at a
+    !> bound: the curve's points are the transform's own cell centres, so the two ranges cannot
+    !> disagree by half a cell -- a disagreement that shows as a SHIFTED curve, right in shape and
+    !> wrong in place, which no check on an integral would see.
+    subroutine test_binned_curve(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: z(:)
+        real(real64) :: x(256), xe(256), f(256), fe(256), fg(256), peak, worst
+        character(len=200) :: msg
+
+        call kde_two_component(2000_int64, z)
+        call k%fit(z, bandwidth=40.0_real64)
+        call k%curve(xe, fe, xmin=-700.0_real64, xmax=700.0_real64)
+        call k%curve(x, f, xmin=-700.0_real64, xmax=700.0_real64, method="binned")
+        call check(error, all(x == xe), "the binned curve must answer the same points as the exact one")
+        if (allocated(error)) return
+        peak = maxval(fe)
+        worst = maxval(abs(f - fe))/peak
+        ! The curve's points are a grid's cell CENTRES, so a binned grid whose edges sit half a
+        ! spacing outside them must answer the same bits. This is the geometric half of the claim,
+        ! separated from the binning error the comparison with the exact curve also carries.
+        call g%init(256, -700.0_real64 - 0.5_real64*(1400.0_real64/255.0_real64), &
+            -700.0_real64 + 255.5_real64*(1400.0_real64/255.0_real64), 40.0_real64, method="binned")
+        call g%add(z, finish=.true.)
+        call g%density(fg)
+        ! To rounding rather than to the bit: the curve forms its spacing as `(b - a)/(n - 1)` and
+        ! `%init` forms it as `(xmax - xmin)/ncells`, which are the same number by two routes.
+        write(msg, '(a,es10.3)') "the binned curve must be the binned grid whose cell centres are " // &
+            "its points; the largest gap over the peak is ", maxval(abs(f - fg))/peak
+        call check(error, maxval(abs(f - fg)) <= 1.0e-14_real64*peak, trim(msg))
+        if (allocated(error)) return
+        ! The control that makes the tolerance below mean something: the curve rises and falls by
+        ! more than a hundredth of its peak between neighbouring points, so a range out by half a
+        ! spacing would move it by several times the tolerance the next check applies.
+        call check(error, maxval(abs(fe(2:) - fe(:255)))/peak > 1.0e-2_real64, &
+            "the fixture must vary by more than the tolerance between neighbouring points, or a " // &
+            "half-spacing shift would pass")
+        if (allocated(error)) return
+        write(msg, '(a,es10.3)') "the binned curve must reproduce the exact curve; the largest gap " // &
+            "over the peak is ", worst
+        call check(error, worst <= 2.0e-3_real64, trim(msg))
+        if (allocated(error)) return
+
+        ! At a bound, where the correction is what the curve must honour.
+        call bounded_fixture(2000_int64, z)
+        call k%fit(z, bandwidth=0.08_real64, lower=0.0_real64, upper=1.0_real64, boundary="reflect")
+        call k%curve(xe, fe, xmin=0.0_real64, xmax=1.0_real64)
+        call k%curve(x, f, xmin=0.0_real64, xmax=1.0_real64, method="binned")
+        peak = maxval(fe)
+        write(msg, '(a,es10.3)') "the binned curve must carry the fit's boundary correction; the " // &
+            "largest gap over the peak is ", maxval(abs(f - fe))/peak
+        call check(error, maxval(abs(f - fe))/peak <= 5.0e-3_real64, trim(msg))
+        if (allocated(error)) return
+        call check(error, abs(f(1) - fe(1)) <= 5.0e-3_real64*peak, &
+            "the binned curve must agree with the exact one AT the lower bound")
+        if (allocated(error)) return
+        call check(error, abs(f(256) - fe(256)) <= 5.0e-3_real64*peak, &
+            "the binned curve must agree with the exact one AT the upper bound")
+
+    end subroutine test_binned_curve
+
+    !> `boundary="linear"` under the binned method, against the exact grid, at the LOWER bound and
+    !> at the UPPER bound separately rather than as one summary.
+    !>
+    !> The local linear correction is two convolutions: the ordinary one against `K`, and a second
+    !> against the odd kernel `u K(u)`, whose transform is a sine. The mutation that matters is the
+    !> odd half given the wrong sign or the wrong frequency -- the spectrum handed from `pf_dct` to
+    !> `pf_idst` unshifted, say. Either biases the estimate towards one bound and away from the
+    !> other while its integral stays one, so an RMS or a mass check survives both and only the two
+    !> bounds taken apart can see them.
+    subroutine test_binned_linear(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g, e
+        real(real64), allocatable :: z(:)
+        real(real64) :: fb(512), fe(512), peak
+        character(len=200) :: msg
+
+        call bounded_fixture(4000_int64, z)
+        call g%init(512, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear", method="binned")
+        call g%add(z, finish=.true.)
+        call e%init(512, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear")
+        call e%add(z, finish=.true.)
+        call g%density(fb)
+        call e%density(fe)
+        peak = maxval(fe)
+        write(msg, '(a,es10.3,a,es10.3)') "binned linear at the LOWER bound: ", fb(1), " against ", fe(1)
+        call check(error, abs(fb(1) - fe(1)) <= 1.0e-2_real64*peak, trim(msg))
+        if (allocated(error)) return
+        write(msg, '(a,es10.3,a,es10.3)') "binned linear at the UPPER bound: ", fb(512), " against ", fe(512)
+        call check(error, abs(fb(512) - fe(512)) <= 1.0e-2_real64*peak, trim(msg))
+        if (allocated(error)) return
+        write(msg, '(a,es10.3)') "binned linear in the interior; the largest gap over the peak is ", &
+            maxval(abs(fb - fe))/peak
+        call check(error, maxval(abs(fb - fe)) <= 1.0e-2_real64*peak, trim(msg))
+        if (allocated(error)) return
+        ! The control that makes the two bounds mean something: the correction is doing real work
+        ! there, so an estimate without it would miss by far more than the tolerance.
+        call check(error, fe(1) > 1.2_real64*peak*0.05_real64 .or. fe(512) > 1.2_real64*peak*0.05_real64, &
+            "the fixture must have a bound where the correction is acting, or this test is vacuous")
+
+    end subroutine test_binned_linear
+
+    !> The adaptive kernel and `boundary="linear"` together, which is the combination the request
+    !> calls usual: each bandwidth class contributes its own pair of convolutions, and each pair is
+    !> combined with the truncated moments taken at THAT class's bandwidth before the classes are
+    !> summed. Taking the moments at the global bandwidth instead is the mutation this catches.
+    subroutine test_binned_adaptive_linear(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, g, e
+        real(real64), allocatable :: z(:)
+        real(real64) :: fb(512), fe(512), peak
+        character(len=200) :: msg
+
+        call bounded_fixture(4000_int64, z)
+        call p%init(128, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear")
+        call p%add(z, finish=.true.)
+        call g%init(512, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear", pilot=p, alpha=0.5_real64, bandwidth_max=0.2_real64, method="binned")
+        call g%add(z, finish=.true.)
+        call e%init(512, 0.0_real64, 1.0_real64, 0.08_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear", pilot=p, alpha=0.5_real64, bandwidth_max=0.2_real64)
+        call e%add(z, finish=.true.)
+        call g%density(fb)
+        call e%density(fe)
+        peak = maxval(fe)
+        write(msg, '(a,es10.3)') "the binned adaptive linear estimate must reproduce the exact one; " // &
+            "the largest gap over the peak is ", maxval(abs(fb - fe))/peak
+        call check(error, maxval(abs(fb - fe)) <= 2.0e-2_real64*peak, trim(msg))
+        if (allocated(error)) return
+        call check(error, g%is_adaptive(), "the fixture must be adaptive, or this test is vacuous")
+
+    end subroutine test_binned_adaptive_linear
+
+    !> Every binned golden case: the cells a binned grid fills, against a 50-digit oracle that
+    !> bins and convolves directly.
+    !>
+    !> The oracle sums the convolution term by term under the extension the transform implies --
+    !> half-sample even about each end of its array -- where the library reaches the same numbers
+    !> through one cosine transform per bandwidth class and, under `"linear"`, one inverse sine
+    !> transform beside it. The two share the definition and nothing else, so any arithmetic change
+    !> at all shows here.
+    subroutine test_binned_golden(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+
+        call check_binned_case(error, "BIN_GAUSS", KG_BIN_GAUSS_NC, KG_BIN_GAUSS_XMIN, &
+            KG_BIN_GAUSS_XMAX, KG_BIN_GAUSS_F)
+        if (allocated(error)) return
+        call check_binned_case(error, "BIN_EPAN", KG_BIN_EPAN_NC, KG_BIN_EPAN_XMIN, &
+            KG_BIN_EPAN_XMAX, KG_BIN_EPAN_F)
+        if (allocated(error)) return
+        call check_binned_case(error, "BIN_BOX", KG_BIN_BOX_NC, KG_BIN_BOX_XMIN, &
+            KG_BIN_BOX_XMAX, KG_BIN_BOX_F)
+        if (allocated(error)) return
+        call check_binned_case(error, "BIN_BSPL", KG_BIN_BSPL_NC, KG_BIN_BSPL_XMIN, &
+            KG_BIN_BSPL_XMAX, KG_BIN_BSPL_F)
+        if (allocated(error)) return
+        call check_binned_case(error, "BIN_REF", KG_BIN_REF_NC, KG_BIN_REF_XMIN, &
+            KG_BIN_REF_XMAX, KG_BIN_REF_F)
+        if (allocated(error)) return
+        call check_binned_case(error, "BIN_REF_IN", KG_BIN_REF_IN_NC, KG_BIN_REF_IN_XMIN, &
+            KG_BIN_REF_IN_XMAX, KG_BIN_REF_IN_F)
+        if (allocated(error)) return
+        call check_binned_case(error, "BIN_REN", KG_BIN_REN_NC, KG_BIN_REN_XMIN, &
+            KG_BIN_REN_XMAX, KG_BIN_REN_F)
+        if (allocated(error)) return
+        call check_binned_case(error, "BIN_LIN", KG_BIN_LIN_NC, KG_BIN_LIN_XMIN, &
+            KG_BIN_LIN_XMAX, KG_BIN_LIN_F)
+
+    end subroutine test_binned_golden
+
+    !> Builds one binned golden case's grid and compares every cell with the oracle's.
+    subroutine check_binned_case(error, name, nc, xmin, xmax, want)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        character(len=*), intent(in) :: name    !! the case
+        integer, intent(in)          :: nc      !! its cells
+        real(real64), intent(in)     :: xmin    !! its range's lower end
+        real(real64), intent(in)     :: xmax    !! its range's upper end
+        real(real64), intent(in)     :: want(:) !! the oracle's density at each cell
+
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: x(:), f(:)
+        real(real64) :: worst
+        character(len=200) :: msg
+        integer :: i
+
+        call kde_fixture(32_int64, x)
+        select case (name)
+        case ("BIN_GAUSS")
+            call g%init(nc, xmin, xmax, 60.0_real64, method="binned")
+        case ("BIN_EPAN")
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="epanechnikov", method="binned")
+        case ("BIN_BOX")
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="box", method="binned")
+        case ("BIN_BSPL")
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="bspline", method="binned")
+        case ("BIN_REF")
+            call g%init(nc, xmin, xmax, 60.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+                boundary="reflect", method="binned")
+        case ("BIN_REF_IN")
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="epanechnikov", lower=-470.0_real64, &
+                upper=460.0_real64, boundary="reflect", method="binned")
+        case ("BIN_REN")
+            call g%init(nc, xmin, xmax, 60.0_real64, lower=-470.0_real64, boundary="renormalise", &
+                method="binned")
+        case ("BIN_LIN")
+            call g%init(nc, xmin, xmax, 60.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+                boundary="linear", method="binned")
+        case default
+            error stop "check_binned_case: unknown case " // name
+        end select
+        call g%add(x, finish=.true.)
+        allocate(f(nc))
+        call g%density(f)
+        worst = 0.0_real64
+        do i = 1, nc
+            worst = max(worst, abs(f(i) - want(i)))
+        end do
+        write(msg, '(3a,es10.3)') "binned golden ", name, ": the largest gap from the oracle is ", worst
+        call check(error, worst <= 1.0e-13_real64*maxval(abs(want)), trim(msg))
+
+    end subroutine check_binned_case
 
 end module test_kde

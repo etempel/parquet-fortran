@@ -119,8 +119,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   back through `%bandwidths`, `%bandwidth_at` and `%pilot`), and the streaming form takes the same
   rule from a `pilot=` grid. A grid's lifecycle is `%init` -> `%add`* -> `%finish` -> query, with
   `%is_finished`, `finish=.true.` on `%add` and `%merge` as the one-line form, and `%clear` to
-  reopen it. `threads=` on the bulk forms of both; draws addressed by `(seed, stream)`. An
-  Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
+  reopen it. `method="binned"` on `pf_kde_grid%init` and on `pf_kde%curve` fills the cells by
+  linear binning and one cosine transform instead of by depositing each kernel -- with the
+  bandwidths bucketed into geometrically spaced classes under the adaptive kernel, a second
+  transform against the odd kernel under `boundary="linear"`, and `%method(name)` reading the token
+  back; the exact deposit stays the default. `threads=` on the bulk forms of both; draws addressed
+  by `(seed, stream)`. An Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
   [Kernel density estimation](doc/pages/utilities/kernel-density.md).
 - **A direction inside a HEALPix pixel, not just at its centre**:
   `pf_healpix_grid%pix2vec_offset(ipix, dx, dy, vec)` is `%pix2vec` generalised to any position in the

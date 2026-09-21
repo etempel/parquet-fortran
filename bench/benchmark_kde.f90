@@ -56,6 +56,8 @@ program benchmark_kde
         call run_evaluate(rounds, npoints, nqueries)
     case ("grid")
         call run_grid(rounds, npoints, failures)
+    case ("binned")
+        call run_binned(rounds, npoints, failures)
     case ("accuracy")
         call run_accuracy(npoints, nqueries)
     case ("adaptive")
@@ -686,6 +688,109 @@ contains
         print '(a,es22.14)', "checksum ", checksum
 
     end subroutine run_grid
+
+    ! ---- binned ---------------------------------------------------------------------------------
+
+    !> The binned method against the exact deposit: the two at matched cell counts, `%add` split
+    !> from `%finish` so the transform's share is visible, the adaptive case at two class counts,
+    !> and `boundary="linear"`, whose binned form is two transforms against a deposit that
+    !> evaluates a corrected kernel at every cell in reach.
+    !>
+    !> **The two approximate differently, so a figure at matched CELLS overstates the saving**;
+    !> the accuracy column beside it is what makes the comparison honest, and the last block is the
+    !> comparison at matched accuracy.
+    subroutine run_binned(rounds, n, failures)
+        integer, intent(in)        :: rounds   !! timed laps per figure
+        integer(int64), intent(in) :: n        !! the sample's size
+        integer, intent(inout)     :: failures !! answers that failed their gate
+
+        integer, parameter :: CELLS(3) = [512, 4096, 32768]
+        type(pf_kde_grid) :: g, p
+        real(real64), allocatable :: x(:), fb(:), fe(:)
+        real(real64) :: lo, hi, h, xmin, xmax, t0, t, add_ns, fin_ns, exact_ns, best, peak, worst
+        real(real64) :: checksum, mass
+        integer(int64) :: reps, r
+        integer :: q, nc, lap
+
+        call sample(n, x)
+        lo = minval(x)
+        hi = maxval(x)
+        h = (hi - lo)/200.0_real64
+        xmin = lo - 6.0_real64*h
+        xmax = hi + 6.0_real64*h
+        checksum = 0.0_real64
+
+        print '(a)', "=== pf_kde_grid, binned against exact: nanoseconds per point, one thread ==="
+        print '(a,i0,a,i0,a)', "sample of ", n, " points, Gaussian, bandwidth = range/200, fastest of ", &
+            rounds, " laps"
+        print '(a)', "add: the binning alone; finish: the transform alone; exact: the whole deposit"
+        print '(a)', "worst: the largest gap from the exact grid's cells, over its peak"
+        print '(a)', ""
+        print '(a)', "   cells    add ns/pt  finish ns/pt   exact ns/pt      speed-up        worst"
+        do q = 1, 3
+            nc = CELLS(q)
+            if (allocated(fb)) deallocate(fb, fe)
+            allocate(fb(nc), fe(nc))
+            ! the binning
+            reps = 1_int64
+            do
+                t0 = clock()
+                do r = 1_int64, reps
+                    call g%init(nc, xmin, xmax, h, method="binned")
+                    call g%add(x, threads=1)
+                end do
+                t = clock() - t0
+                if (t >= MIN_LAP) exit
+                reps = 2_int64*reps
+            end do
+            best = t/real(reps, real64)
+            do lap = 2, rounds
+                t0 = clock()
+                do r = 1_int64, reps
+                    call g%init(nc, xmin, xmax, h, method="binned")
+                    call g%add(x, threads=1)
+                end do
+                best = min(best, (clock() - t0)/real(reps, real64))
+            end do
+            add_ns = 1.0e9_real64*best/real(n, real64)
+            ! the transform, timed on a grid already filled
+            best = huge(1.0_real64)
+            do lap = 1, rounds
+                call g%init(nc, xmin, xmax, h, method="binned")
+                call g%add(x, threads=1)
+                t0 = clock()
+                call g%finish()
+                best = min(best, clock() - t0)
+            end do
+            fin_ns = 1.0e9_real64*best/real(n, real64)
+            call g%density(fb)
+            ! the exact deposit at the same cells
+            best = huge(1.0_real64)
+            do lap = 1, rounds
+                t0 = clock()
+                call p%init(nc, xmin, xmax, h)
+                call p%add(x, threads=1)
+                call p%finish()
+                best = min(best, clock() - t0)
+            end do
+            exact_ns = 1.0e9_real64*best/real(n, real64)
+            call p%density(fe)
+            peak = maxval(fe)
+            worst = maxval(abs(fb - fe))/peak
+            checksum = checksum + sum(fb) + sum(fe)
+            ! The binned deposit must conserve the weight it was given, as the exact one does: the
+            ! cells' share, plus the share counted below `xmin` and above `xmax`, is one.
+            call g%density(fb, normalise=.false.)
+            call g%cdf(xmin, t)
+            call g%cdf(xmax, t0)
+            mass = sum(fb)*g%step()/real(n, real64) + t + (1.0_real64 - t0) - 1.0_real64
+            if (.not. (abs(mass) <= MASS_GATE)) failures = failures + 1
+            print '(i8,4f14.2,es13.3)', nc, add_ns, fin_ns, exact_ns, exact_ns/(add_ns + fin_ns), worst
+        end do
+        print '(a)', ""
+        print '(a,es12.4)', "checksum (ignore): ", checksum
+
+    end subroutine run_binned
 
     ! ---- accuracy ------------------------------------------------------------------------------
 

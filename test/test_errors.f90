@@ -3670,6 +3670,12 @@ contains
                 test_kde_grid_bandwidth_unusable_aborts), &
             new_unittest("a query on an unfinished grid aborts", &
                 test_kde_grid_query_unfinished_aborts), &
+            new_unittest('pf_kde_grid%init refuses an unknown method token', &
+                test_kde_grid_method_token_aborts), &
+            new_unittest('method="binned" refuses a transform past the ceiling', &
+                test_kde_grid_binned_too_long_aborts), &
+            new_unittest('%curve(method="binned") refuses a single point', &
+                test_kde_curve_binned_one_point_aborts), &
             new_unittest("pf_kde_grid%add after %finish aborts", &
                 test_kde_grid_add_after_finish_aborts), &
             new_unittest("pf_kde_grid%merge after %finish aborts", &
@@ -21632,6 +21638,24 @@ contains
         call check_kde_scenario(error, "kde_grid_query_unfinished", &
             "pf_kde_grid%density: the grid has not been finished; call %finish before querying it")
     end subroutine test_kde_grid_query_unfinished_aborts
+    !
+    subroutine test_kde_grid_method_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_method_token", &
+            'pf_kde_grid%init: method must be "exact" or "binned"')
+    end subroutine test_kde_grid_method_token_aborts
+    !
+    subroutine test_kde_grid_binned_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_binned_too_long", &
+            'pf_kde_grid%init: method="binned" needs a transform longer than')
+    end subroutine test_kde_grid_binned_too_long_aborts
+    !
+    subroutine test_kde_curve_binned_one_point_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_binned_one_point", &
+            'pf_kde%curve: method="binned" needs at least two points')
+    end subroutine test_kde_curve_binned_one_point_aborts
     !
     subroutine test_kde_grid_add_after_finish_aborts(error)
         type(error_type), allocatable, intent(out) :: error

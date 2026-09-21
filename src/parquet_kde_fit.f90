@@ -439,11 +439,17 @@ contains
         character(len=*), parameter :: EP = "pf_kde%curve"
         real(real64) :: a, b, c, nan
         integer(int64) :: n, i
-        integer :: team
+        integer :: team, mcode
 
         call require_fitted(self, EP)
         n = size(x, kind=int64)
         if (size(f, kind=int64) /= n) call kde_abort(EP, "x and f must have the same size")
+        mcode = KDE_METHOD_EXACT
+        if (present(method)) call kde_resolve_method(EP, method, mcode)
+        ! The binned curve is one transform over the whole curve, so it needs two points to have a
+        ! spacing at all. The exact curve answers a single point happily.
+        if (mcode == KDE_METHOD_BINNED .and. n < 2_int64) &
+            call kde_abort(EP, 'method="binned" needs at least two points')
         call kde_query_team(EP, threads, n, query_work(self), team)
         c = 3.0_real64
         if (present(cut)) then
@@ -487,6 +493,11 @@ contains
             end if
         end if
         call spaced(a, b, x)
+        if (mcode == KDE_METHOD_BINNED) then
+            kde_team_used = 1
+            call binned_curve(self, EP, a, b, n, f)
+            return
+        end if
         if (team <= 1) then
             kde_team_used = 1
             do i = 1_int64, n
@@ -1666,6 +1677,84 @@ contains
         y = quantile_at(self, pf_random_at(key, sk, d))
 
     end function draw_renormalised
+
+    !> The curve, filled by the binned method: the retained sample split between the two curve
+    !! points around each one, then one cosine transform.
+    !!
+    !! **The curve's points become a grid's cell CENTRES**, which is the one thing this has to get
+    !! right: the transform's array is spaced by the curve's own spacing and its interior is the
+    !! curve itself, so that the two ranges cannot disagree by half a cell. A grid of `n` cells
+    !! whose centres are `a` to `b` has its edges half a spacing outside them, which is what `x0`
+    !! and `x1` are set to here.
+    !!
+    !! The grid is filled by hand rather than through `%init` for two reasons, and both are about
+    !! reaching what a caller of a grid cannot: the range runs half a spacing past the support
+    !! where the curve starts at a bound, which `%init` refuses; and the bandwidths are the FIT's
+    !! own, one per point, where a grid reads them from a pilot.
+    subroutine binned_curve(self, entry, a, b, n, f)
+        class(pf_kde), intent(in)    :: self  !! the fitted estimate
+        character(len=*), intent(in) :: entry !! the binding, for the message
+        real(real64), intent(in)     :: a     !! the first curve point
+        real(real64), intent(in)     :: b     !! the last
+        integer(int64), intent(in)   :: n     !! how many points
+        real(real64), intent(out)    :: f(:)  !! the density at each
+
+        type(pf_kde_grid) :: g
+        real(real64), allocatable :: cb(:), one(:)
+        real(real64) :: dx, hlo, hhi, below, above
+        integer(int64) :: j, m
+
+        m = size(self%x, kind=int64)
+        dx = (b - a)/real(n - 1_int64, real64)
+        g%initialised = .true.
+        g%nc = int(n)
+        g%dx = dx
+        g%x0 = a - 0.5_real64*dx
+        g%x1 = g%x0 + real(n, real64)*dx
+        g%h = self%h
+        g%kernel_code = self%kernel_code
+        g%boundary_code = self%boundary_code
+        g%has_lower = self%has_lower
+        g%has_upper = self%has_upper
+        g%lo = self%lo
+        g%hi = self%hi
+        g%method_code = KDE_METHOD_BINNED
+        allocate(g%acc(n))
+        g%acc = 0.0_real64
+        ! The classes the fit's own bandwidths span, which is what a grid takes from its pilot.
+        hlo = self%hb(1)
+        hhi = self%hb(1)
+        if (self%hstride /= 0_int64) then
+            do j = 1_int64, m
+                if (self%hb(j) < hlo) hlo = self%hb(j)
+                if (self%hb(j) > hhi) hhi = self%hb(j)
+            end do
+        end if
+        call kde_binned_setup(g, entry, hlo, hhi)
+        allocate(g%bins(g%ntr, g%nclass), cb(g%ntr))
+        g%bins = 0.0_real64
+        call kde_padded_centres(g, cb)
+        below = 0.0_real64
+        above = 0.0_real64
+        if (self%weighted) then
+            call kde_bin_range(g, cb, self%x, self%w, .true., self%hb, self%hstride, 1_int64, m, &
+                g%bins, below, above)
+        else
+            allocate(one(1))
+            one(1) = 1.0_real64
+            call kde_bin_range(g, cb, self%x, one, .false., self%hb, self%hstride, 1_int64, m, &
+                g%bins, below, above)
+        end if
+        g%w_below = below
+        g%w_above = above
+        g%w_total = self%w_total
+        ! Closed and read back through the grid's own seam, so that a binned curve and a binned
+        ! grid of the same geometry answer the same bits: `%finish` transforms the bins and forms
+        ! the mass every query normalises by, and `%density` applies it cell for cell.
+        call grid_finish(g)
+        call grid_density(g, f)
+
+    end subroutine binned_curve
 
     ! ==========================================================================================
     ! The local-polynomial boundary corrections

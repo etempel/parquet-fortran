@@ -14,6 +14,11 @@
 #             dense at its two ends and thin in the middle, so the column is an average over very
 #             different windows.
 #
+#   binned    `method="binned"` against the exact deposit at matched cell counts, on ONE thread:
+#             the binning and the transform timed apart, so the transform's share is visible, and
+#             the largest gap from the exact grid's cells beside each figure -- the two approximate
+#             differently, so a saving at matched CELLS is not a saving at matched accuracy. The
+#             mode EXITS NONZERO when the binned deposit loses weight.
 #   grid      `pf_kde_grid%add` in nanoseconds per point, on ONE thread, per kernel, at 2, 4, 8
 #             and 16 cells per bandwidth; `cells` is the number of cells one kernel reaches, which
 #             the deposit should cost in proportion to. `mass-1` is the grid's total weight over the
@@ -95,13 +100,14 @@
 #   MODE=grid bench/benchmark_kde.sh           # one of them
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
-#   MODE=all          evaluate, grid, accuracy, adaptive, rules, sample, boundary, threads, or all.
+#   MODE=all          evaluate, grid, binned, accuracy, adaptive, rules, sample, boundary,
+#                     threads, or all.
 #   ROUNDS=5          Timed laps per figure; the FASTEST is kept, never the mean, because the slow
 #                     laps are the machine's other work rather than this code's.
 #   POINTS=100000     The sample's size in `evaluate`, `accuracy`, `adaptive`, `sample` and
 #                     `threads`, and the largest in `rules`.
 #   GRID_POINTS=1000000
-#                     The sample's size in `grid`.
+#                     The sample's size in `grid` and `binned`.
 #   QUERIES=10000     Query points per call in `evaluate`, `adaptive` and `threads`, draws per
 #                     call in `sample` (and a hundred times as many in `threads`), and the error's
 #                     points in `accuracy`.
@@ -122,9 +128,9 @@ GRID_POINTS="${GRID_POINTS:-1000000}"
 QUERIES="${QUERIES:-10000}"
 
 case "$MODE" in
-    evaluate|grid|accuracy|adaptive|rules|sample|boundary|threads|all) ;;
-    *) echo "benchmark_kde.sh: MODE must be evaluate, grid, accuracy, adaptive, rules, sample," \
-            "boundary, threads or all (got '$MODE')" >&2
+    evaluate|grid|binned|accuracy|adaptive|rules|sample|boundary|threads|all) ;;
+    *) echo "benchmark_kde.sh: MODE must be evaluate, grid, binned, accuracy, adaptive, rules," \
+            "sample, boundary, threads or all (got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -158,6 +164,12 @@ fi
 if [[ "$MODE" == "grid" || "$MODE" == "all" ]]; then
     fpm run benchmark_kde --profile release -- \
         --mode=grid --rounds="$ROUNDS" --points="$GRID_POINTS"
+    echo
+fi
+
+if [[ "$MODE" == "binned" || "$MODE" == "all" ]]; then
+    fpm run benchmark_kde --profile release -- \
+        --mode=binned --rounds="$ROUNDS" --points="$GRID_POINTS"
     echo
 fi
 

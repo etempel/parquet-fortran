@@ -83,7 +83,7 @@ module parquet_kde
     ! transform of the binned sample. Two leaf modules, two files each.
     use parquet_root, only : pf_rootfun, pf_find_root, pf_bracket_expansion, pf_root_info, &
         PF_EXPAND_UP, PF_ROOT_OK
-    use parquet_transform, only : pf_dct, pf_is_pow2
+    use parquet_transform, only : pf_dct, pf_idct, pf_dst, pf_idst, pf_is_pow2, pf_next_pow2
     ! The sort of the retained sample, and the thread-count resolver `%add` shares with every
     ! threaded pass of the library; `parquet_argsort` is already beneath `parquet_stats`.
     use parquet_argsort, only : pf_argsort, resolve_thread_count
@@ -107,6 +107,7 @@ module parquet_kde
     public :: pf_kde, pf_kde_grid
     public :: parquet_debug_kde_threads_used, parquet_debug_set_kde_pilot_cells, parquet_debug_kde_fit_nanos
     public :: parquet_debug_set_kde_isj_cells, parquet_debug_set_kde_sample_tries
+    public :: parquet_debug_set_kde_binned_classes
     public :: parquet_set_verbosity, parquet_get_verbosity
     public :: parquet_set_message_stream, parquet_get_message_stream
 
@@ -142,6 +143,42 @@ module parquet_kde
     !> Boundary correction codes. `KDE_BOUNDARY_NONE` is the unbounded estimate.
     integer, parameter :: KDE_BOUNDARY_NONE = 0, KDE_BOUNDARY_RENORMALISE = 1, &
         KDE_BOUNDARY_REFLECT = 2, KDE_BOUNDARY_LINEAR = 3
+
+    ! ---- the binned method --------------------------------------------------------------------
+
+    !> Method codes, resolved once from the `method=` token of `pf_kde_grid%init` and
+    !! `pf_kde%curve`. `KDE_METHOD_EXACT` is the deposit every grid makes today and the default.
+    integer, parameter :: KDE_METHOD_EXACT = 0, KDE_METHOD_BINNED = 1
+
+    !> `pi`, to 50 digits: the binned method's coefficient `k` carries the frequency
+    !! `pi k/(L step)`, and nothing else in the module needs it.
+    real(real64), parameter :: KDE_PI = 3.1415926535897932384626433832795028841971693993751_real64
+
+    !> Below this argument a kernel transform is summed as its series rather than evaluated in
+    !! closed form, because the closed form's terms cancel there. One standard deviation of
+    !! frequency: the series needs about ten terms at it and the closed form has lost about a digit.
+    real(real64), parameter :: KDE_FT_SERIES = 1.0_real64
+
+    !> The most terms a kernel transform's series sums before it gives up on converging. It exits on
+    !! the term falling below rounding, which happens by the tenth at `KDE_FT_SERIES`; the count is
+    !! a bound on the loop, not a working value.
+    integer, parameter :: KDE_FT_TERMS = 40
+
+    !> The transform length the binned method refuses above, as a multiple of `ncells`: padding
+    !! grows the length with the kernel's reach over the range, so a bandwidth about twice the whole
+    !! range reaches this. A grid whose bandwidth is twice its own range is telling the user
+    !! something, and an `%init` refusal says it better than a transform of a million cells does.
+    integer, parameter :: KDE_BINNED_L_MAX = 32
+
+    !> The ratio between neighbouring bandwidth classes under the binned adaptive kernel, `2**(1/5)`.
+    !! What sets the bucketing error is that ratio, so fixing it makes the accuracy the same whatever
+    !! spread the data produces; the class COUNT then follows the spread.
+    real(real64), parameter :: KDE_BINNED_H_STEP = 2.0_real64**0.2_real64
+
+    !> The most bandwidth classes the binned adaptive kernel resolves. A spread of 9 needs 16 and a
+    !! spread of 99 needs 34, so the ceiling is reached only by a rule whose widest bandwidth is
+    !! thousands of times its narrowest; `bandwidth_max=` is what bounds the spread.
+    integer, parameter :: KDE_BINNED_CLASSES_MAX = 64
 
     ! ---- the linear boundary kernel -----------------------------------------------------------
 
@@ -360,6 +397,11 @@ module parquet_kde
     !! sets it runs serially.
     integer, save :: kde_isj_cells_forced = 0
 
+    !> The bandwidth-class count `parquet_debug_set_kde_binned_classes` forces on a binned adaptive
+    !! grid; 0, the default, means the count `KDE_BINNED_H_STEP` and the rule's own spread give.
+    !! Test-only, process-global and unsynchronised: the suite that sets it runs serially.
+    integer, save :: kde_binned_classes_forced = 0
+
     !> Nanoseconds the most recent `pf_kde%fit` spent sorting, building the pilot and assigning the
     !! bandwidths (`parquet_debug_kde_fit_nanos`); 0 for a phase it did not reach. Process-global
     !! and unsynchronised, like the team counter.
@@ -387,6 +429,9 @@ module parquet_kde
         logical :: unreadable = .false.           !! the pilot has no density to read: poisoned, or empty cells
         real(real64) :: logg = 0.0_real64         !! `log g`: the mean of `log p` over the pilot's own density
         real(real64) :: pmin = 0.0_real64         !! the pilot's smallest positive cell density
+        real(real64) :: pmax = 0.0_real64         !! the pilot's largest cell density: with `pmin` it brackets
+                                                  !! every bandwidth the rule can give, which is what the
+                                                  !! binned method's classes are laid out over
         real(real64) :: digest = 0.0_real64       !! a position-weighted checksum of `acc`, formed once, so
                                                   !! that `%merge` refuses two rules that differ without
                                                   !! walking their cells; a match is still scanned in full
@@ -528,6 +573,13 @@ module parquet_kde
         real(real64) :: h = 0.0_real64               !! the bandwidth; the global one when adaptive
         integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
         integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
+        integer :: method_code = KDE_METHOD_EXACT    !! how the cells are filled: the deposit or the
+                                                     !! binning and the transform
+        integer :: pad = 0                           !! under `"binned"`, the cells of pad at each end
+                                                     !! of the transform's array, `J`
+        integer :: ntr = 0                           !! under `"binned"`, the transform's length, `L`
+        integer :: nclass = 0                        !! under `"binned"`, the bandwidth classes: 1 for a
+                                                     !! fixed bandwidth, `C` for the adaptive kernel
         logical :: has_lower = .false.               !! a lower bound was given
         logical :: has_upper = .false.               !! an upper bound was given
         real(real64) :: lo = 0.0_real64              !! the lower bound, when given
@@ -547,6 +599,13 @@ module parquet_kde
         real(real64), allocatable :: cum(:)
         !! what `%finish` left: `%pdf`'s integral from `xmin` to each cell centre, which `%cdf`,
         !! `%quantile` and `%sample` read instead of rebuilding it per call
+        real(real64), allocatable :: hclass(:)
+        !! under `"binned"`, each bandwidth class's representative bandwidth, ascending and spaced
+        !! by `KDE_BINNED_H_STEP`; one entry for a fixed bandwidth
+        real(real64), allocatable :: bins(:,:)
+        !! under `"binned"`, the binned weight on each of the `L` padded centres, per bandwidth
+        !! class: what `%add` fills and `%finish` transforms into `acc`. Released by `%finish`, so
+        !! a finished binned grid holds what an exact one holds
         type(kde_adapt) :: adapt = kde_adapt()
         !! the adaptive rule, from the pilot `%init` was given; off for a fixed bandwidth. Default-
         !! initialised, so that the whole-object constructor `pf_kde_grid()` needs no value for it
@@ -580,6 +639,7 @@ module parquet_kde
         procedure :: step => grid_step !! the cell width
         procedure :: bandwidth => grid_bandwidth !! the bandwidth
         procedure :: kernel => grid_kernel_name !! the kernel's token
+        procedure :: method => grid_method_name !! how the cells are filled
         procedure :: bounds => grid_bounds !! the support; infinite where unbounded
         procedure :: n => grid_n !! `size(x)` over every `%add`
         procedure :: n_valid => grid_n_valid !! the population's size
@@ -893,7 +953,7 @@ module parquet_kde
         end subroutine kde_quantile_r1
 
         !> The density on `size(x)` equally spaced points: `call k%curve(x, f, [xmin], [xmax],
-        !! [cut], [threads])`.
+        !! [cut], [threads], [method])`.
         !!
         !! `x` receives the points, from `xmin` to `xmax` inclusive, and `f` the density at each.
         !! The default range is the sample's minimum minus `cut` bandwidths to its maximum plus
@@ -903,7 +963,19 @@ module parquet_kde
         !! arguments the caller never passed. A single point is `xmin`, the range's first end, not
         !! its midpoint. On an undefined estimate `f` is NaN, and so is `x` unless both ends were
         !! given. `threads` as `%pdf` takes it.
-        module subroutine kde_curve(self, x, f, xmin, xmax, cut, threads)
+        !!
+        !! `method` is `"exact"`, the default, or `"binned"`, which splits each retained point
+        !! between the two curve points around it and fills the curve with one cosine transform
+        !! instead of summing kernels at every point: `O(n)` and one transform, against `O(n)`
+        !! times the points one kernel reaches. It answers the estimate of a sample whose points
+        !! have been moved to the curve's own points, converging to the exact curve as the SQUARE
+        !! of their spacing, and it **honours the fit's boundary correction**, since `%curve` is
+        !! `%pdf` on equally spaced points and the two must not disagree about what correction is
+        !! in force. It needs at least two points, and aborts where the transform it would need is
+        !! longer than `KDE_BINNED_L_MAX` times `size(x)`. `threads` governs the exact form only:
+        !! the binned curve is one pass over the sample and one transform, with no per-point work
+        !! for a team to share.
+        module subroutine kde_curve(self, x, f, xmin, xmax, cut, threads, method)
             implicit none
             class(pf_kde), intent(in)          :: self    !! the fitted estimate
             real(real64), intent(out)          :: x(:)    !! the points
@@ -912,6 +984,7 @@ module parquet_kde
             real(real64), intent(in), optional :: xmax    !! the last point
             real(real64), intent(in), optional :: cut     !! bandwidths beyond the data, by default
             integer, intent(in), optional      :: threads !! the team for the points
+            character(len=*), intent(in), optional :: method !! how the curve is filled
         end subroutine kde_curve
 
         !> Draws from the estimate: `call k%sample(v, seed, [stream], [threads])` fills `v` with
@@ -1109,7 +1182,7 @@ module parquet_kde
     interface
 
         !> Fixes the grid: `call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha],
-        !! [bandwidth_max], [lower], [upper], [boundary])`.
+        !! [bandwidth_max], [lower], [upper], [boundary], [method])`.
         !!
         !! `ncells` cells of width `step = (xmax - xmin)/ncells` span `[xmin, xmax]`, cell `i`
         !! centred on `xmin + (i - 1/2)*step`. `bandwidth` is the kernel's standard deviation and is
@@ -1123,10 +1196,19 @@ module parquet_kde
         !! are as `pf_kde%fit` takes them, and the range must lie inside the support; under
         !! `boundary="linear"` it must also START at `lower` and END at `upper` where those are
         !! given, and, where only one of them is given, be at least one kernel's reach wide, because
-        !! the weight a grid counts beyond its own range is the plain kernel's mass there. Every
+        !! the weight a grid counts beyond its own range is the plain kernel's mass there.
+        !!
+        !! `method` chooses how the cells are filled, and it is the one argument that changes what
+        !! the grid COSTS rather than what it means. `"exact"`, the default, deposits each point's
+        !! kernel on every cell centre it reaches. `"binned"` splits each point between the two
+        !! centres around it and fills the cells with one cosine transform when `%finish` is called:
+        !! `O(n)` to bin and `O(L log L)` once, against `O(n)` times the cells one kernel spans. It
+        !! answers the estimate of a sample whose points have been moved to the cell centres, which
+        !! converges to the exact estimate as the SQUARE of the cell width, and it aborts here where
+        !! the transform it would need is longer than `KDE_BINNED_L_MAX` times `ncells`. Every
         !! accumulated point and count is discarded; a grid may be initialised again.
         module subroutine grid_init(self, ncells, xmin, xmax, bandwidth, kernel, pilot, alpha, &
-                bandwidth_max, lower, upper, boundary)
+                bandwidth_max, lower, upper, boundary, method)
             implicit none
             class(pf_kde_grid), intent(inout)       :: self          !! the grid; reset
             integer, intent(in)                     :: ncells        !! cells, at least 1; held in memory
@@ -1140,6 +1222,7 @@ module parquet_kde
             real(real64), intent(in), optional      :: lower         !! the support's lower bound
             real(real64), intent(in), optional      :: upper         !! the support's upper bound
             character(len=*), intent(in), optional  :: boundary      !! the boundary correction
+            character(len=*), intent(in), optional  :: method        !! how the cells are filled
         end subroutine grid_init
 
         !> Accumulates one `real64` point: `call g%add(x, [is_valid], [weights], [skipnan],
@@ -1265,6 +1348,65 @@ module parquet_kde
             class(pf_kde_grid), intent(in) :: self !! the grid
             logical                        :: res  !! it is finished
         end function grid_is_finished
+
+    end interface
+
+    ! ---- the binned method's own workers, implemented in parquet_kde_grid.f90 -----------------
+    !
+    ! Separate module procedures rather than helpers contained in that submodule, because
+    ! `pf_kde%curve(method="binned")` reaches them from parquet_kde_fit.f90: it fills a grid whose
+    ! cell centres are the curve's own points and reads the cells back, so the two callers share
+    ! the binning and the transform rather than each writing one.
+
+    interface
+
+        !> Resolves everything the binned method fixes before a point arrives: the bandwidth
+        !! classes, the pad and the transform's length, with the two refusals of that geometry.
+        !! Called once the geometry and the adaptive rule are set, and before the bins are
+        !! allocated, which are sized from it.
+        !! `hlo` and `hhi` bracket every bandwidth a point can take. Absent, they are read from
+        !! the grid's own adaptive rule, which is where a grid's bandwidths come from; the binned
+        !! curve passes the FIT's own, one per retained point.
+        module subroutine kde_binned_setup(self, entry, hlo, hhi)
+            implicit none
+            class(pf_kde_grid), intent(inout)  :: self  !! the grid; its binned geometry is filled
+            character(len=*), intent(in)       :: entry !! the binding, for the message
+            real(real64), intent(in), optional :: hlo   !! the narrowest bandwidth, when known
+            real(real64), intent(in), optional :: hhi   !! the widest, when known
+        end subroutine kde_binned_setup
+
+        !> The transform array's cell centres, `%ntr` of them: the grid's own centres extended by
+        !! `%pad` cells at each end, so that centre `pad + i` is cell `i`'s.
+        pure module subroutine kde_padded_centres(self, cb)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self  !! the grid
+            real(real64), intent(out)      :: cb(:) !! the centres, `%ntr` of them
+        end subroutine kde_padded_centres
+
+        !> Bins the points `x(jlo:jhi)` into `bins`, one column per bandwidth class, and adds what
+        !! lies beyond the transform array altogether to `below` and `above`.
+        module subroutine kde_bin_range(self, cb, x, w, weighted, hb, hstride, jlo, jhi, bins, below, above)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self      !! the grid, read for its geometry
+            real(real64), intent(in)       :: cb(:)     !! the transform array's centres
+            real(real64), intent(in)       :: x(:)      !! the points, inside the support
+            real(real64), intent(in)       :: w(:)      !! their weights, when weighted
+            logical, intent(in)            :: weighted  !! `w` holds one weight per point
+            real(real64), intent(in)       :: hb(:)     !! the bandwidths, one per point or one for all
+            integer(int64), intent(in)     :: hstride   !! 1 for one per point, 0 for one for all
+            integer(int64), intent(in)     :: jlo       !! the first point to bin
+            integer(int64), intent(in)     :: jhi       !! the last point to bin
+            real(real64), intent(inout)    :: bins(:,:) !! the bins to add into, one column per class
+            real(real64), intent(inout)    :: below     !! the weight below the array
+            real(real64), intent(inout)    :: above     !! the weight above it
+        end subroutine kde_bin_range
+
+        !> Fills the cells from the bins: the one operation of the binned method that cannot
+        !! stream, needing the last point to have arrived.
+        module subroutine kde_binned_transform(self)
+            implicit none
+            class(pf_kde_grid), intent(inout) :: self !! the grid, its bins final
+        end subroutine kde_binned_transform
 
     end interface
 
@@ -1424,6 +1566,14 @@ module parquet_kde
             class(pf_kde_grid), intent(in)             :: self !! the grid
             character(len=:), allocatable, intent(out) :: name !! the kernel's token
         end subroutine grid_kernel_name
+
+        !> How the cells are filled, as its token: `call g%method(name)`, `"exact"` or `"binned"`.
+        !! An uninitialised grid aborts, as `%kernel` does.
+        module subroutine grid_method_name(self, name)
+            implicit none
+            class(pf_kde_grid), intent(in)             :: self !! the grid
+            character(len=:), allocatable, intent(out) :: name !! the method's token
+        end subroutine grid_method_name
 
         !> The support: `call g%bounds(lo, hi)`, with `-Infinity`/`+Infinity` where unbounded.
         module subroutine grid_bounds(self, lo, hi)
@@ -1650,6 +1800,14 @@ module parquet_kde
             integer, intent(out)         :: code  !! the correction's code
         end subroutine kde_resolve_boundary
 
+        !> Resolves `method=` to its code, aborting on an unknown token.
+        module subroutine kde_resolve_method(entry, token, code)
+            implicit none
+            character(len=*), intent(in) :: entry !! the binding, for the message
+            character(len=*), intent(in) :: token !! the caller's token
+            integer, intent(out)         :: code  !! the method's code
+        end subroutine kde_resolve_method
+
         !> Validates and resolves the settings `pf_kde%fit` and `pf_kde_grid%init` share -- the
         !! kernel, the two bounds and the boundary correction -- in that order, aborting with the
         !! caller's `entry` on the first mistake. Absent bounds leave the support unbounded on that
@@ -1759,6 +1917,55 @@ module parquet_kde
             real(real64), intent(in) :: z    !! the offset, in standard deviations
             real(real64)             :: m    !! the second moment at or below `z`
         end function kde_kernel_m2
+
+        !> The multiplier one convolution of the binned method applies: the factor `pf_dct`
+        !! coefficient `k` is multiplied by so that inverting gives the sample, binned onto cell
+        !! centres `dx` apart, convolved with the kernel at bandwidth `hj`.
+        !!
+        !! **It is the SAMPLED kernel's transform, not the kernel's own.** The binned estimate at a
+        !! centre is a sum of kernel values at offsets that are whole multiples of the cell width,
+        !! so the filter is the kernel SAMPLED at that spacing, and the two differ by the aliases
+        !! the sampling folds in. For a kernel whose transform decays fast the gap is invisible --
+        !! `4.9e-07` of the peak for the Gaussian at eight cells per bandwidth -- and for one that
+        !! decays slowly it is not: `8.4e-04` for the Epanechnikov kernel and `4.9e-02` for the box,
+        !! whose transform falls off only as one over its argument.
+        !!
+        !! It is built by transforming the filter's own response to an impulse: the symmetric
+        !! convolution of a unit at index 0 with the filter is `h(m) + h(m+1)`, whose transform
+        !! divided by the impulse's own, `2 cos(pi k/(2 L))`, is the multiplier. That divisor
+        !! vanishes only at `k = L`, which is one past the last coefficient.
+        !!
+        !! **Normalised by its own value at zero frequency**, which makes it exactly one there. So
+        !! the convolution conserves the binned weight to the bit, and each point spreads exactly
+        !! its own weight over the cells -- the same normalisation the exact deposit applies per
+        !! point, which is what lets the two agree cell for cell.
+        module subroutine kde_dct_filter(code, hj, dx, lam)
+            implicit none
+            integer, intent(in)      :: code   !! the kernel
+            real(real64), intent(in) :: hj     !! the bandwidth
+            real(real64), intent(in) :: dx     !! the cell width
+            real(real64), intent(out) :: lam(:) !! the multiplier, one per coefficient
+        end subroutine kde_dct_filter
+
+        !> The multiplier the SECOND convolution of the binned local linear correction applies:
+        !! the factor a `pf_dct` coefficient is multiplied by, one position down, so that inverting
+        !! with `pf_idst` gives the binned sample convolved with the ODD kernel `u K(u)`.
+        !!
+        !! `lam(j)` belongs to `pf_dct` coefficient `j`, which carries frequency `j - 1`, so the
+        !! caller forms `sc(1:L-1) = co(2:L) lam(2:L)` with `sc(L) = 0` -- the shift the guide page
+        !! writes out, the sine coefficient at index `k` carrying frequency `k + 1`. `lam(1)` is
+        !! zero: an odd kernel has nothing at zero frequency.
+        !!
+        !! Built by the same impulse route as `kde_dct_filter`, and divided by the SAME number --
+        !! the even sampled filter's own mass -- so that the two convolutions carry one scale and
+        !! their ratio is the correction the exact deposit applies.
+        module subroutine kde_dst_filter(code, hj, dx, lam)
+            implicit none
+            integer, intent(in)       :: code   !! the kernel
+            real(real64), intent(in)  :: hj     !! the bandwidth
+            real(real64), intent(in)  :: dx     !! the cell width
+            real(real64), intent(out) :: lam(:) !! the multiplier, one per cosine coefficient
+        end subroutine kde_dst_filter
 
         !> The local-polynomial boundary kernel `bcode` names, at the query `t` inside the support,
         !! for a point whose reciprocal bandwidth is `r`: the kernel `K` corrected so that its
@@ -1937,6 +2144,21 @@ module parquet_kde
             implicit none
             integer, intent(in) :: n !! the cell count, a power of two; `<= 0` for the default
         end subroutine parquet_debug_set_kde_isj_cells
+
+        !> Forces the number of bandwidth classes a binned adaptive grid convolves at; `n <= 0`
+        !! restores the count the rule's own spread gives. Otherwise `n` is used as it stands, up
+        !! to `KDE_BINNED_CLASSES_MAX`.
+        !!
+        !! Test-only, and public for that reason alone: the class count follows the bandwidth
+        !! spread by design, so there is no argument a caller could vary it with, and this is how a
+        !! test reaches the bucketing law -- that splitting each point's weight between its two
+        !! neighbouring classes makes the error fall as the SQUARE of the class count, where
+        !! rounding to the nearest class would leave it falling as the count. Process-global and
+        !! unsynchronised; the suite that calls it runs serially.
+        module subroutine parquet_debug_set_kde_binned_classes(n)
+            implicit none
+            integer, intent(in) :: n !! the class count; `<= 0` for the rule's own
+        end subroutine parquet_debug_set_kde_binned_classes
 
         !> Caps `%sample`'s attempts before a draw falls back to an inversion: the redraw loop that
         !! places a kernel's variate inside the support, and, under `"linear"`, the zone sampler's

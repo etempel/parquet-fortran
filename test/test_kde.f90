@@ -57,7 +57,8 @@ module test_kde
     use test_kde_golden
     use iso_fortran_env, only : int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
-        ieee_is_nan, ieee_is_finite, ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow
+        ieee_is_nan, ieee_is_finite, ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow, &
+        ieee_support_underflow_control, ieee_get_underflow_mode
 
     implicit none
     private
@@ -1688,6 +1689,24 @@ contains
 
     end subroutine test_default_boundary_is_reflect
 
+    !> Whether this build flushes subnormals to zero, so nothing here can be asked about one.
+    !!
+    !! **ifx turns flush-to-zero and denormals-are-zero on by default at `-O1` and above**, which
+    !! is what a flagless `fpm test` selects; gfortran, flang and nagfor leave gradual underflow in
+    !! force. It is a process-wide MXCSR setting established by the main program, so a library
+    !! procedure sees a subnormal argument already collapsed to zero and cannot recover it -- and
+    !! building the value from its bit pattern rather than by arithmetic does not help, since
+    !! denormals-are-zero collapses it again on the comparison that reads it.
+    function subnormals_are_flushed() result(res)
+        logical :: res !! `.true.` when underflow is abrupt, so subnormal inputs read as zero.
+        logical :: gradual
+
+        res = .false.
+        if (.not. ieee_support_underflow_control(1.0_real64)) return
+        call ieee_get_underflow_mode(gradual)
+        res = .not. gradual
+    end function subnormals_are_flushed
+
     !> One admission rule for the bandwidth, applied by both forms: it must be positive, NORMAL and
     !> reach a finite distance. A bandwidth failing it leaves `pf_kde` undefined -- `ok = .false.`
     !> and every query a quiet NaN -- rather than answering a density that is wrong.
@@ -1698,6 +1717,10 @@ contains
     !> support, where the mass a kernel keeps inside the support underflows and the division by it
     !> gives `+Infinity` and `NaN`. `pf_kde_grid%init` refuses both, out of process
     !> (`kde_grid_bandwidth_subnormal`, `kde_grid_bandwidth_unusable`).
+    !>
+    !> **The subnormal half is dropped where the build flushes subnormals to zero** (ifx at `-O1`
+    !> and above), because the library then receives a zero rather than a subnormal and there is
+    !> nothing left to assert about; the wider-than-support half runs everywhere.
     subroutine test_bandwidth_admission(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k
@@ -1720,18 +1743,24 @@ contains
             call check(error, ok, "control: an ordinary bandwidth on this sample must be defined")
             if (allocated(error)) exit run
 
-            ! Subnormal: built by halving `tiny`, never written as a literal.
-            sub = 0.5_real64*tiny(1.0_real64)
-            call check(error, sub > 0.0_real64 .and. sub < tiny(1.0_real64), &
-                "precondition: the fixture's bandwidth must be positive and subnormal")
-            if (allocated(error)) exit run
-            call k%fit(x, bandwidth=sub, ok=ok)
-            call k%pdf(0.5_real64, f)
-            call k%cdf(0.5_real64, c)
-            write(what, '(a,es12.5,a,es12.5)') "a subnormal bandwidth must leave the estimate " // &
-                "undefined; %pdf is ", f, " and %cdf ", c
-            call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
-            if (allocated(error)) exit run
+            ! Subnormal: built by halving `tiny`, never written as a literal. Dropped where the
+            ! build collapses subnormals to zero, since the library would then be answering about
+            ! a ZERO bandwidth -- a different rule, already covered by `kde_grid_bandwidth` -- and
+            ! the assertion would report the build rather than the kernel. The loss is reported by
+            ! `test_kde_grid_bandwidth_subnormal_aborts` (`test_errors.f90`) skipping outright.
+            if (.not. subnormals_are_flushed()) then
+                sub = 0.5_real64*tiny(1.0_real64)
+                call check(error, sub > 0.0_real64 .and. sub < tiny(1.0_real64), &
+                    "precondition: the fixture's bandwidth must be positive and subnormal")
+                if (allocated(error)) exit run
+                call k%fit(x, bandwidth=sub, ok=ok)
+                call k%pdf(0.5_real64, f)
+                call k%cdf(0.5_real64, c)
+                write(what, '(a,es12.5,a,es12.5)') "a subnormal bandwidth must leave the estimate " // &
+                    "undefined; %pdf is ", f, " and %cdf ", c
+                call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
+                if (allocated(error)) exit run
+            end if
 
             ! Far wider than the support it is bounded by, at both bounds.
             call k%fit(x, bandwidth=1.0e300_real64, lower=0.0_real64, upper=1.0_real64, &

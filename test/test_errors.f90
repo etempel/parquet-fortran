@@ -15,6 +15,8 @@
 !> `error_type` calls its FINAL `escalate_error` and aborts the whole process.
 module test_errors
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
+    use iso_fortran_env, only : real64
+    use, intrinsic :: ieee_arithmetic, only : ieee_support_underflow_control, ieee_get_underflow_mode
     !$ use omp_lib, only : omp_get_max_threads, omp_get_num_procs
     !
     implicit none
@@ -21385,6 +21387,24 @@ contains
     !
     ! ---- pf_kde abort paths --------------------------------------------------------------------
     !
+    !> Whether this build flushes subnormals to zero, so no scenario can present one.
+    !!
+    !! **ifx turns flush-to-zero and denormals-are-zero on by default at `-O1` and above**, which
+    !! is what a flagless `fpm test` selects; gfortran, flang and nagfor leave gradual underflow in
+    !! force. It is a process-wide MXCSR setting, and the scenario binary is built the same way as
+    !! this one, so the answer here is the answer there. Building the value from its bit pattern
+    !! rather than by arithmetic does not help: denormals-are-zero collapses it again on the
+    !! comparison that reads it.
+    function subnormals_are_flushed() result(res)
+        logical :: res !! `.true.` when underflow is abrupt, so subnormal inputs read as zero.
+        logical :: gradual
+
+        res = .false.
+        if (.not. ieee_support_underflow_control(1.0_real64)) return
+        call ieee_get_underflow_mode(gradual)
+        res = .not. gradual
+    end function subnormals_are_flushed
+    !
     !> Runs one `parquet_kde` scenario and asserts its whole shape from the one run: it aborted,
     !! its control call succeeded first (the "kde control" line), and the abort carried the
     !! library's own message, binding and all. The control is what makes the abort evidence that
@@ -21621,8 +21641,22 @@ contains
             "pf_kde_grid%init: bandwidth must be a finite, positive number")
     end subroutine test_kde_grid_bandwidth_aborts
     !
+    !> **Skipped where the build flushes subnormals to zero** (ifx at `-O1` and above turns
+    !! flush-to-zero and denormals-are-zero on by default). The scenario is a separate process
+    !! built the same way, so its subnormal bandwidth reaches `%init` already collapsed to zero
+    !! and the abort is the ZERO-bandwidth one asserted by `test_kde_grid_bandwidth_aborts`. The
+    !! call still aborts; it is the message this test names that the build has taken away, and a
+    !! test that accepted either message would no longer distinguish the two rules. This is the
+    !! only place the loss of the subnormal rule is reported -- `test_bandwidth_admission`
+    !! (`test_kde.f90`) drops its subnormal arm silently to keep its other one running.
     subroutine test_kde_grid_bandwidth_subnormal_aborts(error)
         type(error_type), allocatable, intent(out) :: error
+        if (subnormals_are_flushed()) then
+            call skip_test(error, "needs gradual underflow: this build flushes subnormals to zero, " // &
+                "so the scenario's subnormal bandwidth reaches pf_kde_grid%init as 0 and is refused " // &
+                "by the zero-bandwidth rule instead")
+            return
+        end if
         call check_kde_scenario(error, "kde_grid_bandwidth_subnormal", &
             "pf_kde_grid%init: bandwidth must be a normal positive number whose kernel reach is finite")
     end subroutine test_kde_grid_bandwidth_subnormal_aborts

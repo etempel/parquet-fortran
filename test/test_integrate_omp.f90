@@ -29,6 +29,8 @@ module test_integrate_omp
     use parquet_integrate
     use test_integrate_support, only : exp_profile, tail_exp
     use iso_fortran_env, only : real64
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, &
+        ieee_underflow
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads, omp_get_num_threads
 #endif
@@ -80,6 +82,7 @@ contains
         type(pf_integration_info) :: info
         real(real64)              :: got(CASES), want(CASES), p
         integer                   :: counted(CASES), evals(CASES), i, bad
+        logical :: uf_ok, uf_was
 
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: without it the loop below runs on one thread, so " // &
@@ -87,38 +90,47 @@ contains
                        "independent' would hold because nothing was concurrent")
         return
 #endif
-        ! `prof` is `private`, and every one of its components is written as the FIRST statement of
-        ! the loop body: an OpenMP private copy of a derived type is not reliably
-        ! default-initialised under gfortran (`fortran-gotchas.md`), so nothing may be inherited
-        ! from the declaration.
-        !$omp parallel do default(shared) private(i, p, prof, info) schedule(static)
-        do i = 1, CASES
-            prof%amp = 1.0_real64
-            prof%scale = 1.0_real64/(0.5_real64 + real(i, real64))
-            prof%calls = 0
-            p = 1.0_real64/prof%scale
-            got(i) = pf_integrate(prof, 0.0_real64, 1.0_real64, RTOL, info=info)
-            want(i) = (1.0_real64 - exp(-p))/p
-            counted(i) = prof%calls
-            evals(i) = info%neval
-        end do
-        !$omp end parallel do
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        bad = 0
-        do i = 1, CASES
-            if (abs(got(i) - want(i)) > RTOL*abs(want(i))) bad = bad + 1
-        end do
-        call check(error, bad == 0, &
-                   "a concurrently integrated object did not reproduce its own closed form")
-        if (allocated(error)) return
+        run: block
+            ! `prof` is `private`, and every one of its components is written as the FIRST statement of
+            ! the loop body: an OpenMP private copy of a derived type is not reliably
+            ! default-initialised under gfortran (`fortran-gotchas.md`), so nothing may be inherited
+            ! from the declaration.
+            !$omp parallel do default(shared) private(i, p, prof, info) schedule(static)
+            do i = 1, CASES
+                prof%amp = 1.0_real64
+                prof%scale = 1.0_real64/(0.5_real64 + real(i, real64))
+                prof%calls = 0
+                p = 1.0_real64/prof%scale
+                got(i) = pf_integrate(prof, 0.0_real64, 1.0_real64, RTOL, info=info)
+                want(i) = (1.0_real64 - exp(-p))/p
+                counted(i) = prof%calls
+                evals(i) = info%neval
+            end do
+            !$omp end parallel do
 
-        bad = 0
-        do i = 1, CASES
-            if (counted(i) /= evals(i)) bad = bad + 1
-        end do
-        call check(error, bad == 0, &
-                   "an object's own call counter disagreed with the evaluations info reported")
+            bad = 0
+            do i = 1, CASES
+                if (abs(got(i) - want(i)) > RTOL*abs(want(i))) bad = bad + 1
+            end do
+            call check(error, bad == 0, &
+                       "a concurrently integrated object did not reproduce its own closed form")
+            if (allocated(error)) exit run
 
+            bad = 0
+            do i = 1, CASES
+                if (counted(i) /= evals(i)) bad = bad + 1
+            end do
+            call check(error, bad == 0, &
+                       "an object's own call counter disagreed with the evaluations info reported")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_objects_are_independent
 
     !> The path that shares NO object: a plain module function, integrated 2000 times at once.

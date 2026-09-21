@@ -128,31 +128,41 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         real(real64) :: r, want
+        logical :: uf_ok, uf_was
 
         ! sin over a range covering three half-periods: the antiderivative is -cos.
-        want = cos(0.1_real64) - cos(10.0_real64)
-        r = pf_integrate(sine, 0.1_real64, 10.0_real64, 1.0e-12_real64)
-        call check(error, abs(r - want) <= 1.0e-12_real64*abs(want), &
-                   "sin over [0.1, 10] must reproduce cos(0.1) - cos(10)")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        ! x*x over the unit interval: the rule is exact to degree 31, so this is exact.
-        r = pf_integrate(x_squared, 0.0_real64, 1.0_real64, 1.0e-10_real64)
-        call check(error, abs(r - 1.0_real64/3.0_real64) <= 1.0e-15_real64, &
-                   "x*x over [0, 1] must be 1/3 to rounding")
-        if (allocated(error)) return
+        run: block
+            want = cos(0.1_real64) - cos(10.0_real64)
+            r = pf_integrate(sine, 0.1_real64, 10.0_real64, 1.0e-12_real64)
+            call check(error, abs(r - want) <= 1.0e-12_real64*abs(want), &
+                       "sin over [0.1, 10] must reproduce cos(0.1) - cos(10)")
+            if (allocated(error)) exit run
 
-        ! Runge's function: a rational whose antiderivative is an arctangent.
-        r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64)
-        call check(error, abs(r - runge_exact()) <= 1.0e-10_real64*abs(runge_exact()), &
-                   "Runge's function over [0, 1] must be atan(5)/5")
-        if (allocated(error)) return
+            ! x*x over the unit interval: the rule is exact to degree 31, so this is exact.
+            r = pf_integrate(x_squared, 0.0_real64, 1.0_real64, 1.0e-10_real64)
+            call check(error, abs(r - 1.0_real64/3.0_real64) <= 1.0e-15_real64, &
+                       "x*x over [0, 1] must be 1/3 to rounding")
+            if (allocated(error)) exit run
 
-        ! A gaussian narrow enough to need refinement but wide enough to be found.
-        r = pf_integrate(sharp_gauss, 0.0_real64, 1.0_real64, 1.0e-10_real64)
-        call check(error, abs(r - sharp_gauss_exact()) <= 1.0e-10_real64*abs(sharp_gauss_exact()), &
-                   "a gaussian of width 0.01 at 0.9 must reproduce its error-function form")
+            ! Runge's function: a rational whose antiderivative is an arctangent.
+            r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64)
+            call check(error, abs(r - runge_exact()) <= 1.0e-10_real64*abs(runge_exact()), &
+                       "Runge's function over [0, 1] must be atan(5)/5")
+            if (allocated(error)) exit run
 
+            ! A gaussian narrow enough to need refinement but wide enough to be found.
+            r = pf_integrate(sharp_gauss, 0.0_real64, 1.0_real64, 1.0e-10_real64)
+            call check(error, abs(r - sharp_gauss_exact()) <= 1.0e-10_real64*abs(sharp_gauss_exact()), &
+                       "a gaussian of width 0.01 at 0.9 must reproduce its error-function form")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_finite_closed_forms
 
     !> Asserts that `log_base` turns six decades of a power law into one rule application.
@@ -474,31 +484,41 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         real(real64) :: inf, sqrt_pi
+        logical :: uf_ok, uf_was
 
-        inf = pf_infinity()
-        sqrt_pi = far_bump_exact()
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        ! A spike of half-width 1e-3 at 1.02, just above the lower bound.
-        call one_far_feature(error, narrow_spike, 1.0_real64, narrow_spike_exact(), &
-                             1.0e-10_real64, "the spike at 1.02 from [1, inf)")
-        if (allocated(error)) return
+        run: block
+            inf = pf_infinity()
+            sqrt_pi = far_bump_exact()
 
-        ! A compact bump living entirely inside the first probe's blind sliver.
-        call one_far_feature(error, sliver_bump, 1.0_real64, sliver_bump_exact(), &
-                             1.0e-10_real64, "the sliver bump at 1.001 from [1, inf)")
-        if (allocated(error)) return
+            ! A spike of half-width 1e-3 at 1.02, just above the lower bound.
+            call one_far_feature(error, narrow_spike, 1.0_real64, narrow_spike_exact(), &
+                                 1.0e-10_real64, "the spike at 1.02 from [1, inf)")
+            if (allocated(error)) exit run
 
-        ! A unit-width bump at 40, from three lower bounds, each of which sends the search down a
-        ! different arm: log x from one, log x from a bound below one, and linear x from zero.
-        call one_far_feature(error, far_bump, 1.0_real64, sqrt_pi, 1.0e-8_real64, &
-                             "the bump at 40 from [1, inf)")
-        if (allocated(error)) return
-        call one_far_feature(error, far_bump, 0.5_real64, sqrt_pi, 1.0e-8_real64, &
-                             "the bump at 40 from [0.5, inf)")
-        if (allocated(error)) return
-        call one_far_feature(error, far_bump, 0.0_real64, sqrt_pi, 1.0e-8_real64, &
-                             "the bump at 40 from [0, inf)")
+            ! A compact bump living entirely inside the first probe's blind sliver.
+            call one_far_feature(error, sliver_bump, 1.0_real64, sliver_bump_exact(), &
+                                 1.0e-10_real64, "the sliver bump at 1.001 from [1, inf)")
+            if (allocated(error)) exit run
 
+            ! A unit-width bump at 40, from three lower bounds, each of which sends the search down a
+            ! different arm: log x from one, log x from a bound below one, and linear x from zero.
+            call one_far_feature(error, far_bump, 1.0_real64, sqrt_pi, 1.0e-8_real64, &
+                                 "the bump at 40 from [1, inf)")
+            if (allocated(error)) exit run
+            call one_far_feature(error, far_bump, 0.5_real64, sqrt_pi, 1.0e-8_real64, &
+                                 "the bump at 40 from [0.5, inf)")
+            if (allocated(error)) exit run
+            call one_far_feature(error, far_bump, 0.0_real64, sqrt_pi, 1.0e-8_real64, &
+                                 "the bump at 40 from [0, inf)")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_start_panel_search
 
     !> Integrates one far feature to infinity and asserts it was found, not stepped over.
@@ -888,27 +908,37 @@ contains
         type(pf_integration_info) :: info
         real(real64)              :: r
         integer, parameter        :: BUDGET = 105 ! 42*3 - 21: three subintervals exactly
+        logical :: uf_ok, uf_was
 
-        r = pf_integrate(sharp_gauss, 0.0_real64, 1.0_real64, 1.0e-13_real64, &
-                         max_neval=BUDGET, info=info)
-        call check(error, info%status == PF_INT_LIMIT, &
-                   "a budget too small for the tolerance must report PF_INT_LIMIT")
-        if (allocated(error)) return
-        call check(error, .not. info%converged, &
-                   "converged must be false whenever the status is not PF_INT_OK")
-        if (allocated(error)) return
-        call check(error, info%neval == BUDGET, &
-                   "a budget of the form 42k - 21 must be spent exactly")
-        if (allocated(error)) return
-        call check(error, r == r, "a call that ran out of budget must still return a number")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        ! A budget that is not a whole number of bisections is still never exceeded.
-        r = pf_integrate(sharp_gauss, 0.0_real64, 1.0_real64, 1.0e-13_real64, &
-                         max_neval=100, info=info)
-        call check(error, info%neval <= 100, &
-                   "the evaluation count must never exceed max_neval on a finite range")
+        run: block
+            r = pf_integrate(sharp_gauss, 0.0_real64, 1.0_real64, 1.0e-13_real64, &
+                             max_neval=BUDGET, info=info)
+            call check(error, info%status == PF_INT_LIMIT, &
+                       "a budget too small for the tolerance must report PF_INT_LIMIT")
+            if (allocated(error)) exit run
+            call check(error, .not. info%converged, &
+                       "converged must be false whenever the status is not PF_INT_OK")
+            if (allocated(error)) exit run
+            call check(error, info%neval == BUDGET, &
+                       "a budget of the form 42k - 21 must be spent exactly")
+            if (allocated(error)) exit run
+            call check(error, r == r, "a call that ran out of budget must still return a number")
+            if (allocated(error)) exit run
 
+            ! A budget that is not a whole number of bisections is still never exceeded.
+            r = pf_integrate(sharp_gauss, 0.0_real64, 1.0_real64, 1.0e-13_real64, &
+                             max_neval=100, info=info)
+            call check(error, info%neval <= 100, &
+                       "the evaluation count must never exceed max_neval on a finite range")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_status_limit_and_converged_agree
 
     !> Asserts that a tolerance the arithmetic cannot deliver reports round-off rather than
@@ -996,45 +1026,55 @@ contains
 
         type(pf_integration_info) :: info
         real(real64)              :: r
+        logical :: uf_ok, uf_was
 
         ! A bump of width 0.012 on a range of width 9: every sample misses it.
-        r = pf_integrate(compact_bump, 1.0_real64, 10.0_real64, 1.0e-8_real64, info=info)
-        call check(error, r == 0.0_real64, &
-                   "a bump narrower than the first rule's spacing must integrate as exactly zero")
-        if (allocated(error)) return
-        call check(error, info%converged .and. info%neval == ONE_RULE .and. info%nsub == 1, &
-                   "and must be reported as converged after exactly one rule application")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        ! Fit the range to the feature and the same integrand is integrated correctly.
-        r = pf_integrate(compact_bump, 1.0_real64, 1.05_real64, 1.0e-8_real64, info=info)
-        call check(error, abs(r - compact_bump_exact()) <= 1.0e-9_real64, &
-                   "the same bump on a range fitted to it must be integrated correctly")
-        if (allocated(error)) return
+        run: block
+            r = pf_integrate(compact_bump, 1.0_real64, 10.0_real64, 1.0e-8_real64, info=info)
+            call check(error, r == 0.0_real64, &
+                       "a bump narrower than the first rule's spacing must integrate as exactly zero")
+            if (allocated(error)) exit run
+            call check(error, info%converged .and. info%neval == ONE_RULE .and. info%nsub == 1, &
+                       "and must be reported as converged after exactly one rule application")
+            if (allocated(error)) exit run
 
-        ! The unit-width bump at 40 is found on [0, 100] and missed on [0, 1000], which is the
-        ! measurement the design rests on.
-        r = pf_integrate(far_bump, 0.0_real64, 100.0_real64, &
-                         pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=info)
-        call check(error, abs(r - far_bump_exact()) <= 1.0e-8_real64*far_bump_exact(), &
-                   "a unit-width bump at 40 must be found on a range of width 100")
-        if (allocated(error)) return
+            ! Fit the range to the feature and the same integrand is integrated correctly.
+            r = pf_integrate(compact_bump, 1.0_real64, 1.05_real64, 1.0e-8_real64, info=info)
+            call check(error, abs(r - compact_bump_exact()) <= 1.0e-9_real64, &
+                       "the same bump on a range fitted to it must be integrated correctly")
+            if (allocated(error)) exit run
 
-        r = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
-                         pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=info)
-        call check(error, abs(r) <= 1.0e-14_real64 .and. info%converged, &
-                   "the same bump on a range of width 1000 is missed and reported as converged")
-        if (allocated(error)) return
+            ! The unit-width bump at 40 is found on [0, 100] and missed on [0, 1000], which is the
+            ! measurement the design rests on.
+            r = pf_integrate(far_bump, 0.0_real64, 100.0_real64, &
+                             pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=info)
+            call check(error, abs(r - far_bump_exact()) <= 1.0e-8_real64*far_bump_exact(), &
+                       "a unit-width bump at 40 must be found on a range of width 100")
+            if (allocated(error)) exit run
 
-        ! The cure, on the same call the first assertion above showed returning zero: the guide
-        ! page prints exactly this, so this assertion is what keeps the page honest.
-        r = pf_integrate(compact_bump, 1.0_real64, 10.0_real64, 1.0e-8_real64, &
-                         breakpoints=[1.0_real64 + 1.0e-6_real64, 1.02_real64], info=info)
-        call check(error, abs(r - compact_bump_exact()) <= 1.0e-9_real64, &
-                   "a cut each side of the bump must find it on the very range that missed it")
-        if (allocated(error)) return
-        call check(error, info%converged, "and the cut call must converge")
+            r = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
+                             pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=info)
+            call check(error, abs(r) <= 1.0e-14_real64 .and. info%converged, &
+                       "the same bump on a range of width 1000 is missed and reported as converged")
+            if (allocated(error)) exit run
 
+            ! The cure, on the same call the first assertion above showed returning zero: the guide
+            ! page prints exactly this, so this assertion is what keeps the page honest.
+            r = pf_integrate(compact_bump, 1.0_real64, 10.0_real64, 1.0e-8_real64, &
+                             breakpoints=[1.0_real64 + 1.0e-6_real64, 1.02_real64], info=info)
+            call check(error, abs(r - compact_bump_exact()) <= 1.0e-9_real64, &
+                       "a cut each side of the bump must find it on the very range that missed it")
+            if (allocated(error)) exit run
+            call check(error, info%converged, "and the cut call must converge")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_blind_spot_is_documented
 
     !> Asserts that the `50*epsilon` floor is about the PAIR of tolerances, not about `rtol`.
@@ -1313,25 +1353,35 @@ contains
 
         type(pf_integration_info) :: blind, named
         real(real64)              :: r_blind, r_named
+        logical :: uf_ok, uf_was
 
-        r_blind = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
-                               pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=blind)
-        call check(error, abs(r_blind) <= 1.0e-14_real64 .and. blind%converged, &
-                   "a bump at 40 on [0, 1000] at atol=1e-14 must come back as zero, converged")
-        if (allocated(error)) return
-        call check(error, blind%neval <= 3*ONE_RULE, &
-                   "and it must come back that way after a handful of rule applications")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        r_named = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
-                               pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), &
-                               breakpoints=[30.0_real64, 50.0_real64], info=named)
-        call check(error, abs(r_named - far_bump_exact()) <= 1.0e-9_real64, &
-                   "cutting the range at 30 and 50 must find the bump and reproduce sqrt(pi)")
-        if (allocated(error)) return
-        call check(error, named%nsub >= 3, &
-                   "three pieces must leave at least three subintervals in the partition")
+        run: block
+            r_blind = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
+                                   pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=blind)
+            call check(error, abs(r_blind) <= 1.0e-14_real64 .and. blind%converged, &
+                       "a bump at 40 on [0, 1000] at atol=1e-14 must come back as zero, converged")
+            if (allocated(error)) exit run
+            call check(error, blind%neval <= 3*ONE_RULE, &
+                       "and it must come back that way after a handful of rule applications")
+            if (allocated(error)) exit run
 
+            r_named = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
+                                   pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), &
+                                   breakpoints=[30.0_real64, 50.0_real64], info=named)
+            call check(error, abs(r_named - far_bump_exact()) <= 1.0e-9_real64, &
+                       "cutting the range at 30 and 50 must find the bump and reproduce sqrt(pi)")
+            if (allocated(error)) exit run
+            call check(error, named%nsub >= 3, &
+                       "three pieces must leave at least three subintervals in the partition")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_breakpoints_find_the_far_bump
 
     !> Asserts that cutting a range the integrand is smooth over changes the answer by nothing.

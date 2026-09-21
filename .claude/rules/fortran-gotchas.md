@@ -171,7 +171,13 @@ done | sort | uniq -c | sort -rn
   neither. Save, hold off, clear, read
   and restore in the test's own body; only an inquiry may live in a helper (`traps_can_be_held`,
   `test/test_prima.f90`). `ieee_get_status`/`ieee_set_status` would do it in two lines, but flang
-  22 does not implement them.
+  22 does not implement them. **Set in the BODY whose arithmetic it covers it DOES hold**, callees
+  included, and nagfor's OpenMP workers inherit the master's halting modes, so one hold-off covers
+  a threaded region (`stats_engine`, `src/parquet_stats_core.f90`, holds off overflow and invalid
+  across pass two so that a population at `1e200` reaches the rescaled recomputation instead of
+  killing the process). The RESTORE is written inline at every exit of that body, for the same
+  reason a helper cannot do the hold-off. "NAG ignores `ieee_set_halting_mode`" is what the helper
+  shape looks like from outside; before recording that, re-measure with the call in the body.
 - **A DIFFERENCE of two nearly-equal doubles carries ~8 digits, the rest is the compiler.** Form
   small quantities directly (exact rational, `(a²-b²)/(a+b)`, half-angle sine); a test asserting
   such a value below ~1e-8 relative pins one toolchain's rounding. An external reference computed
@@ -498,6 +504,17 @@ done | sort | uniq -c | sort -rn
 
 flang builds here are serial only and `--profile release` does not link (`build.md`).
 
+- **`ieee_set_halting_mode`, `ieee_get_halting_mode` and `ieee_support_halting` do not LINK on
+  macOS**: they lower to `feenableexcept`/`fedisableexcept`, which Apple's libc does not carry, so
+  the reference survives compilation and dies as `Undefined symbols ... _feenableexcept` at the
+  link of every executable. Every use of the trio, in `src/` as much as in `test/`, sits behind
+  `#if !defined(__flang__) && !defined(__FLANG)` with an arm that leaves the halting state alone
+  (`stats_engine`, `stats_spread_scaled` and `stats_pair_moments`, `src/parquet_stats_core.f90`;
+  `test_root_extreme_calls_raise_no_flag`). Nothing is lost by compiling them out -- flang leaves
+  the traps masked, so a hold-off has nothing to hold off -- and `ieee_get_flag`/`ieee_set_flag`
+  and `ieee_support_flag` link fine and stay outside the guard. Only a flang LINK sees it: a
+  gfortran and a nagfor build of the same source are both clean, and `fpm build` (which does not
+  build `test/`) can be clean while `fpm build --tests` is not.
 - **A rejected format is reported through `iostat` AND leaves partial text in the buffer**
   (`ios = 1005`; gfortran/ifx/nagfor leave it empty), so never decide "was this rendered?" from
   emptiness (`rendered_ok`, `src/parquet_utils.f90`, keys on the overflow asterisk;
@@ -552,6 +569,15 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   Find it with `-ieee=stop -gline` appended to `FPM_FFLAGS` in its own `FPM_BUILD_DIR`, running
   the application rather than the test binary. `NaN > 0` and `NaN <= 0` are both false, so a
   `<= 0` guard does not skip a NaN.
+- **`ieee_support_flag(IEEE_UNDERFLOW)` without an X argument is `.false.` under nagfor**, because
+  the bare form asks about EVERY real kind and nagfor carries no underflow flag for `real128`;
+  `ieee_get_flag`/`ieee_set_flag` on it work perfectly at `real64`. A guard written the bare way
+  therefore skips the save-and-restore it protects, silently, on the one compiler that reports the
+  flag at program exit — the symptom is an unattributed "Floating underflow occurred" line that
+  survives every attempt to clear it. **Always name the kind**
+  (`ieee_support_flag(ieee_underflow, 0.0_real64)`). `IEEE_INVALID`, `IEEE_DIVIDE_BY_ZERO` and
+  `IEEE_OVERFLOW` all answer `.true.` to the bare form, so only underflow is affected; audit with
+  `grep -rn "ieee_support_flag(ieee_underflow)" src/ test/ app/ bench/`.
 - **`-nan` (in the `nagfor` feature) poisons every undefined `real`, including the unwritten tail
   of an `intent(out)` array**, as a signalling NaN. A test may not read past what the callee wrote:
   use a canary outside the section passed in, or assert that returned entries agree. A second pass

@@ -49,7 +49,8 @@ module test_stats
         FIT_SIGMA_FILLIBEN, FIT_CORR_FILLIBEN, SCALE_P25, SCALE_P16, PMEAN, PMEAN_W
     use iso_fortran_env, only : int32, int64, real32, real64
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_get_flag, &
-        ieee_set_flag, ieee_support_flag, ieee_divide_by_zero, ieee_invalid, ieee_is_nan
+        ieee_set_flag, ieee_support_flag, ieee_divide_by_zero, ieee_invalid, ieee_is_nan, &
+        ieee_underflow
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     implicit none
     private
@@ -65,7 +66,7 @@ contains
     !> Registers this module's tests with test-drive.
     subroutine collect_tests_parquet_stats(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the suite to fill.
-        type(unittest_type), allocatable :: general(:), linear(:)
+        type(unittest_type), allocatable :: general(:), linear(:), extremes(:)
 
         general = [ &
             new_unittest("pf_count_valid counts every element of a clean array", test_plain_count), &
@@ -325,6 +326,10 @@ contains
         ! A second constructor, because one statement may carry at most 255 continuation lines
         ! (nagfor enforces it; `check_statement_continuation_lines`) and the one above is at 252.
         ! Add a further part rather than growing either.
+        extremes = [ &
+            new_unittest("the pair statistics answer a sample scaled to the end of the range", &
+                test_pair_moments_at_an_extreme_scale_do_not_abort) &
+            ]
         linear = [ &
             new_unittest("pf_bin_linear matches its definition written out, to the bit where exact", &
                 test_bin_linear_matches_the_direct_definition), &
@@ -355,7 +360,7 @@ contains
             new_unittest("pf_bin_linear accounts for every element exactly once", &
                 test_bin_linear_accounts_for_every_element) &
             ]
-        testsuite = [general, linear]
+        testsuite = [general, extremes, linear]
     end subroutine collect_tests_parquet_stats
 
     !> Deferring pass one's compaction changes no answer, wherever the first exclusion falls.
@@ -783,6 +788,12 @@ contains
     !> then silently reports a population with spread as having none. The variance is asserted at
     !> gentler scales, `1e+-150`, because the variance ITSELF is unrepresentable at `1e+-200`:
     !> squaring is what puts it out of range, and no accumulation can put it back.
+    !>
+    !> **The fixture is subnormal BY DESIGN, so the underflow flag is saved on entry and put back
+    !> on exit.** A population at `1e-200` squares to zero inside the library, which is the very
+    !> condition being asserted about; left raised it surfaces as nagfor's unattributed "Floating
+    !> underflow occurred" line at program exit, attached to whatever ran last. The single exit
+    !> below is what makes the restore cover a failed check as well as a passing one.
     subroutine test_spread_at_extreme_scales(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64), allocatable :: x(:), y(:)
@@ -792,39 +803,50 @@ contains
         character(len=200) :: msg
         integer(int64) :: i
         integer :: k
-        logical :: ok
+        logical :: ok, uf_supported, uf_entry
 
-        call golden_fixture(1000_int64, x)
-        allocate(y(size(x)))
-        call pf_stddev(x, sd0, ok=ok)
-        call pf_variance(x, v0)
-        call check(error, ok .and. sd0 > 0.0_real64, &
-            "control: the unscaled fixture must have a standard deviation to scale")
-        if (allocated(error)) return
+        ! The kind-SPECIFIC inquiry: nagfor 7.2 answers .false. to the bare
+        ! `ieee_support_flag(ieee_underflow)` because it does not carry the flag for `real128`,
+        ! which would silently skip the save and restore below on the one compiler that reports
+        ! the flag at exit.
+        uf_supported = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_supported) call ieee_get_flag(ieee_underflow, uf_entry)
 
-        do k = 1, 2
-            sc = SD_SCALES(k)
-            do i = 1_int64, size(x, kind=int64)
-                y(i) = x(i)*sc
+        scales: block
+            call golden_fixture(1000_int64, x)
+            allocate(y(size(x)))
+            call pf_stddev(x, sd0, ok=ok)
+            call pf_variance(x, v0)
+            call check(error, ok .and. sd0 > 0.0_real64, &
+                "control: the unscaled fixture must have a standard deviation to scale")
+            if (allocated(error)) exit scales
+
+            do k = 1, 2
+                sc = SD_SCALES(k)
+                do i = 1_int64, size(x, kind=int64)
+                    y(i) = x(i)*sc
+                end do
+                call pf_stddev(y, sd1, ok=ok)
+                write(msg, '(a,es10.3,a,es24.17,a,es24.17)') "pf_stddev at a scale of ", sc, &
+                    " answers ", sd1, " against the scaled ", sd0*sc
+                call check(error, ok .and. abs(sd1 - sd0*sc) <= 1.0e-12_real64*(sd0*sc), trim(msg))
+                if (allocated(error)) exit scales
             end do
-            call pf_stddev(y, sd1, ok=ok)
-            write(msg, '(a,es10.3,a,es24.17,a,es24.17)') "pf_stddev at a scale of ", sc, &
-                " answers ", sd1, " against the scaled ", sd0*sc
-            call check(error, ok .and. abs(sd1 - sd0*sc) <= 1.0e-12_real64*(sd0*sc), trim(msg))
-            if (allocated(error)) return
-        end do
 
-        do k = 1, 2
-            sc = V_SCALES(k)
-            do i = 1_int64, size(x, kind=int64)
-                y(i) = x(i)*sc
+            do k = 1, 2
+                sc = V_SCALES(k)
+                do i = 1_int64, size(x, kind=int64)
+                    y(i) = x(i)*sc
+                end do
+                call pf_variance(y, v1, ok=ok)
+                write(msg, '(a,es10.3,a,es24.17,a,es24.17)') "pf_variance at a scale of ", sc, &
+                    " answers ", v1, " against the scaled ", v0*sc*sc
+                call check(error, ok .and. abs(v1 - v0*sc*sc) <= 1.0e-12_real64*(v0*sc*sc), trim(msg))
+                if (allocated(error)) exit scales
             end do
-            call pf_variance(y, v1, ok=ok)
-            write(msg, '(a,es10.3,a,es24.17,a,es24.17)') "pf_variance at a scale of ", sc, &
-                " answers ", v1, " against the scaled ", v0*sc*sc
-            call check(error, ok .and. abs(v1 - v0*sc*sc) <= 1.0e-12_real64*(v0*sc*sc), trim(msg))
-            if (allocated(error)) return
-        end do
+        end block scales
+
+        if (uf_supported) call ieee_set_flag(ieee_underflow, uf_entry)
 
     end subroutine test_spread_at_extreme_scales
 
@@ -7048,6 +7070,71 @@ contains
         end do
     end subroutine test_cov_identity_survives_inexact_centring
 
+    !> The pair statistics ANSWER a sample scaled to the end of the representable range, rather
+    !> than ending the process on it.
+    !>
+    !> `stats_pair_moments` squares every deviation, so a pair at `1e200` overflows its three
+    !> centred sums -- which is the answer, not a fault: the covariance of such a pair is a number
+    !> no `real64` holds. Under a compiler that unmasks the IEEE traps the overflow killed the run
+    !> instead (nagfor's default `-ieee=stop`), so every assertion below is really the same one --
+    !> that control reached it.
+    !>
+    !> What is asserted beyond that is the module's own contract rather than a snapshot of
+    !> whatever the overflow produced: `ok` tracks "the answer is not a NaN" exactly, the
+    !> `pf_cov(x, x) == pf_variance(x)` identity survives the scale, and the SPEARMAN correlation
+    !> -- which is taken over midranks and so cannot overflow -- is bit-identical to the unscaled
+    !> sample's, because a rank is scale-free.
+    subroutine test_pair_moments_at_an_extreme_scale_do_not_abort(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x0(:), y0(:), x(:), y(:)
+        real(real64) :: c, r, v, rs0, rs1
+        real(real64), parameter :: SC = 1.0e200_real64
+        integer(int64) :: i, a
+        logical :: ok, uf_supported, uf_entry
+
+        ! An extreme fixture by design: see `test_spread_at_extreme_scales` for why the flag is
+        ! saved and put back, and why the inquiry names the kind.
+        uf_supported = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_supported) call ieee_get_flag(ieee_underflow, uf_entry)
+
+        pair: block
+            call golden_fixture(1000_int64, x0)
+            allocate(y0(size(x0)), x(size(x0)), y(size(x0)))
+            do i = 1_int64, size(x0, kind=int64)
+                a = mod(i*i*104729_int64 + 7_int64, 1000003_int64)
+                y0(i) = real(a - 500001_int64, real64)/1024.0_real64
+                x(i) = x0(i)*SC
+                y(i) = y0(i)*SC
+            end do
+            call pf_corr(x0, y0, rs0, method="spearman", ok=ok)
+            call check(error, ok, "control: the unscaled fixture must have a Spearman correlation")
+            if (allocated(error)) exit pair
+
+            call pf_cov(x, y, c, ok=ok)
+            call check(error, ok .eqv. (c == c), "pf_cov: ok did not track whether the answer is a NaN")
+            if (allocated(error)) exit pair
+            call pf_corr(x, y, r, ok=ok)
+            call check(error, ok .eqv. (r == r), "pf_corr: ok did not track whether the answer is a NaN")
+            if (allocated(error)) exit pair
+
+            ! The documented identity, at a scale where both sides are the unrepresentable one.
+            call pf_cov(x, x, c, ok=ok)
+            call pf_variance(x, v)
+            call check(error, c == v .or. (c /= c .and. v /= v), &
+                "pf_cov(x, x) stopped being pf_variance(x) at an extreme scale")
+            if (allocated(error)) exit pair
+
+            ! Midranks cannot overflow, so this one has a real value to assert, and the scale must
+            ! not have moved a bit of it.
+            call pf_corr(x, y, rs1, method="spearman", ok=ok)
+            call check(error, ok .and. rs1 == rs0, &
+                "the Spearman correlation is rank-based and must not change with the scale")
+        end block pair
+
+        if (uf_supported) call ieee_set_flag(ieee_underflow, uf_entry)
+
+    end subroutine test_pair_moments_at_an_extreme_scale_do_not_abort
+
     !> The streaming accuracy loss is bounded, and the two-pass route is exact.
     !!
     !! `pf_stats`' doc-comment says "in streaming mode there is no buffer to re-walk and the
@@ -8134,29 +8221,43 @@ contains
     subroutine test_weight_near_huge_survives_the_lower_levels(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64) :: x(3), w(3), s, mn, q, med
+        logical :: uf_supported, uf_entry
 
-        x = [1.0_real64, 2.0_real64, 3.0_real64]
-        ! The precondition, read rather than assumed: this weight must be past the square root of
-        ! `huge`, or squaring it does not overflow and the test asserts nothing.
-        w = [1.0e308_real64, 1.0e-300_real64, 1.0e-300_real64]
-        call check(error, w(1) > sqrt(huge(0.0_real64)), &
-            "the weight is not large enough to overflow when squared -- this fixture proves nothing")
-        if (allocated(error)) return
+        ! The two `1e-300` weights are subnormal-producing BY DESIGN, so the underflow flag is
+        ! saved here and put back at the single exit below; left raised it becomes nagfor's
+        ! unattributed "Floating underflow occurred" line at program exit. The inquiry names the
+        ! KIND, because nagfor answers .false. to the bare form (it has no `real128` underflow
+        ! flag), which would skip the save and the restore alike.
+        uf_supported = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_supported) call ieee_get_flag(ieee_underflow, uf_entry)
 
-        ! Level 0: the plain sum, and the order tier that shares its compaction.
-        call pf_sum(x, s, weights=w)
-        call check(error, s == w(1) + w(2) + w(3), "pf_sum(weights=) did not answer the weighted total")
-        if (allocated(error)) return
-        call pf_median(x, med, weights=w)
-        call check(error, med >= 1.0_real64 .and. med <= 3.0_real64, "pf_median(weights=) left the population")
-        if (allocated(error)) return
-        call pf_quantile(x, 0.25_real64, q, weights=w)
-        call check(error, q >= 1.0_real64 .and. q <= 3.0_real64, "pf_quantile(weights=) left the population")
-        if (allocated(error)) return
+        levels: block
+            x = [1.0_real64, 2.0_real64, 3.0_real64]
+            ! The precondition, read rather than assumed: this weight must be past the square root
+            ! of `huge`, or squaring it does not overflow and the test asserts nothing.
+            w = [1.0e308_real64, 1.0e-300_real64, 1.0e-300_real64]
+            call check(error, w(1) > sqrt(huge(0.0_real64)), &
+                "the weight is not large enough to overflow when squared -- this fixture proves nothing")
+            if (allocated(error)) exit levels
 
-        ! Level 1: the refined mean. The absorbing weight puts it on that element's value.
-        call pf_mean(x, mn, weights=w)
-        call check(error, mn == 1.0_real64, "pf_mean(weights=) did not collapse onto the absorbing weight's value")
+            ! Level 0: the plain sum, and the order tier that shares its compaction.
+            call pf_sum(x, s, weights=w)
+            call check(error, s == w(1) + w(2) + w(3), "pf_sum(weights=) did not answer the weighted total")
+            if (allocated(error)) exit levels
+            call pf_median(x, med, weights=w)
+            call check(error, med >= 1.0_real64 .and. med <= 3.0_real64, "pf_median(weights=) left the population")
+            if (allocated(error)) exit levels
+            call pf_quantile(x, 0.25_real64, q, weights=w)
+            call check(error, q >= 1.0_real64 .and. q <= 3.0_real64, "pf_quantile(weights=) left the population")
+            if (allocated(error)) exit levels
+
+            ! Level 1: the refined mean. The absorbing weight puts it on that element's value.
+            call pf_mean(x, mn, weights=w)
+            call check(error, mn == 1.0_real64, &
+                "pf_mean(weights=) did not collapse onto the absorbing weight's value")
+        end block levels
+
+        if (uf_supported) call ieee_set_flag(ieee_underflow, uf_entry)
     end subroutine test_weight_near_huge_survives_the_lower_levels
 
     !> No reduction RAISES an IEEE exception on a non-finite population.

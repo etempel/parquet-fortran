@@ -30,7 +30,8 @@ module test_root
     use parquet_root
     use test_root_support
     use iso_fortran_env, only : real64, int64
-    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_usual, ieee_is_finite
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_usual, &
+                                             ieee_is_finite, ieee_support_flag, ieee_underflow
 #ifndef __flang__
     ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
     ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
@@ -331,34 +332,44 @@ contains
         type(pf_root_info)         :: info
         real(real64)               :: x
         logical                    :: conv
+        logical :: uf_ok, uf_was
 
-        grow%mode = PF_EXPAND_UP
-        call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, converged=conv, &
-                          info=info)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. .not. info%converged &
-                   .and. .not. conv, "running out of tries must report PF_ROOT_NO_BRACKET")
-        if (allocated(error)) return
-        call check(error, info%nexpand == 64 .and. info%neval == 66, &
-                   "the default policy makes 64 tries, one evaluation each")
-        if (allocated(error)) return
-        call check(error, x == 0.0_real64 .and. info%froot == 2.0_real64, &
-                   "x must be the end with the smaller |f|, and froot its value")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        ! KDEpy's own stop: the upper end reaching 1. 1e-3*2**10 passes it, so the tenth try is
-        ! the last, at the limit exactly.
-        grow%upper_limit = 1.0_real64
-        call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, info=info)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%nexpand == 10 &
-                   .and. info%bracket_hi == 1.0_real64, &
-                   "an expansion stopped by its limit must report PF_ROOT_NO_BRACKET at the limit")
-        if (allocated(error)) return
+        run: block
+            grow%mode = PF_EXPAND_UP
+            call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, converged=conv, &
+                              info=info)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. .not. info%converged &
+                       .and. .not. conv, "running out of tries must report PF_ROOT_NO_BRACKET")
+            if (allocated(error)) exit run
+            call check(error, info%nexpand == 64 .and. info%neval == 66, &
+                       "the default policy makes 64 tries, one evaluation each")
+            if (allocated(error)) exit run
+            call check(error, x == 0.0_real64 .and. info%froot == 2.0_real64, &
+                       "x must be the end with the smaller |f|, and froot its value")
+            if (allocated(error)) exit run
 
-        grow = pf_bracket_expansion(mode=PF_EXPAND_UP, max_tries=5)
-        call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, info=info)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%nexpand == 5, &
-                   "max_tries must cap the tries")
+            ! KDEpy's own stop: the upper end reaching 1. 1e-3*2**10 passes it, so the tenth try is
+            ! the last, at the limit exactly.
+            grow%upper_limit = 1.0_real64
+            call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, info=info)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%nexpand == 10 &
+                       .and. info%bracket_hi == 1.0_real64, &
+                       "an expansion stopped by its limit must report PF_ROOT_NO_BRACKET at the limit")
+            if (allocated(error)) exit run
 
+            grow = pf_bracket_expansion(mode=PF_EXPAND_UP, max_tries=5)
+            call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, info=info)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%nexpand == 5, &
+                       "max_tries must cap the tries")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_root_expansion_exhausted_reports_no_bracket
 
     !> No evaluation outside `[lower_limit, upper_limit]`, read from the record, in all three
@@ -372,45 +383,55 @@ contains
         type(shifted_line)         :: line
         real(real64)               :: x
         integer                    :: i
+        logical :: uf_ok, uf_was
 
         ! UP toward a root at 0.9 beyond a limit at 0.7: 0.2, 0.4, then 0.8 cut to 0.7.
-        line%root = 0.9_real64
-        grow = pf_bracket_expansion(mode=PF_EXPAND_UP, upper_limit=0.7_real64)
-        call pf_find_root(line, 0.0_real64, 0.1_real64, x, expand=grow, info=info, history=hist)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%nexpand == 3, &
-                   "a root beyond the limit must not be found")
-        if (allocated(error)) return
-        call check(error, maxval(hist%x(1:hist%n)) == 0.7_real64, &
-                   "the last probe must be at the limit exactly, and nothing beyond it")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        ! DOWN toward a root at -5 below a limit at -3.
-        line%root = -5.0_real64
-        grow = pf_bracket_expansion(mode=PF_EXPAND_DOWN, lower_limit=-3.0_real64)
-        call pf_find_root(line, -1.0_real64, 0.0_real64, x, expand=grow, info=info, history=hist)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. &
-                   minval(hist%x(1:hist%n)) == -3.0_real64, &
-                   "DOWN must stop at its lower limit exactly")
-        if (allocated(error)) return
+        run: block
+            line%root = 0.9_real64
+            grow = pf_bracket_expansion(mode=PF_EXPAND_UP, upper_limit=0.7_real64)
+            call pf_find_root(line, 0.0_real64, 0.1_real64, x, expand=grow, info=info, history=hist)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%nexpand == 3, &
+                       "a root beyond the limit must not be found")
+            if (allocated(error)) exit run
+            call check(error, maxval(hist%x(1:hist%n)) == 0.7_real64, &
+                       "the last probe must be at the limit exactly, and nothing beyond it")
+            if (allocated(error)) exit run
 
-        ! BOTH inside [-3, 5] from [0, 1]: each end reaches its limit, and an end at its limit is
-        ! never evaluated again, so no point appears twice.
-        grow = pf_bracket_expansion(mode=PF_EXPAND_BOTH, lower_limit=-3.0_real64, &
-                                    upper_limit=5.0_real64)
-        call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, expand=grow, info=info, &
-                          history=hist)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%bracket_lo == -3.0_real64 &
-                   .and. info%bracket_hi == 5.0_real64, "BOTH must stop with both ends at their limits")
-        if (allocated(error)) return
-        call check(error, minval(hist%x(1:hist%n)) >= -3.0_real64 .and. &
-                   maxval(hist%x(1:hist%n)) <= 5.0_real64, "BOTH must evaluate nothing outside its limits")
-        if (allocated(error)) return
-        do i = 2, hist%n
-            call check(error, all(hist%x(1:i - 1) /= hist%x(i)), &
-                       "an end already at its limit must not be evaluated again")
-            if (allocated(error)) return
-        end do
+            ! DOWN toward a root at -5 below a limit at -3.
+            line%root = -5.0_real64
+            grow = pf_bracket_expansion(mode=PF_EXPAND_DOWN, lower_limit=-3.0_real64)
+            call pf_find_root(line, -1.0_real64, 0.0_real64, x, expand=grow, info=info, history=hist)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. &
+                       minval(hist%x(1:hist%n)) == -3.0_real64, &
+                       "DOWN must stop at its lower limit exactly")
+            if (allocated(error)) exit run
 
+            ! BOTH inside [-3, 5] from [0, 1]: each end reaches its limit, and an end at its limit is
+            ! never evaluated again, so no point appears twice.
+            grow = pf_bracket_expansion(mode=PF_EXPAND_BOTH, lower_limit=-3.0_real64, &
+                                        upper_limit=5.0_real64)
+            call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, expand=grow, info=info, &
+                              history=hist)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%bracket_lo == -3.0_real64 &
+                       .and. info%bracket_hi == 5.0_real64, "BOTH must stop with both ends at their limits")
+            if (allocated(error)) exit run
+            call check(error, minval(hist%x(1:hist%n)) >= -3.0_real64 .and. &
+                       maxval(hist%x(1:hist%n)) <= 5.0_real64, "BOTH must evaluate nothing outside its limits")
+            if (allocated(error)) exit run
+            do i = 2, hist%n
+                call check(error, all(hist%x(1:i - 1) /= hist%x(i)), &
+                           "an end already at its limit must not be evaluated again")
+                if (allocated(error)) exit run
+            end do
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_root_expansion_respects_the_limit
 
     !> DOWN finds a root below the bracket and BOTH one on either side, each by the structural
@@ -460,23 +481,33 @@ contains
         type(pf_bracket_expansion) :: grow
         type(pf_root_info)         :: info
         real(real64)               :: x
+        logical :: uf_ok, uf_was
 
-        call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, info=info)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%neval == 2 &
-                   .and. info%nexpand == 0, "no expand= must mean no expansion")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        grow = pf_bracket_expansion(mode=PF_EXPAND_NONE, factor=10.0_real64, max_tries=100)
-        call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, expand=grow, info=info)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%neval == 2, &
-                   "PF_EXPAND_NONE must not expand whatever its other components say")
-        if (allocated(error)) return
+        run: block
+            call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, info=info)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%neval == 2 &
+                       .and. info%nexpand == 0, "no expand= must mean no expansion")
+            if (allocated(error)) exit run
 
-        grow = pf_bracket_expansion(mode=PF_EXPAND_UP, max_tries=0)
-        call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, expand=grow, info=info)
-        call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%neval == 2, &
-                   "max_tries = 0 must not expand")
+            grow = pf_bracket_expansion(mode=PF_EXPAND_NONE, factor=10.0_real64, max_tries=100)
+            call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, expand=grow, info=info)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%neval == 2, &
+                       "PF_EXPAND_NONE must not expand whatever its other components say")
+            if (allocated(error)) exit run
 
+            grow = pf_bracket_expansion(mode=PF_EXPAND_UP, max_tries=0)
+            call pf_find_root(root_gentle, 0.0_real64, 1.0_real64, x, expand=grow, info=info)
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. info%neval == 2, &
+                       "max_tries = 0 must not expand")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_root_no_expansion_requires_a_bracket
 
     !> `-Infinity` at an end is a sign: an infinite tail above the root, a sign change with no
@@ -562,30 +593,40 @@ contains
         type(pf_root_history)      :: hist
         real(real64)               :: x
         logical                    :: conv
+        logical :: uf_ok, uf_was
 
-        call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, max_neval=3, converged=conv, &
-                          info=info, history=hist)
-        call check(error, info%status == PF_ROOT_LIMIT .and. .not. info%converged .and. .not. conv, &
-                   "max_neval = 3 must stop the search with PF_ROOT_LIMIT")
-        if (allocated(error)) return
-        call check(error, info%neval == 3 .and. hist%n == 3, "max_neval must never be exceeded")
-        if (allocated(error)) return
-        call check(error, any(hist%x(1:3) == x) .and. info%froot == root_cos_minus_x(x), &
-                   "x must be an evaluated point, and info%froot the value there")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, max_neval=1, info=info)
-        call check(error, info%status == PF_ROOT_LIMIT .and. info%neval == 1 .and. x == 0.0_real64, &
-                   "max_neval = 1 must evaluate a alone and return it")
-        if (allocated(error)) return
+        run: block
+            call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, max_neval=3, converged=conv, &
+                              info=info, history=hist)
+            call check(error, info%status == PF_ROOT_LIMIT .and. .not. info%converged .and. .not. conv, &
+                       "max_neval = 3 must stop the search with PF_ROOT_LIMIT")
+            if (allocated(error)) exit run
+            call check(error, info%neval == 3 .and. hist%n == 3, "max_neval must never be exceeded")
+            if (allocated(error)) exit run
+            call check(error, any(hist%x(1:3) == x) .and. info%froot == root_cos_minus_x(x), &
+                       "x must be an evaluated point, and info%froot the value there")
+            if (allocated(error)) exit run
 
-        ! Two ends and three probes spend five evaluations before the policy's 64 tries are used.
-        grow%mode = PF_EXPAND_UP
-        call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, max_neval=5, info=info)
-        call check(error, info%status == PF_ROOT_LIMIT .and. info%nexpand == 3 .and. info%neval == 5 &
-                   .and. x == 0.0_real64, &
-                   "a budget spent while expanding must report PF_ROOT_LIMIT, not PF_ROOT_NO_BRACKET")
+            call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, max_neval=1, info=info)
+            call check(error, info%status == PF_ROOT_LIMIT .and. info%neval == 1 .and. x == 0.0_real64, &
+                       "max_neval = 1 must evaluate a alone and return it")
+            if (allocated(error)) exit run
 
+            ! Two ends and three probes spend five evaluations before the policy's 64 tries are used.
+            grow%mode = PF_EXPAND_UP
+            call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, max_neval=5, info=info)
+            call check(error, info%status == PF_ROOT_LIMIT .and. info%nexpand == 3 .and. info%neval == 5 &
+                       .and. x == 0.0_real64, &
+                       "a budget spent while expanding must report PF_ROOT_LIMIT, not PF_ROOT_NO_BRACKET")
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_root_budget_is_spent
 
     !> A root of order `1e-9` -- a squared bandwidth on unit-scaled data -- comes back to the
@@ -742,8 +783,14 @@ contains
         integer(int64)             :: state
         integer                    :: i, j, nbad
         logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+        logical :: uf_ok, uf_was
 
         ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        ! UNDERFLOW is saved and put back beside them but deliberately NOT asserted on: these
+        ! calls are extreme by construction and underflow harmlessly, which is why the assertion
+        ! below names the other three (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
         halting = .false.
         call ieee_get_flag(ieee_usual, saved)
 #ifndef __flang__
@@ -817,6 +864,7 @@ contains
 
         call ieee_get_flag(ieee_usual, raised)
         call ieee_set_flag(ieee_usual, saved .or. raised)
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
 #ifndef __flang__
         if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
 #endif

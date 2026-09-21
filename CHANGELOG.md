@@ -261,7 +261,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and underflows to zero below about `1e-170`, so a standard deviation an ordinary `real64` holds
   was answered as `+Infinity` or, worse, as `0` for a population that has spread; where the plain
   accumulation returns something that is not finite and positive, the deviations are now scaled by
-  the largest of them and the sum retaken. Every other answer is unchanged, to the last bit.
+  the largest of them and the sum retaken. Every other answer is unchanged, to the last bit. The
+  recomputation is reached under a trapping build as well: the overflow and invalid traps are held
+  off across the accumulation that provokes them, so such a sample no longer ends the process under
+  nagfor's default `-ieee=stop`. `pf_cov` and `pf_corr` answer such a sample too, with a NaN and
+  `ok = .false.` where a centred sum is not representable, instead of ending the process there.
 - `pf_spatial_index%within_segment`, `%within_cylinder` and `%within_cone` find the points lying
   exactly on their axis when the radius is zero, and refuse an axis whose squared length overflows
   rather than answering as a ball about its first endpoint. The zero-radius answer holds under a

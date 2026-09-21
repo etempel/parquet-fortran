@@ -46,7 +46,15 @@
 !! through `ieee_value`, because building one with `anint`/`int` traps under nagfor's `-ieee=stop`.
 submodule (parquet_stats) parquet_stats_core
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
-        ieee_negative_inf
+        ieee_negative_inf, ieee_get_flag, ieee_set_flag, ieee_overflow, ieee_invalid
+#if !defined(__flang__) && !defined(__FLANG)
+    ! The halting-mode trio lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc lacks,
+    ! so flang on macOS cannot LINK a reference to any of them (`fortran-gotchas.md`). Nothing is
+    ! lost by compiling them out: flang leaves the IEEE traps masked, so the overflow the three
+    ! hold-offs below exist for is already quiet there.
+    use, intrinsic :: ieee_arithmetic, only : ieee_support_halting, ieee_get_halting_mode, &
+        ieee_set_halting_mode
+#endif
 #ifdef _OPENMP
     ! Only for the team observable below, which is written from inside the region so that it
     ! reports what RAN rather than what was decided. No other OpenMP entry point is called here:
@@ -312,6 +320,7 @@ contains
         integer(int64) :: nv, m, nb, i, c, team, istart, n_null_l, n_nan_l, wbits
         logical :: saw_nan_l
         logical :: skip, weighted, masked, deferrable, compacting, nonfinite_mean
+        logical :: held, halt_ovf, halt_inv, flag_ovf, flag_inv
         integer :: nm
 
         nv = size(values, kind=int64)
@@ -595,9 +604,10 @@ contains
         ! The reason is that `Inf + (-Inf)` raises IEEE_INVALID, and nagfor unmasks the IEEE traps
         ! by default (`-ieee=stop`), so executing it kills the process -- on data this module
         ! documents itself as ANSWERING rather than refusing (the non-finite table in
-        ! doc/pages/utilities/statistics.md). The trap cannot be masked away instead: NAG's
-        ! `ieee_set_halting_mode` does not lift it under `-ieee=stop`, measured against 7.2, so
-        ! the offending operation has to not happen.
+        ! doc/pages/utilities/statistics.md). Not having the operation happen is preferred to
+        ! holding the trap off around it, as pass two does: the screen below is two comparisons per
+        ! population, it answers the same bits on every finite population, and it leaves the IEEE
+        ! flags a caller reads afterwards exactly as this module found them.
         !
         ! **The signs come from the extremes pass one already tracked, so the screen costs one
         ! comparison per element and nothing per population.** `vmax` is `+Inf` exactly when the
@@ -676,6 +686,39 @@ contains
         end if
         stats_scan_count = stats_scan_count + 1_int64   ! pass two
 
+        ! ---- The overflow and invalid traps are held off across pass two ----
+        !
+        ! Pass two squares, cubes and FOURTH-powers every deviation whatever `nm` is (see
+        ! `stats_block_moments`, whose one loop body is a bit-exactness requirement), so a
+        ! population of magnitude `1e78` overflows `d**4` and one of `1e155` overflows `d*d`. The
+        ! module is built to answer through that: `stats_var_trusted` rejects the infinity and the
+        ! variance family recomputes through `stats_spread_scaled`, which is why `pf_stddev` of a
+        ! sample scaled to `1e200` is an ordinary number. gfortran and ifx reach that path because
+        ! an overflow is quiet for them; nagfor unmasks the IEEE traps by default (`-ieee=stop`),
+        ! so the run died inside the library before the rescue could look at the result
+        ! (`test_spread_at_extreme_scales`). The re-centring below then subtracts one infinity from
+        ! another for a level that accumulated one, which raises INVALID for the same reason.
+        !
+        ! Held off HERE, in this procedure's own body, and not in a helper: F2018 17.3 restores the
+        ! halting modes on return from any procedure that changed them, so a `hold_traps()` call
+        ! would leave `-ieee=stop` armed -- the trap recorded in `.claude/rules/fortran-gotchas.md`
+        ! that makes a masking attempt look as though NAG ignored it. nagfor's OpenMP workers
+        ! inherit the master's halting modes, so the threaded walk below is covered too. Both flags
+        ! are put back as they were found, because an overflow this module HANDLES must not surface
+        ! as NAG's "Floating overflow occurred" line at program exit.
+        held = .false.
+#if !defined(__flang__) && !defined(__FLANG)
+        held = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid)
+        if (held) then
+            call ieee_get_halting_mode(ieee_overflow, halt_ovf)
+            call ieee_get_halting_mode(ieee_invalid, halt_inv)
+            call ieee_get_flag(ieee_overflow, flag_ovf)
+            call ieee_get_flag(ieee_invalid, flag_inv)
+            call ieee_set_halting_mode(ieee_overflow, .false.)
+            call ieee_set_halting_mode(ieee_invalid, .false.)
+        end if
+#endif
+
         ! ---- Pass two: the central moments, against the mean pass one produced ----
         !
         ! `q1` accumulates `sum(w*d)`, which is algebraically ZERO and in floating point is the
@@ -732,15 +775,13 @@ contains
         ! right -- `(x - Inf)**2` is `Inf` for a finite element and `Inf - Inf` for the infinite
         ! one -- which is numpy's answer for the variance here, so nothing needs forcing.
         !
-        ! **Reached only by an OVERFLOW, and no portable fixture can build one.** The screen above
-        ! has already returned for every population holding an infinity, so arriving here with a
-        ! non-finite `mu` means finite values whose weighted sum, or whose weight sum, overflowed
-        ! in the block tree. Producing that in a test means executing the overflow, and nagfor
-        ! unmasks the IEEE traps by default (`-ieee=stop`): the run dies inside the library rather
-        ! than reporting anything. The trap cannot be masked around it either -- NAG's
-        ! `ieee_set_halting_mode` does not lift it, measured against 7.2 and recorded above. The
-        ! branch stays because the condition is real in production (a column of 1e300s), and is
-        ! excluded rather than chased with a fixture that would break one supported compiler.
+        ! **Reached only by an OVERFLOW.** The screen above has already returned for every
+        ! population holding an infinity, so arriving here with a non-finite `mu` means finite
+        ! values whose weighted sum, or whose weight sum, overflowed in PASS ONE's block tree --
+        ! which is outside the hold-off above, so under nagfor's `-ieee=stop` producing it in a
+        ! test still dies inside the library. The branch stays because the condition is real in
+        ! production (a column of 1e300s), and is excluded from coverage rather than chased with a
+        ! fixture that would break one supported compiler.
         nonfinite_mean = .false.
         if (mu /= mu) then
             nonfinite_mean = .true.                        ! GCOVR_EXCL_LINE
@@ -757,6 +798,16 @@ contains
             acc%m2 = merge(q2(1), stats_nan(), nm >= 2)
             acc%m3 = merge(q3(1), stats_nan(), nm >= 3)
             acc%m4 = merge(q4(1), stats_nan(), nm >= 4)
+            ! Restored inline at both exits rather than through one helper, for the reason the
+            ! hold-off above gives: a helper's return would undo it.
+#if !defined(__flang__) && !defined(__FLANG)
+            if (held) then
+                call ieee_set_halting_mode(ieee_overflow, halt_ovf)
+                call ieee_set_halting_mode(ieee_invalid, halt_inv)
+                call ieee_set_flag(ieee_overflow, flag_ovf)
+                call ieee_set_flag(ieee_invalid, flag_inv)
+            end if
+#endif
             call stats_hand_over(xb, wb, keep_x, keep_w)
             return
         end if                                             ! GCOVR_EXCL_STOP
@@ -769,6 +820,14 @@ contains
         if (nm >= 3) acc%m3 = q3(1) - 3.0_real64 * delta * q2(1) + 2.0_real64 * delta**3 * acc%w_sum
         if (nm >= 4) acc%m4 = q4(1) - 4.0_real64 * delta * q3(1) + 6.0_real64 * delta * delta * q2(1) &
             - 3.0_real64 * delta**4 * acc%w_sum
+#if !defined(__flang__) && !defined(__FLANG)
+        if (held) then
+            call ieee_set_halting_mode(ieee_overflow, halt_ovf)
+            call ieee_set_halting_mode(ieee_invalid, halt_inv)
+            call ieee_set_flag(ieee_overflow, flag_ovf)
+            call ieee_set_flag(ieee_invalid, flag_inv)
+        end if
+#endif
         call stats_hand_over(xb, wb, keep_x, keep_w)
     end subroutine stats_engine
 
@@ -1084,17 +1143,26 @@ contains
     !! `c` is that largest deviation. It is attained at the smallest or the largest surviving value,
     !! so the accumulator already holds what it takes to form it and no pass is needed to find it;
     !! `t` is then the variance of `(x - mean)/c`, an ordinary number of order one for every
-    !! representable sample. The caller forms `c*c*t` for a variance and `c*sqrt(t)` for a standard
-    !! deviation: the second is representable over a far wider range of samples than the first,
-    !! which is the case this exists for -- a sample of magnitude `1e200` has a standard deviation
-    !! an ordinary `real64` holds and a variance no `real64` can.
+    !! representable sample. The caller forms `c*sqrt(t)` for a standard deviation and takes `var`
+    !! for a variance: the first is representable over a far wider range of samples than the
+    !! second, which is the case this exists for -- a sample of magnitude `1e200` has a standard
+    !! deviation an ordinary `real64` holds and a variance no `real64` can.
+    !!
+    !! **`var` is scaled back HERE, not by the caller, because forming `(c*c)*t` is what overflows
+    !! when the variance is the unrepresentable one.** That overflow is the intended answer --
+    !! `+Infinity`, which is what gfortran and ifx return -- but under nagfor's default
+    !! `-ieee=stop` it ends the process, so it is formed with the overflow and invalid traps held
+    !! off and the flags put back, the same way `stats_engine` runs its pass two. Doing it in one
+    !! place is what keeps that hold-off from having to be repeated at every caller
+    !! (`test_spread_at_extreme_scales`).
     !!
     !! **A COLD PATH.** It runs only where `stats_var` answered something `stats_var_trusted`
     !! rejects, so every ordinary answer is the plain accumulation's, to the last bit, and
     !! `parquet_stats`' golden vectors do not move. `ok` is `.false.` wherever there is nothing
     !! better to answer -- an empty or poisoned population, a constant one, or a sample so wide that
     !! its own extent is not representable -- and the caller then keeps what it had.
-    subroutine stats_spread_scaled(values, what, is_valid, weights, skipnan, acc, ddof, freq, c, t, ok)
+    subroutine stats_spread_scaled(values, what, is_valid, weights, skipnan, acc, ddof, freq, c, t, &
+            var, ok)
         real(real64), intent(in) :: values(:)            !! the population, before exclusions.
         character(len=*), intent(in) :: what             !! the public procedure's name, for messages.
         logical, intent(in), optional :: is_valid(:)     !! per element: .false. marks a null.
@@ -1105,15 +1173,19 @@ contains
         logical, intent(in) :: freq                      !! .true. for frequency weights.
         real(real64), intent(out) :: c                   !! the largest absolute deviation.
         real(real64), intent(out) :: t                   !! the variance of the deviations over `c`.
+        real(real64), intent(out) :: var
+        !! `(c*c)*t`, the variance in the caller's own units, `+Infinity` where no `real64` holds it.
         logical, intent(out) :: ok                       !! the pair is usable.
 
         real(real64), allocatable :: keep_x(:), keep_w(:)
         real(real64) :: denom, half, s, d, lim
+        logical :: held, halt_ovf, halt_inv, flag_ovf, flag_inv
         integer(int64) :: i, nv, nnull, nnan
         logical :: saw_nan
 
         c = 0.0_real64
         t = 0.0_real64
+        var = stats_nan()
         ok = .false.
         if (acc%empty .or. acc%saw_nan) return
         if (.not. (acc%w_sum > 0.0_real64)) return
@@ -1150,6 +1222,30 @@ contains
         end do
         t = s/denom
         ok = t > 0.0_real64 .and. t <= lim
+        if (.not. ok) return
+        ! Scaled back under the same hold-off `stats_engine` takes, and for the same reason: this
+        ! product is MEANT to reach `+Infinity` on a sample whose variance is not representable.
+        held = .false.
+#if !defined(__flang__) && !defined(__FLANG)
+        held = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid)
+        if (held) then
+            call ieee_get_halting_mode(ieee_overflow, halt_ovf)
+            call ieee_get_halting_mode(ieee_invalid, halt_inv)
+            call ieee_get_flag(ieee_overflow, flag_ovf)
+            call ieee_get_flag(ieee_invalid, flag_inv)
+            call ieee_set_halting_mode(ieee_overflow, .false.)
+            call ieee_set_halting_mode(ieee_invalid, .false.)
+        end if
+#endif
+        var = (c*c)*t
+#if !defined(__flang__) && !defined(__FLANG)
+        if (held) then
+            call ieee_set_halting_mode(ieee_overflow, halt_ovf)
+            call ieee_set_halting_mode(ieee_invalid, halt_inv)
+            call ieee_set_flag(ieee_overflow, flag_ovf)
+            call ieee_set_flag(ieee_invalid, flag_inv)
+        end if
+#endif
 
     end subroutine stats_spread_scaled
 
@@ -1469,7 +1565,7 @@ contains
         type(stats_acc) :: acc
         logical :: freq, scaled
         integer :: dd
-        real(real64) :: c, t
+        real(real64) :: c, t, vs
         call stats_weight_kind("pf_variance", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
@@ -1481,8 +1577,8 @@ contains
             ! The squared deviations over- or underflowed: recompute them scaled. A cold path, and
             ! `c*c*t` still answers `+Infinity` where the variance itself is unrepresentable.
             call stats_spread_scaled(values, "pf_variance", is_valid, weights, skipnan, acc, dd, &
-                freq, c, t, scaled)
-            if (scaled) v = (c*c)*t
+                freq, c, t, vs, scaled)
+            if (scaled) v = vs
         end if
         if (present(ok)) ok = (v == v)
     end procedure variance_f64
@@ -1491,7 +1587,7 @@ contains
         type(stats_acc) :: acc
         logical :: freq, scaled
         integer :: dd
-        real(real64) :: v, c, t
+        real(real64) :: v, c, t, vs
         call stats_weight_kind("pf_stddev", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
@@ -1505,7 +1601,7 @@ contains
             ! without ever forming the variance, which for a sample of magnitude `1e200` no
             ! `real64` holds while its standard deviation is an ordinary number.
             call stats_spread_scaled(values, "pf_stddev", is_valid, weights, skipnan, acc, dd, &
-                freq, c, t, scaled)
+                freq, c, t, vs, scaled)
             if (scaled) sd = c*sqrt(t)
         end if
         if (present(ok)) ok = (sd == sd)
@@ -1515,7 +1611,7 @@ contains
         type(stats_acc) :: acc
         logical :: freq, scaled
         integer :: dd
-        real(real64) :: c, t
+        real(real64) :: c, t, vs
         call stats_weight_kind("pf_sem", weight_type, freq)
         dd = 1
         if (present(ddof)) dd = ddof
@@ -1527,7 +1623,7 @@ contains
         ! rescaled recomputation wherever the squared deviations over- or underflowed.
         if (.not. stats_var_trusted(stats_var(acc, dd, freq))) then
             call stats_spread_scaled(values, "pf_sem", is_valid, weights, skipnan, acc, dd, freq, &
-                c, t, scaled)
+                c, t, vs, scaled)
             if (scaled) se = c*sqrt(t)/sqrt(stats_neff(acc, freq))
         end if
         if (present(ok)) ok = (se == se)
@@ -1565,7 +1661,7 @@ contains
         type(stats_acc) :: acc
         logical :: freq, bs, ex, scaled
         integer :: dd, nm
-        real(real64) :: vv, c, t
+        real(real64) :: vv, c, t, vs
 
         call stats_weight_kind("pf_moments", weight_type, freq)
         dd = 1
@@ -1602,9 +1698,9 @@ contains
         if ((present(variance) .or. present(stddev) .or. present(sem)) .and. &
                 .not. stats_var_trusted(vv)) then
             call stats_spread_scaled(values, "pf_moments", is_valid, weights, skipnan, acc, dd, &
-                freq, c, t, scaled)
+                freq, c, t, vs, scaled)
             if (scaled) then
-                if (present(variance)) variance = (c*c)*t
+                if (present(variance)) variance = vs
                 if (present(stddev)) stddev = c*sqrt(t)
                 if (present(sem)) sem = c*sqrt(t)/sqrt(stats_neff(acc, freq))
             end if
@@ -2469,6 +2565,7 @@ contains
         real(real64) :: sx, sy, sw, mux, muy, dx, dy, m3_drop, m4_drop
         integer(int64) :: i, c, nb
         logical :: weighted, xpinf, xninf, ypinf, yninf, diagonal
+        logical :: held, halt_ovf, halt_inv, flag_ovf, flag_inv
 
         weighted = allocated(kw)
         xpinf = .false.
@@ -2629,6 +2726,31 @@ contains
         ! element, and one compare-only traversal for the diagonal.
         diagonal = stats_pair_is_diagonal(kx, ky, m)
 
+        ! ---- The overflow and invalid traps are held off across pass two ----
+        !
+        ! The same hold-off `stats_engine` takes, for the same reason and with the same rules:
+        ! set in this body rather than a helper (F2018 17.3), restored inline at the one exit
+        ! below, both flags put back as they were found. Pass two squares every deviation -- and
+        ! through `stats_block_moments` on the diagonal fork, fourth-powers them -- so a pair
+        ! scaled to `1e200` overflows, and without this the run dies here instead of answering.
+        ! What `pf_cov` and `pf_corr` then report is what gfortran and ifx already report for the
+        ! same data: a non-finite centred sum, which both screen into a NaN with `ok = .false.`
+        ! (`test_pair_moments_at_an_extreme_scale_do_not_abort`). There is no rescaled
+        ! recomputation on this path -- `stats_spread_scaled` has no pair twin -- so the screen in
+        ! the callers is the whole answer.
+        held = .false.
+#if !defined(__flang__) && !defined(__FLANG)
+        held = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid)
+        if (held) then
+            call ieee_get_halting_mode(ieee_overflow, halt_ovf)
+            call ieee_get_halting_mode(ieee_invalid, halt_inv)
+            call ieee_get_flag(ieee_overflow, flag_ovf)
+            call ieee_get_flag(ieee_invalid, flag_inv)
+            call ieee_set_halting_mode(ieee_overflow, .false.)
+            call ieee_set_halting_mode(ieee_invalid, .false.)
+        end if
+#endif
+
         ! ---- Pass two: the three centred sums, then the same re-centring correction.
         !
         allocate(q1x(nb), q1y(nb), qxx(nb), qxy(nb), qyy(nb))
@@ -2676,6 +2798,14 @@ contains
         sxx = qxx(1) - dx * dx * w_sum
         sxy = qxy(1) - dx * dy * w_sum
         syy = qyy(1) - dy * dy * w_sum
+#if !defined(__flang__) && !defined(__FLANG)
+        if (held) then
+            call ieee_set_halting_mode(ieee_overflow, halt_ovf)
+            call ieee_set_halting_mode(ieee_invalid, halt_inv)
+            call ieee_set_flag(ieee_overflow, flag_ovf)
+            call ieee_set_flag(ieee_invalid, flag_inv)
+        end if
+#endif
     end procedure stats_pair_moments
 
     module procedure stats_mean_sd

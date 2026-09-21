@@ -1705,36 +1705,46 @@ contains
         real(real64) :: f, c, sub
         logical :: ok
         character(len=140) :: what
+        logical :: uf_ok, uf_was
 
-        call bounded_fixture(200_int64, x)
-        ! The control: an ordinary bandwidth on the same sample is defined, so that neither
-        ! assertion below can pass because the fixture itself is unusable.
-        call k%fit(x, bandwidth=0.05_real64, lower=0.0_real64, upper=1.0_real64, ok=ok)
-        call check(error, ok, "control: an ordinary bandwidth on this sample must be defined")
-        if (allocated(error)) return
+        ! Extreme but legal inputs underflow inside the library; the flag is put back rather than
+        ! left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
 
-        ! Subnormal: built by halving `tiny`, never written as a literal.
-        sub = 0.5_real64*tiny(1.0_real64)
-        call check(error, sub > 0.0_real64 .and. sub < tiny(1.0_real64), &
-            "precondition: the fixture's bandwidth must be positive and subnormal")
-        if (allocated(error)) return
-        call k%fit(x, bandwidth=sub, ok=ok)
-        call k%pdf(0.5_real64, f)
-        call k%cdf(0.5_real64, c)
-        write(what, '(a,es12.5,a,es12.5)') "a subnormal bandwidth must leave the estimate " // &
-            "undefined; %pdf is ", f, " and %cdf ", c
-        call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
-        if (allocated(error)) return
+        run: block
+            call bounded_fixture(200_int64, x)
+            ! The control: an ordinary bandwidth on the same sample is defined, so that neither
+            ! assertion below can pass because the fixture itself is unusable.
+            call k%fit(x, bandwidth=0.05_real64, lower=0.0_real64, upper=1.0_real64, ok=ok)
+            call check(error, ok, "control: an ordinary bandwidth on this sample must be defined")
+            if (allocated(error)) exit run
 
-        ! Far wider than the support it is bounded by, at both bounds.
-        call k%fit(x, bandwidth=1.0e300_real64, lower=0.0_real64, upper=1.0_real64, &
-            boundary="reflect", ok=ok)
-        call k%pdf(0.5_real64, f)
-        call k%cdf(0.5_real64, c)
-        write(what, '(a,es12.5,a,es12.5)') "a bandwidth far wider than a two-sided support must " // &
-            "leave the estimate undefined; %pdf is ", f, " and %cdf ", c
-        call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
+            ! Subnormal: built by halving `tiny`, never written as a literal.
+            sub = 0.5_real64*tiny(1.0_real64)
+            call check(error, sub > 0.0_real64 .and. sub < tiny(1.0_real64), &
+                "precondition: the fixture's bandwidth must be positive and subnormal")
+            if (allocated(error)) exit run
+            call k%fit(x, bandwidth=sub, ok=ok)
+            call k%pdf(0.5_real64, f)
+            call k%cdf(0.5_real64, c)
+            write(what, '(a,es12.5,a,es12.5)') "a subnormal bandwidth must leave the estimate " // &
+                "undefined; %pdf is ", f, " and %cdf ", c
+            call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
+            if (allocated(error)) exit run
 
+            ! Far wider than the support it is bounded by, at both bounds.
+            call k%fit(x, bandwidth=1.0e300_real64, lower=0.0_real64, upper=1.0_real64, &
+                boundary="reflect", ok=ok)
+            call k%pdf(0.5_real64, f)
+            call k%cdf(0.5_real64, c)
+            write(what, '(a,es12.5,a,es12.5)') "a bandwidth far wider than a two-sided support must " // &
+                "leave the estimate undefined; %pdf is ", f, " and %cdf ", c
+            call check(error, .not. ok .and. ieee_is_nan(f) .and. ieee_is_nan(c), trim(what))
+
+        end block run
+
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
     end subroutine test_bandwidth_admission
 
     !> The grid's lifecycle, in process: `%finish` closes the accumulation, `%is_finished` reports

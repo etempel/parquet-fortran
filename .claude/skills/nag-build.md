@@ -67,6 +67,9 @@ All but `release` are `-O0`; a green `nag`/`nagdeb` run says nothing about the o
 
 ## 4 Triage the diagnostics
 
+**`Panic:` and `Internal Error -- please report this bug` outrank every class below and are
+reported to the maintainer in the same reply**: `.claude/rules/fortran-gotchas.md`, nagfor section.
+
 **Unused-import warnings are mostly false positives**, in two classes NAG cannot see: a name
 reached by HOST ASSOCIATION from an ancestor (every `parquet_read_*`, `parquet_write_*`,
 `parquet_metadata_base/_get`, `parquet_tables_*`, `parquet_sorting_*`, `parquet_columns_*` file has

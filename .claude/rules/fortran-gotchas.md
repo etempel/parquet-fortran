@@ -549,6 +549,16 @@ flang builds here are serial only and `--profile release` does not link (`build.
 check and read a hang there as a possible miscompilation (`sample <pid>` names the procedure).
 Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-build.md`).
 
+- **`Panic: '<message>'` and `Internal Error -- please report this bug` are COMPILER defects, and
+  both are reported to the maintainer — always, and in the same reply that met them.** They are
+  nagfor asking to be told, not a verdict on the source, and the maintainer is the one who can
+  report them to NAG. Quote the message verbatim and name the file, the procedure, the `--profile`
+  and the `nagfor -V` build. A source workaround may follow and several are recorded below
+  (`find_node_sym -- invalid tree`, `No mapinfo.sym?`, the `pure module procedure` ICE in the
+  gfortran section), but the panic is never absorbed into one silently: a workaround applied
+  without the message being surfaced spends the report NAG would have acted on. The same holds for
+  any diagnostic naming an internal compiler structure, and for a bare `Segmentation fault` from
+  the compiler itself rather than from the program it built.
 - **nagfor unmasks the IEEE traps by default (`-ieee=stop`) for the whole process.** `anint(NaN)`
   and `int(NaN)` trap (test `ieee_is_nan` first, as its own statement); `arrow::compute::MinMax`
   raises `FE_INVALID` benignly on every non-empty float array. Mask the traps around a foreign call

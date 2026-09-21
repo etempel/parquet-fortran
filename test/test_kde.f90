@@ -143,6 +143,14 @@ contains
                 test_isj_narrower_on_bimodal), &
             new_unittest("without a root the default falls back to silverman and rule=isj is undefined", &
                 test_isj_fallback), &
+            new_unittest("isj refuses a bandwidth finer than the sample's own resolution", &
+                test_isj_refuses_sub_gap), &
+            new_unittest("pf_kde_bandwidth answers %fit's own number, bit for bit", &
+                test_standalone_bandwidth), &
+            new_unittest("rule=lscv minimises cross-validation and scores the estimator in force", &
+                test_lscv_rule), &
+            new_unittest("%curve's default method is binned only where binned is accurate", &
+                test_curve_default_method), &
             new_unittest("the isj rule's sum forms no factor it does not use", &
                 test_isj_sum_forms_no_unused_factor), &
             new_unittest("isj weights: frequency weights replicate, equal reliability weights are none", &
@@ -177,6 +185,8 @@ contains
                 test_grid_linear_free_edge), &
             new_unittest("an adaptive point wider than the grid poisons it under linear", &
                 test_grid_linear_reach_poisons), &
+            new_unittest("R3 counts the over-reaching points and %merge sums the counts", &
+                test_grid_overreach_counted), &
             new_unittest("the pilot of a linear fit keeps R2", test_pilot_linear_keeps_r2), &
             new_unittest("the linear estimate is never negative", test_linear_never_negative), &
             new_unittest("at a rising bound the linear correction is closer than both simple ones", &
@@ -208,10 +218,16 @@ contains
             new_unittest("the grid's %print writes the summary and says when there is none", &
                 test_grid_print_writes), &
             new_unittest("alpha=0 is the fixed estimate, alpha=0.5 is not", test_alpha_zero_is_fixed), &
+            new_unittest("an adaptive fit widens a rule's bandwidth and leaves an explicit one alone", &
+                test_adaptive_inflates_a_rule), &
             new_unittest("the adaptive bandwidths follow the pilot", test_adaptive_bandwidths_follow_pilot), &
             new_unittest("the adaptive golden case", test_adaptive_golden), &
             new_unittest("bandwidth_max caps every h_j", test_bandwidth_max_caps), &
             new_unittest("%pilot returns the grid the fit used", test_pilot_is_the_fits), &
+            new_unittest("%fit(pilot=) applies a smoothing measured on another sample", &
+                test_fit_takes_a_pilot), &
+            new_unittest("a grid may reach beyond its pilot, where the no-density rule applies", &
+                test_grid_wider_than_its_pilot), &
             new_unittest("the pilot's cells follow the rule and its clamps", test_pilot_cells_rule), &
             new_unittest("the two forms agree under one pilot", test_two_forms_agree_under_one_pilot), &
             new_unittest("the adaptive kernel conserves mass under both corrections", &
@@ -898,6 +914,297 @@ contains
             "a constant sample has no bandwidth under the default, and no rule is named for it")
 
     end subroutine test_isj_fallback
+
+    !> With no `method=`, `%curve` fills itself by the binned transform only where that is as
+    !! accurate as the exact sum, and by the exact sum everywhere else. Three conditions decide it,
+    !! and this test walks all three, in each direction.
+    !!
+    !! **Which method ran is not reported, so it is read off the VALUES**: the default must equal
+    !! one of the two explicit methods bit for bit, and on a fixture where the two differ, that
+    !! says which one ran. The fixture is chosen so they do differ -- a curve on which binned and
+    !! exact agreed would make every arm below pass whatever the default did.
+    !!
+    !! The correction arm carries the most weight. `"reflect"` keeps the binned curve's second
+    !! order, because its images are the same kernel placed elsewhere; `"renormalise"` and
+    !! `"linear"` vary along the curve and cost it an order, which is tens of times worse at a few
+    !! thousand points -- exactly where a bounded density most needs a curve. If the condition is
+    !! ever simplified back to the kernel alone, this is the arm that fails.
+    subroutine test_curve_default_method(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        character(len=12), parameter :: SMOOTH(2) = [character(len=12) :: "gaussian", "bspline"]
+        character(len=12), parameter :: ROUGH(2) = [character(len=12) :: "epanechnikov", "box"]
+        character(len=11), parameter :: VARYING(2) = [character(len=11) :: "renormalise", "linear"]
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        real(real64) :: xg(600), fd(600), fb(600), fe(600), x1(1), f1(1), fq(1)
+        integer :: j
+
+        call kde_fixture(400_int64, x)
+
+        ! ---- the kernel: smooth kernels bin, rough ones do not ----
+        do j = 1, 2
+            call k%fit(x, rule="silverman", kernel=trim(SMOOTH(j)))
+            call k%curve(xg, fd)
+            call k%curve(xg, fb, method="binned")
+            call k%curve(xg, fe, method="exact")
+            call check(error, any(fb /= fe), trim(SMOOTH(j)) // &
+                ": the fixture must tell the two methods apart, or the arms below assert nothing")
+            if (allocated(error)) return
+            call check(error, all(fd == fb), trim(SMOOTH(j)) // &
+                ": a smooth kernel on a fine unbounded curve must default to the binned transform")
+            if (allocated(error)) return
+
+            ! `"reflect"` keeps the order, so it still bins.
+            call k%fit(x, rule="silverman", kernel=trim(SMOOTH(j)), lower=-470.0_real64, &
+                boundary="reflect")
+            call k%curve(xg, fd)
+            call k%curve(xg, fb, method="binned")
+            call check(error, all(fd == fb), trim(SMOOTH(j)) // &
+                ': boundary="reflect" keeps the binned curve''s order, so it must still bin')
+            if (allocated(error)) return
+
+            ! The corrections that vary along the curve cost it an order, so they do not.
+            call k%fit(x, rule="silverman", kernel=trim(SMOOTH(j)), lower=-470.0_real64, &
+                boundary=trim(VARYING(j)))
+            call k%curve(xg, fd)
+            call k%curve(xg, fe, method="exact")
+            call check(error, all(fd == fe), trim(SMOOTH(j)) // " under " // trim(VARYING(j)) // &
+                ": a correction that varies along the curve must fall back to the exact sum")
+            if (allocated(error)) return
+        end do
+
+        do j = 1, 2
+            call k%fit(x, rule="silverman", kernel=trim(ROUGH(j)))
+            call k%curve(xg, fd)
+            call k%curve(xg, fe, method="exact")
+            call check(error, all(fd == fe), trim(ROUGH(j)) // &
+                ": a kernel the binned estimate converges slowly for must default to the exact sum")
+            if (allocated(error)) return
+        end do
+
+        ! ---- the spacing: a curve too coarse to bin accurately takes the exact sum ----
+        call k%fit(x, rule="silverman")
+        block
+            real(real64) :: xc(9), fc(9), fce(9)
+            call k%curve(xc, fc)
+            call k%curve(xc, fce, method="exact")
+            call check(error, all(fc == fce), &
+                "a curve of nine points samples the kernel far too coarsely to bin: it must be exact")
+        end block
+        if (allocated(error)) return
+
+        ! ---- one point: the default falls back rather than refusing ----
+        call k%curve(x1, f1)
+        call k%pdf(x1(1), fq(1))
+        call check(error, f1(1) == fq(1), &
+            "a one-point default curve must answer the exact density, not refuse")
+
+    end subroutine test_curve_default_method
+
+    !> `rule="lscv"` minimises the least-squares cross-validation criterion. It is the one rule here
+    !! that is defined for whatever estimator is in force, which is what it is for: asked for with
+    !! `adaptive = .true.` it scores the ADAPTIVE estimate and so returns that estimator's own
+    !! bandwidth, which no plug-in rule can do.
+    !!
+    !! **The tolerance in the first arm is wide on purpose, and it is not slack.** LSCV is a
+    !! high-variance criterion -- that is its known and documented weakness, the price of making no
+    !! assumption about the density -- so on one sample of a thousand normals it lands some tens of
+    !! per cent from the bandwidth that minimises the exact MISE, and would still be behaving
+    !! correctly. What the assertion forbids is the failure that matters: a criterion that is not
+    !! being minimised at all, or is minimised in the wrong direction, which misses by a factor.
+    !! The reference is the closed-form normal-reference optimum `(4/3)**(1/5) n**(-1/5)`, exact for
+    !! this fixture, not a recorded output.
+    !!
+    !! The second arm is the one that would catch the criterion being evaluated for the wrong
+    !! estimator, which is the defect this rule exists to avoid: the adaptive estimator's own
+    !! bandwidth is wider, and a criterion that quietly scored the fixed estimate under
+    !! `adaptive = .true.` would answer the same number twice.
+    subroutine test_lscv_rule(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        real(real64) :: hfix, hada, href, h1, h2
+        character(len=:), allocatable :: name
+        integer(int64) :: i, n
+        logical :: ok
+
+        n = 1000_int64
+        allocate(x(n))
+        do i = 1_int64, n
+            x(i) = pf_random_normal_at(11_int64, pf_random_key(1_int64, 1_int64), i)
+        end do
+
+        ! ---- (i) against the closed-form optimum for this density ----
+        call k%fit(x, rule="lscv", ok=ok)
+        hfix = k%bandwidth()
+        call k%rule(name)
+        href = (4.0_real64/3.0_real64)**0.2_real64*real(n, real64)**(-0.2_real64)
+        call check(error, ok .and. name == "lscv", "rule=lscv must find a bandwidth and name itself")
+        if (allocated(error)) return
+        call check(error, hfix > 0.5_real64*href .and. hfix < 2.0_real64*href, &
+            "the cross-validated bandwidth must land near the normal-reference optimum")
+        if (allocated(error)) return
+
+        ! ---- (ii) it scores the estimator in force ----
+        call k%fit(x, rule="lscv", adaptive=.true., ok=ok)
+        hada = k%bandwidth()
+        call check(error, ok .and. hada > hfix, &
+            "under adaptive=.true. lscv must return the adaptive estimator's own, wider bandwidth")
+        if (allocated(error)) return
+
+        ! ---- (iii) reproducible, and independent of the team ----
+        call k%fit(x, rule="lscv", threads=1)
+        h1 = k%bandwidth()
+        call k%fit(x, rule="lscv", threads=4)
+        h2 = k%bandwidth()
+        call check(error, h1 == hfix .and. h2 == hfix, &
+            "the subsample is addressed, not drawn afresh: lscv must answer the same bits every time")
+        if (allocated(error)) return
+
+        ! ---- (iv) a sample with no scale has no cross-validated bandwidth either ----
+        call k%fit([2.5_real64, 2.5_real64, 2.5_real64], rule="lscv", ok=ok)
+        call k%rule(name)
+        call check(error, .not. ok .and. ieee_is_nan(k%bandwidth()) .and. name == "none", &
+            "a constant sample must leave rule=lscv undefined, as every other rule leaves it")
+
+    end subroutine test_lscv_rule
+
+    !> `pf_kde_bandwidth` gives a caller the number without the estimate. The bit-identity with
+    !! `%fit`'s own `%bandwidth()` IS the contract, and it is what stops the two drifting: every
+    !! rule, weighted and unweighted, bounded and unbounded, fixed and adaptive.
+    !!
+    !! Exact equality is the right assertion here and not a fragile one. The two entry points do
+    !! not merely compute the same thing, they run the SAME body -- `kde_fit_core`, which
+    !! `pf_kde_bandwidth` stops once the bandwidth is known -- so there is no second rounding to
+    !! differ by. A re-implementation, which is what this test exists to forbid, would show up as
+    !! an inequality in the last bits rather than as a wrong number, and nothing else would see it.
+    !!
+    !! The population counts and `rule_used` come along for the same reason: the default falls back
+    !! to Silverman's rule where the ISJ rule finds none, so a caller has to be able to ask which
+    !! rule actually answered.
+    subroutine test_standalone_bandwidth(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        character(len=9), parameter :: RULES(3) = [character(len=9) :: "isj", "silverman", "scott"]
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: h
+        character(len=:), allocatable :: want, got
+        integer(int64) :: nn, nd, no
+        logical :: ok1, ok2
+        integer :: r
+
+        call kde_fixture(400_int64, x)
+        call kde_weights_mod5(400_int64, w)
+
+        do r = 1, 3
+            ! unbounded, unweighted
+            call k%fit(x, rule=trim(RULES(r)), ok=ok1)
+            call pf_kde_bandwidth(x, h, rule=trim(RULES(r)), ok=ok2, rule_used=got)
+            call k%rule(want)
+            call check(error, ok1 .eqv. ok2, trim(RULES(r)) // ": the two forms must agree on whether " // &
+                "a rule found a bandwidth")
+            if (allocated(error)) return
+            call check(error, same_h(h, k%bandwidth()) .and. got == want, &
+                trim(RULES(r)) // ": pf_kde_bandwidth must answer %fit's bandwidth and name the same rule")
+            if (allocated(error)) return
+
+            ! bounded and weighted, which routes through the same exclusion pass
+            call k%fit(x, rule=trim(RULES(r)), weights=w, lower=-300.0_real64, upper=300.0_real64)
+            call pf_kde_bandwidth(x, h, rule=trim(RULES(r)), weights=w, lower=-300.0_real64, &
+                upper=300.0_real64, n_null=nn, n_nan=nd, n_outside=no)
+            call check(error, same_h(h, k%bandwidth()), &
+                trim(RULES(r)) // ": the two forms must agree under weights and a support")
+            if (allocated(error)) return
+            call check(error, nn == k%n_null() .and. nd == k%n_nan() .and. no == k%n_outside(), &
+                trim(RULES(r)) // ": the population counts must be the same population's")
+            if (allocated(error)) return
+
+            ! adaptive: the number is the one an adaptive fit would actually use, widened
+            call k%fit(x, rule=trim(RULES(r)), adaptive=.true.)
+            call pf_kde_bandwidth(x, h, rule=trim(RULES(r)), adaptive=.true.)
+            call check(error, same_h(h, k%bandwidth()), &
+                trim(RULES(r)) // ": the adaptive form must carry the adaptive kernel's own bandwidth")
+            if (allocated(error)) return
+        end do
+
+        ! adjust= composes, and the default's fallback is reported by name
+        call k%fit(x, adjust=2.0_real64)
+        call pf_kde_bandwidth(x, h, adjust=2.0_real64)
+        call check(error, same_h(h, k%bandwidth()), "adjust= must reach the standalone form too")
+        if (allocated(error)) return
+
+        ! A constant sample has no scale: no rule finds one, and the answer says so.
+        call pf_kde_bandwidth([2.5_real64, 2.5_real64, 2.5_real64], h, ok=ok2, rule_used=got)
+        call check(error, .not. ok2 .and. ieee_is_nan(h) .and. got == "none", &
+            "a constant sample must leave the standalone bandwidth undefined and name no rule")
+
+    end subroutine test_standalone_bandwidth
+
+    !> Two bandwidths are the same answer when they are the same number, or when BOTH are the quiet
+    !! NaN that says no rule found one. A bare `==` would call the second case a disagreement, and
+    !! it is the case a named rule reaches on a sample it has no scale for.
+    logical function same_h(a, b) result(res)
+        real(real64), intent(in) :: a !! one bandwidth
+        real(real64), intent(in) :: b !! the other
+        if (ieee_is_nan(a) .or. ieee_is_nan(b)) then
+            res = ieee_is_nan(a) .and. ieee_is_nan(b)
+        else
+            res = a == b
+        end if
+    end function same_h
+
+    !> A bandwidth finer than the closest pair of distinct observations is resolving structure the
+    !! sample cannot express, so the ISJ rule refuses it. On a standard normal of n = 1000 rounded
+    !! to a step of 0.01 the fixed point has a root far below that step; taken, it would make every
+    !! value its own spike. The refusal takes the path a rule that finds no bandwidth already takes:
+    !! Silverman's rule when `rule=` was not named, an undefined estimate when `rule="isj"` was.
+    !!
+    !! The negative control is the SAME sample unrounded, whose closest pair is about 2e-6 against
+    !! a bandwidth of about 0.3: without it the guard could be made to pass by disabling the rule.
+    subroutine test_isj_refuses_sub_gap(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: d, s, i
+        real(real64), allocatable :: x(:), raw(:)
+        real(real64) :: f(NKX)
+        character(len=:), allocatable :: name
+        logical :: okd, oki
+        integer(int64) :: j
+
+        allocate(raw(1000))
+        do j = 1_int64, 1000_int64
+            raw(j) = pf_random_normal_at(1_int64, pf_random_key(1_int64, 1_int64), j)
+        end do
+
+        ! ---- rounded: the rule finds a root at about 5.9e-04, a twentieth of the step ----
+        x = raw
+        call kde_rounded(0.01_real64, x)
+        call d%fit(x, ok=okd)
+        call d%rule(name)
+        call s%fit(x, rule="silverman")
+        call check(error, okd .and. name == "silverman" .and. d%bandwidth() == s%bandwidth(), &
+            "a sub-step isj bandwidth must be refused and the default must fall back to silverman")
+        if (allocated(error)) return
+        call check(error, d%bandwidth() > 0.01_real64, &
+            "the bandwidth the fallback gives must be wider than the sample's rounding step")
+        if (allocated(error)) return
+
+        ! Named, the refusal leaves the estimate undefined, quietly, as a rule that finds no scale
+        ! does: a data condition, not an abort.
+        call i%fit(x, rule="isj", ok=oki)
+        call i%pdf(KG_X, f)
+        call i%rule(name)
+        call check(error, .not. oki .and. ieee_is_nan(i%bandwidth()) .and. all(ieee_is_nan(f)) .and. &
+            name == "none", &
+            "a named isj rule whose bandwidth is refused must leave the estimate undefined")
+        if (allocated(error)) return
+
+        ! ---- the negative control: the same sample, unrounded ----
+        call i%fit(raw, rule="isj", ok=oki)
+        call i%rule(name)
+        call check(error, oki .and. name == "isj" .and. i%bandwidth() > 0.1_real64, &
+            "the guard must not fire on a continuous sample, whose closest pair is far below its bandwidth")
+
+    end subroutine test_isj_refuses_sub_gap
 
     !> The ISJ rule's norm forms no factor its sum does not use. `isj_norm` walks the terms
     !! `exp(-k**2 c)` by two running factors, and a factor formed past the last term kept is below
@@ -2220,6 +2527,71 @@ contains
         call check(error, seen, "R3's reason must be printed beside it")
 
     end subroutine test_grid_linear_reach_poisons
+
+    !> R3 leaves the grid undefined quietly, which on its own names neither the cause nor the
+    !! remedy. `%n_overreach` is what makes it diagnosable: how many points had a reach wider than
+    !! the range, over every `%add`, with `%add`'s own out-argument reporting that call's share.
+    !!
+    !! The count is asserted by its IMPLICATIONS, never against a recorded number: it is positive
+    !! and no larger than the population where R3 fires, and exactly zero on each of the two
+    !! configurations where it cannot -- a cap below the width, and both bounds given, which are
+    !! the two remedies the warning names. The `%merge` arm proves the counter is accumulated
+    !! rather than assigned, which an `=` in place of a `+` would pass without.
+    subroutine test_grid_overreach_counted(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: pilot, g, gc, gb, ga, gm
+        real(real64) :: xe(200)
+        integer(int64) :: reported, total
+        integer :: n_in
+
+        call kde_exponential(200, xe)
+        n_in = count(xe <= 3.0_real64)
+        call pilot%init(200, 0.0_real64, 3.0_real64, 0.3_real64, lower=0.0_real64, boundary="linear")
+        call pilot%add(xe(1:n_in))
+        call pilot%finish()
+
+        ! ---- R3 fires: the count is positive, and it is this call's own ----
+        call g%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, boundary="linear")
+        call g%add(xe(1:n_in), n_overreach=reported)
+        call check(error, reported > 0_int64 .and. reported <= int(n_in, int64), &
+            "%add must report how many points out-reached the range, and no more than it was given")
+        if (allocated(error)) return
+        call check(error, g%n_overreach() == reported, &
+            "the grid's total must be what the one %add that filled it reported")
+        if (allocated(error)) return
+
+        ! ---- the first remedy: a cap below the width ----
+        call gc%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            bandwidth_max=0.5_real64, lower=0.0_real64, boundary="linear")
+        call gc%add(xe(1:n_in), n_overreach=reported)
+        call check(error, reported == 0_int64 .and. gc%n_overreach() == 0_int64, &
+            "with bandwidth_max below the width no point can out-reach the range")
+        if (allocated(error)) return
+
+        ! ---- the second remedy: no free edge at all ----
+        call gb%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, upper=3.0_real64, boundary="linear")
+        call gb%add(xe(1:n_in), n_overreach=reported)
+        call check(error, reported == 0_int64 .and. gb%n_overreach() == 0_int64, &
+            "with both bounds given R3 cannot fire, so nothing is counted")
+        if (allocated(error)) return
+
+        ! ---- %merge adds the two totals, and %clear gives the counter back ----
+        call ga%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, boundary="linear")
+        call ga%add(xe(1:n_in))
+        call gm%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, boundary="linear")
+        call gm%add(xe(1:n_in))
+        total = ga%n_overreach() + gm%n_overreach()
+        call gm%merge(ga)
+        call check(error, gm%n_overreach() == total, "%merge must add the two counts, not replace one")
+        if (allocated(error)) return
+        call gm%clear()
+        call check(error, gm%n_overreach() == 0_int64, "%clear must give the counter back with the cells")
+
+    end subroutine test_grid_overreach_counted
 
     !> The pilot an adaptive `"linear"` fit builds keeps R2: with one bound given, its free edge lies
     !> at least one kernel reach from that bound, so that the copy `%pilot` hands back would pass
@@ -3601,6 +3973,79 @@ contains
 
     end subroutine test_alpha_zero_is_fixed
 
+    !> A bandwidth rule answers the question the FIXED estimator asks. The adaptive kernel's own
+    !! best global bandwidth is larger, so an adaptive fit that was given a rule rather than a
+    !! number widens the rule's answer by `KDE_ADAPT_INFLATE**(2*alpha)`.
+    !!
+    !! Four things are asserted, and each of them is a way the change could go wrong:
+    !! the factor is exactly one at `alpha = 0`, where the adaptive estimate IS the fixed one;
+    !! it grows with `alpha`; an explicit `bandwidth=` is NOT inflated, which is what keeps
+    !! "the bandwidth I asked for" meaning that; and `adjust=` composes multiplicatively with it
+    !! rather than replacing it.
+    !!
+    !! The factor is re-derived here from the ratio at one `alpha` rather than from the library's
+    !! own constant, so that the SHAPE of the rule -- a power of `2*alpha` -- is what is pinned. A
+    !! constant that moves changes every number here together and still passes, which is correct:
+    !! the constant is a measurement (`bench/benchmark_kde.sh`, `mise` mode), not a contract.
+    subroutine test_adaptive_inflates_a_rule(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kf, ka
+        real(real64), allocatable :: x(:)
+        real(real64) :: hfixed, h0, h5, h3, c, want
+        integer :: i
+
+        call kde_two_component(60_int64, x)
+        call kf%fit(x, rule="silverman")
+        hfixed = kf%bandwidth()
+
+        ! alpha = 0: the adaptive estimate is the fixed one, so nothing may be added to it.
+        call ka%fit(x, rule="silverman", adaptive=.true., alpha=0.0_real64)
+        h0 = ka%bandwidth()
+        call check(error, h0 == hfixed, "at alpha=0 the adaptive kernel must take the rule's bandwidth unchanged")
+        if (allocated(error)) return
+
+        ! alpha = 0.5: the factor is C itself, which fixes C from this one ratio.
+        call ka%fit(x, rule="silverman", adaptive=.true., alpha=0.5_real64)
+        h5 = ka%bandwidth()
+        c = h5/hfixed
+        call check(error, c > 1.0_real64, "an adaptive fit given a rule must widen it")
+        if (allocated(error)) return
+
+        ! alpha = 0.3: the same C, raised to 2*alpha. A factor that were linear in alpha, or applied
+        ! whole whatever alpha is, fails here and nowhere above.
+        call ka%fit(x, rule="silverman", adaptive=.true., alpha=0.3_real64)
+        h3 = ka%bandwidth()
+        want = hfixed*c**(2.0_real64*0.3_real64)
+        call check(error, abs(h3 - want) <= 1.0e-12_real64*want, &
+            "the factor must be C**(2*alpha): the ratio at alpha=0.3 must follow from the one at 0.5")
+        if (allocated(error)) return
+
+        ! An explicit bandwidth is the caller's own number and is never inflated.
+        call ka%fit(x, bandwidth=60.0_real64, adaptive=.true.)
+        call check(error, ka%bandwidth() == 60.0_real64, &
+            "an explicit bandwidth= must reach the adaptive fit unchanged")
+        if (allocated(error)) return
+
+        ! adjust= composes with the factor rather than replacing it.
+        call ka%fit(x, rule="silverman", adaptive=.true., alpha=0.5_real64, adjust=2.0_real64)
+        call check(error, abs(ka%bandwidth() - 2.0_real64*h5) <= 1.0e-12_real64*h5, &
+            "adjust= must multiply the inflated bandwidth, not stand in for the inflation")
+        if (allocated(error)) return
+
+        ! The per-point bandwidths move with the global one, so the inflation is not a number the
+        ! accessor reports and the estimate ignores.
+        i = int(kf%n_valid())
+        block
+            real(real64), allocatable :: hb(:)
+            allocate(hb(i))
+            call ka%fit(x, rule="silverman", adaptive=.true., alpha=0.5_real64)
+            call ka%bandwidths(hb)
+            call check(error, minval(hb) > 0.0_real64 .and. maxval(hb) > hfixed, &
+                "every point's bandwidth must be built from the inflated global bandwidth")
+        end block
+
+    end subroutine test_adaptive_inflates_a_rule
+
     !> On the two-component recipe the rule narrows the kernels in the dense cluster and widens
     !> them in the sparse one: every bandwidth in the narrow cluster is below the global one and
     !> every one in the wide cluster above it, and the gap between the clusters, where the pilot is
@@ -3655,6 +4100,13 @@ contains
     !> `bandwidth_max` caps every point's bandwidth and touches no other: where the uncapped rule
     !> stays below the cap the two fits agree bit for bit, everywhere else the capped one is the cap
     !> exactly, and the estimates then differ. A point the pilot reads as zero takes the cap itself.
+    !>
+    !> **The multiplier is a property of THIS fixture and has to be re-probed when the adaptive
+    !> kernel's global bandwidth moves.** The cap is a multiple of the fit's own bandwidth, so it
+    !> scales with it; what does not scale is the SPREAD of `h_j/h`, which narrows as the global
+    !> bandwidth widens, because the pilot built at that bandwidth is smoother. On this recipe the
+    !> spread is about `[0.72, 1.19]`, so a cap at `1.05` binds on a third of the points and the
+    !> vacuity guard below has room on both sides; at `1.2` it binds on none and the guard fires.
     subroutine test_bandwidth_max_caps(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k, kc
@@ -3664,7 +4116,7 @@ contains
 
         call kde_two_component(60_int64, x)
         call k%fit(x, rule="silverman", adaptive=.true.)
-        cap = 1.2_real64*k%bandwidth()
+        cap = 1.05_real64*k%bandwidth()
         call kc%fit(x, rule="silverman", adaptive=.true., bandwidth_max=cap)
         allocate(h0(k%n_valid()), hc(kc%n_valid()))
         call k%bandwidths(h0)
@@ -3748,6 +4200,156 @@ contains
             "an adaptive fit with nothing to build a pilot from must hand back an uninitialised grid")
 
     end subroutine test_pilot_is_the_fits
+
+    !> `pilot=` applies a smoothing measured on ANOTHER sample: the shape from the pilot, and --
+    !! given alone -- the scale from it too.
+    !!
+    !! **The round trip is the load-bearing assertion.** A fit that builds its own pilot, hands it
+    !! back through `%pilot`, and is then refitted reading that copy must reproduce its own
+    !! bandwidths EXACTLY, bit for bit: the two routes differ only in whether the table was built
+    !! here or copied in, so anything but equality means the read and the build disagree. That is
+    !! the promise `%pilot`'s doc-comment already makes in the other direction, closed here.
+    !!
+    !! The second arm is the transfer proper -- one sample's pilot applied to another -- against
+    !! the `pf_kde_grid` route, which is the only way the same thing could be said before. They
+    !! must agree to the grid's own resolution, and no better: one is exact and one is binned.
+    !!
+    !! The third arm pins the SCALE rule, which is the part a reader is most likely to get wrong:
+    !! `pilot=` alone takes the pilot's own global bandwidth and `%rule` answers `"explicit"`,
+    !! while a `rule=` beside it re-measures the scale on this sample and keeps only the shape.
+    !!
+    !! What a transferred pilot SAVES -- the grid pass this fit does not make -- is a timing, so it
+    !! is `bench/benchmark_kde.sh`'s `adaptive` mode that reports it and not this test.
+    subroutine test_fit_takes_a_pilot(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: ka, kb, kc
+        type(pf_kde_grid) :: p, g
+        real(real64), allocatable :: xa(:), xb(:), h1(:), h2(:), hg(:)
+        real(real64) :: t(40), fa(40), fg(40), peak
+        character(len=:), allocatable :: name
+        logical :: ok
+
+        call kde_two_component(60_int64, xa)
+        call kde_two_component(90_int64, xb)
+
+        ! ---- (i) the round trip: a pilot built here, handed back, and read again ----
+        call ka%fit(xa, rule="silverman", adaptive=.true.)
+        call ka%pilot(p)
+        allocate(h1(ka%n_valid()))
+        call ka%bandwidths(h1)
+        call kb%fit(xa, adaptive=.true., pilot=p, ok=ok)
+        allocate(h2(kb%n_valid()))
+        call kb%bandwidths(h2)
+        call check(error, ok .and. kb%bandwidth() == ka%bandwidth(), &
+            "a pilot given alone must carry the scale: the refit must take the pilot's own bandwidth")
+        if (allocated(error)) return
+        call check(error, size(h2) == size(h1), "the refit must keep the same population")
+        if (allocated(error)) return
+        call check(error, all(h2 == h1), &
+            "reading a pilot back must reproduce the bandwidths the fit that built it used, bit for bit")
+        if (allocated(error)) return
+        call kb%rule(name)
+        call check(error, name == "explicit", &
+            "a scale taken from a pilot is a number, not a rule, so %rule must answer explicit")
+        if (allocated(error)) return
+
+        ! ---- (ii) the transfer: A's pilot applied to B, against the grid route ----
+        call kc%fit(xb, adaptive=.true., pilot=p, bandwidth_max=200.0_real64, ok=ok)
+        call check(error, ok, "a foreign pilot must give a defined fit")
+        if (allocated(error)) return
+        call g%init(400, -500.0_real64, 500.0_real64, ka%bandwidth(), pilot=p, &
+            bandwidth_max=200.0_real64)
+        call g%add(xb)
+        call g%finish()
+        call spread_points(-400.0_real64, 400.0_real64, t)
+        call kc%pdf(t, fa)
+        call g%pdf(t, fg)
+        peak = maxval(fa)
+        call check(error, peak > 0.0_real64 .and. maxval(abs(fa - fg)) < 2.0e-2_real64*peak, &
+            "the exact and the grid form of one transferred pilot must answer the same density")
+        if (allocated(error)) return
+        ! The bandwidths themselves are the shared quantity, and they must agree exactly: both
+        ! forms read one table through one look-up.
+        allocate(hg(kc%n_valid()))
+        call kc%bandwidths(hg)
+        call check(error, all(hg > 0.0_real64) .and. maxval(hg) <= 200.0_real64, &
+            "bandwidth_max must bound a transferred bandwidth as it bounds a measured one")
+        if (allocated(error)) return
+
+        ! ---- (iii) a rule beside the pilot re-scales, keeping the shape ----
+        call kc%fit(xb, rule="silverman", adaptive=.true., pilot=p, bandwidth_max=200.0_real64)
+        call kc%rule(name)
+        call check(error, name == "silverman" .and. kc%bandwidth() /= ka%bandwidth(), &
+            "a rule beside a pilot must re-measure the scale on this sample")
+        if (allocated(error)) return
+
+    end subroutine test_fit_takes_a_pilot
+
+    !> A grid's range need not lie inside its pilot's. A point beyond the pilot reads no density
+    !! there, and that is a case the adaptive rule already answers -- the cap where one was given,
+    !! the pilot's smallest positive density otherwise -- so extending it from "no density here" to
+    !! "no pilot here" says the same thing about the same absence.
+    !!
+    !! **Why it has to be allowed.** R3 poisons a grid whose widest adaptive kernel out-reaches its
+    !! range, and it names two remedies: cap the bandwidth, or widen the range. Refusing a grid
+    !! wider than its pilot would leave only the first, which is the narrower answer -- it changes
+    !! the estimate, where widening the range does not.
+    !!
+    !! The negative control is a cell WELL INSIDE the pilot's range: relaxing the rule at the edges
+    !! must leave the interior bit for bit as it was, or what changed is not the coverage rule.
+    subroutine test_grid_wider_than_its_pilot(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, wide, narrow
+        real(real64) :: x(200), fw(400), fn(200), mass, hj
+        type(pf_kde) :: k
+        integer :: i, inside
+
+        call kde_exponential(200, x)
+
+        ! The pilot spans [0, 3]; the grid below spans [0, 6], so half of it has no pilot at all.
+        call p%init(200, 0.0_real64, 3.0_real64, 0.3_real64)
+        call p%add(x)
+        call p%finish()
+
+        call wide%init(400, 0.0_real64, 6.0_real64, 0.3_real64, pilot=p, bandwidth_max=1.0_real64)
+        call wide%add(x)
+        call wide%finish()
+        call wide%density(fw)
+        call check(error, .not. any(ieee_is_nan(fw)), &
+            "a grid reaching beyond its pilot must answer numbers, not NaN")
+        if (allocated(error)) return
+        call check(error, any(fw(201:400) >= 0.0_real64) .and. all(fw >= -1.0e-12_real64), &
+            "the cells beyond the pilot's range must hold an ordinary density")
+        if (allocated(error)) return
+        ! The wider grid must hold MORE of the sample than the one stopping at the pilot's edge,
+        ! which is the whole point of being allowed to reach past it. Neither holds all of it: a
+        ! kernel at the last point spills half its mass beyond the range, and the grid counts that
+        ! weight rather than depositing it.
+        call narrow%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=p, bandwidth_max=1.0_real64)
+        call narrow%add(x)
+        call narrow%finish()
+        call narrow%density(fn)
+        mass = sum(fw)*(6.0_real64/400.0_real64)
+        call check(error, mass > sum(fn)*(3.0_real64/200.0_real64) .and. mass <= 1.0_real64, &
+            "reaching past the pilot must capture more of the sample, and never more than all of it")
+        if (allocated(error)) return
+
+        ! A point beyond the pilot takes the cap exactly, which is the documented rule for a point
+        ! the pilot reads as zero.
+        call k%fit(x, adaptive=.true., pilot=p, bandwidth_max=1.0_real64)
+        call k%bandwidth_at(5.0_real64, hj)
+        call check(error, hj == 1.0_real64, &
+            "a point beyond the pilot must take bandwidth_max, as a point of zero density does")
+        if (allocated(error)) return
+
+        ! The negative control: inside the pilot, nothing moved.
+        inside = 0
+        do i = 1, 200
+            if (fn(i) > 0.0_real64) inside = inside + 1
+        end do
+        call check(error, inside > 100, "the control grid must hold a density, or it asserts nothing")
+
+    end subroutine test_grid_wider_than_its_pilot
 
     !> The pilot's cells: a quarter of a bandwidth over its range, never fewer than 64 -- a sample
     !> narrower than sixteen bandwidths -- and never more than 65536 -- a far outlier -- with the

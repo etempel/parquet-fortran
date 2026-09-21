@@ -37,6 +37,25 @@
 #             kernels; the Epanechnikov estimate has kinks and the box estimate steps, and both
 #             converge more slowly. `centres` is the largest gap at a centre over the peak density.
 #
+#   mise      No timing. Each bandwidth rule scored by `MISE(h_rule) / MISE(h_optimal)` against the
+#             Marron-Wand normal mixtures, both sides in closed form: 1.00 is the best any fixed
+#             bandwidth could have done at that sample size, and a rule getting quietly worse is a
+#             rising number here. The mixtures are parameter tables and the MISE of a Gaussian-kernel
+#             estimate of a normal mixture is a four-line formula, so NO reference implementation --
+#             no R package, no Python package -- is a dependency of this measurement. It is the only
+#             check anywhere in the project that can see a bandwidth rule degrade: every other one
+#             compares the library against itself, which a rule's drift survives. A penalty BELOW
+#             1.00 is impossible and means the optimiser found a local minimum, which is why the
+#             search scans a ladder before it refines.
+#
+#             It closes with the adaptive estimator's own optimum, which has no closed form: a sweep
+#             over explicit bandwidths minimising the integrated squared error against the true
+#             density, for the fixed and the adaptive kernel, and the median of `h*(adaptive) /
+#             h*(fixed)`. That median is what the adaptive kernel's default bandwidth inflation is
+#             calibrated from; the sweep passes `bandwidth=` on every rung, which is never inflated,
+#             so the measurement cannot be contaminated by the default it calibrates. POINTS is the
+#             smaller of the two sample sizes and ten times it is the larger.
+#
 #   adaptive  `pf_kde%fit` fixed and adaptive, in milliseconds on ONE thread, per kernel, at a
 #             bandwidth of 1/200 of the sample's range, with the adaptive fit's three phases as the
 #             library times them (`parquet_debug_kde_fit_nanos`): `sort` orders the survivors,
@@ -46,7 +65,13 @@
 #             under each fit: an adaptive query sums the points within reach of the WIDEST kernel,
 #             so its cost follows `max`.
 #
-#   rules     `pf_kde%fit` in milliseconds on ONE thread under `rule="isj"`, `"silverman"` and
+#   rules     It closes by timing `pf_kde_bandwidth` against `%fit` under each rule, fixed and
+#             adaptive, with `same h` asserting the two answer the same number. The standalone form
+#             saves nothing on a plain unbounded fit -- every rule reads an ordered sample, so the
+#             sort is paid either way, and there is almost nothing after the bandwidth to skip --
+#             and saves most of an ADAPTIVE fit, whose pilot and per-point look-up come after it.
+#
+#             `pf_kde%fit` in milliseconds on ONE thread under `rule="isj"`, `"silverman"` and
 #             `"scott"`, and with the bandwidth given as a number (range/200), on samples of 1e3
 #             points and every tenfold size up to POINTS. The fit given a number is the sort and
 #             the bookkeeping every fit shares, so a rule's column less it is what that rule adds:
@@ -101,13 +126,15 @@
 #
 # Config (env-overridable, matching this repo's other bench/*.sh scripts):
 #   MODE=all          evaluate, grid, binned, accuracy, adaptive, rules, sample, boundary,
-#                     threads, or all.
+#                     threads, mise, or all.
 #   ROUNDS=5          Timed laps per figure; the FASTEST is kept, never the mean, because the slow
 #                     laps are the machine's other work rather than this code's.
 #   POINTS=100000     The sample's size in `evaluate`, `accuracy`, `adaptive`, `sample` and
-#                     `threads`, and the largest in `rules`.
+#                     `threads`, the largest in `rules`, and the smaller of the two in `mise`
+#                     (which is run at MISE_POINTS instead, since its sweep is quadratic in it).
 #   GRID_POINTS=1000000
 #                     The sample's size in `grid` and `binned`.
+#   MISE_POINTS=1000  The smaller sample size in `mise`; the larger is ten times it.
 #   QUERIES=10000     Query points per call in `evaluate`, `adaptive` and `threads`, draws per
 #                     call in `sample` (and a hundred times as many in `threads`), and the error's
 #                     points in `accuracy`.
@@ -126,11 +153,12 @@ ROUNDS="${ROUNDS:-5}"
 POINTS="${POINTS:-100000}"
 GRID_POINTS="${GRID_POINTS:-1000000}"
 QUERIES="${QUERIES:-10000}"
+MISE_POINTS="${MISE_POINTS:-1000}"
 
 case "$MODE" in
-    evaluate|grid|binned|accuracy|adaptive|rules|sample|boundary|threads|all) ;;
+    evaluate|grid|binned|accuracy|adaptive|rules|sample|boundary|threads|mise|all) ;;
     *) echo "benchmark_kde.sh: MODE must be evaluate, grid, binned, accuracy, adaptive, rules," \
-            "sample, boundary, threads or all (got '$MODE')" >&2
+            "sample, boundary, threads, mise or all (got '$MODE')" >&2
        exit 2 ;;
 esac
 
@@ -176,6 +204,12 @@ fi
 if [[ "$MODE" == "accuracy" || "$MODE" == "all" ]]; then
     fpm run benchmark_kde --profile release -- \
         --mode=accuracy --points="$POINTS" --queries="$QUERIES"
+    echo
+fi
+
+if [[ "$MODE" == "mise" || "$MODE" == "all" ]]; then
+    fpm run benchmark_kde --profile release -- \
+        --mode=mise --points="$MISE_POINTS"
     echo
 fi
 

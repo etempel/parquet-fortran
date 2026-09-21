@@ -559,12 +559,17 @@ contains
         end if
         call check_adaptive_settings(EP, alpha, bandwidth_max, a_alpha, a_bmax)
         if (present(pilot)) then
-            ! A pilot must be a grid, and must cover the range, so that no point inside it reads a
-            ! pilot that was never built there. What it holds is data: one with no density to read,
-            ! a kept NaN or nothing in its cells, makes this grid answer NaN, quietly.
+            ! A pilot must be a grid. What it holds is data: one with no density to read, a kept
+            ! NaN or nothing in its cells, makes this grid answer NaN, quietly.
+            !
+            ! Its range need NOT cover this grid's. A point outside the pilot reads no density
+            ! there, which is the case the rule already answers: it takes `bandwidth_max` where one
+            ! was given and the pilot's smallest positive density otherwise. Extending that from
+            ! "no density here" to "no pilot here" is the same statement about the same absence,
+            ! and refusing it instead would block the natural remedy for R3 -- widening the grid so
+            ! that the widest kernel has room -- leaving a cap as the only way out.
             if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid")
             if (.not. pilot%finished) call kde_abort(EP, "pilot must be a finished grid; call %finish on it")
-            if (pilot%x0 > xmin .or. pilot%x1 < xmax) call kde_abort(EP, "the pilot must cover this grid's range")
             ! The table is read out of the pilot before this grid is touched.
             call kde_adapt_set(rule, pilot, a_alpha, present(bandwidth_max), a_bmax)
         end if
@@ -585,11 +590,14 @@ contains
         character(len=*), parameter :: EP = "pf_kde_grid%add"
         real(real64), allocatable :: keep_x(:), keep_w(:), hb(:)
         real(real64) :: one(1), v, wsum, hj
-        integer(int64) :: nv, nnull, nnan, nout, m, i, stride
+        integer(int64) :: nv, nnull, nnan, nout, m, i, stride, nreach
         logical :: saw_nan, weighted
 
         call require_initialised(self, EP)
         call require_unfinished(self, EP)
+        ! Defined before any path can return, so that an `intent(out)` count is never left unwritten:
+        ! R3 fires for one configuration only, and every other one answers zero.
+        if (present(n_overreach)) n_overreach = 0_int64
         if (present(threads)) then
             if (threads < 1) call kde_abort(EP, "threads must be positive")
         end if
@@ -654,15 +662,26 @@ contains
             ! R3: under `"linear"` with a free edge, a point whose own reach exceeds the range's
             ! width would put corrected weight beyond that edge, where the beyond-range count is the
             ! plain kernel's mass. The grid poisons itself rather than count it wrongly, as it does
-            ! for a bandwidth the rule cannot represent; `bandwidth_max` is the remedy.
+            ! for a bandwidth the rule cannot represent.
+            !
+            ! Quiet, because it is a finding about the DATA and not a caller mistake; but counted
+            ! and said, because a grid that answers NaN in every cell with nothing to read names
+            ! neither the cause nor the remedy. Every offending point is counted rather than the
+            ! first one found: "3 of 20000" and "20000 of 20000" call for different remedies, and
+            ! the walk is already over the whole array.
             if (self%boundary_code == KDE_BOUNDARY_LINEAR .and. (self%has_lower .neqv. self%has_upper)) then
+                nreach = 0_int64
                 do i = 1_int64, m
-                    if (KDE_RADIUS(self%kernel_code)*hb(i) > self%x1 - self%x0) then
-                        self%reach_poisoned = .true.
-                        call close_if_asked(self, finish)
-                        return
-                    end if
+                    if (KDE_RADIUS(self%kernel_code)*hb(i) > self%x1 - self%x0) nreach = nreach + 1_int64
                 end do
+                if (nreach > 0_int64) then
+                    self%reach_poisoned = .true.
+                    self%cnt_overreach = self%cnt_overreach + nreach
+                    if (present(n_overreach)) n_overreach = nreach
+                    call warn_overreach(nreach)
+                    call close_if_asked(self, finish)
+                    return
+                end if
             end if
             stride = 1_int64
         else
@@ -726,7 +745,7 @@ contains
             allocate(ws(1))
             ws(1) = weights
         end if
-        call grid_add_f64_r1(self, xs, vs, ws, skipnan, n_null, n_nan, n_outside, finish=finish)
+        call grid_add_f64_r1(self, xs, vs, ws, skipnan, n_null, n_nan, n_outside, n_overreach, finish=finish)
 
     end procedure grid_add_f64_r0
 
@@ -736,7 +755,8 @@ contains
 
         allocate(xw(size(x, kind=int64)))
         xw = real(x, real64)
-        call grid_add_f64_r1(self, xw, is_valid, weights, skipnan, n_null, n_nan, n_outside, threads, finish)
+        call grid_add_f64_r1(self, xw, is_valid, weights, skipnan, n_null, n_nan, n_outside, n_overreach, &
+            threads, finish)
 
     end procedure grid_add_f32_r1
 
@@ -747,13 +767,15 @@ contains
 
         ! The column's validity becomes `is_valid`: unallocated when it has no null, and so absent.
         call kde_widen_column("pf_kde_grid%add", x, is_valid, wide, mask)
-        call grid_add_f64_r1(self, wide, mask, weights, skipnan, n_null, n_nan, n_outside, threads, finish)
+        call grid_add_f64_r1(self, wide, mask, weights, skipnan, n_null, n_nan, n_outside, n_overreach, &
+            threads, finish)
 
     end procedure grid_add_col
 
     module procedure grid_add_f32_r0
 
-        call grid_add_f64_r0(self, real(x, real64), is_valid, weights, skipnan, n_null, n_nan, n_outside, finish)
+        call grid_add_f64_r0(self, real(x, real64), is_valid, weights, skipnan, n_null, n_nan, n_outside, &
+            n_overreach, finish)
 
     end procedure grid_add_f32_r0
 
@@ -795,6 +817,7 @@ contains
         self%cnt_null = self%cnt_null + other%cnt_null
         self%cnt_nan = self%cnt_nan + other%cnt_nan
         self%cnt_out = self%cnt_out + other%cnt_out
+        self%cnt_overreach = self%cnt_overreach + other%cnt_overreach
         self%poisoned = self%poisoned .or. other%poisoned
         self%reach_poisoned = self%reach_poisoned .or. other%reach_poisoned
         call close_if_asked(self, finish)
@@ -1068,6 +1091,11 @@ contains
         n = self%cnt_out
     end procedure grid_n_outside
 
+    module procedure grid_n_overreach
+        call require_initialised(self, "pf_kde_grid%n_overreach")
+        n = self%cnt_overreach
+    end procedure grid_n_overreach
+
     module procedure grid_sum_weights
         call require_initialised(self, "pf_kde_grid%sum_weights")
         s = self%w_total
@@ -1152,6 +1180,25 @@ contains
     ! Private helpers
     ! ==========================================================================================
 
+    !> Says that R3 fired, naming the count and both remedies.
+    !!
+    !! A WARNING and not advice: it is a finding about the caller's DATA -- these points, with the
+    !! bandwidths this pilot gave them -- rather than a remark about how the call was written, so by
+    !! `.claude/rules/api-conventions.md` it belongs on the channel that survives
+    !! `verbosity = "silent"`. Both remedies are named because either one works: a cap bounds the
+    !! widest kernel, and a wider range gives the widest kernel room.
+    subroutine warn_overreach(n)
+        integer(int64), intent(in) :: n !! how many points out-reached the range
+
+        character(len=32) :: count_text
+
+        write (count_text, "(i0)") n
+        call parquet_emit_warning("pf_kde_grid%add: " // trim(count_text) // " points have an adaptive " // &
+            "bandwidth whose reach exceeds the grid's range, so the grid is undefined and every cell " // &
+            "answers NaN (%n_overreach reports the total). Set bandwidth_max=, or widen the grid's range.")
+
+    end subroutine warn_overreach
+
     !> Aborts unless the grid has been initialised. Impure deliberately, like every guard here.
     subroutine require_initialised(self, entry)
         class(pf_kde_grid), intent(in) :: self  !! the grid
@@ -1229,6 +1276,7 @@ contains
         self%cnt_null = 0_int64
         self%cnt_nan = 0_int64
         self%cnt_out = 0_int64
+        self%cnt_overreach = 0_int64
 
     end subroutine empty_grid
 

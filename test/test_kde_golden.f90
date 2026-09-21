@@ -234,14 +234,14 @@ module test_kde_golden
 
     !> the adaptive kernel over the two-component recipe: Silverman's rule, the Gaussian, alpha = 0.5
     logical, parameter :: KG_ADAPT_DEF = .true.
-    real(real64), parameter :: KG_ADAPT_H = 113.57143640464979_real64
-    real(real64), parameter :: KG_ADAPT_PDF(NKX) = [7.8458263944782792e-05_real64, 0.00032313856337138426_real64,  &
-        0.0033440863699562944_real64, 9.9938180010162867e-05_real64, 0.00012844613003146899_real64,  &
-        0.00015552066484258835_real64, 0.00083557373390661098_real64, 0.00050417914570348335_real64,  &
-        0.00046270782753398505_real64]
-    real(real64), parameter :: KG_ADAPT_CDF(NKX) = [0.0020574571960979638_real64, 0.010224863139779713_real64,  &
-        0.31408941651816336_real64, 0.6689615078192207_real64, 0.67528341112729429_real64, 0.67775923896695178_real64,  &
-        0.78934646051685131_real64, 0.95162442559616978_real64, 0.95718328374644368_real64]
+    real(real64), parameter :: KG_ADAPT_H = 170.35715460697469_real64
+    real(real64), parameter :: KG_ADAPT_PDF(NKX) = [0.00046306412939662591_real64, 0.00082542070315436383_real64,  &
+        0.0021439069496393725_real64, 0.00050658865422686158_real64, 0.00035153414655044856_real64,  &
+        0.0003423967167950289_real64, 0.00063363966535755526_real64, 0.00047968198641614232_real64,  &
+        0.00045814078785030328_real64]
+    real(real64), parameter :: KG_ADAPT_CDF(NKX) = [0.026794803464024467_real64, 0.055959116789019485_real64,  &
+        0.32169144400683813_real64, 0.65933143231698987_real64, 0.68450969976616582_real64, 0.69056326348054697_real64,  &
+        0.80138893844632875_real64, 0.92738650012952695_real64, 0.93277945619419145_real64]
 
     !> the adaptive kernel at alpha = 1 with every bandwidth capped at 120, the B-spline at an explicit bandwidth of 80,
     !! renormalised at a lower bound
@@ -266,14 +266,14 @@ module test_kde_golden
 
     !> the adaptive kernel under weights mod 5, reliability: the pilot is weighted too
     logical, parameter :: KG_ADAPT_W_DEF = .true.
-    real(real64), parameter :: KG_ADAPT_W_H = 125.45560414391876_real64
-    real(real64), parameter :: KG_ADAPT_W_PDF(NKX) = [0.00014354420883252235_real64, 0.00045198858468351304_real64,  &
-        0.0030044930836210623_real64, 0.00015125285868088049_real64, 0.00013410449433740173_real64,  &
-        0.00015466123701314717_real64, 0.00078121218645840469_real64, 0.00055307029059431653_real64,  &
-        0.0005131106717538136_real64]
-    real(real64), parameter :: KG_ADAPT_W_CDF(NKX) = [0.0045529534268499462_real64, 0.01719823508602978_real64,  &
-        0.31502585750787915_real64, 0.66777131118416722_real64, 0.67559587311928304_real64, 0.67811153596360652_real64,  &
-        0.78160500392377685_real64, 0.94341723635839048_real64, 0.949547896433655_real64]
+    real(real64), parameter :: KG_ADAPT_W_H = 188.18340621587814_real64
+    real(real64), parameter :: KG_ADAPT_W_PDF(NKX) = [0.00056218576553675268_real64, 0.00089183922978888926_real64,  &
+        0.0019180001994962103_real64, 0.00061796462843146532_real64, 0.00042866943587230479_real64,  &
+        0.00040510387134596703_real64, 0.00058700784405582834_real64, 0.00048388299051438355_real64,  &
+        0.00046614677021848255_real64]
+    real(real64), parameter :: KG_ADAPT_W_CDF(NKX) = [0.039365310251200138_real64, 0.07252429283881151_real64,  &
+        0.32265784137731068_real64, 0.65002710203721026_real64, 0.6811756446550804_real64, 0.688453737506587_real64,  &
+        0.79718123689080411_real64, 0.91733435382500816_real64, 0.92279766474454661_real64]
 
     !> the ISJ rule over the two-component recipe, 1024 cells: the Gaussian, unbounded
     logical, parameter :: KG_ISJ_DEF = .true.

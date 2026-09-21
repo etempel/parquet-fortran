@@ -31,9 +31,9 @@ Signatures on this page show optional arguments in square brackets, with the com
 bracket:
 
 ```fortran
-call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [adaptive], [alpha], [bandwidth_max], &
-           [lower], [upper], [boundary], [is_valid], [weights], [weight_type], [skipnan], &
-           [n_null], [n_nan], [n_outside], [ok], [threads])
+call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [adaptive], [pilot], [alpha], &
+           [bandwidth_max], [lower], [upper], [boundary], [is_valid], [weights], [weight_type], &
+           [skipnan], [n_null], [n_nan], [n_outside], [ok], [threads])
 call k%pdf(x, f, [threads])
 call k%cdf(x, p, [threads])
 call k%quantile(p, x, [threads])
@@ -43,6 +43,10 @@ call k%bandwidths(h, [x])
 call k%bandwidth_at(x, h)
 call k%pilot(g)
 call k%print([unit])
+
+call pf_kde_bandwidth(x, h, [rule], [adjust], [adaptive], [alpha], [lower], [upper], &
+                      [is_valid], [weights], [weight_type], [skipnan], [n_null], [n_nan], &
+                      [n_outside], [rule_used], [ok], [threads])
 ```
 
 `x` in `%fit` is a `real64` or `real32` array, or a `parquet_column` of kind `int32`, `int64`,
@@ -117,7 +121,8 @@ no conversion under either.
 ## Choosing a bandwidth
 
 Without `bandwidth=`, the bandwidth comes from a rule over the fitted population. The default is the
-Improved Sheather-Jones rule, `rule="isj"`; Silverman's and Scott's rules of thumb are there by name.
+Improved Sheather-Jones rule, `rule="isj"`; Silverman's and Scott's rules of thumb, and
+least-squares cross-validation (`rule="lscv"`), are there by name.
 
 ### The Improved Sheather-Jones rule
 
@@ -138,16 +143,18 @@ The answer is the smallest solution no narrower than one cell.
   `"silverman"`. That happens for a handful of points, and for values rounded to a step several
   cells wide, whose repeats the equation reads as structure finer than a cell. Named as
   `rule="isj"`, the rule is not replaced: the fit is undefined (`ok = .false.`, every answer NaN).
-- **Repeated values are concentrations to it.** A sample of few distinct values repeated many times,
-  and in the same way one given integer frequency weights, can be given a bandwidth of about a cell,
-  which resolves the repeats. Name a rule of thumb, or give the bandwidth, for such data.
-- **Several narrow components at a REGULAR spacing on a broad one are its blind spot**, and the one
-  shape where its error grows with the sample rather than falling: a transform-based fixed point
-  reads an evenly spaced comb as genuine high-frequency structure and keeps narrowing. A few narrow
-  components at irregular positions do not do this -- the rule is excellent on an ordinary mixture
-  at every width and weight -- so what defeats it is the regularity. Name a rule of thumb, or use
-  the adaptive kernel, for such data. `bench/benchmark_kde.sh` measures the rule's own cost, not
-  its accuracy; the shape is one to recognise rather than to detect.
+- **A bandwidth finer than the sample's own resolution is refused.** Values rounded to a step --
+  measurements to two decimals, counts, anything on a lattice -- put a solution of the fixed point
+  far below that step, because the repeats look like structure. A kernel narrower than the closest
+  pair of distinct observations cannot be resolving anything the sample expresses, so the rule
+  declines it and the fallback above applies. Rounded data therefore gets a sensible bandwidth
+  rather than one spike per distinct value, and nothing is needed from the caller.
+- **The rule has no known blind spot of shape.** Its error falls with the sample on every density
+  measured against it, combs of narrow evenly spaced components included, and it is the most
+  accurate of the selectors this library has been compared with. What defeats it is the RESOLUTION
+  of the data rather than the shape of the density, which is what the bullet above answers.
+  `bench/benchmark_kde.sh`'s `mise` mode scores every rule against the exact mean integrated
+  squared error of the Marron-Wand test densities, and is what would show a rule getting worse.
 - **Its cost is one pass binning the sample and a fixed amount besides**: a transform of the 16384
   cells and a few tens of evaluations of the equation. On a large sample that is less than the rules
   of thumb spend on their own passes over it; on a small one it is many times more, so a loop
@@ -196,11 +203,79 @@ Other software may compute a different number under the same name. statsmodels' 
 agrees with `rule="silverman"` exactly, to the last bit; its `bw_scott` uses the rounded `1.059`
 where this library uses the exact `(4/3)**(1/5)`. scipy's `gaussian_kde` differs under both names,
 because its `bw_method="silverman"` and `"scott"` scale the sample's standard deviation rather than
-the robust scale `A`. When a particular value is needed, pass it as `bandwidth=`.
+the robust scale `A`. R's `bw.nrd0` -- what `density()` uses unless told otherwise -- is Silverman's
+rule with the interquartile range divided by the rounded `1.34` rather than by `1.349`, so it
+differs from `rule="silverman"` by a fraction of a per cent whenever the interquartile range is the
+smaller scale and not at all when the standard deviation is; R's `bw.nrd` is Scott's rule with the
+same rounding. When a particular value is needed, pass it as `bandwidth=`.
 
 `%bandwidth()` answers the bandwidth in use, after `adjust`, and `%rule(name)` the rule that chose
-it: `"isj"`, `"silverman"` or `"scott"`, `"explicit"` when it was given as a number, or `"none"` on
-an undefined estimate, where no rule produced one.
+it: `"isj"`, `"lscv"`, `"silverman"` or `"scott"`, `"explicit"` when it was given as a number or
+taken from a `pilot=`, or `"none"` on an undefined estimate, where no rule produced one.
+
+### The bandwidth on its own: `pf_kde_bandwidth`
+
+A caller who wants the number but not the estimate can ask for it directly:
+
+```fortran
+real(real64) :: h
+character(len=:), allocatable :: used
+
+call pf_kde_bandwidth(mag, h, rule="isj", rule_used=used)
+```
+
+It takes the same sample forms `%fit` takes, and `rule`, `adjust`, `adaptive`, `alpha`, `lower`,
+`upper` and the population arguments mean exactly what they mean there. The answer is the number
+`%fit` would have resolved from the same arguments -- the two share one body, so they cannot
+drift -- and what it skips is everything after the bandwidth: the pilot an adaptive fit would
+build, each point's own bandwidth and mass, and the boundary correction's zones.
+
+**What that saves depends entirely on what came after.** Every rule here reads an ordered sample,
+so the sort is paid either way; for a plain unbounded fit there is almost nothing else after the
+bandwidth, and this form costs what `%fit` costs. Under the ADAPTIVE kernel it skips the pilot pass
+and the per-point look-up, which is most of the fit -- the greater part of the work, on a large
+sample. Reach for it to get a number cheaply out of an adaptive configuration, or to get one at
+all without an estimate; not as a faster way to fit. `bench/benchmark_kde.sh`'s `rules` mode
+measures both cases.
+
+- **Give `adaptive=.true.` when the number is for an adaptive estimate**, since that estimator's
+  global bandwidth is the wider one.
+- **`kernel=` is deliberately absent.** A bandwidth is the kernel's standard deviation whatever the
+  kernel, so one number serves all four; accepting a kernel would imply a dependence that is not
+  there.
+- **`rule_used`** names the rule that produced the number, which matters because the default falls
+  back to Silverman's rule where the ISJ rule finds none. `ok` is `.false.` where no rule found
+  one, and `h` is then a quiet NaN.
+
+It is what lets `pf_kde_grid` be used without building a `pf_kde` first: a grid needs its bandwidth
+before the first point arrives, and this is how to get one from a sample already in hand.
+
+### Cross-validation: `rule="lscv"`
+
+`rule="lscv"` chooses the bandwidth that minimises the least-squares cross-validation criterion
+
+```
+LSCV(h) = integral of f_h**2  -  (2/n) * sum_i f_{h,-i}(x_i)
+```
+
+where `f_{h,-i}` is the estimate built without point `i`. The criterion estimates the integrated
+squared error up to a constant, so minimising it aims at the same target the other rules aim at,
+without assuming anything about the density.
+
+- **It is the only rule here that scores the estimator actually in force.** Asked for with
+  `adaptive=.true.` it minimises the criterion for the ADAPTIVE estimate, and so returns the
+  adaptive estimator's own bandwidth, which no plug-in rule can do: a plug-in rule answers the
+  question the fixed estimator asks. This is what to reach for when the adaptive kernel's
+  bandwidth has to be measured on the data rather than derived from the fixed one's.
+- **It is the expensive rule.** The criterion is a double sum over the points, evaluated a few tens
+  of times, so it is quadratic where the other rules are linear. Above a few thousand points it is
+  evaluated over a subsample drawn at a fixed seed, which bounds the cost whatever the sample's
+  size; the answer is then reproducible but is not a function of every point.
+- **It is a high-variance criterion.** That is its known weakness, and the price of assuming
+  nothing: on one sample its bandwidth can sit some tens of per cent from the one that minimises
+  the true error, in either direction. The ISJ rule is the better default and remains it.
+- **Where the criterion has no minimum to find**, the fit is undefined (`ok = .false.`, every
+  answer NaN), as it is for any rule that finds no scale.
 
 ## Bounded support: `lower=`, `upper=` and `boundary=`
 
@@ -295,8 +370,15 @@ range is never weight the correction was acting on: its range must START at `low
 `upper` where those are given (R1); where only one bound is given, its range must be at least one
 kernel's reach wide, so that the free edge lies outside the bound's zone (R2); and, with the
 adaptive kernel and a free edge, a point whose own reach exceeds the range's width poisons the grid
-rather than have that weight miscounted (R3), for which `bandwidth_max` is the remedy. With both
-bounds given no edge is free and only R1 applies.
+rather than have that weight miscounted (R3), for which `bandwidth_max` is the remedy -- or a
+wider range, since a grid's range need not lie inside its pilot's. With both bounds given no edge
+is free and only R1 applies.
+
+R3 leaves the grid undefined quietly, as every data condition here does, but it does not leave it
+undiagnosable: `%add` counts the offending points and reports that call's share in `n_overreach=`,
+`%n_overreach()` answers the total over every `%add`, and a WARNING names the count and both
+remedies. The warning is a finding about the data, so `verbosity = "silent"` leaves it standing and
+only `"errors_only"` takes it.
 
 ## The adaptive kernel
 
@@ -331,11 +413,22 @@ one, and a boundary correction applies to each kernel at its own bandwidth.
 - **`alpha`**, in `[0, 1]` (default 0.5, Abramson's choice), sets how far the bandwidths follow
   the pilot. `alpha = 0` is the fixed estimate exactly; `alpha = 1` makes each bandwidth inversely
   proportional to the pilot, which is the nearest-neighbour extreme.
+- **An adaptive fit given a RULE widens that rule's bandwidth.** A bandwidth rule answers the
+  question the fixed estimator asks, and the adaptive kernel's own best global bandwidth is larger:
+  used unchanged, a rule's number oversharpens it. So with `adaptive=.true.` and no `bandwidth=`,
+  the rule's answer is multiplied by a factor that is one at `alpha = 0` -- where the adaptive
+  estimate IS the fixed one -- and grows with `alpha`. An explicit `bandwidth=` is never widened,
+  and neither is a scale taken from a `pilot=`; `adjust=` multiplies whatever comes out.
+  `%bandwidth()` answers the widened number, which is the one every point's own bandwidth is built
+  from. `bench/benchmark_kde.sh`'s `mise` mode is what the factor is measured by, and
+  `rule="lscv"` is how to measure it on one particular sample instead.
 - **`bandwidth_max`** caps every point's bandwidth. An outlier has a pilot density near zero and
   so a very wide kernel, and since every query sums the points within reach of the widest
   kernel, one far outlier slows every query. The cap is the remedy. A cap BELOW the resolved global
   bandwidth is accepted and then governs every point, which makes the estimate narrower everywhere
-  rather than only where the pilot is thin: it is a cap, not a check on the rule.
+  rather than only where the pilot is thin: it is a cap, not a check on the rule. `%bandwidth()`
+  still answers the resolved global bandwidth in that case, not the cap -- it reports what the rule
+  chose, and `%bandwidths()` reports what each point actually got, which is the cap.
 - **The pilot** is a `pf_kde_grid` that `%fit` builds at the global bandwidth over the population,
   with the same kernel and support, from four bandwidths below the lowest point to four above the
   highest (clipped to the support), a quarter of a bandwidth to the cell, and never fewer than 64
@@ -351,6 +444,44 @@ one, and a boundary correction applies to each kernel at its own bandwidth.
   `bandwidth_max` when it is given, and otherwise the bandwidth of the pilot's smallest positive
   density.
 
+### Applying one sample's smoothing to another
+
+A smoothing measured on one dataset can be applied to a second, so that two densities are smoothed
+identically and can be compared. `%pilot` hands back the first fit's pilot, and `pilot=` on the
+second fit reads it instead of building one:
+
+```fortran
+type(pf_kde) :: ka, kb
+type(pf_kde_grid) :: shape
+
+call ka%fit(a, adaptive=.true., lower=0.0_real64, boundary="linear")   ! measure on A
+call ka%pilot(shape)                                                   ! the smoothing, as a grid
+
+call kb%fit(b, adaptive=.true., pilot=shape, bandwidth_max=1.0_real64, &
+            lower=0.0_real64, boundary="linear")                       ! apply it to B
+```
+
+The same pilot drives `pf_kde_grid%init(pilot=)`, so the second dataset can be streamed instead of
+held. Three things to know, each of which is easy to meet and awkward to discover:
+
+- **Give `bandwidth_max`.** A pilot measured on one sample can hand another sample's tail
+  bandwidths orders of magnitude above the global one, wherever the two populations reach
+  differently. For an exact `pf_kde` that is slow rather than wrong -- every query sums the points
+  within reach of the widest kernel, and `%fit` says so when the spread is extreme -- but for a
+  grid under `boundary="linear"` with a free edge it is R3, and the grid is left undefined.
+- **The pilot and the fit must describe the same estimate**: the same kernel, the same `lower` and
+  `upper`, the same `boundary`. A mismatch aborts, naming which one differs, because a bandwidth
+  read from a pilot of another shape is a number from a different density.
+- **Given alone, `pilot=` carries the SCALE as well as the shape.** The fit takes the pilot's own
+  global bandwidth, so "the same smoothing" means the same smoothing and not merely the same shape
+  at whatever size the second sample suggests; `%rule` then answers `"explicit"`. Add `rule=` or
+  `bandwidth=` beside it to re-scale instead: the per-point ratios still come from the pilot, and
+  the scale is measured on the new data.
+
+The transfer is accurate when the two populations are alike, and degrades gracefully as they
+diverge -- it becomes the smoothing the first dataset called for, applied to the second, which is
+what was asked for.
+
 Reading the adaptive fit:
 
 - **`%bandwidths(h, [x])`**: every retained point's bandwidth, in the order of the points,
@@ -360,11 +491,13 @@ Reading the adaptive fit:
   `%fit` read it for each retained point.
 - **`%pilot(g)`**: a copy of the pilot. Given to `pf_kde_grid%init(pilot=g)` with the same
   bandwidth and `alpha`, it gives every point the bandwidth `%fit` gave it, so the grid converges
-  to the same adaptive estimate.
+  to the same adaptive estimate; given to another `%fit(pilot=g)` it does the same for the exact
+  form. See [Applying one sample's smoothing to another](#applying-one-samples-smoothing-to-another).
 - **`%is_adaptive()`** says whether the fit was asked for the adaptive kernel.
 
 The adaptive `%fit` costs one grid pass for the pilot and one look-up per point beyond the fixed
-one; `bench/benchmark_kde.sh` measures both (`MODE=adaptive`).
+one; `bench/benchmark_kde.sh` measures both (`MODE=adaptive`). Given `pilot=`, it pays a copy
+instead of the grid pass.
 
 ## Reading the estimate
 
@@ -385,6 +518,16 @@ one; `bench/benchmark_kde.sh` measures both (`MODE=adaptive`).
   curve is `%pdf` on equally spaced points and the two must not disagree about what correction is
   in force, and it needs at least two points. `threads=` governs the exact form only: a binned
   curve is one pass over the sample and one transform, with no per-point work for a team to share.
+
+    **With no `method=`, the curve chooses.** It is filled by the binned transform where that is as
+    accurate as the exact sum, and by the exact sum everywhere else, so the default is never the
+    worse answer. Three things have to hold for it to bin: the kernel is `"gaussian"` or
+    `"bspline"`, the two whose binned estimate converges as the square of the cell width; the fit
+    is unbounded or corrected by `"reflect"`, the two under which that order survives; and the
+    curve has at least sixteen points per bandwidth, below which the cells are too coarse to
+    resolve the kernel whatever the rest says. A one-point curve is always exact, since it cannot
+    be binned at all -- though `method="binned"` named there still refuses. `%curve` does not
+    report which method it used; those are the rules.
 - **`threads=`** on the array forms of `%pdf`, `%cdf` and `%quantile`, and on `%curve`, shares the
   points among a team. Each point is answered by one thread alone, so the answer is the same bits at
   every thread count, and a team opens only where the points within the kernels' reach make the
@@ -410,7 +553,8 @@ turns the bins into cells cannot start until the last point has arrived.
 ```fortran
 call g%init(ncells, xmin, xmax, bandwidth, [kernel], [pilot], [alpha], [bandwidth_max], &
             [lower], [upper], [boundary], [method])
-call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], [threads], [finish])
+call g%add(x, [is_valid], [weights], [skipnan], [n_null], [n_nan], [n_outside], &
+           [n_overreach], [threads], [finish])
 call g%merge(other, [finish])
 call g%finish()
 call g%density(f, [x], [normalise])
@@ -430,8 +574,10 @@ call g%method(name)
   cells are filled, and is the one argument that changes what the grid costs rather than what it
   means -- see [Two ways to fill a grid](#two-ways-to-fill-a-grid).
 - **`%add`** takes one point or an array, `real64` or `real32`, or a numeric `parquet_column` as
-  `%fit` does, under the population rules of `%fit`. `n_null`, `n_nan` and `n_outside` report what that call excluded, and the accessors
-  (`%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%n_outside()`, `%sum_weights()`) the totals over
+  `%fit` does, under the population rules of `%fit`. `n_null`, `n_nan` and `n_outside` report what
+  that call excluded and `n_overreach` what R3 found in it, and the accessors
+  (`%n()`, `%n_valid()`, `%n_null()`, `%n_nan()`, `%n_outside()`, `%n_overreach()`,
+  `%sum_weights()`) the totals over
   every call. `finish=.true.` closes the grid after that call.
 - **`%finish`** closes the accumulation; `%is_finished()` reports whether it has run, and a second
   `%finish` is a no-op. The accessors and `%print` answer at any point in the lifecycle; the five
@@ -492,19 +638,30 @@ today changes.
 have been moved to the cell centres. That error falls as the SQUARE of the cell width for the
 Gaussian and the cubic B-spline; the Epanechnikov kernel's first derivative jumps at the edge of
 its support and the box kernel steps there, so moving a point by half a cell moves that edge, and
-both converge more slowly -- the box by far the slowest of the four. Nothing else is approximated:
-the boundary corrections are applied cell by cell exactly as the deposit applies them, the weight
-beyond each end is the transform's own pad, and `%pdf`, `%cdf`, `%quantile` and `%sample` read the
-filled cells without knowing which method filled them.
+both converge more slowly -- the box by far the slowest of the four, and not monotonically, so a
+finer grid does not reliably give a better answer under it.
+
+**The boundary correction decides the order too.** Unbounded, and under `boundary="reflect"`, the
+binned estimate keeps its second order: a reflection is the same kernel placed elsewhere, which one
+convolution still carries. Under `"renormalise"` and `"linear"` the correction varies from place to
+place while the transform carries a single kernel, and the binned estimate drops to FIRST order --
+converging half as fast, and at a few thousand cells tens of times further from the exact estimate
+than the unbounded case. It is still a density and still converges; it is the rate that changes.
+
+The weight beyond each end is the transform's own pad, and `%pdf`, `%cdf`, `%quantile` and
+`%sample` read the filled cells without knowing which method filled them.
 
 **The adaptive kernel is bucketed.** A convolution has exactly one kernel width, so the binned
 method sorts the per-point bandwidths into geometrically spaced classes and convolves each class
 at its own width, splitting every point's weight between the two classes around its own bandwidth.
 The class count follows the bandwidth SPREAD, so the accuracy is the same whatever the data does,
-and `%print` reports the count in force. **The binned adaptive estimate is about an order coarser
-than the binned fixed one**: bucketing, not binning, is then the dominant error. `bandwidth_max=`
-bounds the spread and so bounds both the class count and the error, which matters more here than
-it does under `"exact"`.
+and `%print` reports the count in force. **The binned adaptive estimate does not converge with the
+cell width the way the fixed one does**: once the cells are fine enough, bucketing rather than
+binning is the error, and refining the grid past that point buys nothing -- the difference from the
+exact adaptive estimate flattens out instead of falling. It is a floor, not a slower rate.
+`bandwidth_max=` bounds the spread and so bounds both the class count and that floor, which matters
+more here than it does under `"exact"`; where the adaptive estimate has to converge, use
+`"exact"`.
 
 **What it costs.** Binning is one pass over the points whatever the bandwidth, where a deposit
 costs a pass over the cells each kernel reaches, so the saving grows with the bandwidth and with
@@ -747,7 +904,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 |---|---|
 | `bandwidth` NaN, infinite or `<= 0` | `pf_kde%fit: bandwidth must be a finite, positive number` |
 | `bandwidth=` and `rule=` both given | `pf_kde%fit: bandwidth= and rule= cannot both be given; use adjust= to scale a rule` |
-| an unknown `rule` | `pf_kde%fit: rule must be "isj", "silverman" or "scott"` |
+| an unknown `rule` | `pf_kde%fit: rule must be "isj", "lscv", "silverman" or "scott"` |
 | `adjust` NaN, infinite or `<= 0` | `pf_kde%fit: adjust must be a finite, positive number` |
 | an unknown `kernel` | `pf_kde%fit: kernel must be "gaussian", "epanechnikov", "bspline" or "box"` |
 | `lower` or `upper` NaN or infinite | `pf_kde%fit: lower and upper must be finite` |
@@ -782,11 +939,15 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | an unknown `method` | `pf_kde_grid%init: method must be "exact" or "binned"` (or `pf_kde%curve`) |
 | `method="binned"` with a bandwidth whose padded transform would be too long | `pf_kde_grid%init: method="binned" needs a transform longer than ... cells can carry` |
 | `%curve(method="binned")` on a single point | `pf_kde%curve: method="binned" needs at least two points` |
+| `pilot=` without `adaptive=.true.` | `pf_kde%fit: pilot= needs adaptive=.true.` |
+| `pilot=` a grid that was never finished | `pf_kde%fit: pilot must be a finished grid; call %finish on it` |
+| `pilot=` a grid built with another kernel | `pf_kde%fit: the pilot must use the same kernel as this fit` |
+| `pilot=` a grid built under another correction | `pf_kde%fit: the pilot must use the same boundary correction as this fit` |
+| `pilot=` a grid built over another support | `pf_kde%fit: the pilot must have the same support as this fit` |
 | under `boundary="linear"` with one bound, a range narrower than one kernel's reach (R2) | `pf_kde_grid%init: under boundary="linear" the grid must be at least one kernel reach wide` |
 | `bandwidth`, `kernel`, `alpha`, `bandwidth_max`, `lower`, `upper` or `boundary` as `%fit` refuses them | `%fit`'s texts, naming `pf_kde_grid%init` |
 | `alpha=` or `bandwidth_max=` without `pilot=` | `pf_kde_grid%init: alpha= and bandwidth_max= need pilot=` |
 | `pilot=` a grid never initialised | `pf_kde_grid%init: pilot must be an initialised grid` |
-| `pilot=` a grid whose range does not cover `[xmin, xmax]` | `pf_kde_grid%init: the pilot must cover this grid's range` |
 | `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0`, a column of another kind, `is_valid=` beside a column | `%fit`'s texts, naming `pf_kde_grid%add` (`pf_kde_grid%sample` for its `threads`) |
 | a query, accessor, `%add` or `%merge` before `%init` | `pf_kde_grid%pdf: the grid has not been initialised` |
 | `%merge` with a grid never initialised | `pf_kde_grid%merge: the other grid has not been initialised` |

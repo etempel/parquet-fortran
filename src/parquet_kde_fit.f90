@@ -71,11 +71,19 @@ contains
 
     module procedure kde_fit_f64
 
+        call kde_fit_core(self, x, .false., bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
+            bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+            n_null, n_nan, n_outside, ok, threads)
+
+    end procedure kde_fit_f64
+
+    module procedure kde_fit_core
+
         character(len=*), parameter :: EP = "pf_kde%fit"
         real(real64), allocatable :: keep_x(:), keep_w(:)
         integer(int64), allocatable :: perm(:)
         integer(int64) :: nv, nnull, nnan, nout, m, i, c0, c1, rate
-        real(real64) :: v, hh, adj, a_alpha, a_bmax, one(1)
+        real(real64) :: v, hh, adj, a_alpha, a_bmax, one(1), infl, h_start
         logical :: saw_nan, freq, want_adaptive, built, found, usable
 
         call kde_clear(self)
@@ -93,6 +101,12 @@ contains
             self%rule_code = KDE_RULE_EXPLICIT
         else if (present(rule)) then
             call kde_resolve_rule(EP, rule, self%rule_code)
+        else if (present(pilot)) then
+            ! A pilot given alone carries the scale as well as the shape: the fit takes the pilot's
+            ! own global bandwidth, so that "the same smoothing" means the same smoothing. That is a
+            ! NUMBER, not a rule, so `%rule` answers `"explicit"` and the adaptive kernel's
+            ! inflation does not apply -- it was applied already, by whichever fit resolved it.
+            self%rule_code = KDE_RULE_EXPLICIT
         else
             self%rule_code = KDE_RULE_ISJ
         end if
@@ -107,6 +121,29 @@ contains
         if (present(adaptive)) want_adaptive = adaptive
         if (present(alpha) .or. present(bandwidth_max)) then
             if (.not. want_adaptive) call kde_abort(EP, "alpha= and bandwidth_max= need adaptive=.true.")
+        end if
+        if (present(pilot)) then
+            if (.not. want_adaptive) call kde_abort(EP, "pilot= needs adaptive=.true.")
+            ! A pilot must be a grid, and must describe the same estimate this fit is building: a
+            ! bandwidth read from a pilot of another kernel, support or correction is a number from
+            ! a different density. Its RANGE need not cover this sample -- a point outside it reads
+            ! no density there, which the rule already answers with the cap or the pilot's smallest
+            ! positive density. What the pilot HOLDS is data: one with nothing to read leaves this
+            ! fit undefined, quietly, as every other data condition does.
+            if (.not. pilot%initialised) call kde_abort(EP, "pilot must be an initialised grid")
+            if (.not. pilot%finished) call kde_abort(EP, "pilot must be a finished grid; call %finish on it")
+            if (pilot%kernel_code /= self%kernel_code) &
+                call kde_abort(EP, "the pilot must use the same kernel as this fit")
+            if (pilot%boundary_code /= self%boundary_code) &
+                call kde_abort(EP, "the pilot must use the same boundary correction as this fit")
+            if ((pilot%has_lower .neqv. self%has_lower) .or. (pilot%has_upper .neqv. self%has_upper)) &
+                call kde_abort(EP, "the pilot must have the same support as this fit")
+            if (self%has_lower) then
+                if (pilot%lo /= self%lo) call kde_abort(EP, "the pilot must have the same support as this fit")
+            end if
+            if (self%has_upper) then
+                if (pilot%hi /= self%hi) call kde_abort(EP, "the pilot must have the same support as this fit")
+            end if
         end if
         a_alpha = KDE_ALPHA_DEFAULT
         if (present(alpha)) then
@@ -192,6 +229,27 @@ contains
         ! ---- the bandwidth ----
         if (present(bandwidth)) then
             hh = bandwidth
+        else if (self%rule_code == KDE_RULE_EXPLICIT) then
+            ! `pilot=` alone: the pilot's own global bandwidth is the scale, which is what makes a
+            ! transferred smoothing the SAME smoothing rather than the same shape at another size.
+            hh = pilot%h
+        else if (self%rule_code == KDE_RULE_LSCV) then
+            ! The criterion is minimised, not solved, so it needs somewhere to start: Silverman's
+            ! rule gives the scale and the search spans a factor either side of it. Unlike a plug-in
+            ! rule it is defined for whatever estimator is in force, so under `adaptive=.true.` it
+            ! scores the ADAPTIVE estimate and returns that estimator's own bandwidth -- which is
+            ! why it is also the one rule B1's inflation must not be applied on top of.
+            call kde_rule_bandwidth(KDE_RULE_SILVERMAN, self%x, freq, self%w, weight_type, threads, h_start)
+            hh = ieee_value(1.0_real64, ieee_quiet_nan)
+            if (.not. ieee_is_nan(h_start)) then
+                ! `h_start` and `hh` are separate variables deliberately: the start is an
+                ! `intent(in)` and the answer an `intent(out)`, and one variable in both places is
+                ! clobbered by the callee before it is read.
+                call kde_lscv_bandwidth(self%x, self%w, self%adapt%on, a_alpha, self%kernel_code, &
+                    self%has_lower, self%lo, self%has_upper, self%hi, self%boundary_code, &
+                    self%w_total, h_start, hh, found)
+                if (.not. found) hh = ieee_value(1.0_real64, ieee_quiet_nan)
+            end if
         else if (self%rule_code == KDE_RULE_ISJ) then
             call kde_isj_bandwidth(self%x, freq, self%w, self%has_lower, self%lo, self%has_upper, self%hi, &
                 hh, found)
@@ -210,18 +268,45 @@ contains
         ! estimate to answer with, and the product is tested before it is formed: the overflow
         ! itself would stop a program under nagfor.
         if (ieee_is_nan(hh)) return
+        ! ---- the adaptive kernel's own scale ----
+        ! A rule answers the question the FIXED estimator asks, and the adaptive kernel's own best
+        ! global bandwidth is larger, so a rule's number used unchanged oversharpens it. Applied
+        ! only where the scale CAME from a rule: an explicit `bandwidth=`, and a scale taken from a
+        ! `pilot=`, are numbers the caller supplied and are never inflated -- the pilot's was
+        ! inflated already, when whichever fit resolved it did so. `adjust=` then composes on top.
+        if (self%adapt%on .and. self%rule_code /= KDE_RULE_EXPLICIT .and. &
+                self%rule_code /= KDE_RULE_LSCV) then
+            infl = KDE_ADAPT_INFLATE**(2.0_real64*a_alpha)
+            if (infl > 1.0_real64) then
+                if (hh > huge(hh)/infl) return
+            end if
+            hh = hh*infl
+        end if
         if (adj > 1.0_real64) then
             if (hh > huge(hh)/adj) return
         end if
         hh = hh*adj
         if (.not. kde_bandwidth_usable(self%kernel_code, hh)) return
         self%h = hh
+        ! `pf_kde_bandwidth` wanted the number and nothing else: what follows builds the estimate.
+        if (bandwidth_only) then
+            self%defined = .true.
+            if (present(ok)) ok = .true.
+            return
+        end if
 
         ! ---- each point's bandwidth: from the pilot when adaptive, the global one otherwise ----
         if (self%adapt%on) then
             call system_clock(count=c0)
             one(1) = 1.0_real64
-            if (self%weighted) then
+            if (present(pilot)) then
+                ! The caller measured the smoothing on another sample: this fit reads that table
+                ! instead of building one, so the pilot phase costs a copy rather than a grid pass.
+                ! Kept, so that `%pilot` hands back the pilot this fit actually read, as it does
+                ! for one built here.
+                self%pilot_grid = pilot
+                built = .true.
+            else if (self%weighted) then
                 call kde_build_pilot(self%pilot_grid, self%x, self%w, .true., hh, self%kernel_code, self%has_lower, &
                     self%lo, self%has_upper, self%hi, self%boundary_code, self%w_total, threads, built)
             else
@@ -250,6 +335,16 @@ contains
             do i = 2_int64, m
                 if (self%hb(i) > self%hmax) self%hmax = self%hb(i)
             end do
+            ! A pilot measured on ANOTHER sample can give this one's tail a bandwidth orders of
+            ! magnitude above the global one, where the two populations reach differently. Nothing
+            ! is wrong with the answer -- an exact estimate has no range for such a kernel to
+            ! overrun, unlike a grid, which R3 poisons -- but every later query sums the points
+            ! within reach of the WIDEST kernel, so one transferred outlier makes every `%pdf`
+            ! expensive. ADVICE, not a warning: it is a remark about how the call was configured
+            ! rather than a finding about the data, so `verbosity = "silent"` takes it.
+            if (present(pilot) .and. .not. present(bandwidth_max)) then
+                if (self%hmax > KDE_PILOT_SPREAD_ADVICE*hh) call advise_transferred_spread(self%hmax/hh)
+            end if
             allocate(self%hr(m))
             do i = 1_int64, m
                 self%hr(i) = reciprocal(self%hb(i))
@@ -292,7 +387,52 @@ contains
         self%defined = .true.
         if (present(ok)) ok = .true.
 
-    end procedure kde_fit_f64
+    end procedure kde_fit_core
+
+    module procedure kde_bandwidth_f64
+
+        type(pf_kde) :: k
+        logical :: got
+
+        ! The whole contract is that this is `%fit`'s own number: one body resolves it, and this
+        ! entry point stops it once the bandwidth is known rather than repeating the arithmetic.
+        call kde_fit_core(k, x, .true., rule=rule, adjust=adjust, &
+            adaptive=adaptive, alpha=alpha, lower=lower, upper=upper, is_valid=is_valid, &
+            weights=weights, weight_type=weight_type, skipnan=skipnan, n_null=n_null, n_nan=n_nan, &
+            n_outside=n_outside, ok=got, threads=threads)
+        h = k%h
+        if (present(ok)) ok = got
+        if (present(rule_used)) then
+            if (got) then
+                call kde_rule_name(k, rule_used)
+            else
+                rule_used = "none"
+            end if
+        end if
+
+    end procedure kde_bandwidth_f64
+
+    module procedure kde_bandwidth_f32
+
+        real(real64), allocatable :: xw(:)
+
+        allocate(xw(size(x, kind=int64)))
+        xw = real(x, real64)
+        call kde_bandwidth_f64(xw, h, rule, adjust, adaptive, alpha, lower, upper, is_valid, weights, &
+            weight_type, skipnan, n_null, n_nan, n_outside, rule_used, ok, threads)
+
+    end procedure kde_bandwidth_f32
+
+    module procedure kde_bandwidth_col
+
+        real(real64), allocatable :: wide(:)
+        logical, allocatable :: mask(:)
+
+        call kde_widen_column("pf_kde_bandwidth", x, is_valid, wide, mask)
+        call kde_bandwidth_f64(wide, h, rule, adjust, adaptive, alpha, lower, upper, mask, weights, &
+            weight_type, skipnan, n_null, n_nan, n_outside, rule_used, ok, threads)
+
+    end procedure kde_bandwidth_col
 
     module procedure kde_fit_f32
 
@@ -302,8 +442,9 @@ contains
         ! the `real64` form does it.
         allocate(xw(size(x, kind=int64)))
         xw = real(x, real64)
-        call kde_fit_f64(self, xw, bandwidth, rule, adjust, kernel, adaptive, alpha, bandwidth_max, lower, &
-            upper, boundary, is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
+        call kde_fit_f64(self, xw, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, bandwidth_max, &
+            lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, &
+            threads)
 
     end procedure kde_fit_f32
 
@@ -314,8 +455,9 @@ contains
 
         ! The column's validity becomes `is_valid`: unallocated when it has no null, and so absent.
         call kde_widen_column("pf_kde%fit", x, is_valid, wide, mask)
-        call kde_fit_f64(self, wide, bandwidth, rule, adjust, kernel, adaptive, alpha, bandwidth_max, lower, &
-            upper, boundary, mask, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, threads)
+        call kde_fit_f64(self, wide, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, bandwidth_max, &
+            lower, upper, boundary, mask, weights, weight_type, skipnan, n_null, n_nan, n_outside, ok, &
+            threads)
 
     end procedure kde_fit_col
 
@@ -444,12 +586,18 @@ contains
         call require_fitted(self, EP)
         n = size(x, kind=int64)
         if (size(f, kind=int64) /= n) call kde_abort(EP, "x and f must have the same size")
-        mcode = KDE_METHOD_EXACT
-        if (present(method)) call kde_resolve_method(EP, method, mcode)
-        ! The binned curve is one transform over the whole curve, so it needs two points to have a
-        ! spacing at all. The exact curve answers a single point happily.
-        if (mcode == KDE_METHOD_BINNED .and. n < 2_int64) &
-            call kde_abort(EP, 'method="binned" needs at least two points')
+        ! The default cannot be settled yet: it depends on how finely the curve samples the
+        ! kernel, and the range is only known once `cut`, the support and `xmin`/`xmax` have been
+        ! read. `KDE_METHOD_AUTO` carries "the caller named none" as far as that point.
+        mcode = KDE_METHOD_AUTO
+        if (present(method)) then
+            call kde_resolve_method(EP, method, mcode)
+            ! The binned curve is one transform over the whole curve, so it needs two points to have
+            ! a spacing at all. Asked for by name at one point, that is a refusal: the caller asked
+            ! for something impossible.
+            if (mcode == KDE_METHOD_BINNED .and. n < 2_int64) &
+                call kde_abort(EP, 'method="binned" needs at least two points')
+        end if
         call kde_query_team(EP, threads, n, query_work(self), team)
         c = 3.0_real64
         if (present(cut)) then
@@ -493,6 +641,7 @@ contains
             end if
         end if
         call spaced(a, b, x)
+        if (mcode == KDE_METHOD_AUTO) mcode = default_curve_method(self, n, a, b)
         if (mcode == KDE_METHOD_BINNED) then
             kde_team_used = 1
             call binned_curve(self, EP, a, b, n, f)
@@ -632,6 +781,8 @@ contains
             name = "scott"
         case (KDE_RULE_ISJ)
             name = "isj"
+        case (KDE_RULE_LSCV)
+            name = "lscv"
         case default
             name = "silverman"
         end select
@@ -785,6 +936,72 @@ contains
     ! ==========================================================================================
 
     !> Aborts unless the object has been fitted. Impure deliberately, like every guard here.
+    !> Says that a transferred pilot gave some point a kernel far wider than the global bandwidth.
+    !!
+    !! ADVICE and not a warning: nothing about the DATA is wrong -- an exact estimate has no range
+    !! for a wide kernel to overrun -- and what is worth saying is about the CONFIGURATION, that
+    !! every later query will sum the points within reach of that kernel. By
+    !! `.claude/rules/api-conventions.md` that class goes quiet at `verbosity = "silent"`, unlike
+    !! `pf_kde_grid%add`'s R3 warning, which is a finding about the data and survives it.
+    subroutine advise_transferred_spread(ratio)
+        real(real64), intent(in) :: ratio !! the widest transferred bandwidth over the global one
+
+        character(len=32) :: ratio_text
+
+        write (ratio_text, "(i0)") int(ratio, int64)
+        call parquet_emit_advice("pf_kde%fit: the pilot gives some point a bandwidth about " // &
+            trim(ratio_text) // " times the global one, so every query sums the points within reach " // &
+            "of that kernel. Set bandwidth_max= to bound it.")
+
+    end subroutine advise_transferred_spread
+
+    !> Which method `%curve` fills itself by when the caller named none: `"binned"` only where it is
+    !! as accurate as the exact sum, `"exact"` everywhere else.
+    !!
+    !! **Two conditions, and both were measured rather than assumed.**
+    !!
+    !! The KERNEL must be `"gaussian"` or `"bspline"`. Those two are smooth enough that the binned
+    !! estimate converges as the square of the cell width; the Epanechnikov estimate has kinks and
+    !! the box estimate steps, and both converge more slowly and not monotonically.
+    !!
+    !! The fit must be UNBOUNDED, or corrected by `"reflect"`. A curve honours the fit's boundary
+    !! correction, and under `"renormalise"` and `"linear"` the binned curve drops an order -- from
+    !! second to first -- because those corrections vary along the curve and the transform carries
+    !! one kernel. At a few thousand points that is tens of times worse than the unbounded case,
+    !! exactly where a bounded density most needs a curve. `"reflect"` keeps second order, its
+    !! images being the same kernel placed elsewhere.
+    !!
+    !! A one-point curve cannot be binned at all, so the default falls back to the exact sum rather
+    !! than refusing; an explicit `method="binned"` there still refuses, because the caller asked
+    !! for something that cannot be done.
+    !!
+    !! Do not simplify this back to the kernel alone: the correction arm is the one that would
+    !! silently cost an order, and it is `%curve(method="binned")`'s convergence under each
+    !! correction that says so.
+    pure function default_curve_method(self, n, a, b) result(mcode)
+        class(pf_kde), intent(in)  :: self  !! the fitted estimate
+        integer(int64), intent(in) :: n     !! how many points the curve has
+        real(real64), intent(in)   :: a     !! the curve's first point
+        real(real64), intent(in)   :: b     !! the curve's last point
+        integer                    :: mcode !! the method to fill it by
+
+        real(real64) :: step, hmin
+
+        mcode = KDE_METHOD_EXACT
+        if (n < 2_int64) return
+        if (self%kernel_code /= KDE_GAUSSIAN .and. self%kernel_code /= KDE_BSPLINE) return
+        if (self%boundary_code /= KDE_BOUNDARY_NONE .and. self%boundary_code /= KDE_BOUNDARY_REFLECT) return
+        ! The narrowest kernel on the curve decides: under the adaptive kernel the points differ,
+        ! and it is the sharpest one the cells have to resolve.
+        hmin = self%h
+        if (self%hstride == 1_int64) hmin = minval(self%hb)
+        if (.not. (hmin > 0.0_real64)) return
+        step = (b - a)/real(n - 1_int64, real64)
+        if (.not. (step <= hmin/KDE_CURVE_BINNED_PER_H)) return
+        mcode = KDE_METHOD_BINNED
+
+    end function default_curve_method
+
     subroutine require_fitted(self, entry)
         class(pf_kde), intent(in)    :: self  !! the estimate
         character(len=*), intent(in) :: entry !! the binding, for the message

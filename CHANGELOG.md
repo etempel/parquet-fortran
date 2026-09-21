@@ -107,23 +107,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the estimate; `pf_kde_grid` streams points into a fixed grid and forgets them, with `%merge` for
   per-thread accumulation and `%density`, `%pdf`, `%cdf`, `%quantile` and `%sample` read from the
   grid. Four kernels (`gaussian`, `epanechnikov`, `bspline`, `box`), with the bandwidth the
-  kernel's standard deviation; the Improved Sheather-Jones rule (the default), Silverman's and
-  Scott's rules, a number, and `adjust=`; per-element weights and nulls under the `pf_*` family's
-  rules, with `n_eff` in the rules; `lower=`/`upper=` for a bounded support, corrected by
+  kernel's standard deviation; the Improved Sheather-Jones rule (the default), least-squares
+  cross-validation (`rule="lscv"`, which scores whichever estimator is in force and so can measure
+  the adaptive kernel's own bandwidth), Silverman's and
+  Scott's rules, a number, and `adjust=`; `pf_kde_bandwidth` answers a rule's bandwidth on its own,
+  without building an estimate, over the same sample forms; per-element weights and nulls under the
+  `pf_*` family's rules, with `n_eff` in the rules; `lower=`/`upper=` for a bounded support, corrected by
   `boundary=` `"reflect"` (the default), `"renormalise"` or `"linear"` -- the last two the
   degree-zero and degree-one members of the local-polynomial boundary kernel, each dividing the
   summed kernels by the mass a kernel centred at the QUERY point keeps inside the support and then
   by the estimate's own integral, `"linear"` additionally setting negative values to zero.
   `adaptive=.true.` selects the sample-point adaptive kernel (each
   point's bandwidth from a pilot density, sensitivity `alpha=`, capped by `bandwidth_max=`, read
-  back through `%bandwidths`, `%bandwidth_at` and `%pilot`), and the streaming form takes the same
-  rule from a `pilot=` grid. A grid's lifecycle is `%init` -> `%add`* -> `%finish` -> query, with
+  back through `%bandwidths`, `%bandwidth_at` and `%pilot`), given a rule rather than a number it
+  widens that rule's bandwidth to the one the adaptive estimator itself calls for, and both forms
+  take a smoothing measured on another sample from a `pilot=` grid, whose range need not cover
+  theirs. `%add` counts the points whose adaptive reach exceeds a grid's range in `n_overreach=`
+  and `%n_overreach()`, and says so. A grid's lifecycle is `%init` -> `%add`* -> `%finish` -> query, with
   `%is_finished`, `finish=.true.` on `%add` and `%merge` as the one-line form, and `%clear` to
   reopen it. `method="binned"` on `pf_kde_grid%init` and on `pf_kde%curve` fills the cells by
   linear binning and one cosine transform instead of by depositing each kernel -- with the
   bandwidths bucketed into geometrically spaced classes under the adaptive kernel, a second
   transform against the odd kernel under `boundary="linear"`, and `%method(name)` reading the token
-  back; the exact deposit stays the default. `threads=` on the bulk forms of both; draws addressed
+  back; the exact deposit stays the grid's default, while a `%curve` given no `method=` picks the
+  binned transform only where it is as accurate as the exact sum and the exact sum otherwise. `threads=` on the bulk forms of both; draws addressed
   by `(seed, stream)`. An Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
   [Kernel density estimation](doc/pages/utilities/kernel-density.md).
 - **A direction inside a HEALPix pixel, not just at its centre**:

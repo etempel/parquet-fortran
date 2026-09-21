@@ -93,10 +93,11 @@ module parquet_kde
     ! its coordinates and a sample splits among threads anywhere.
     use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
     ! `%print` is solicited output; the verbosity and message-stream pair is re-exported because
-    ! this module reads it.
+    ! this module reads it. `parquet_emit_warning` carries the one finding this module makes about
+    ! a caller's DATA that leaves nothing to read: R3's over-reaching adaptive bandwidths.
     use parquet_settings_base, only : parquet_output_is_suppressed, parquet_message_unit, &
         parquet_set_verbosity, parquet_get_verbosity, parquet_set_message_stream, &
-        parquet_get_message_stream
+        parquet_get_message_stream, parquet_emit_warning, parquet_emit_advice
     use iso_fortran_env, only : int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
         ieee_negative_inf, ieee_is_nan, ieee_is_finite
@@ -105,6 +106,7 @@ module parquet_kde
     private
 
     public :: pf_kde, pf_kde_grid
+    public :: pf_kde_bandwidth
     public :: parquet_debug_kde_threads_used, parquet_debug_set_kde_pilot_cells, parquet_debug_kde_fit_nanos
     public :: parquet_debug_set_kde_isj_cells, parquet_debug_set_kde_sample_tries
     public :: parquet_debug_set_kde_binned_classes
@@ -138,7 +140,7 @@ module parquet_kde
 
     !> Bandwidth rule codes. `KDE_RULE_EXPLICIT` records that `bandwidth=` was given as a number.
     integer, parameter :: KDE_RULE_EXPLICIT = 0, KDE_RULE_SILVERMAN = 1, KDE_RULE_SCOTT = 2, &
-        KDE_RULE_ISJ = 3
+        KDE_RULE_ISJ = 3, KDE_RULE_LSCV = 4
 
     !> Boundary correction codes. `KDE_BOUNDARY_NONE` is the unbounded estimate.
     integer, parameter :: KDE_BOUNDARY_NONE = 0, KDE_BOUNDARY_RENORMALISE = 1, &
@@ -320,6 +322,80 @@ module parquet_kde
 
     !> The adaptive rule's default sensitivity: the square root of the pilot's inverse.
     real(real64), parameter :: KDE_ALPHA_DEFAULT = 0.5_real64
+
+    !> How much wider the adaptive kernel's global bandwidth is than the same rule's for the fixed
+    !! estimator, at `alpha = 0.5`: the factor is `KDE_ADAPT_INFLATE**(2*alpha)`, which is exactly
+    !! one at `alpha = 0`, where the adaptive estimate IS the fixed one.
+    !!
+    !! A bandwidth rule answers the question the FIXED estimator asks. The adaptive kernel then
+    !! narrows the kernel where the pilot is dense and widens it where the pilot is thin, and its
+    !! own best global bandwidth is larger -- so a rule's number, used unchanged, oversharpens it.
+    !!
+    !! The value is measured, not chosen: `bench/benchmark_kde.sh`'s `mise` mode sweeps explicit
+    !! bandwidths for both estimators over the Marron-Wand mixtures at two sample sizes and takes
+    !! the median of `h*(adaptive)/h*(fixed)`. Re-run that mode after any change to the pilot or
+    !! the rule; the individual ratios run from about 1.1 to about 2.4, so the median is a
+    !! compromise and a run that moves it by a few per cent has not found a defect.
+    real(real64), parameter :: KDE_ADAPT_INFLATE = 1.5_real64
+
+    !> How many times the global bandwidth the WIDEST transferred bandwidth may reach before
+    !! `pf_kde%fit(pilot=)` says so. A pilot measured on another sample can give this one's tail a
+    !! kernel orders of magnitude wider than the global one; the answer is still right, but every
+    !! later query sums the points within reach of the widest kernel, so the fit costs more than
+    !! the caller is likely to expect. Recorded here rather than tuned: anything of this order
+    !! separates "the two samples reach differently" from ordinary adaptive spread, which on the
+    !! library's own pilots stays inside a factor of a few.
+    real(real64), parameter :: KDE_PILOT_SPREAD_ADVICE = 100.0_real64
+
+    ! ---- the cross-validation rule -------------------------------------------------------------
+
+    !> The most points the LSCV criterion is evaluated over. The criterion is a double sum, so its
+    !! cost is quadratic in this; capping it makes the rule's cost bounded and predictable whatever
+    !! the sample's size, at the price of making the answer a draw rather than a function of the
+    !! whole sample. The draw is addressed by `(seed, stream)` like `%sample`, so it is reproducible.
+    integer(int64), parameter :: KDE_LSCV_MAX = 2000_int64
+
+    !> The seed the LSCV subsample is drawn at, so that one sample gives one bandwidth however
+    !! often it is asked for, and two runs of a program agree.
+    integer(int64), parameter :: KDE_LSCV_SEED = 20240917_int64
+
+    !> How far either side of the starting bandwidth the criterion is minimised over, as a factor.
+    !! Wide enough that the minimum is interior on every density this was measured against, narrow
+    !! enough that the search does not spend its evaluations in the tails.
+    real(real64), parameter :: KDE_LSCV_BRACKET = 4.0_real64
+
+    !> How many golden-section steps the minimisation takes. The criterion is noisy near its
+    !! minimum -- it is an estimate -- so refining far past a per cent of the bandwidth buys
+    !! nothing a caller can use.
+    integer, parameter :: KDE_LSCV_STEPS = 40
+
+    !> `1/phi`, the golden section's ratio, at which the criterion's bracket is split.
+    real(real64), parameter :: KDE_GOLDEN = 0.6180339887498949_real64
+
+    !> `sqrt(2*pi)`, the normal density's normaliser, at 50 digits.
+    real(real64), parameter :: KDE_ROOT_TWO_PI = 2.5066282746310002_real64
+
+    !> Where the criterion's normal density is taken as zero, in standard deviations. The same cut
+    !! the Gaussian kernel itself takes, so the criterion and the estimate agree about how far a
+    !! kernel reaches.
+    real(real64), parameter :: KDE_NORM_CUT = 5.0_real64
+
+    ! ---- the curve's default method -------------------------------------------------------------
+
+    !> Stands for "the caller named no method" between `%curve`'s argument checks and the point
+    !! where its range is known, which is the first place the default can be decided.
+    integer, parameter :: KDE_METHOD_AUTO = -1
+
+    !> How many points per bandwidth a curve must have before it is filled by the binned method
+    !! rather than the exact sum, when the caller named neither.
+    !!
+    !! The binned curve's error falls as the SQUARE of its spacing, so the point count decides the
+    !! accuracy as much as the kernel does: on one sample it is a quarter of the peak density at
+    !! three points, a twentieth at eleven, and only past a few hundred does it reach the exact
+    !! sum's own agreement. Sixteen points per bandwidth is where the difference stops being
+    !! visible on a plot, and it is also where binning starts being worth doing: a curve too coarse
+    !! to bin accurately is too short for the saving to matter.
+    real(real64), parameter :: KDE_CURVE_BINNED_PER_H = 16.0_real64
 
     !> The pilot `pf_kde%fit(adaptive=.true.)` builds reaches this many global bandwidths beyond the
     !! extreme points, clipped to the support.
@@ -592,6 +668,9 @@ module parquet_kde
         integer(int64) :: cnt_null = 0_int64         !! excluded as null
         integer(int64) :: cnt_nan = 0_int64          !! excluded as NaN
         integer(int64) :: cnt_out = 0_int64          !! excluded as outside the support
+        integer(int64) :: cnt_overreach = 0_int64    !! under `"linear"` with a free edge, how many points
+                                                     !! had an adaptive bandwidth whose reach exceeded the
+                                                     !! range's width, which is what `reach_poisoned` records
         real(real64) :: mass_total = 0.0_real64      !! what `%finish` left: the mass every query
                                                      !! normalises by, formed once
         real(real64), allocatable :: acc(:)
@@ -646,6 +725,7 @@ module parquet_kde
         procedure :: n_null => grid_n_null !! how many were excluded as null
         procedure :: n_nan => grid_n_nan !! how many were excluded as NaN
         procedure :: n_outside => grid_n_outside !! how many were outside the support
+        procedure :: n_overreach => grid_n_overreach !! how many out-reached the range under `"linear"`
         procedure :: sum_weights => grid_sum_weights !! `sum(w)` over the population
         procedure :: is_initialised => grid_is_initialised !! `%init` has run
         procedure :: is_adaptive => grid_is_adaptive !! each point takes its own bandwidth
@@ -770,6 +850,34 @@ module parquet_kde
 
     ! ---- fitting, implemented in parquet_kde_fit.f90 ----------------------------------------
 
+    !> The bandwidth a rule gives a sample, without building an estimate over it:
+    !! `call pf_kde_bandwidth(x, h, [rule], [adjust], [adaptive], [alpha], [lower], [upper],
+    !! [is_valid], [weights], [weight_type], [skipnan], [n_null], [n_nan], [n_outside],
+    !! [rule_used], [ok], [threads])`.
+    !!
+    !! Every argument means what it means to `pf_kde%fit`, and the answer is the number `%fit`
+    !! would have resolved from the same arguments, bit for bit -- the two share one body, so they
+    !! cannot drift. What it skips is everything AFTER the bandwidth: the pilot an adaptive fit
+    !! would build, each point's own bandwidth and mass, and the boundary correction's zones.
+    !!
+    !! `adaptive = .true.` is worth giving when the number is meant for an adaptive estimate: the
+    !! adaptive kernel's global bandwidth is wider than the same rule's for the fixed estimator,
+    !! and this answers the one that will actually be used.
+    !!
+    !! **`kernel` is deliberately absent.** `bandwidth` is the kernel's standard deviation whatever
+    !! the kernel, so one rule's number serves all four; accepting a kernel here would imply a
+    !! dependence that does not exist.
+    !!
+    !! `rule_used` reports which rule produced the number, since the default falls back to
+    !! Silverman's rule where the ISJ rule finds none; `ok` is `.false.` where no rule did, and `h`
+    !! is then a quiet NaN. A subroutine rather than a function, because the rule actually used and
+    !! the population counts are part of the answer.
+    interface pf_kde_bandwidth
+        module procedure kde_bandwidth_f64
+        module procedure kde_bandwidth_f32
+        module procedure kde_bandwidth_col
+    end interface pf_kde_bandwidth
+
     interface
 
         !> Fits the estimate to a `real64` sample: `call k%fit(x, [bandwidth], [rule], [adjust],
@@ -787,7 +895,21 @@ module parquet_kde
         !! .true.` gives each point its own bandwidth, `h * (p(x_j)/g)**(-alpha)`, from a pilot
         !! estimate at the global bandwidth `h`: `alpha` in `[0, 1]` (default 0.5) sets how far
         !! the bandwidths follow the pilot, `0` being the fixed estimate, and `bandwidth_max` caps
-        !! every one; both need `adaptive = .true.`. `lower` and `upper` bound the support: a
+        !! every one; both need `adaptive = .true.`. Given a rule rather than a number, an adaptive
+        !! fit widens that rule's bandwidth, because a rule answers the question the fixed
+        !! estimator asks and the adaptive kernel's own optimum is larger; an explicit `bandwidth`
+        !! is never widened.
+        !!
+        !! `pilot` applies a smoothing MEASURED ON ANOTHER SAMPLE: a finished `pf_kde_grid`, as
+        !! `pf_kde_grid%init` takes one, whose kernel, support and boundary correction must match
+        !! this fit's. It also needs `adaptive = .true.`. Given alone it carries the SCALE too --
+        !! the fit takes the pilot's own global bandwidth, so that "the same smoothing" means the
+        !! same smoothing and not merely the same shape -- and `%rule` then answers `"explicit"`,
+        !! since no rule was applied here. A `bandwidth` or `rule` beside it re-scales the
+        !! transferred shape instead: the per-point ratios come from the pilot, the scale from
+        !! this sample. `bandwidth_max` is worth giving with a foreign pilot, which can hand this
+        !! sample's tail bandwidths orders of magnitude above the global one.
+        !! `lower` and `upper` bound the support: a
         !! point outside is excluded and counted in `n_outside`, and a kernel crossing a bound is
         !! corrected by `boundary`, `"reflect"` (the default), `"renormalise"` or `"linear"`.
         !! `is_valid`,
@@ -796,9 +918,9 @@ module parquet_kde
         !! `n_outside` report what each exclusion removed, and `ok` is `.false.` when the estimate
         !! is undefined. `threads` is the team for the sort, the rules' statistics and the pilot;
         !! the answer does not depend on it. Tokens are matched without regard to case.
-        module subroutine kde_fit_f64(self, x, bandwidth, rule, adjust, kernel, adaptive, alpha, &
-                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, &
-                n_nan, n_outside, ok, threads)
+        module subroutine kde_fit_f64(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
+                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+                n_null, n_nan, n_outside, ok, threads)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real64), intent(in)               :: x(:)          !! the sample
@@ -807,6 +929,8 @@ module parquet_kde
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
+            type(pf_kde_grid), intent(in), optional :: pilot        !! a pilot measured elsewhere, read
+                                                                    !! instead of building one here
             real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
             real(real64), intent(in), optional     :: lower         !! the support's lower bound
@@ -823,11 +947,121 @@ module parquet_kde
             integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
         end subroutine kde_fit_f64
 
+        !> The shared body of `pf_kde%fit` and `pf_kde_bandwidth`: everything up to and including
+        !! the global bandwidth, then -- unless `bandwidth_only` -- the pilot, each point's own
+        !! bandwidth and mass, and the boundary correction's tables.
+        !!
+        !! One body deliberately. The population rules, the argument checks, the sort and the rules
+        !! themselves are the part the two entry points must agree on to the bit, and the only way
+        !! to guarantee that is for there to be one of each rather than two written alike.
+        module subroutine kde_fit_core(self, x, bandwidth_only, bandwidth, rule, adjust, kernel, adaptive, &
+                pilot, alpha, bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, &
+                skipnan, n_null, n_nan, n_outside, ok, threads)
+            implicit none
+            class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
+            real(real64), intent(in)               :: x(:)          !! the sample
+            logical, intent(in)                    :: bandwidth_only !! stop once the bandwidth is known
+            real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
+            real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
+            character(len=*), intent(in), optional :: kernel        !! the kernel's token
+            logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
+            type(pf_kde_grid), intent(in), optional :: pilot        !! a pilot measured elsewhere, read
+                                                                    !! instead of building one here
+            real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
+            real(real64), intent(in), optional     :: lower         !! the support's lower bound
+            real(real64), intent(in), optional     :: upper         !! the support's upper bound
+            character(len=*), intent(in), optional :: boundary      !! the boundary correction
+            logical, intent(in), optional          :: is_valid(:)   !! `.false.` marks a null
+            real(real64), intent(in), optional     :: weights(:)    !! per-element weights
+            character(len=*), intent(in), optional :: weight_type   !! `"reliability"` or `"frequency"`
+            logical, intent(in), optional          :: skipnan       !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional  :: n_null        !! excluded as null
+            integer(int64), intent(out), optional  :: n_nan         !! excluded as NaN
+            integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
+            logical, intent(out), optional         :: ok            !! the estimate is defined
+            integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
+        end subroutine kde_fit_core
+
+        !> `pf_kde_bandwidth` over a `real64` sample; see the generic's own documentation.
+        module subroutine kde_bandwidth_f64(x, h, rule, adjust, adaptive, alpha, lower, upper, &
+                is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, rule_used, ok, threads)
+            implicit none
+            real(real64), intent(in)               :: x(:)        !! the sample
+            real(real64), intent(out)              :: h           !! the bandwidth; NaN where no rule found one
+            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"silverman"` or `"scott"`
+            real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
+            logical, intent(in), optional          :: adaptive    !! the number is for an adaptive estimate
+            real(real64), intent(in), optional     :: alpha       !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional     :: lower       !! the support's lower bound
+            real(real64), intent(in), optional     :: upper       !! the support's upper bound
+            logical, intent(in), optional          :: is_valid(:) !! `.false.` marks a null
+            real(real64), intent(in), optional     :: weights(:)  !! per-element weights
+            character(len=*), intent(in), optional :: weight_type !! `"reliability"` or `"frequency"`
+            logical, intent(in), optional          :: skipnan     !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional  :: n_null      !! excluded as null
+            integer(int64), intent(out), optional  :: n_nan       !! excluded as NaN
+            integer(int64), intent(out), optional  :: n_outside   !! excluded as outside the support
+            character(len=:), allocatable, intent(out), optional :: rule_used !! which rule gave `h`
+            logical, intent(out), optional         :: ok          !! a rule found a bandwidth
+            integer, intent(in), optional          :: threads     !! the team for the sort and the rules
+        end subroutine kde_bandwidth_f64
+
+        !> `pf_kde_bandwidth` over a `real32` sample, widened first; otherwise as the `real64` form.
+        module subroutine kde_bandwidth_f32(x, h, rule, adjust, adaptive, alpha, lower, upper, &
+                is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, rule_used, ok, threads)
+            implicit none
+            real(real32), intent(in)               :: x(:)        !! the sample
+            real(real64), intent(out)              :: h           !! the bandwidth; NaN where no rule found one
+            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"silverman"` or `"scott"`
+            real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
+            logical, intent(in), optional          :: adaptive    !! the number is for an adaptive estimate
+            real(real64), intent(in), optional     :: alpha       !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional     :: lower       !! the support's lower bound
+            real(real64), intent(in), optional     :: upper       !! the support's upper bound
+            logical, intent(in), optional          :: is_valid(:) !! `.false.` marks a null
+            real(real64), intent(in), optional     :: weights(:)  !! per-element weights
+            character(len=*), intent(in), optional :: weight_type !! `"reliability"` or `"frequency"`
+            logical, intent(in), optional          :: skipnan     !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional  :: n_null      !! excluded as null
+            integer(int64), intent(out), optional  :: n_nan       !! excluded as NaN
+            integer(int64), intent(out), optional  :: n_outside   !! excluded as outside the support
+            character(len=:), allocatable, intent(out), optional :: rule_used !! which rule gave `h`
+            logical, intent(out), optional         :: ok          !! a rule found a bandwidth
+            integer, intent(in), optional          :: threads     !! the team for the sort and the rules
+        end subroutine kde_bandwidth_f32
+
+        !> `pf_kde_bandwidth` over a numeric `parquet_column`, widened first. The column's own
+        !! validity is the null mask, so `is_valid` cannot be given beside it.
+        module subroutine kde_bandwidth_col(x, h, rule, adjust, adaptive, alpha, lower, upper, &
+                is_valid, weights, weight_type, skipnan, n_null, n_nan, n_outside, rule_used, ok, threads)
+            implicit none
+            type(parquet_column), intent(in)       :: x           !! the sample, one numeric column
+            real(real64), intent(out)              :: h           !! the bandwidth; NaN where no rule found one
+            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"silverman"` or `"scott"`
+            real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
+            logical, intent(in), optional          :: adaptive    !! the number is for an adaptive estimate
+            real(real64), intent(in), optional     :: alpha       !! the adaptive rule's sensitivity
+            real(real64), intent(in), optional     :: lower       !! the support's lower bound
+            real(real64), intent(in), optional     :: upper       !! the support's upper bound
+            logical, intent(in), optional          :: is_valid(:) !! must be absent: the column's own
+            real(real64), intent(in), optional     :: weights(:)  !! per-element weights
+            character(len=*), intent(in), optional :: weight_type !! `"reliability"` or `"frequency"`
+            logical, intent(in), optional          :: skipnan     !! `.false.` lets a NaN poison
+            integer(int64), intent(out), optional  :: n_null      !! excluded as null
+            integer(int64), intent(out), optional  :: n_nan       !! excluded as NaN
+            integer(int64), intent(out), optional  :: n_outside   !! excluded as outside the support
+            character(len=:), allocatable, intent(out), optional :: rule_used !! which rule gave `h`
+            logical, intent(out), optional         :: ok          !! a rule found a bandwidth
+            integer, intent(in), optional          :: threads     !! the team for the sort and the rules
+        end subroutine kde_bandwidth_col
+
         !> The `real32` sample, widened to `real64` first; every other argument as the `real64`
         !! form.
-        module subroutine kde_fit_f32(self, x, bandwidth, rule, adjust, kernel, adaptive, alpha, &
-                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, &
-                n_nan, n_outside, ok, threads)
+        module subroutine kde_fit_f32(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
+                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+                n_null, n_nan, n_outside, ok, threads)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real32), intent(in)               :: x(:)          !! the sample
@@ -836,6 +1070,8 @@ module parquet_kde
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
+            type(pf_kde_grid), intent(in), optional :: pilot        !! a pilot measured elsewhere, read
+                                                                    !! instead of building one here
             real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
             real(real64), intent(in), optional     :: lower         !! the support's lower bound
@@ -855,9 +1091,9 @@ module parquet_kde
         !> A numeric `parquet_column`, widened to `real64` first: `int32`, `int64`, `float32` or
         !! `float64`, and any other kind aborts, naming it. The column's own validity is the null
         !! mask, so `is_valid` cannot be given beside it; every other argument as the `real64` form.
-        module subroutine kde_fit_col(self, x, bandwidth, rule, adjust, kernel, adaptive, alpha, &
-                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, &
-                n_nan, n_outside, ok, threads)
+        module subroutine kde_fit_col(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
+                bandwidth_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
+                n_null, n_nan, n_outside, ok, threads)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             type(parquet_column), intent(in)       :: x             !! the sample, one numeric column
@@ -866,6 +1102,8 @@ module parquet_kde
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
+            type(pf_kde_grid), intent(in), optional :: pilot        !! a pilot measured elsewhere, read
+                                                                    !! instead of building one here
             real(real64), intent(in), optional     :: alpha         !! the adaptive rule's sensitivity
             real(real64), intent(in), optional     :: bandwidth_max !! caps every point's bandwidth
             real(real64), intent(in), optional     :: lower         !! the support's lower bound
@@ -1229,7 +1467,7 @@ module parquet_kde
         !! [n_null], [n_nan], [n_outside])`, with `is_valid` and `weights` scalars; otherwise as the
         !! array form.
         module subroutine grid_add_f64_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                finish)
+                n_overreach, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self      !! the grid
             real(real64), intent(in)              :: x         !! the point
@@ -1239,6 +1477,7 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_null    !! excluded as null
             integer(int64), intent(out), optional :: n_nan     !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside !! excluded as outside the support
+            integer(int64), intent(out), optional :: n_overreach !! out-reached the range under "linear"
             logical, intent(in), optional         :: finish    !! `.true.` finishes the grid after this call
         end subroutine grid_add_f64_r0
 
@@ -1246,14 +1485,15 @@ module parquet_kde
         !! [skipnan], [n_null], [n_nan], [n_outside], [threads])`.
         !!
         !! `is_valid`, `weights` and `skipnan` are the `pf_*` family's population arguments, and a
-        !! point outside the support is excluded and counted; `n_null`, `n_nan` and `n_outside`
-        !! report what THIS call excluded, while the grid's accessors report every call's total. A
+        !! point outside the support is excluded and counted; `n_null`, `n_nan`, `n_outside` and
+        !! `n_overreach` report what THIS call excluded or found, while the grid's accessors report
+        !! every call's total. A
         !! NaN kept by `skipnan = .false.` makes every later answer of the grid NaN. `threads`
         !! gives each thread of a team a static share of the points and a private partial grid,
         !! summed in thread order: at a given count the bits do not change, and between counts
         !! they differ by rounding.
         module subroutine grid_add_f64_r1(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                threads, finish)
+                n_overreach, threads, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self        !! the grid
             real(real64), intent(in)              :: x(:)        !! the points
@@ -1263,13 +1503,14 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_null      !! excluded as null
             integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
+            integer(int64), intent(out), optional :: n_overreach !! out-reached the range under "linear"
             integer, intent(in), optional         :: threads     !! the team for the deposit
             logical, intent(in), optional         :: finish      !! `.true.` finishes the grid after this call
         end subroutine grid_add_f64_r1
 
         !> Accumulates one `real32` point, widened to `real64` first; otherwise as the `real64` form.
         module subroutine grid_add_f32_r0(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                finish)
+                n_overreach, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self      !! the grid
             real(real32), intent(in)              :: x         !! the point
@@ -1279,13 +1520,14 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_null    !! excluded as null
             integer(int64), intent(out), optional :: n_nan     !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside !! excluded as outside the support
+            integer(int64), intent(out), optional :: n_overreach !! out-reached the range under "linear"
             logical, intent(in), optional         :: finish    !! `.true.` finishes the grid after this call
         end subroutine grid_add_f32_r0
 
         !> Accumulates an array of `real32` points, widened to `real64` first; otherwise as the
         !! `real64` form.
         module subroutine grid_add_f32_r1(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                threads, finish)
+                n_overreach, threads, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self        !! the grid
             real(real32), intent(in)              :: x(:)        !! the points
@@ -1295,6 +1537,7 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_null      !! excluded as null
             integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
+            integer(int64), intent(out), optional :: n_overreach !! out-reached the range under "linear"
             integer, intent(in), optional         :: threads     !! the team for the deposit
             logical, intent(in), optional         :: finish      !! `.true.` finishes the grid after this call
         end subroutine grid_add_f32_r1
@@ -1304,7 +1547,7 @@ module parquet_kde
         !! the null mask, so `is_valid` cannot be given beside it; otherwise as the `real64` array
         !! form.
         module subroutine grid_add_col(self, x, is_valid, weights, skipnan, n_null, n_nan, n_outside, &
-                threads, finish)
+                n_overreach, threads, finish)
             implicit none
             class(pf_kde_grid), intent(inout)     :: self        !! the grid
             type(parquet_column), intent(in)      :: x           !! the points, one numeric column
@@ -1314,6 +1557,7 @@ module parquet_kde
             integer(int64), intent(out), optional :: n_null      !! excluded as null
             integer(int64), intent(out), optional :: n_nan       !! excluded as NaN
             integer(int64), intent(out), optional :: n_outside   !! excluded as outside the support
+            integer(int64), intent(out), optional :: n_overreach !! out-reached the range under "linear"
             integer, intent(in), optional         :: threads     !! the team for the deposit
             logical, intent(in), optional         :: finish      !! `.true.` finishes the grid after this call
         end subroutine grid_add_col
@@ -1617,6 +1861,17 @@ module parquet_kde
             class(pf_kde_grid), intent(in) :: self !! the grid
             integer(int64)                 :: n    !! the count
         end function grid_n_outside
+
+        !> How many points, over every `%add`, had an adaptive bandwidth whose reach exceeded the
+        !! grid's own range under `boundary = "linear"` with one bound free: the count behind R3,
+        !! which leaves the grid undefined because the weight such a kernel puts beyond the free
+        !! edge cannot be counted by the plain kernel's mass. Zero for every other configuration.
+        !! `bandwidth_max`, or a wider range, is the remedy; the grid says so once per `%add`.
+        module function grid_n_overreach(self) result(n)
+            implicit none
+            class(pf_kde_grid), intent(in) :: self !! the grid
+            integer(int64)                 :: n    !! the count
+        end function grid_n_overreach
 
         !> `sum(w)` over the population; its size when unweighted.
         module function grid_sum_weights(self) result(s)
@@ -2066,6 +2321,53 @@ module parquet_kde
         !! too extreme a range to bin, one whose fixed point is not negative at one cell (its root,
         !! if any, lies below what the grid resolves), and one with no sign change up to
         !! `KDE_ISJ_T_MAX`.
+        !!
+        !! A bandwidth below the smallest positive gap between neighbouring values of `x` is refused
+        !! the same way: a kernel narrower than the closest pair of distinct observations resolves
+        !! structure the sample cannot express, which is what values rounded to a step the grid
+        !! resolves ask for.
+        !> The bandwidth minimising the least-squares cross-validation criterion over the
+        !! population `x`, ascending:
+        !!
+        !! `LSCV(h) = integral of fhat_h**2  -  (2/n) * sum_i fhat_{h,-i}(x_i)`,
+        !!
+        !! which estimates the integrated squared error less the part that does not depend on `h`.
+        !! Unlike a plug-in rule it is defined for whatever estimator is in force, so asked for with
+        !! `adaptive = .true.` it scores the ADAPTIVE estimate and returns that estimator's own
+        !! bandwidth rather than the fixed one's.
+        !!
+        !! **Evaluated for the Gaussian kernel**, as every other rule here is: a bandwidth is the
+        !! kernel's standard deviation, so one number serves all four and the criterion has a
+        !! closed form in this one. Both terms are exact -- no quadrature -- through
+        !! `(K*K)(z) = phi_sqrt2(z)` for the Gaussian.
+        !!
+        !! **Evaluated over at most `KDE_LSCV_MAX` points**, drawn without replacement at a fixed
+        !! seed when the population is larger, because the criterion is a double sum. That makes the
+        !! cost bounded whatever `n` is, and the answer reproducible but not a function of every
+        !! point.
+        !!
+        !! `h0` seeds the bracket, which spans `KDE_LSCV_BRACKET` either side of it. `found` is
+        !! `.false.` -- and `h` NaN -- where the population is too small to leave anything out of,
+        !! or `h0` is not a usable bandwidth to search around.
+        module subroutine kde_lscv_bandwidth(x, weights, adaptive, alpha, kernel_code, has_lower, lo, &
+                has_upper, hi, boundary_code, w_total, h0, h, found)
+            implicit none
+            real(real64), intent(in)           :: x(:)       !! the population, ascending
+            real(real64), intent(in), optional :: weights(:) !! its weights, when weighted
+            logical, intent(in)                :: adaptive   !! score the adaptive estimate
+            real(real64), intent(in)           :: alpha      !! the adaptive rule's sensitivity
+            integer, intent(in)                :: kernel_code !! the kernel the pilot is built with
+            logical, intent(in)                :: has_lower  !! a lower bound was given
+            real(real64), intent(in)           :: lo         !! the lower bound
+            logical, intent(in)                :: has_upper  !! an upper bound was given
+            real(real64), intent(in)           :: hi         !! the upper bound
+            integer, intent(in)                :: boundary_code !! the boundary correction
+            real(real64), intent(in)           :: w_total    !! the population's total weight
+            real(real64), intent(in)           :: h0         !! the bandwidth the search starts from
+            real(real64), intent(out)          :: h          !! the bandwidth; NaN when none was found
+            logical, intent(out)               :: found      !! the rule found a bandwidth
+        end subroutine kde_lscv_bandwidth
+
         module subroutine kde_isj_bandwidth(x, freq, weights, has_lower, lo, has_upper, hi, h, found)
             implicit none
             real(real64), intent(in)           :: x(:)       !! the population, ascending, inside the support

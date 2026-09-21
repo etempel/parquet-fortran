@@ -121,9 +121,11 @@ contains
             code = KDE_RULE_SCOTT
         case ("isj")
             code = KDE_RULE_ISJ
+        case ("lscv")
+            code = KDE_RULE_LSCV
         case default
             code = 0
-            call kde_abort(entry, 'rule must be "isj", "silverman" or "scott"')
+            call kde_abort(entry, 'rule must be "isj", "lscv", "silverman" or "scott"')
         end select
 
     end procedure kde_resolve_rule
@@ -657,8 +659,8 @@ contains
         type(pf_bracket_expansion) :: grow
         type(pf_root_info) :: info
         real(real64), allocatable :: c(:), mass(:), y(:)
-        real(real64) :: span, a, b, r, dx, below, above, total, n_eff, tlo, t, kk, pw, bk
-        integer(int64) :: m, i1, i2
+        real(real64) :: span, a, b, r, dx, below, above, total, n_eff, tlo, t, kk, pw, bk, gap, g
+        integer(int64) :: m, i, i1, i2
         integer :: nc, j, k, s
 
         h = ieee_value(1.0_real64, ieee_quiet_nan)
@@ -771,9 +773,277 @@ contains
         call pf_find_root(fp, tlo, 2.0_real64*tlo, t, expand=grow, info=info, context="pf_kde%fit, the ISJ rule")
         if (info%status /= PF_ROOT_OK) return
         h = sqrt(t)*r
+
+        ! ---- no finer than the sample's own resolution ----
+        ! A kernel narrower than the closest pair of distinct observations is resolving structure
+        ! the sample cannot express. Values rounded to a step this grid resolves put a root far
+        ! below that step, and the estimate taken there is one spike per distinct value rather than
+        ! a density. Refused, which is the same answer as no root at all, so the caller's fallback
+        ! carries it: Silverman's rule where the rule was not named, an undefined estimate where it
+        ! was. The two populations are two orders of magnitude apart -- a flagged bandwidth is a few
+        ! hundredths of the gap, a sound one tens of thousands of times it -- so the threshold of
+        ! one gap sits in an empty middle and needs no constant to tune.
+        !
+        ! The MINIMUM gap, deliberately, not a robust statistic: one near-duplicate pair in
+        ! otherwise continuous data makes it tiny and disarms the guard, which fails safe, where a
+        ! median or low-quantile gap could fire on a legitimately spiky density. Do not replace it.
+        gap = huge(1.0_real64)
+        do i = 2_int64, m
+            g = x(i) - x(i - 1_int64)
+            if (g > 0.0_real64 .and. g < gap) gap = g
+        end do
+        if (.not. (h >= gap)) then
+            h = ieee_value(1.0_real64, ieee_quiet_nan)
+            return
+        end if
         found = .true.
 
     end procedure kde_isj_bandwidth
+
+    module procedure kde_lscv_bandwidth
+
+        real(real64), allocatable :: y(:), v(:), hj(:)
+        real(real64) :: a, b, c, d, fc, fd
+        integer(int64) :: m
+        integer :: it
+        logical :: ok
+
+        h = ieee_value(1.0_real64, ieee_quiet_nan)
+        found = .false.
+        ! Leaving one point out of a sample of one leaves nothing to estimate from.
+        if (size(x, kind=int64) < 3_int64) return
+        if (.not. kde_positive_finite(h0)) return
+
+        call lscv_subsample(x, weights, y, v, m)
+        if (m < 3_int64) return
+        allocate(hj(m))
+
+        ! ---- golden section over the bracket ----
+        ! The criterion has no derivative to follow and can have a shallow second minimum on a
+        ! comb, so the bracket is fixed rather than grown: widening it on such a sample moves the
+        ! answer between two minima from run to run, which is worse than a slightly clipped one.
+        a = h0/KDE_LSCV_BRACKET
+        b = h0*KDE_LSCV_BRACKET
+        if (.not. (b > a)) return
+        c = b - KDE_GOLDEN*(b - a)
+        d = a + KDE_GOLDEN*(b - a)
+        fc = lscv_at(y, v, hj, m, c, adaptive, alpha, kernel_code, has_lower, lo, has_upper, hi, &
+            boundary_code, w_total, ok)
+        if (.not. ok) return
+        fd = lscv_at(y, v, hj, m, d, adaptive, alpha, kernel_code, has_lower, lo, has_upper, hi, &
+            boundary_code, w_total, ok)
+        if (.not. ok) return
+        do it = 1, KDE_LSCV_STEPS
+            if (fc < fd) then
+                b = d
+                d = c
+                fd = fc
+                c = b - KDE_GOLDEN*(b - a)
+                fc = lscv_at(y, v, hj, m, c, adaptive, alpha, kernel_code, has_lower, lo, has_upper, &
+                    hi, boundary_code, w_total, ok)
+            else
+                a = c
+                c = d
+                fc = fd
+                d = a + KDE_GOLDEN*(b - a)
+                fd = lscv_at(y, v, hj, m, d, adaptive, alpha, kernel_code, has_lower, lo, has_upper, &
+                    hi, boundary_code, w_total, ok)
+            end if
+            if (.not. ok) return
+            if (b - a <= 1.0e-4_real64*(a + b)) exit
+        end do
+        h = 0.5_real64*(a + b)
+        if (.not. kde_positive_finite(h)) then
+            h = ieee_value(1.0_real64, ieee_quiet_nan)
+            return
+        end if
+        found = .true.
+
+    end procedure kde_lscv_bandwidth
+
+    !> The points the criterion is evaluated over: the population itself where it is small enough,
+    !! and otherwise `KDE_LSCV_MAX` of them drawn without replacement at `KDE_LSCV_SEED`.
+    !!
+    !! A partial Fisher-Yates walk over an index array, which draws without replacement in one pass
+    !! and touches only the prefix it keeps. The draw reads `parquet_random`'s coordinate-addressed
+    !! generator, so one sample gives one subsample however often the rule is asked for, and a
+    !! caller's own draws at any `(seed, stream)` are untouched.
+    subroutine lscv_subsample(x, weights, y, v, m)
+        real(real64), intent(in)               :: x(:)       !! the population, ascending
+        real(real64), intent(in), optional     :: weights(:) !! its weights, when weighted
+        real(real64), allocatable, intent(out) :: y(:)       !! the points kept
+        real(real64), allocatable, intent(out) :: v(:)       !! their weights; all one when unweighted
+        integer(int64), intent(out)            :: m          !! how many were kept
+
+        integer(int64), allocatable :: idx(:)
+        integer(int64) :: n, i, j, t, key
+        real(real64) :: u
+
+        n = size(x, kind=int64)
+        m = min(n, KDE_LSCV_MAX)
+        allocate(y(m), v(m))
+        if (m == n) then
+            y = x
+            if (present(weights)) then
+                v = weights
+            else
+                v = 1.0_real64
+            end if
+            return
+        end if
+        allocate(idx(n))
+        do i = 1_int64, n
+            idx(i) = i
+        end do
+        key = pf_random_key(KDE_LSCV_SEED, 1_int64)
+        do i = 1_int64, m
+            u = pf_random_at(KDE_LSCV_SEED, key, i)
+            j = i + int(u*real(n - i + 1_int64, real64), int64)
+            if (j > n) j = n
+            if (j < i) j = i
+            t = idx(i)
+            idx(i) = idx(j)
+            idx(j) = t
+            y(i) = x(idx(i))
+            if (present(weights)) then
+                v(i) = weights(idx(i))
+            else
+                v(i) = 1.0_real64
+            end if
+        end do
+        ! The criterion reads the points pairwise, so their order does not matter; the pilot below
+        ! does want them ascending, and sorting `m` of them is cheap beside the double sum.
+        call lscv_sort_pairs(y, v, m)
+
+    end subroutine lscv_subsample
+
+    !> Orders the drawn points ascending, carrying their weights, so that the pilot the adaptive arm
+    !! builds over them sees the ascending sample it is documented to take.
+    subroutine lscv_sort_pairs(y, v, m)
+        real(real64), intent(inout) :: y(:)  !! the points, ordered in place
+        real(real64), intent(inout) :: v(:)  !! their weights, carried along
+        integer(int64), intent(in)  :: m     !! how many
+
+        integer(int64), allocatable :: perm(:)
+        real(real64), allocatable :: ty(:), tv(:)
+        integer(int64) :: i
+
+        call pf_argsort(y(1:m), perm)
+        allocate(ty(m), tv(m))
+        do i = 1_int64, m
+            ty(i) = y(perm(i))
+            tv(i) = v(perm(i))
+        end do
+        y(1:m) = ty
+        v(1:m) = tv
+
+    end subroutine lscv_sort_pairs
+
+    !> The LSCV criterion at one bandwidth, over the drawn points.
+    !!
+    !! `integral of fhat**2 - (2/n) sum_i fhat_{-i}(x_i)`, both terms exact for the Gaussian:
+    !! the integral of a product of two normal densities is a normal density of the combined
+    !! width at their separation, and the leave-one-out sum simply omits `i == j`.
+    !!
+    !! Under `adaptive` every point carries its own bandwidth, read from a pilot built over these
+    !! points AT THIS `h` -- which is what makes the criterion score the adaptive estimator rather
+    !! than the fixed one, and what no plug-in rule can do.
+    function lscv_at(y, v, hj, m, h, adaptive, alpha, kernel_code, has_lower, lo, has_upper, hi, &
+            boundary_code, w_total, ok) result(crit)
+        real(real64), intent(in)    :: y(:)     !! the drawn points, ascending
+        real(real64), intent(in)    :: v(:)     !! their weights
+        real(real64), intent(inout) :: hj(:)    !! scratch: each point's bandwidth at this `h`
+        integer(int64), intent(in)  :: m        !! how many points
+        real(real64), intent(in)    :: h        !! the candidate bandwidth
+        logical, intent(in)         :: adaptive !! score the adaptive estimate
+        real(real64), intent(in)    :: alpha    !! the adaptive rule's sensitivity
+        integer, intent(in)         :: kernel_code   !! the kernel the pilot is built with
+        logical, intent(in)         :: has_lower     !! a lower bound was given
+        real(real64), intent(in)    :: lo            !! the lower bound
+        logical, intent(in)         :: has_upper     !! an upper bound was given
+        real(real64), intent(in)    :: hi            !! the upper bound
+        integer, intent(in)         :: boundary_code !! the boundary correction
+        real(real64), intent(in)    :: w_total       !! the population's total weight
+        logical, intent(out)        :: ok            !! the criterion could be formed
+        real(real64)                :: crit          !! the criterion's value
+
+        type(pf_kde_grid) :: pilot
+        type(kde_adapt) :: rule
+        real(real64) :: sw, s_int, s_loo, dz, si, wij, one(1)
+        integer(int64) :: i, j
+        logical :: built
+
+        ok = .false.
+        crit = 0.0_real64
+        if (adaptive) then
+            one(1) = 1.0_real64
+            call kde_build_pilot(pilot, y(1:m), v(1:m), .true., h, kernel_code, has_lower, lo, &
+                has_upper, hi, boundary_code, w_total, threads_serial(), built)
+            if (.not. built) return
+            call kde_adapt_set(rule, pilot, alpha, .false., 0.0_real64)
+            if (rule%unreadable) return
+            call kde_adapt_bandwidths(rule, h, y(1:m), hj(1:m))
+            do i = 1_int64, m
+                if (.not. kde_positive_finite(hj(i))) return
+            end do
+        else
+            do i = 1_int64, m
+                hj(i) = h
+            end do
+        end if
+
+        sw = 0.0_real64
+        do i = 1_int64, m
+            sw = sw + v(i)
+        end do
+        if (.not. (sw > 0.0_real64)) return
+
+        s_int = 0.0_real64
+        s_loo = 0.0_real64
+        do i = 1_int64, m
+            do j = 1_int64, m
+                wij = v(i)*v(j)
+                dz = y(i) - y(j)
+                ! The integral term: the two kernels' product integrates to one normal density of
+                ! the combined width, evaluated at their separation.
+                si = sqrt(hj(i)*hj(i) + hj(j)*hj(j))
+                s_int = s_int + wij*kde_norm_at(dz, si)
+                ! The leave-one-out term omits the point's own kernel, which is the whole point:
+                ! kept, every bandwidth below the data's resolution would win.
+                if (i /= j) s_loo = s_loo + wij*kde_norm_at(dz, hj(j))
+            end do
+        end do
+        crit = s_int/(sw*sw) - 2.0_real64*s_loo/(sw*(sw - 1.0_real64))
+        ok = crit == crit .and. abs(crit) <= huge(1.0_real64)
+
+    end function lscv_at
+
+    !> The normal density of standard deviation `s` at `z`, which both of the criterion's terms are
+    !! built from. Zero where `s` is not usable, so a degenerate bandwidth contributes nothing
+    !! rather than a NaN.
+    pure function kde_norm_at(z, s) result(f)
+        real(real64), intent(in) :: z !! the separation
+        real(real64), intent(in) :: s !! the standard deviation
+        real(real64)             :: f !! the density
+
+        real(real64) :: t
+
+        f = 0.0_real64
+        if (.not. (s > 0.0_real64)) return
+        t = z/s
+        if (abs(t) > KDE_NORM_CUT) return
+        f = exp(-0.5_real64*t*t)/(s*KDE_ROOT_TWO_PI)
+
+    end function kde_norm_at
+
+    !> One thread: the criterion is minimised inside a rule that may itself be running under a
+    !! caller's team, and a pilot built per candidate bandwidth is far too small to pay for one.
+    pure function threads_serial() result(n)
+        integer :: n !! always one
+
+        n = 1
+
+    end function threads_serial
 
     module procedure kde_widen_column
 

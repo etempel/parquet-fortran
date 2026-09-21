@@ -3767,8 +3767,6 @@ contains
                 test_kde_grid_bandwidth_max_nan_aborts), &
             new_unittest("pf_kde_grid%init refuses a pilot that was never initialised", &
                 test_kde_grid_pilot_uninitialised_aborts), &
-            new_unittest("pf_kde_grid%init refuses a pilot that does not cover its range", &
-                test_kde_grid_pilot_not_covering_aborts), &
             new_unittest("pf_kde_grid%merge refuses a grid read from another pilot", &
                 test_kde_grid_merge_pilot_aborts), &
             new_unittest("pf_kde_grid%merge refuses a fixed grid into an adaptive one", &
@@ -3804,7 +3802,19 @@ contains
             new_unittest("parquet_debug_set_kde_isj_cells refuses a count that is not a power of two", &
                 test_kde_isj_cells_not_pow2_aborts), &
             new_unittest("parquet_debug_set_kde_isj_cells refuses a power of two beyond 2**20", &
-                test_kde_isj_cells_out_of_range_aborts) &
+                test_kde_isj_cells_out_of_range_aborts), &
+            new_unittest("R3's warning is a data finding: it survives silent and goes at errors_only", &
+                test_kde_overreach_warning_class), &
+            new_unittest("pf_kde%fit refuses pilot= without the adaptive kernel", &
+                test_kde_fit_pilot_without_adaptive_aborts), &
+            new_unittest("pf_kde%fit refuses a pilot that was never finished", &
+                test_kde_fit_pilot_unfinished_aborts), &
+            new_unittest("pf_kde%fit refuses a pilot built with another kernel", &
+                test_kde_fit_pilot_kernel_aborts), &
+            new_unittest("pf_kde%fit refuses a pilot built under another boundary correction", &
+                test_kde_fit_pilot_boundary_aborts), &
+            new_unittest("pf_kde%fit refuses a pilot built over another support", &
+                test_kde_fit_pilot_support_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, &
@@ -21460,7 +21470,7 @@ contains
     subroutine test_kde_unknown_rule_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_unknown_rule", &
-            "pf_kde%fit: rule must be ""isj"", ""silverman"" or ""scott""")
+            "pf_kde%fit: rule must be ""isj"", ""lscv"", ""silverman"" or ""scott""")
     end subroutine test_kde_unknown_rule_aborts
     !
     subroutine test_kde_adjust_negative_aborts(error)
@@ -21953,12 +21963,6 @@ contains
             "pf_kde_grid%init: pilot must be an initialised grid")
     end subroutine test_kde_grid_pilot_uninitialised_aborts
     !
-    subroutine test_kde_grid_pilot_not_covering_aborts(error)
-        type(error_type), allocatable, intent(out) :: error
-        call check_kde_scenario(error, "kde_grid_pilot_not_covering", &
-            "pf_kde_grid%init: the pilot must cover this grid's range")
-    end subroutine test_kde_grid_pilot_not_covering_aborts
-    !
     subroutine test_kde_grid_merge_pilot_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_kde_scenario(error, "kde_grid_merge_pilot", &
@@ -22056,6 +22060,63 @@ contains
         call check_kde_scenario(error, "kde_isj_cells_not_pow2", &
             "parquet_debug_set_kde_isj_cells: n must be a power of two from 16 to 1048576")
     end subroutine test_kde_isj_cells_not_pow2_aborts
+    !
+    !> `pilot=` transfers a smoothing measured on another sample, so a pilot describing a DIFFERENT
+    !> estimate -- another kernel, another support, another correction -- would hand this fit
+    !> numbers from a density it is not building. Each refusal is asserted by its own text.
+    subroutine test_kde_fit_pilot_without_adaptive_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_pilot_without_adaptive", &
+            "pf_kde%fit: pilot= needs adaptive=.true.")
+    end subroutine test_kde_fit_pilot_without_adaptive_aborts
+    !
+    subroutine test_kde_fit_pilot_unfinished_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_pilot_unfinished", &
+            "pf_kde%fit: pilot must be a finished grid; call %finish on it")
+    end subroutine test_kde_fit_pilot_unfinished_aborts
+    !
+    subroutine test_kde_fit_pilot_kernel_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_pilot_kernel", &
+            "pf_kde%fit: the pilot must use the same kernel as this fit")
+    end subroutine test_kde_fit_pilot_kernel_aborts
+    !
+    subroutine test_kde_fit_pilot_boundary_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_pilot_boundary", &
+            "pf_kde%fit: the pilot must use the same boundary correction as this fit")
+    end subroutine test_kde_fit_pilot_boundary_aborts
+    !
+    subroutine test_kde_fit_pilot_support_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_pilot_support", &
+            "pf_kde%fit: the pilot must have the same support as this fit")
+    end subroutine test_kde_fit_pilot_support_aborts
+    !
+    !> R3 leaves the grid undefined quietly and says so. The message's CLASS is the assertion:
+    !> a finding about the caller's DATA goes through `parquet_emit_warning`, so `"silent"` leaves
+    !> it standing and only `"errors_only"` takes it. Advice would have gone at `"silent"` already,
+    !> so the silent arm is what tells the two channels apart.
+    !>
+    !> Every arm also prints its `%n_overreach` count, so an arm with no WARNING cannot pass
+    !> because R3 never fired.
+    subroutine test_kde_overreach_warning_class(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "kde_overreach_warning", expect_abort=.false., &
+            failure_message="R3 is a data condition and must not abort", &
+            required_stderr="WARNING: pf_kde_grid%add:")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "kde_overreach_warning_silent", expect_abort=.false., &
+            failure_message="R3 is a data condition and must not abort", &
+            required_stderr="WARNING: pf_kde_grid%add:")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "kde_overreach_warning_errors_only", &
+            expect_abort=.false., &
+            failure_message="R3 is a data condition and must not abort", &
+            forbidden_text="WARNING:")
+    end subroutine test_kde_overreach_warning_class
     !
     subroutine test_kde_isj_cells_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error

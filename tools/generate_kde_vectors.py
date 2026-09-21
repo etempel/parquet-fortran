@@ -84,6 +84,12 @@ CUT = mpf(5)
 #: The pilot's reach beyond the extreme points, in global bandwidths (`KDE_PILOT_REACH`).
 PILOT_REACH = mpf(4)
 
+#: How much wider the adaptive kernel's global bandwidth is than the same rule's for the fixed
+#: estimator, at `alpha = 0.5` (`KDE_ADAPT_INFLATE`). The factor is `ADAPT_INFLATE ** (2 * alpha)`,
+#: exactly one at `alpha = 0`. Keep in step with the Fortran parameter: a default that moves in one
+#: and not the other makes every adaptive case here disagree, which is what these vectors are for.
+ADAPT_INFLATE = mpf("1.5")
+
 #: The digits the pilot's entropy integral is taken to. `log g` is read to about `1e-12` by the
 #: tightest test (a bandwidth moves by `alpha` times its error), and a quadrature at 50 digits
 #: would cost minutes; `--self-test` confirms this one against 30.
@@ -862,6 +868,11 @@ def estimate(case):
         h = rule_bandwidth(case["rule"], xs, ws, weights is not None, weight_type)
         if h is None:
             return False, None, None, None
+    if case.get("adaptive") and "bandwidth" not in case:
+        # A rule answers the question the FIXED estimator asks; the adaptive kernel's own best
+        # global bandwidth is larger. Applied only where the scale came from a rule, so that an
+        # explicit `bandwidth=` means exactly what it says, and before `adjust`, which composes.
+        h *= ADAPT_INFLATE ** (2 * mpf(case.get("alpha", 0.5)))
     h *= mpf(case.get("adjust", 1.0))
     hs = [h] * len(xs)
     corrected = boundary in ("renormalise", "linear")

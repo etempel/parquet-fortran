@@ -4269,8 +4269,6 @@ program error_scenarios
         call scenario_kde_grid_bandwidth_max_nan()
     case ("kde_grid_pilot_uninitialised")
         call scenario_kde_grid_pilot_uninitialised()
-    case ("kde_grid_pilot_not_covering")
-        call scenario_kde_grid_pilot_not_covering()
     case ("kde_grid_merge_pilot")
         call scenario_kde_grid_merge_pilot()
     case ("kde_grid_merge_fixed")
@@ -4305,6 +4303,22 @@ program error_scenarios
         call scenario_kde_isj_cells_not_pow2()
     case ("kde_isj_cells_out_of_range")
         call scenario_kde_isj_cells_out_of_range()
+    case ("kde_fit_pilot_without_adaptive")
+        call scenario_kde_fit_pilot_without_adaptive()
+    case ("kde_fit_pilot_unfinished")
+        call scenario_kde_fit_pilot_unfinished()
+    case ("kde_fit_pilot_kernel")
+        call scenario_kde_fit_pilot_kernel()
+    case ("kde_fit_pilot_boundary")
+        call scenario_kde_fit_pilot_boundary()
+    case ("kde_fit_pilot_support")
+        call scenario_kde_fit_pilot_support()
+    case ("kde_overreach_warning")
+        call scenario_kde_overreach_warning("normal")
+    case ("kde_overreach_warning_silent")
+        call scenario_kde_overreach_warning("silent")
+    case ("kde_overreach_warning_errors_only")
+        call scenario_kde_overreach_warning("errors_only")
     case default
         ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
         ! not the plain 1 that `error stop "message"` produces) -- callers
@@ -35808,18 +35822,117 @@ contains
         print '(a)', "accepted a pilot that was never initialised"
     end subroutine scenario_kde_grid_pilot_uninitialised
     !
-    !> Proves that pf_kde_grid%init refuses a pilot that does not cover its range.
-    subroutine scenario_kde_grid_pilot_not_covering()
-        type(pf_kde_grid) :: g, p
+    !> Proves that pf_kde%fit refuses pilot= without adaptive=.true.
+    subroutine scenario_kde_fit_pilot_without_adaptive()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(6)
 
-        call p%init(8, 0.0_real64, 1.0_real64, 0.1_real64)
-        call p%add([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64])
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        call p%init(16, 0.0_real64, 7.0_real64, 0.5_real64)
+        call p%add(x)
         call p%finish()
-        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p)
-        print '(a, l1)', "kde control initialised: ", g%is_adaptive()
-        call g%init(4, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p)
-        print '(a)', "accepted a pilot covering half the range"
-    end subroutine scenario_kde_grid_pilot_not_covering
+        call k%fit(x, adaptive=.true., pilot=p)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, pilot=p)
+        print '(a)', "accepted a pilot without the adaptive kernel"
+    end subroutine scenario_kde_fit_pilot_without_adaptive
+    !
+    !> Proves that pf_kde%fit refuses a pilot that is still accumulating.
+    subroutine scenario_kde_fit_pilot_unfinished()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p, open_grid
+        real(real64) :: x(6)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        call p%init(16, 0.0_real64, 7.0_real64, 0.5_real64)
+        call p%add(x)
+        call p%finish()
+        call k%fit(x, adaptive=.true., pilot=p)
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call open_grid%init(16, 0.0_real64, 7.0_real64, 0.5_real64)
+        call open_grid%add(x)
+        call k%fit(x, adaptive=.true., pilot=open_grid)
+        print '(a)', "accepted a pilot that was never finished"
+    end subroutine scenario_kde_fit_pilot_unfinished
+    !
+    !> Proves that pf_kde%fit refuses a pilot built with another kernel: a bandwidth read from it
+    !> is a number from a different density.
+    subroutine scenario_kde_fit_pilot_kernel()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(6)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        call p%init(16, 0.0_real64, 7.0_real64, 0.5_real64, kernel="epanechnikov")
+        call p%add(x)
+        call p%finish()
+        call k%fit(x, adaptive=.true., pilot=p, kernel="epanechnikov")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, adaptive=.true., pilot=p, kernel="gaussian")
+        print '(a)', "accepted a pilot built with another kernel"
+    end subroutine scenario_kde_fit_pilot_kernel
+    !
+    !> Proves that pf_kde%fit refuses a pilot built under another boundary correction.
+    subroutine scenario_kde_fit_pilot_boundary()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(6)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        call p%init(16, 0.0_real64, 7.0_real64, 0.5_real64, lower=0.0_real64, boundary="reflect")
+        call p%add(x)
+        call p%finish()
+        call k%fit(x, adaptive=.true., pilot=p, lower=0.0_real64, boundary="reflect")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, adaptive=.true., pilot=p, lower=0.0_real64, boundary="renormalise")
+        print '(a)', "accepted a pilot built under another boundary correction"
+    end subroutine scenario_kde_fit_pilot_boundary
+    !
+    !> Proves that pf_kde%fit refuses a pilot built over another support.
+    subroutine scenario_kde_fit_pilot_support()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(6)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        call p%init(16, 0.0_real64, 7.0_real64, 0.5_real64, lower=0.0_real64, boundary="reflect")
+        call p%add(x)
+        call p%finish()
+        call k%fit(x, adaptive=.true., pilot=p, lower=0.0_real64, boundary="reflect")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, adaptive=.true., pilot=p, lower=0.5_real64, boundary="reflect")
+        print '(a)', "accepted a pilot built over another support"
+    end subroutine scenario_kde_fit_pilot_support
+    !
+    !> Emits R3's WARNING at a chosen verbosity, so the wrapper can assert the CLASS: a finding
+    !> about the caller's data survives `"silent"` and goes quiet only at `"errors_only"`, unlike
+    !> advice, which `"silent"` already suppresses.
+    !>
+    !> Exits 0 -- R3 is a data condition, not an abort. The control is inside the process: the
+    !> `%n_overreach` line is printed on every arm, so an arm with no WARNING is told apart from a
+    !> build where R3 never fired at all, which would silence the message for the wrong reason.
+    subroutine scenario_kde_overreach_warning(level)
+        character(len=*), intent(in) :: level !! verbosity to set first.
+        type(pf_kde_grid) :: pilot, g
+        real(real64) :: xe(200)
+        integer :: i, n_in
+
+        do i = 1, 200
+            xe(i) = -log(1.0_real64 - (real(i, real64) - 0.5_real64)/200.0_real64)
+        end do
+        n_in = count(xe <= 3.0_real64)
+        call pilot%init(200, 0.0_real64, 3.0_real64, 0.3_real64, lower=0.0_real64, boundary="linear")
+        call pilot%add(xe(1:n_in))
+        call pilot%finish()
+
+        call parquet_set_verbosity(level)
+        call g%init(200, 0.0_real64, 3.0_real64, 0.3_real64, pilot=pilot, alpha=1.0_real64, &
+            lower=0.0_real64, boundary="linear")
+        call g%add(xe(1:n_in))
+        call parquet_reset_settings()
+        print '(a, i0)', "kde overreach counted: ", g%n_overreach()
+    end subroutine scenario_kde_overreach_warning
     !
     !> Proves that pf_kde_grid%merge refuses a grid read from another pilot.
     subroutine scenario_kde_grid_merge_pilot()

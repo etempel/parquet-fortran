@@ -15,9 +15,10 @@
 program benchmark_kde
 
     use iso_fortran_env, only : real64, int64, error_unit
-    use parquet_kde, only : pf_kde, pf_kde_grid, parquet_debug_kde_fit_nanos, parquet_debug_kde_threads_used, &
-        parquet_debug_set_kde_sample_tries
+    use parquet_kde, only : pf_kde, pf_kde_grid, pf_kde_bandwidth, parquet_debug_kde_fit_nanos, &
+        parquet_debug_kde_threads_used, parquet_debug_set_kde_sample_tries
     use parquet_argsort, only : pf_argsort
+    use parquet_random, only : pf_random_at, pf_random_normal_at, pf_random_key
 #ifdef _OPENMP
     use omp_lib, only : omp_get_max_threads
 #endif
@@ -45,6 +46,15 @@ program benchmark_kde
     !! machine with other work on it.
     real(real64), parameter :: PDF_COST_GATE = 2.0_real64
 
+    !> How many Marron-Wand test densities the `mise` mode scores against.
+    integer, parameter :: MW_N = 11
+    !> The most components any of them has.
+    integer, parameter :: MW_MAXC = 8
+    !> Their names, in `mw_density`'s order; the last is Marron and Wand's #15.
+    character(len=18), parameter :: MW_NAME(MW_N) = [character(len=18) :: "gaussian", &
+        "skewed unimodal", "strongly skewed", "kurtotic unimodal", "outlier", "bimodal", &
+        "separated bimodal", "skewed bimodal", "trimodal", "claw", "discrete comb"]
+
     character(len=32) :: mode
     integer :: rounds, failures
     integer(int64) :: npoints, nqueries
@@ -70,6 +80,8 @@ program benchmark_kde
         call run_threads(rounds, npoints, nqueries, failures)
     case ("boundary")
         call run_boundary(rounds, npoints)
+    case ("mise")
+        call run_mise(npoints)
     case default
         write(error_unit, '(a)') "benchmark_kde: unknown mode '" // trim(mode) // "'"
         error stop 1
@@ -115,8 +127,8 @@ contains
                 read(val, *) nqueries
             case default
                 write(error_unit, '(a)') "benchmark_kde: unknown option '" // trim(arg(1:eq - 1)) // "'"
-                write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|accuracy|adaptive|" // &
-                    "rules|sample|threads] [--rounds=N] [--points=N] [--queries=N]"
+                write(error_unit, '(a)') "Usage: benchmark_kde [--mode=evaluate|grid|binned|accuracy|adaptive|" // &
+                    "rules|sample|threads|boundary|mise] [--rounds=N] [--points=N] [--queries=N]"
                 error stop 1
             end select
         end do
@@ -852,6 +864,503 @@ contains
 
     end subroutine run_accuracy
 
+    ! ---- mise ----------------------------------------------------------------------------------
+
+    !> Scores each bandwidth rule against the best bandwidth there is, with no reference
+    !> implementation anywhere in the loop.
+    !>
+    !> The Marron-Wand normal mixtures are parameter tables, and for a Gaussian-kernel estimate of a
+    !> normal mixture the mean integrated squared error has a closed form, so `MISE(h_rule)` and
+    !> `min_h MISE(h)` are both evaluated exactly and their ratio is the rule's penalty: 1.00 is the
+    !> best any fixed bandwidth could have done on that sample size, and a rule getting quietly
+    !> worse shows up here as a rising number. Nothing else in the suite can see that -- every other
+    !> KDE check compares the library against itself, which a bandwidth rule's drift survives.
+    !>
+    !> The second table measures the ADAPTIVE estimator's own optimum. An adaptive estimate has no
+    !> closed-form MISE, so its bandwidth is found by sweeping `bandwidth=` over a geometric ladder
+    !> and integrating the squared error against the true density. `h*(adaptive)/h*(fixed)` is what
+    !> the adaptive kernel's default inflation is calibrated from. The sweep passes `bandwidth=`
+    !> explicitly, which is never inflated, so the measurement cannot be contaminated by the default
+    !> it calibrates.
+    !>
+    !> No timing, and no gate: the numbers are the output.
+    subroutine run_mise(n)
+        integer(int64), intent(in) :: n !! the sample's size
+
+        integer, parameter :: NRULE = 3
+        character(len=9), parameter :: RULES(NRULE) = [character(len=9) :: "isj", "silverman", "scott"]
+        real(real64) :: w(MW_MAXC), mu(MW_MAXC), sg(MW_MAXC)
+        real(real64), allocatable :: x(:), ratio(:)
+        real(real64) :: hopt, mopt, h, pen(NRULE), hf, ha
+        integer(int64) :: nn(2)
+        integer :: d, r, nc, is, nsize
+        type(pf_kde) :: k
+        logical :: ok
+
+        nn(1) = n
+        nn(2) = 10_int64*n
+        nsize = 2
+
+        write(*, '(a)') "MISE(h_rule) / MISE(h_optimal), both in closed form; 1.00 is the best a fixed"
+        write(*, '(a)') "bandwidth could do. The Marron-Wand mixtures are parameter tables, so no"
+        write(*, '(a)') "reference implementation is a dependency of this measurement."
+        write(*, '(a)') ""
+        do is = 1, nsize
+            write(*, '(a,i0)') "n = ", nn(is)
+            write(*, '(a20,a12,a12,3a12)') "density", "h_optimal", "MISE_opt", (trim(RULES(r)), r = 1, NRULE)
+            do d = 1, MW_N
+                call mw_density(d, w, mu, sg, nc)
+                call mw_sample(d, nn(is), x)
+                call mise_optimal(nn(is), w, mu, sg, nc, hopt, mopt)
+                do r = 1, NRULE
+                    call k%fit(x, rule=trim(RULES(r)), ok=ok)
+                    if (ok) then
+                        h = k%bandwidth()
+                        pen(r) = mise_exact(h, nn(is), w, mu, sg, nc)/mopt
+                    else
+                        pen(r) = -1.0_real64
+                    end if
+                end do
+                write(*, '(a20,es12.4,es12.4,3f12.4)') trim(MW_NAME(d)), hopt, mopt, (pen(r), r = 1, NRULE)
+            end do
+            write(*, '(a)') ""
+        end do
+
+        write(*, '(a)') "The adaptive estimator's own optimum, by an ISE sweep over explicit bandwidths."
+        write(*, '(a)') "ratio is h*(adaptive, alpha=0.5) / h*(fixed); the median over the densities is"
+        write(*, '(a)') "what the default inflation is calibrated from."
+        write(*, '(a)') ""
+        allocate(ratio(MW_N*nsize))
+        ratio = -1.0_real64
+        is = 0
+        do r = 1, nsize
+            write(*, '(a,i0)') "n = ", nn(r)
+            write(*, '(a20,a14,a14,a10)') "density", "h*(fixed)", "h*(adaptive)", "ratio"
+            do d = 1, MW_N
+                call mw_density(d, w, mu, sg, nc)
+                call mw_sample(d, nn(r), x)
+                call ise_optimal(x, w, mu, sg, nc, .false., hf)
+                call ise_optimal(x, w, mu, sg, nc, .true., ha)
+                is = is + 1
+                if (hf > 0.0_real64 .and. ha > 0.0_real64) ratio(is) = ha/hf
+                write(*, '(a20,es14.5,es14.5,f10.4)') trim(MW_NAME(d)), hf, ha, ratio(is)
+            end do
+            write(*, '(a)') ""
+        end do
+        call report_median(ratio(1:is))
+
+    end subroutine run_mise
+
+    !> The median of the ratios that came out positive, and the inflation constant it implies:
+    !! `factor = C**(2*alpha)` at `alpha = 0.5` is `C`, so the median IS `C`.
+    subroutine report_median(v)
+        real(real64), intent(in) :: v(:) !! the ratios, `-1` where a sweep found nothing
+
+        real(real64), allocatable :: g(:)
+        integer(int64), allocatable :: perm(:)
+        integer :: i, m
+        real(real64) :: med
+
+        m = count(v > 0.0_real64)
+        if (m == 0) then
+            write(*, '(a)') "no usable ratio: every sweep failed"
+            return
+        end if
+        allocate(g(m))
+        m = 0
+        do i = 1, size(v)
+            if (v(i) > 0.0_real64) then
+                m = m + 1
+                g(m) = v(i)
+            end if
+        end do
+        call pf_argsort(g, perm)
+        if (mod(m, 2) == 1) then
+            med = g(perm((m + 1)/2))
+        else
+            med = 0.5_real64*(g(perm(m/2)) + g(perm(m/2 + 1)))
+        end if
+        write(*, '(a,i0,a,f8.4)') "median ratio over ", m, " measurements: ", med
+        write(*, '(a,f8.4)') "the inflation constant C this fixes (factor = C**(2*alpha)): ", med
+
+    end subroutine report_median
+
+    ! ---- the Marron-Wand mixtures, and the closed forms over them ------------------------------
+
+    !> One of the Marron-Wand test densities as a normal mixture: its weights, means and standard
+    !! deviations. Parameter tables from Marron and Wand (1992), "Exact Mean Integrated Squared
+    !! Error", Annals of Statistics 20, table 1 -- which is why scoring a bandwidth rule against
+    !! them needs no reference implementation, only arithmetic.
+    subroutine mw_density(d, w, mu, sg, nc)
+        integer, intent(in)       :: d     !! which density, `1 .. MW_N`
+        real(real64), intent(out) :: w(:)  !! the component weights, summing to one
+        real(real64), intent(out) :: mu(:) !! the component means
+        real(real64), intent(out) :: sg(:) !! the component standard deviations
+        integer, intent(out)      :: nc    !! how many components
+
+        integer :: l
+        real(real64) :: t
+
+        w = 0.0_real64
+        mu = 0.0_real64
+        sg = 1.0_real64
+        select case (d)
+        case (1)  ! #1 Gaussian
+            nc = 1
+            w(1) = 1.0_real64
+        case (2)  ! #2 Skewed unimodal
+            nc = 3
+            w(1:3) = [1.0_real64/5.0_real64, 1.0_real64/5.0_real64, 3.0_real64/5.0_real64]
+            mu(1:3) = [0.0_real64, 0.5_real64, 13.0_real64/12.0_real64]
+            sg(1:3) = [1.0_real64, 2.0_real64/3.0_real64, 5.0_real64/9.0_real64]
+        case (3)  ! #3 Strongly skewed
+            nc = 8
+            do l = 0, 7
+                t = (2.0_real64/3.0_real64)**l
+                w(l + 1) = 1.0_real64/8.0_real64
+                mu(l + 1) = 3.0_real64*(t - 1.0_real64)
+                sg(l + 1) = t
+            end do
+        case (4)  ! #4 Kurtotic unimodal
+            nc = 2
+            w(1:2) = [2.0_real64/3.0_real64, 1.0_real64/3.0_real64]
+            mu(1:2) = [0.0_real64, 0.0_real64]
+            sg(1:2) = [1.0_real64, 0.1_real64]
+        case (5)  ! #5 Outlier
+            nc = 2
+            w(1:2) = [0.1_real64, 0.9_real64]
+            mu(1:2) = [0.0_real64, 0.0_real64]
+            sg(1:2) = [1.0_real64, 0.1_real64]
+        case (6)  ! #6 Bimodal
+            nc = 2
+            w(1:2) = [0.5_real64, 0.5_real64]
+            mu(1:2) = [-1.0_real64, 1.0_real64]
+            sg(1:2) = [2.0_real64/3.0_real64, 2.0_real64/3.0_real64]
+        case (7)  ! #7 Separated bimodal
+            nc = 2
+            w(1:2) = [0.5_real64, 0.5_real64]
+            mu(1:2) = [-1.5_real64, 1.5_real64]
+            sg(1:2) = [0.5_real64, 0.5_real64]
+        case (8)  ! #8 Skewed bimodal
+            nc = 2
+            w(1:2) = [0.75_real64, 0.25_real64]
+            mu(1:2) = [0.0_real64, 1.5_real64]
+            sg(1:2) = [1.0_real64, 1.0_real64/3.0_real64]
+        case (9)  ! #9 Trimodal
+            nc = 3
+            w(1:3) = [0.45_real64, 0.45_real64, 0.1_real64]
+            mu(1:3) = [-1.2_real64, 1.2_real64, 0.0_real64]
+            sg(1:3) = [0.6_real64, 0.6_real64, 0.25_real64]
+        case (10) ! #10 Claw
+            nc = 6
+            w(1) = 0.5_real64
+            mu(1) = 0.0_real64
+            sg(1) = 1.0_real64
+            do l = 0, 4
+                w(l + 2) = 0.1_real64
+                mu(l + 2) = real(l, real64)/2.0_real64 - 1.0_real64
+                sg(l + 2) = 0.1_real64
+            end do
+        case (11) ! #15 Discrete comb
+            nc = 6
+            do l = 0, 2
+                w(l + 1) = 2.0_real64/7.0_real64
+                mu(l + 1) = (12.0_real64*real(l, real64) - 15.0_real64)/7.0_real64
+                sg(l + 1) = 2.0_real64/7.0_real64
+            end do
+            do l = 8, 10
+                w(l - 4) = 1.0_real64/21.0_real64
+                mu(l - 4) = 2.0_real64*real(l, real64)/7.0_real64
+                sg(l - 4) = 1.0_real64/21.0_real64
+            end do
+        case default
+            error stop "benchmark_kde: no such Marron-Wand density"
+        end select
+
+    end subroutine mw_density
+
+    !> The normal density of standard deviation `s` at `t`, which every closed form below is built
+    !! from: `phi_s(t)`.
+    pure function phi(t, s) result(v)
+        real(real64), intent(in) :: t !! where
+        real(real64), intent(in) :: s !! the standard deviation, positive
+        real(real64)             :: v !! the density
+
+        real(real64), parameter :: ROOT_TWO_PI = 2.5066282746310002_real64
+
+        v = exp(-0.5_real64*(t/s)**2)/(s*ROOT_TWO_PI)
+
+    end function phi
+
+    !> The EXACT mean integrated squared error of a Gaussian-kernel estimate of bandwidth `h` built
+    !! from `n` points of the normal mixture `(w, mu, sg)`, by Marron and Wand (1992):
+    !!
+    !! `MISE(h) = 1/(2 sqrt(pi) h n) + w' {(1 - 1/n) O2 - 2 O1 + O0} w`,
+    !!
+    !! with `(O_a)_ij = phi_{sqrt(a h^2 + sg_i^2 + sg_j^2)}(mu_i - mu_j)`. No sample enters it: this
+    !! is the error averaged over every sample of that size, which is what makes it a reference a
+    !! rule can be scored against rather than one realisation's luck.
+    pure function mise_exact(h, n, w, mu, sg, nc) result(m)
+        real(real64), intent(in) :: h     !! the bandwidth
+        integer(int64), intent(in) :: n   !! the sample's size
+        real(real64), intent(in) :: w(:)  !! the component weights
+        real(real64), intent(in) :: mu(:) !! the component means
+        real(real64), intent(in) :: sg(:) !! the component standard deviations
+        integer, intent(in)      :: nc    !! how many components
+        real(real64)             :: m     !! the mean integrated squared error
+
+        real(real64), parameter :: ROOT_PI = 1.7724538509055159_real64
+        real(real64) :: q, s2, dn, o0, o1, o2
+        integer :: i, j
+
+        dn = real(n, real64)
+        o0 = 0.0_real64
+        o1 = 0.0_real64
+        o2 = 0.0_real64
+        do i = 1, nc
+            do j = 1, nc
+                s2 = sg(i)**2 + sg(j)**2
+                q = w(i)*w(j)
+                o0 = o0 + q*phi(mu(i) - mu(j), sqrt(s2))
+                o1 = o1 + q*phi(mu(i) - mu(j), sqrt(h*h + s2))
+                o2 = o2 + q*phi(mu(i) - mu(j), sqrt(2.0_real64*h*h + s2))
+            end do
+        end do
+        m = 1.0_real64/(2.0_real64*ROOT_PI*h*dn) + (1.0_real64 - 1.0_real64/dn)*o2 - 2.0_real64*o1 + o0
+
+    end function mise_exact
+
+    !> The bandwidth minimising `mise_exact`, and the value there.
+    !!
+    !! A COARSE SCAN over a geometric ladder first, then a golden-section refinement inside the
+    !! winning bracket. The scan is not decoration: on a comb density the MISE has several local
+    !! minima, and a local optimiser started anywhere sensible returns the wrong one -- which
+    !! presents as a rule scoring BELOW 1, an impossibility that is the only outward sign.
+    subroutine mise_optimal(n, w, mu, sg, nc, hopt, mopt)
+        integer(int64), intent(in) :: n    !! the sample's size
+        real(real64), intent(in) :: w(:)   !! the component weights
+        real(real64), intent(in) :: mu(:)  !! the component means
+        real(real64), intent(in) :: sg(:)  !! the component standard deviations
+        integer, intent(in)      :: nc     !! how many components
+        real(real64), intent(out) :: hopt  !! the minimising bandwidth
+        real(real64), intent(out) :: mopt  !! the error there
+
+        integer, parameter :: NSCAN = 2000
+        real(real64), parameter :: HLO = 1.0e-4_real64, HHI = 5.0_real64
+        real(real64) :: g, v, best, hbest, a, b
+        integer :: i, ibest
+
+        best = huge(1.0_real64)
+        ibest = 1
+        hbest = HLO
+        do i = 1, NSCAN
+            g = HLO*exp(real(i - 1, real64)*log(HHI/HLO)/real(NSCAN - 1, real64))
+            v = mise_exact(g, n, w, mu, sg, nc)
+            if (v < best) then
+                best = v
+                hbest = g
+                ibest = i
+            end if
+        end do
+        a = HLO*exp(real(max(1, ibest - 1) - 1, real64)*log(HHI/HLO)/real(NSCAN - 1, real64))
+        b = HLO*exp(real(min(NSCAN, ibest + 1) - 1, real64)*log(HHI/HLO)/real(NSCAN - 1, real64))
+        call golden(a, b, n, w, mu, sg, nc, hopt, mopt)
+        if (best < mopt) then
+            hopt = hbest
+            mopt = best
+        end if
+
+    end subroutine mise_optimal
+
+    !> Golden-section minimisation of `mise_exact` inside `[a, b]`, which the caller has already
+    !! shown to bracket a minimum.
+    subroutine golden(a, b, n, w, mu, sg, nc, hopt, mopt)
+        real(real64), intent(in) :: a, b    !! the bracket
+        integer(int64), intent(in) :: n     !! the sample's size
+        real(real64), intent(in) :: w(:)    !! the component weights
+        real(real64), intent(in) :: mu(:)   !! the component means
+        real(real64), intent(in) :: sg(:)   !! the component standard deviations
+        integer, intent(in)      :: nc      !! how many components
+        real(real64), intent(out) :: hopt   !! the minimiser
+        real(real64), intent(out) :: mopt   !! the value there
+
+        real(real64), parameter :: R = 0.6180339887498949_real64
+        real(real64) :: lo, hi, c, d, fc, fd
+        integer :: it
+
+        lo = a
+        hi = b
+        c = hi - R*(hi - lo)
+        d = lo + R*(hi - lo)
+        fc = mise_exact(c, n, w, mu, sg, nc)
+        fd = mise_exact(d, n, w, mu, sg, nc)
+        do it = 1, 200
+            if (fc < fd) then
+                hi = d
+                d = c
+                fd = fc
+                c = hi - R*(hi - lo)
+                fc = mise_exact(c, n, w, mu, sg, nc)
+            else
+                lo = c
+                c = d
+                fc = fd
+                d = lo + R*(hi - lo)
+                fd = mise_exact(d, n, w, mu, sg, nc)
+            end if
+            if (hi - lo <= 1.0e-12_real64*(1.0_real64 + hi)) exit
+        end do
+        hopt = 0.5_real64*(lo + hi)
+        mopt = mise_exact(hopt, n, w, mu, sg, nc)
+
+    end subroutine golden
+
+    !> A deterministic sample of `n` points from Marron-Wand density `d`: one uniform picks the
+    !! component, one standard normal places the point inside it. Both are coordinate-addressed, so
+    !! the sample is a pure function of `(d, n, i)` and two runs of this mode compare.
+    subroutine mw_sample(d, n, x)
+        integer, intent(in)                    :: d    !! which density
+        integer(int64), intent(in)             :: n    !! how many points
+        real(real64), allocatable, intent(out) :: x(:) !! the sample
+
+        real(real64) :: w(MW_MAXC), mu(MW_MAXC), sg(MW_MAXC), u, cum
+        integer(int64) :: i, key, skey
+        integer :: nc, c, j
+
+        call mw_density(d, w, mu, sg, nc)
+        if (allocated(x)) deallocate(x)
+        allocate(x(n))
+        key = int(d, int64)
+        skey = pf_random_key(1_int64, int(d, int64))
+        do i = 1_int64, n
+            u = pf_random_at(key, skey, i)
+            cum = 0.0_real64
+            c = nc
+            do j = 1, nc
+                cum = cum + w(j)
+                if (u < cum) then
+                    c = j
+                    exit
+                end if
+            end do
+            x(i) = mu(c) + sg(c)*pf_random_normal_at(key + 7919_int64, skey, i)
+        end do
+
+    end subroutine mw_sample
+
+    !> The true density of the mixture at `t`.
+    pure function mw_pdf(t, w, mu, sg, nc) result(f)
+        real(real64), intent(in) :: t     !! where
+        real(real64), intent(in) :: w(:)  !! the component weights
+        real(real64), intent(in) :: mu(:) !! the component means
+        real(real64), intent(in) :: sg(:) !! the component standard deviations
+        integer, intent(in)      :: nc    !! how many components
+        real(real64)             :: f     !! the density
+
+        integer :: j
+
+        f = 0.0_real64
+        do j = 1, nc
+            f = f + w(j)*phi(t - mu(j), sg(j))
+        end do
+
+    end function mw_pdf
+
+    !> The bandwidth minimising the integrated squared error of one fitted estimate against the
+    !! true density, swept over a geometric ladder of explicit bandwidths.
+    !!
+    !! `bandwidth=` is passed on every rung deliberately: an explicit bandwidth is never inflated,
+    !! so this measurement is independent of the default it is used to calibrate. The sweep is
+    !! coarse-to-fine for the same reason `mise_optimal`'s is -- the error surface of a comb has
+    !! more than one local minimum.
+    subroutine ise_optimal(x, w, mu, sg, nc, adaptive, hopt)
+        real(real64), intent(in) :: x(:)   !! the sample
+        real(real64), intent(in) :: w(:)   !! the component weights
+        real(real64), intent(in) :: mu(:)  !! the component means
+        real(real64), intent(in) :: sg(:)  !! the component standard deviations
+        integer, intent(in)      :: nc     !! how many components
+        logical, intent(in)      :: adaptive !! fit with the adaptive kernel
+        real(real64), intent(out) :: hopt  !! the minimising bandwidth, or `-1` where none was found
+
+        integer, parameter :: NRUNG = 40
+        real(real64), parameter :: HLO = 0.01_real64, HHI = 2.0_real64
+        real(real64) :: h, e, best
+        integer :: i
+
+        best = huge(1.0_real64)
+        hopt = -1.0_real64
+        do i = 1, NRUNG
+            h = HLO*exp(real(i - 1, real64)*log(HHI/HLO)/real(NRUNG - 1, real64))
+            call ise_at(x, w, mu, sg, nc, adaptive, h, e)
+            if (e >= 0.0_real64 .and. e < best) then
+                best = e
+                hopt = h
+            end if
+        end do
+        if (hopt < 0.0_real64) return
+        ! One refinement pass, a tenth of a rung wide, inside the winning bracket.
+        block
+            real(real64), parameter :: RUNG = 1.2_real64
+            real(real64) :: a, b, hh
+            a = hopt/RUNG
+            b = hopt*RUNG
+            do i = 1, 20
+                hh = a*exp(real(i - 1, real64)*log(b/a)/19.0_real64)
+                call ise_at(x, w, mu, sg, nc, adaptive, hh, e)
+                if (e >= 0.0_real64 .and. e < best) then
+                    best = e
+                    hopt = hh
+                end if
+            end do
+        end block
+
+    end subroutine ise_optimal
+
+    !> The integrated squared error of one fit at bandwidth `h` against the true density, by the
+    !! midpoint rule over the range the mixture puts essentially all its mass in. `-1` where the fit
+    !! is undefined.
+    subroutine ise_at(x, w, mu, sg, nc, adaptive, h, e)
+        real(real64), intent(in) :: x(:)     !! the sample
+        real(real64), intent(in) :: w(:)     !! the component weights
+        real(real64), intent(in) :: mu(:)    !! the component means
+        real(real64), intent(in) :: sg(:)    !! the component standard deviations
+        integer, intent(in)      :: nc       !! how many components
+        logical, intent(in)      :: adaptive !! fit with the adaptive kernel
+        real(real64), intent(in) :: h        !! the bandwidth
+        real(real64), intent(out) :: e       !! the integrated squared error, or `-1`
+
+        integer, parameter :: NG = 2001
+        type(pf_kde) :: k
+        real(real64), allocatable :: g(:), f(:)
+        real(real64) :: a, b, dx
+        integer :: i
+        logical :: ok
+
+        a = minval(mu(1:nc) - 5.0_real64*sg(1:nc))
+        b = maxval(mu(1:nc) + 5.0_real64*sg(1:nc))
+        if (adaptive) then
+            call k%fit(x, bandwidth=h, adaptive=.true., ok=ok)
+        else
+            call k%fit(x, bandwidth=h, ok=ok)
+        end if
+        if (.not. ok) then
+            e = -1.0_real64
+            return
+        end if
+        allocate(g(NG), f(NG))
+        dx = (b - a)/real(NG, real64)
+        do i = 1, NG
+            g(i) = a + (real(i, real64) - 0.5_real64)*dx
+        end do
+        call k%pdf(g, f)
+        e = 0.0_real64
+        do i = 1, NG
+            e = e + (f(i) - mw_pdf(g(i), w, mu, sg, nc))**2
+        end do
+        e = e*dx
+
+    end subroutine ise_at
+
     ! ---- adaptive ------------------------------------------------------------------------------
 
     !> What the adaptive kernel adds, per kernel: `%fit` fixed and adaptive, on one thread, with the
@@ -944,9 +1453,135 @@ contains
             nsize = 10_int64*nsize
         end do
         print '(a)', ""
+
+        print '(a)', "=== pf_kde_bandwidth against the same rule through %fit: milliseconds, one thread ==="
+        print '(a)', "standalone: the rule's bandwidth with no estimate built over it. `saved` is the share"
+        print '(a)', "of a fit the standalone form does not pay. Both sort -- every rule here reads an"
+        print '(a)', "ordered sample -- so what it saves is the estimate, not the ordering."
+        print '(a)', ""
+        print '(a)', "     points       rule        fit standalone      saved   same h"
+        nsize = 1000_int64
+        do while (nsize <= n)
+            do r = 1, 3
+                best(1) = time_rule_fit(k, x(1:nsize), trim(RULES(r)), h, rounds, checksum)
+                best(2) = time_standalone(x(1:nsize), trim(RULES(r)), .false., rounds, checksum, h_isj)
+                call k%fit(x(1:nsize), rule=trim(RULES(r)), threads=1)
+                print '(i11,a11,2f11.3,f10.1,a,l9)', nsize, trim(RULES(r)), 1.0e3_real64*best(1), &
+                    1.0e3_real64*best(2), 100.0_real64*(1.0_real64 - best(2)/best(1)), "%", &
+                    same_bandwidth(h_isj, k%bandwidth())
+            end do
+            nsize = 10_int64*nsize
+        end do
+        print '(a)', ""
+
+        print '(a)', "=== the same under the ADAPTIVE kernel, where a fit builds a pilot afterwards ==="
+        print '(a)', "This is where the standalone form earns its keep: the bandwidth is resolved before"
+        print '(a)', "the pilot is built, so asking only for the number skips the pilot and the per-point"
+        print '(a)', "look-up entirely. A plain unbounded fit has almost nothing after the bandwidth to skip."
+        print '(a)', ""
+        print '(a)', "     points       rule        fit standalone      saved   same h"
+        nsize = 1000_int64
+        do while (nsize <= n)
+            do r = 1, 3
+                best(1) = time_adaptive_fit(k, x(1:nsize), trim(RULES(r)), rounds, checksum)
+                best(2) = time_standalone(x(1:nsize), trim(RULES(r)), .true., rounds, checksum, h_isj)
+                call k%fit(x(1:nsize), rule=trim(RULES(r)), adaptive=.true., threads=1)
+                print '(i11,a11,2f11.3,f10.1,a,l9)', nsize, trim(RULES(r)), 1.0e3_real64*best(1), &
+                    1.0e3_real64*best(2), 100.0_real64*(1.0_real64 - best(2)/best(1)), "%", &
+                    same_bandwidth(h_isj, k%bandwidth())
+            end do
+            nsize = 10_int64*nsize
+        end do
+        print '(a)', ""
         print '(a,es22.14)', "checksum ", checksum
 
     end subroutine run_rules
+
+    !> The fastest of `rounds` calls of `pf_kde_bandwidth` under `rule`, on one thread, in seconds,
+    !> with the last bandwidth it answered in `h_out` so the caller can compare it with `%fit`'s.
+    function time_standalone(x, rule, adaptive, rounds, checksum, h_out) result(best)
+        real(real64), intent(in)     :: x(:)     !! the sample
+        character(len=*), intent(in) :: rule     !! the rule's token
+        logical, intent(in)          :: adaptive !! ask for the adaptive kernel's own bandwidth
+        integer, intent(in)          :: rounds   !! laps
+        real(real64), intent(inout)  :: checksum !! the keep-it-live sum
+        real(real64), intent(out)    :: h_out    !! the bandwidth the last call answered
+        real(real64)                 :: best     !! seconds per call, the fastest lap
+
+        real(real64) :: t0, t, hb
+        integer(int64) :: reps, r
+        integer :: lap
+
+        reps = 1_int64
+        best = huge(1.0_real64)
+        h_out = 0.0_real64
+        lap = 0
+        do while (lap < rounds)
+            t0 = clock()
+            do r = 1_int64, reps
+                call pf_kde_bandwidth(x, hb, rule=rule, adaptive=adaptive, threads=1)
+                checksum = checksum + hb
+            end do
+            t = clock() - t0
+            h_out = hb
+            if (lap == 0 .and. t < MIN_LAP) then
+                reps = 2_int64*reps
+                cycle
+            end if
+            lap = lap + 1
+            best = min(best, t/real(reps, real64))
+        end do
+
+    end function time_standalone
+
+    !> The fastest of `rounds` ADAPTIVE fits under `rule`, on one thread, in seconds per fit.
+    function time_adaptive_fit(k, x, rule, rounds, checksum) result(best)
+        type(pf_kde), intent(inout)  :: k        !! the estimate; refitted every repetition
+        real(real64), intent(in)     :: x(:)     !! the sample
+        character(len=*), intent(in) :: rule     !! the rule's token
+        integer, intent(in)          :: rounds   !! laps
+        real(real64), intent(inout)  :: checksum !! the keep-it-live sum
+        real(real64)                 :: best     !! seconds per fit, the fastest lap
+
+        real(real64) :: t0, t
+        integer(int64) :: reps, r
+        integer :: lap
+
+        reps = 1_int64
+        best = huge(1.0_real64)
+        lap = 0
+        do while (lap < rounds)
+            t0 = clock()
+            do r = 1_int64, reps
+                call k%fit(x, rule=rule, adaptive=.true., threads=1)
+                checksum = checksum + k%bandwidth()
+            end do
+            t = clock() - t0
+            if (lap == 0 .and. t < MIN_LAP) then
+                reps = 2_int64*reps
+                cycle
+            end if
+            lap = lap + 1
+            best = min(best, t/real(reps, real64))
+        end do
+
+    end function time_adaptive_fit
+
+    !> Two bandwidths are the same answer when they are the same number or both the NaN that says
+    !> no rule found one. The identity between the two entry points is the whole contract, so the
+    !> benchmark reports it beside every timing rather than leaving it to be assumed.
+    pure function same_bandwidth(a, b) result(res)
+        real(real64), intent(in) :: a   !! one bandwidth
+        real(real64), intent(in) :: b   !! the other
+        logical                  :: res !! they are the same answer
+
+        if (a /= a .or. b /= b) then
+            res = (a /= a) .and. (b /= b)
+        else
+            res = a == b
+        end if
+
+    end function same_bandwidth
 
     !> The fastest of `rounds` fits of `x` under `rule` -- or with the bandwidth `h` given as a
     !> number when `rule` is blank -- on one thread, each lap repeated until it is long enough to

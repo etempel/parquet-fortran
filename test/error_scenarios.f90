@@ -12922,11 +12922,11 @@ contains
 
     !> get_parquet_maml resolves an embedded fixture by name and error stops on
     !> one it does not have -- the `case default` arm of the select case
-    !> tools/generate_parquet_maml.sh emits. The same template serves both of
-    !> that script's modes, so this also pins the message a DOWNSTREAM project's
-    !> generated parquet_maml produces (see
+    !> tools/generate_parquet_maml_base.sh emits. Both MAML generators emit it
+    !> from the same shared template, so this also pins the message a DOWNSTREAM
+    !> project's generated parquet_maml produces (see
     !> doc/pages/utilities/embedding-maml-schemas.md); nothing in this repository
-    !> compiles that mode, which is what tools/check_downstream_maml_module.sh is
+    !> compiles that one, which is what tools/check_downstream_maml_module.sh is
     !> for.
     !>
     !> The successful lookup first is the negative control, and it is what makes

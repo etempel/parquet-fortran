@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
 #
-# Assert that tools/generate_parquet_maml.sh's DOWNSTREAM mode still emits a module that compiles
-# against this library.
+# Assert that tools/generate_parquet_maml.sh still emits a module that compiles against this
+# library.
 #
-# WHY THIS EXISTS. That script has two modes. `base` emits src/parquet_maml_base.f90 for this
-# repository and is checked on every pipeline run (.gitlab-ci.yml's lint stage, and
-# tools/run_lint_check.sh, both `base --check`). The other mode -- no positional argument -- is the
-# CONSUMER-FACING one documented in doc/pages/utilities/embedding-maml-schemas.md: a downstream
-# project copies the script, points it at its own .maml files, and commits the src/parquet_maml.f90
-# it emits.
+# WHY THIS EXISTS. There are two MAML generators. tools/generate_parquet_maml_base.sh emits
+# src/parquet_maml_base.f90 for this repository and is checked on every pipeline run
+# (.gitlab-ci.yml's lint stage, and tools/run_lint_check.sh, both `--check`). The other,
+# tools/generate_parquet_maml.sh, is the CONSUMER-FACING one documented in
+# doc/pages/utilities/embedding-maml-schemas.md: a downstream project copies the script, points it
+# at its own .maml files, and commits the src/parquet_maml.f90 it emits.
 #
-# Nothing in this repository used to compile that second mode, and the two modes do not emit the
-# same text. Base mode emits NO `use` statement at all; downstream mode emits
+# Nothing in this repository compiles that second generator's output, and the two do not emit the
+# same text. The base module carries NO `use` statement at all; the consumer-facing one emits
 #
-#     use parquet, only: parquet_schema, parquet_load_maml_file
-#     use parquet, only: parquet_parse_maml, parquet_validate_user_maml
+#     use parquet_io, only: parquet_schema, parquet_load_maml_file
+#     use parquet_io, only: parquet_parse_maml, parquet_validate_user_maml
 #
 # plus a `call parquet_parse_maml(schema)` in every accessor and a whole `set_maml` body. Rename any
-# of those four, move parquet_schema between modules, or change parquet_load_maml_file's signature,
-# and `base --check` stays green, `fpm test` stays green, the lint stage stays green -- and every
-# downstream project's next regeneration fails to compile, with an error naming a file this script
-# wrote. The library would have no way to know it had broken them.
+# of those four, move parquet_schema between modules, stop parquet_io re-exporting one, or change
+# parquet_load_maml_file's signature, and the base generator's `--check` stays green, `fpm test`
+# stays green, the lint stage stays green -- and every downstream project's next regeneration fails
+# to compile, with an error naming a file this script wrote. The library would have no way to know
+# it had broken them.
 #
 # That is not hypothetical here: the schema/building-schema-in-code.md review removed the
 # parquet_parse_maml ordering requirement and swept 141 call sites, and generate_parquet_maml.sh
@@ -30,7 +31,7 @@
 # nothing but the library's own .mod files -- no linking, no Arrow link line, no dependency resolve.
 # Running the emitted module would additionally exercise parquet_parse_maml at run time, and costs a
 # full link against Arrow; test/test_reading.f90's test_get_parquet_maml_examples already covers the
-# shared select-case template through base mode.
+# shared select-case template through the base module.
 #
 # WHAT THAT LEAVES UNCOVERED, since a check is only useful if its limits are stated: the CONTENT of
 # the extracted schema. An invalid data_type in the guide page's ```yaml block would be caught by
@@ -48,22 +49,22 @@
 #
 # bash 3.2 only (macOS ships 3.2): no associative arrays, no mapfile, no ${var,,}.
 # ---------------------------------------------------------------------------------------------
-# Protects the other mode of
-# `tools/generate_parquet_maml.sh`. That script has two: `base`, which emits
-# `src/parquet_maml_base.f90` for this repository and is checked on every pipeline run (`base
-# --check`, in the `lint` stage), and the no-argument mode a downstream project uses on its own
-# schemas -- see "Embedding your own MAML schemas in your own project"
-# (doc/pages/utilities/embedding-maml-schemas.md). The two do not emit the same text: base mode
-# emits no `use` statement at all, while downstream mode imports four names from `parquet`
-# (`parquet_schema`, `parquet_load_maml_file`, `parquet_parse_maml`, `parquet_validate_user_maml`),
-# calls `parquet_parse_maml` in every accessor, and carries a whole `set_maml` body. Rename any of
-# those four and `base --check`, `fpm test` and the lint stage all stay green while every downstream
-# project's next regeneration fails to compile -- this library would have no way to know it had
-# broken them. The script builds a throwaway downstream project in a temporary directory (nothing is
-# written inside this repository), generates from it and compiles the result against the library's
-# own `.mod` files. It compiles rather than runs, which is what makes it cheap enough for every
-# pipeline: no linking, no Arrow link line, no dependency resolve. Its five checks also cover the
-# generator's own refusals -- a duplicate `.maml` filename, `--check` drift in both directions,
+# Protects the consumer-facing `tools/generate_parquet_maml.sh`. There are two MAML generators:
+# `generate_parquet_maml_base.sh`, which emits `src/parquet_maml_base.f90` for this repository and
+# is checked on every pipeline run (`--check`, in the `lint` stage), and `generate_parquet_maml.sh`,
+# which a downstream project copies and runs on its own schemas -- see "Embedding your own MAML
+# schemas in your own project" (doc/pages/utilities/embedding-maml-schemas.md). The two do not emit
+# the same text: the base module carries no `use` statement at all, while the consumer-facing one
+# imports four names from `parquet_io` (`parquet_schema`, `parquet_load_maml_file`,
+# `parquet_parse_maml`, `parquet_validate_user_maml`), calls `parquet_parse_maml` in every accessor,
+# and carries a whole `set_maml` body. Rename any of those four and the base `--check`, `fpm test`
+# and the lint stage all stay green while every downstream project's next regeneration fails to
+# compile -- this library would have no way to know it had broken them. The script builds a
+# throwaway project in a temporary directory (nothing is written inside this repository), generates
+# from it and compiles the result against the library's own `.mod` files. It compiles rather than
+# runs, which is what makes it cheap enough for every pipeline: no linking, no Arrow link line, no
+# dependency resolve. Its five checks also cover the generator's own refusals -- a duplicate
+# `.maml` filename, `--check` drift in both directions,
 # `--module=<name>` -- and one of them is a deliberate negative control that renames an imported
 # name and requires the compile to fail, so a run that had silently stopped compiling anything
 # cannot report success. It runs in CI's `test` job rather than `lint`, because it needs a Fortran
@@ -108,8 +109,9 @@ report() {  # report <ok|FAIL> <description>
 # ---- The library's own .mod files -------------------------------------------------------------
 # fpm build is idempotent and fast when the tree is already built, which it is in CI (the test
 # stage runs `fpm test` first). Several build trees can exist on a dev machine that has built with
-# more than one FPM_FFLAGS; take the most recently written parquet.mod and SAY WHICH, because a
-# stale one is the only way this check could pass against a library it did not describe.
+# more than one FPM_FFLAGS; take the most recently written parquet_io.mod -- the module the emitted
+# code actually imports -- and SAY WHICH, because a stale one is the only way this check could pass
+# against a library it did not describe.
 echo "check_downstream_maml_module.sh: building the library ($FC) ..."
 if ! fpm build >"$WORK/fpm-build.log" 2>&1; then
     echo "check_downstream_maml_module.sh: fpm build failed; see below" >&2
@@ -119,13 +121,13 @@ fi
 
 MOD_DIR=""
 NEWEST=""
-for m in $(find "${FPM_BUILD_DIR:-build}" -name 'parquet.mod' -type f 2>/dev/null); do
+for m in $(find "${FPM_BUILD_DIR:-build}" -name 'parquet_io.mod' -type f 2>/dev/null); do
     if [ -z "$NEWEST" ] || [ "$m" -nt "$NEWEST" ]; then
         NEWEST="$m"
     fi
 done
 if [ -z "$NEWEST" ]; then
-    echo "check_downstream_maml_module.sh: no parquet.mod found under ${FPM_BUILD_DIR:-build}/" >&2
+    echo "check_downstream_maml_module.sh: no parquet_io.mod found under ${FPM_BUILD_DIR:-build}/" >&2
     exit 2
 fi
 MOD_DIR="$(dirname "$NEWEST")"
@@ -186,13 +188,13 @@ compile_module() {  # compile_module <file> <objdir>; echoes nothing, returns th
 
 echo "check_downstream_maml_module.sh: checks"
 
-# 1. The documented recipe: run it with no arguments, compile what it emits.
+# 1. The documented recipe: run it with no options, compile what it emits.
 ( cd "$PROJ" && "$GEN" >"$WORK/gen1.log" 2>&1 )
 if [ ! -f "$PROJ/src/parquet_maml.f90" ]; then
-    report FAIL "downstream mode wrote src/parquet_maml.f90"
+    report FAIL "the generator wrote src/parquet_maml.f90"
     cat "$WORK/gen1.log" >&2
 else
-    report ok "downstream mode wrote src/parquet_maml.f90 (src/ created for it)"
+    report ok "the generator wrote src/parquet_maml.f90 (src/ created for it)"
     if compile_module "$PROJ/src/parquet_maml.f90" "$WORK/o1"; then
         report ok "the emitted module compiles against the library"
         # And the page's own example program compiles against that module. Compiling, not linking,

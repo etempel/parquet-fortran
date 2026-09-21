@@ -253,6 +253,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and totality are unchanged and `use parquet` sees no difference; a program that imported
   `parquet_healpix` alone for it now imports `parquet_skycoord`. `pf_angdist`, the vector form,
   stays in `parquet_healpix`.
+- **The embedded-schema module `tools/generate_parquet_maml.sh` emits imports from `parquet_io`**
+  rather than from `parquet`, so embedding schemas no longer brings the whole library surface into
+  a project that only reads and writes files. The script is now the consumer-facing generator
+  alone: its `base` mode has moved to `tools/generate_parquet_maml_base.sh`, which is internal to
+  this library. Regenerate and commit your own embedded-schema module to pick this up.
 
 ### Fixed
 

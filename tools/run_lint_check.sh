@@ -92,7 +92,7 @@ CHECKS=(
     "python3 tools/generate_stats_vectors.py --check"
     "python3 tools/generate_kde_vectors.py --check"
     "python3 tools/generate_interpolate_vectors.py --check"
-    "bash tools/generate_parquet_maml.sh base --check"
+    "bash tools/generate_parquet_maml_base.sh --check"
     "python3 tools/generate_user_table_code.py --self-test"
     "python3 tools/generate_user_table_code.py --check"
     "python3 tools/generate_parquet_ziggurat.py --self-test"

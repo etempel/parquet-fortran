@@ -177,7 +177,7 @@ ford --warn docs.md 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/Warning: Unknown ent
   run `tools/fix_ford_page_links.sh ford-doc` after `ford docs.md`, because FORD does not resolve
   `doc/pages/*.md` links inside the embedded README.md. README.md keeps that link form; pages link
   to each other with FORD's `page/*.html`-relative form.
-- `tools/generate_parquet_maml.sh`'s `end module` template line must keep emitting
+- Each MAML generator's `end module` template line must keep emitting
   `! GCOVR_EXCL_LINE`.
 - **FORD 7.0.13 renders no per-argument docs for members of a multi-specific generic interface**;
   not fixable from source (upstream issue 738). Each public generic's own leading `!>` names every

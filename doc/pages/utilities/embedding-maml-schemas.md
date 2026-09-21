@@ -23,7 +23,7 @@ do this in your own project:
    file.** Like the generated table types, it is regenerated on demand rather than at build time,
    which is what keeps your own build free of any dependency on Python or on this script; re-run
    the generator whenever a `.maml` changes, and commit the result alongside it.
-4. `use parquet_maml` (the module the script just generated for you) alongside `use parquet` in
+4. `use parquet_maml` (the module the script just generated for you) alongside `use parquet_io` in
    your code — the second is what supplies the `parquet_schema` type itself.
    `get_parquet_maml("your_schema.maml")` returns that schema **already parsed**, so there is no
    `parquet_parse_maml` call of your own to make; `set_maml(maml_default, [maml_file])` resolves
@@ -58,7 +58,7 @@ After `tools/generate_parquet_maml.sh` has written `src/parquet_maml.f90`:
 
 ```fortran
 program embedded_schema_quickstart
-    use parquet
+    use parquet_io
     use parquet_maml, only : get_parquet_maml   ! the module the script generated
     use iso_fortran_env, only : int64, real64, real32
     implicit none
@@ -162,13 +162,17 @@ At run time, `get_parquet_maml` `error stop`s on a name it does not have, with
 
 ## What the generated module depends on
 
-The generated `parquet_maml` module imports four names from `parquet` — `parquet_schema`,
-`parquet_load_maml_file`, `parquet_parse_maml` and `parquet_validate_user_maml` — and does not
+The generated `parquet_maml` module imports four names from `parquet_io` — `parquet_schema`,
+`parquet_load_maml_file`, `parquet_parse_maml` and `parquet_validate_user_maml`. It reaches them
+through `parquet_io` rather than `parquet` so that embedding a schema costs you the I/O surface and
+nothing else; your own code is free to `use parquet` alongside it. It does not
 import `parquet_maml_base` at all. `parquet_maml_base` is where *this library's* own bundled
 schemas are embedded, so importing it gives you those fixtures and the shared `parquet_maml_file`
-type, never your project's own schemas; your generated `parquet_maml` is what holds those. (If
-you're contributing to `parquet-fortran` itself and need to regenerate its own built-in schema
-module, see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md).)
+type, never your project's own schemas; your generated `parquet_maml` is what holds those. (That
+module has a generator of its own, `tools/generate_parquet_maml_base.sh`, which is internal to the
+library and not the script described here. If you're contributing to `parquet-fortran` itself and
+need to regenerate its built-in schema module, see
+[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md).)
 
 ## A second generator, for table types
 

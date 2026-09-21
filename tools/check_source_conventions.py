@@ -238,6 +238,7 @@ Run it after touching the table layer or a generator template (it is also part o
 
     tools/check_source_conventions.py
 """
+import difflib
 import re
 import sys
 from pathlib import Path
@@ -255,7 +256,7 @@ FINALIZABLE_TYPE = ("parquet_table", SRC / "parquet_tables.f90")
 TABLE_FILES = sorted(SRC.glob("parquet_tables*.f90"))
 
 #: Committed output of tools/generate_parquet_columns.py / generate_parquet_tables.py /
-#: generate_parquet_maml.sh. Add a new generator's output here; see the module docstring for why
+#: generate_parquet_maml_base.sh. Add a new generator's output here; see the module docstring for why
 #: the generators' own --check modes cannot cover this.
 GENERATED_FILES = [
     SRC / "parquet_columns.f90",
@@ -820,6 +821,72 @@ def check_generated_file_conventions():
                         "(.claude/rules/code-style.md, \"Generated files\"):\n    %s"
                         % (path.relative_to(REPO_ROOT), i + 1, stripped[:100])
                     )
+    return problems
+
+
+#: The two MAML generators, and the markers delimiting the region they must carry identically.
+#: The consumer-facing one is COPIED into downstream projects, so it cannot source a shared file;
+#: the region is duplicated on purpose and this check is what keeps the duplicate honest.
+MAML_GENERATORS = (
+    TOOLS / "generate_parquet_maml_base.sh",
+    TOOLS / "generate_parquet_maml.sh",
+)
+MAML_EMITTER_BEGIN = "# ---- shared emitter (begin)"
+MAML_EMITTER_END = "# ---- shared emitter (end)"
+
+
+def shared_emitter_region(path):
+    """Return (lines, first_line_number) for `path`'s shared-emitter region, or (None, message)."""
+    lines = path.read_text().split("\n")
+    starts = [i for i, line in enumerate(lines) if line.startswith(MAML_EMITTER_BEGIN)]
+    ends = [i for i, line in enumerate(lines) if line.startswith(MAML_EMITTER_END)]
+    if len(starts) != 1 or len(ends) != 1:
+        return None, ("%s: expected exactly one `%s` line and one `%s` line, found %d and %d"
+                      % (path.relative_to(REPO_ROOT), MAML_EMITTER_BEGIN, MAML_EMITTER_END,
+                         len(starts), len(ends)))
+    if ends[0] <= starts[0]:
+        return None, ("%s:%d: the shared-emitter `(end)` marker is above its `(begin)`"
+                      % (path.relative_to(REPO_ROOT), ends[0] + 1))
+    return lines[starts[0]:ends[0] + 1], starts[0] + 1
+
+
+def check_maml_generators_share_their_emitter():
+    """The two MAML generators carry one emitter, byte for byte.
+
+    tools/generate_parquet_maml.sh is consumer-facing: a downstream project copies that one file
+    into its own tools/ and runs it there, so it cannot `source` anything from this repository and
+    the emitter it shares with tools/generate_parquet_maml_base.sh has to be a copy. A fix made to
+    one copy and not the other is invisible -- the base generator's `--check` only sees its own
+    output, and nothing in this repository regenerates a downstream module. So compare the two
+    regions here and fail on any difference, including whitespace.
+    """
+    problems = []
+    regions = []
+    for path in MAML_GENERATORS:
+        if not path.exists():
+            problems.append("%s: MAML generator not found" % path.relative_to(REPO_ROOT))
+            continue
+        region, extra = shared_emitter_region(path)
+        if region is None:
+            problems.append(extra)
+            continue
+        regions.append((path, region, extra))
+    if problems or len(regions) != len(MAML_GENERATORS):
+        return problems
+    (first_path, first, first_at), (second_path, second, second_at) = regions
+    if first == second:
+        return problems
+    diff = list(difflib.unified_diff(
+        first, second, lineterm="",
+        fromfile="%s:%d" % (first_path.relative_to(REPO_ROOT), first_at),
+        tofile="%s:%d" % (second_path.relative_to(REPO_ROOT), second_at)))
+    problems.append(
+        "%s:%d: the shared emitter differs from %s -- the consumer-facing generator is a copy "
+        "this repository cannot regenerate, so both files must carry this region identically. "
+        "Apply the change to both:\n    %s"
+        % (first_path.relative_to(REPO_ROOT), first_at,
+           second_path.relative_to(REPO_ROOT), "\n    ".join(diff[:40]))
+    )
     return problems
 
 
@@ -8366,6 +8433,7 @@ CHECKS = (
     ("no path reaches a column's string store through a binding",
      check_no_type_bound_string_column_access),
     ("generated files carry their conventions", check_generated_file_conventions),
+    ("the two MAML generators share one emitter", check_maml_generators_share_their_emitter),
     ("the schema-less write declares auto sizes", check_schemaless_write_declares_auto),
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),
     ("print_stat's columns match its documentation", check_print_stat_columns_documented),

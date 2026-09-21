@@ -217,7 +217,7 @@ The one to know before your first push is **`tools/run_lint_check.sh`**: it runs
 | `check_random_ubsan.sh` | UndefinedBehaviorSanitizer over those same standalone compiles. |
 | `check_exp_key.sh` | The same instrument for `parquet_expkey`'s frozen `-log(u)` transform. |
 | `check_philox_compliance.sh` | Sweeps the shipped Philox kernel against `philox_reference.py`. |
-| `check_downstream_maml_module.sh` | Protects the consumer-facing mode of `generate_parquet_maml.sh`. |
+| `check_downstream_maml_module.sh` | Protects the consumer-facing `generate_parquet_maml.sh`. |
 | `run_error_scenarios.sh` | Every error scenario, standalone — see above. |
 
 #### `tools/` — coverage
@@ -238,7 +238,8 @@ Output is committed; re-run the generator and its `--check` after editing one.
 | `generate_parquet_sorting.py` | The `parquet_sorting` per-type blocks. |
 | `generate_parquet_stats.py` | The `parquet_stats` per-kind blocks. |
 | `generate_parquet_ziggurat.py` | `src/parquet_ziggurat.f90`'s 771 layer constants, re-derived rather than pasted. |
-| `generate_parquet_maml.sh` | The built-in MAML module — see [below](#regenerating-the-built-in-maml-module). **Consumer-facing.** |
+| `generate_parquet_maml_base.sh` | The built-in MAML module — see [below](#regenerating-the-built-in-maml-module). |
+| `generate_parquet_maml.sh` | A project's own `.maml` schemas into an embedded-schema module. **Consumer-facing.** |
 | `generate_user_table_code.py` | A Role-A MAML into a named `parquet_table` extension type. **Consumer-facing.** |
 | `generate_random_golden_vectors.py` | The golden vectors freezing `parquet_random`'s bit contract. |
 | `generate_probit_reference.py` | `pf_probit` and the normal family's golden expectations, from a 50-digit `mpmath` oracle. |
@@ -453,21 +454,22 @@ consumer of this library already uses.
 ## Regenerating the built-in MAML module
 
 Every `.maml` file under `schemas/` is compiled directly into this library by
-`tools/generate_parquet_maml.sh`, which scans that directory recursively. Run it from the repository
-root in `base` mode:
+`tools/generate_parquet_maml_base.sh`, which scans that directory recursively:
 
 ```bash
-tools/generate_parquet_maml.sh base   # (re)generates src/parquet_maml_base.f90
+tools/generate_parquet_maml_base.sh   # (re)generates src/parquet_maml_base.f90
 ```
 
-`base` mode additionally defines the `parquet_maml_file`/`parquet_maml_missing_column`/
+It additionally defines the `parquet_maml_file`/`parquet_maml_missing_column`/
 `parquet_maml_col_map_entry` derived types the library uses. The generated file carries a header
 saying it is auto-generated — **do not hand-edit `src/parquet_maml_base.f90`**; edit the source
 `.maml` files under `schemas/` and re-run. Note `schemas/` is for schemas describing files the
 library *writes*; Role-A schemas that generate table types live in `table_types/` instead.
 
-The script's other, no-argument mode is a separate, consumer-facing feature for embedding schemas in
-a downstream project — see [Embedding your own MAML schemas](doc/pages/utilities/embedding-maml-schemas.md). See the script's own header for `--dir=` and the rest.
+Its sibling `tools/generate_parquet_maml.sh` is a separate, consumer-facing generator for embedding
+schemas in a downstream project — see [Embedding your own MAML schemas](doc/pages/utilities/embedding-maml-schemas.md).
+The two carry one copy each of the same emitter, marked `shared emitter` in both and compared byte
+for byte by `check_maml_generators_share_their_emitter`: a fix to one belongs in the other.
 
 ## Extending the MAML schema
 

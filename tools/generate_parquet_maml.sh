@@ -1,28 +1,51 @@
 #!/usr/bin/env bash
+#
+# Embed this project's .maml schemas into compiled Fortran source, so nothing has to locate or
+# ship a .maml file at run time.
+#
+# Every .maml file under the scanned directory becomes one accessor function returning a
+# parquet_schema that is ALREADY PARSED, plus an entry in get_parquet_maml's lookup by name. The
+# generated module is written to src/<module>.f90 and is meant to be COMMITTED: it is regenerated
+# on demand rather than at build time, which keeps the build itself free of any dependency on
+# Python or on this script. Re-run it whenever a .maml changes, and commit the result alongside.
+#
+# Copy this script into your own project (e.g. under tools/) and run it from your project's root.
+# It needs python3 and nothing else.
+#
+# Usage:  tools/generate_parquet_maml.sh [--dir=NAME] [--module=NAME] [--check]
+#
+#   --dir=NAME     directory to scan for .maml files, relative to the project root
+#                  (default: schemas). Scanned RECURSIVELY: subdirectories organise your schemas
+#                  without changing how any of them is addressed, which is why every .maml
+#                  filename must be unique across the whole tree.
+#   --module=NAME  name of the generated module, and therefore of the file it is written to,
+#                  src/NAME.f90 (default: parquet_maml). Reach for it when your project requires
+#                  every module to carry its own package prefix, or when you want more than one
+#                  embedded-schema module -- a second run with the default would overwrite the
+#                  first, since both the module name and the output path come from it.
+#   --check        regenerate in memory and compare against the committed file, writing nothing;
+#                  exit 1 on drift, naming the file. A one-line addition to your own CI. A --check
+#                  run must repeat whatever --dir/--module the generating run used; with
+#                  different options it is comparing against a different file.
+#
+# Both long-option spellings work: --dir=NAME and --dir NAME.
+#
+# The generated module imports parquet_schema, parquet_load_maml_file, parquet_parse_maml and
+# parquet_validate_user_maml from parquet_io -- the I/O entry module -- so a project embedding
+# schemas does not pull in the whole library surface. Alongside get_parquet_maml it makes
+# set_maml(maml_default, [maml_file]) public: the embedded default when maml_file is absent or
+# blank, otherwise that file loaded, validated against the default, and parsed.
+#
+# It REFUSES, with a message and a nonzero exit, before writing anything: when the scanned
+# directory holds no .maml file, when two schemas share a filename (anywhere in the tree, or
+# differing only in case or punctuation), and when --module is not a valid Fortran module name.
 set -euo pipefail
 
 work_dir="$(pwd)"
-mode=""
 maml_dir="schemas"
 check=""
 module_override=""
 
-# --dir=NAME / --dir NAME selects the directory (relative to the project
-# root) to scan for .maml files; may appear before or after the positional
-# mode argument (empty, or "base"). Defaults to "schemas" -- this project's
-# own convention, and the one downstream projects following "Embedding your
-# own MAML schemas" are expected to match unless they have their own.
-# --module=NAME / --module NAME names the generated module (and therefore the
-# file, src/NAME.f90), for a downstream project whose own conventions require a
-# different name than the default parquet_maml -- e.g. one that enables fpm's
-# module-naming rule, which requires every module to carry the package's own
-# prefix. It is rejected in `base` mode: parquet_maml_base is this library's own
-# module and the rest of the library refers to it by name.
-# --check compares the regenerated content with the committed file instead of
-# writing it, exiting nonzero on drift -- mirrors generate_parquet_columns.py's
-# own --check. For this project's own base MAML, run as: base --check
-# A --check run must repeat whatever --dir/--module the generating run used;
-# with different flags it is comparing against a different file.
 while [ $# -gt 0 ]; do
     case "$1" in
         --dir=*)
@@ -46,31 +69,24 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         *)
-            mode="$1"
-            shift
+            echo "generate_parquet_maml.sh: unknown argument '$1'" >&2
+            echo "Usage: generate_parquet_maml.sh [--dir=NAME] [--module=NAME] [--check]" >&2
+            exit 2
             ;;
     esac
 done
 
-python3 - "$work_dir" "$mode" "$maml_dir" "$check" "$module_override" <<'PY'
+python3 - "$work_dir" "$maml_dir" "$check" "$module_override" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 work_dir = Path(sys.argv[1]).resolve()
-mode = sys.argv[2]
-maml_dir_name = sys.argv[3]
-check = bool(sys.argv[4])
-module_override = sys.argv[5]
-is_base = (mode == 'base')
+maml_dir_name = sys.argv[2]
+check = bool(sys.argv[3])
+module_override = sys.argv[4]
 
-if is_base:
-    if module_override:
-        raise SystemExit(
-            '--module cannot be combined with base mode: parquet_maml_base is this library\'s '
-            'own module and the rest of the library refers to it by that name.')
-    module_name = 'parquet_maml_base'
-elif module_override:
+if module_override:
     # A Fortran module name, and one short enough to survive as a filename and as
     # the `end module <name>` line: letters/digits/underscore, leading letter, and
     # the standard's own 63-character identifier limit.
@@ -85,15 +101,23 @@ elif module_override:
     module_name = module_override
 else:
     module_name = 'parquet_maml'
-out_path = work_dir / 'src' / f'{module_name}.f90'
 
+out_path = work_dir / 'src' / f'{module_name}.f90'
 maml_source_dir = work_dir / maml_dir_name
 maml_files = sorted(maml_source_dir.rglob('*.maml'))
 if not maml_files:
     raise SystemExit(f'No .maml files found under {maml_dir_name}/')
 
 
+# ---- shared emitter (begin) -------------------------------------------------------------------
+# Everything between this marker and its (end) twin turns a set of .maml files into the Fortran
+# that embeds them: the per-file accessor functions, the select-case lookup they share, and the
+# line-chunking that keeps both inside Fortran's source limits. It is deliberately free of any
+# decision about WHICH module is being written -- every such difference arrives through `spec`.
+
+
 def make_identifier(name: str) -> str:
+    """The name of the public accessor emitted for one .maml file."""
     stem = Path(name).stem.lower()
     ident = re.sub(r'[^a-z0-9]+', '_', stem).strip('_')
     if not ident:
@@ -104,6 +128,7 @@ def make_identifier(name: str) -> str:
 
 
 def fstr(s: str) -> str:
+    """One Fortran character literal holding `s`."""
     return '"' + s.replace('"', '""') + '"'
 
 
@@ -125,20 +150,19 @@ def case_labels(rel_name: str) -> list:
 # only in case or punctuation, since make_identifier lowercases and collapses
 # every run of non-alphanumerics -- would otherwise emit a duplicate `public ::`,
 # a duplicate function and a duplicate `case` label. The generator would report
-# success and the failure would surface in the consumer's build as
-# "ACCESS specification at (1) was already specified", naming neither this script
-# nor either schema.
-def check_for_collisions(paths: list) -> None:
+# success and the failure would surface at compile time as "ACCESS specification
+# at (1) was already specified", naming neither this script nor either schema.
+def check_for_collisions(paths: list, source_dir, dir_name: str) -> None:
     seen = {}
     for path in paths:
-        rel_name = path.relative_to(maml_source_dir).as_posix()
+        rel_name = path.relative_to(source_dir).as_posix()
         claims = [('accessor name', make_identifier(path.name))]
         claims += [('name', label) for label in case_labels(rel_name)]
         for what, key in claims:
             previous = seen.get((what, key))
             if previous is not None:
                 raise SystemExit(
-                    f"Two MAML files under {maml_dir_name}/ share the {what} '{key}':\n"
+                    f"Two MAML files under {dir_name}/ share the {what} '{key}':\n"
                     f'    {previous}\n'
                     f'    {rel_name}\n'
                     'Every .maml filename must be unique across that directory, including its '
@@ -147,10 +171,10 @@ def check_for_collisions(paths: list) -> None:
             seen[(what, key)] = rel_name
 
 
-# Wraps a leading '!>' doc-comment to the project's 132-column limit, splitting
-# on word boundaries -- needed here (unlike the mostly-static doc blocks below,
-# hand-wrapped and verified once) because this helper's callers interpolate
-# runtime data (a .maml filename) of arbitrary length into the comment text.
+# Wraps a leading '!>' doc-comment to Fortran's 132-column free-form limit, splitting on word
+# boundaries -- needed here (unlike the mostly-static doc blocks elsewhere, hand-wrapped and
+# verified once) because this helper's callers interpolate runtime data (a .maml filename) of
+# arbitrary length into the comment text.
 def emit_doc(indent: str, *sentences: str) -> list:
     prefix = f'{indent}!> '
     text = ' '.join(sentences)
@@ -190,231 +214,142 @@ def emit_assignment(target: str, text: str) -> list:
         stmt.append(f'            {fstr(chunk)}{suffix}')
     return stmt
 
+
+# One accessor function per .maml file, plus the select-case arms naming it. `spec` carries
+# everything that depends on which module is being written:
+#
+#   var          the function result variable's name
+#   type         its Fortran type
+#   name_field   component of the result that holds the fixture's own name
+#   lines_field  component that holds the raw MAML lines
+#   doc          tail of the accessor's !> sentence
+#   result_doc   tail of the !! text on the per-file result declaration
+#   lookup_doc   the same for get_parquet_maml's result declaration
+#   trailer      statements emitted after the lines, before `end function`
+def emit_accessors(maml_files: list, source_dir, spec: dict) -> tuple:
+    public_names = []
+    function_blocks = []
+    case_blocks = []
+    name_target = spec['var'] + spec['name_field']
+    lines_target = spec['var'] + spec['lines_field']
+    for path in maml_files:
+        identifier = make_identifier(path.name)
+        public_names.append(identifier)
+        file_lines = path.read_text(encoding='utf-8').splitlines()
+        max_len = max((len(x) for x in file_lines), default=1)
+        rel_name = path.relative_to(source_dir).as_posix()
+
+        block = emit_doc('    ', f'Returns the embedded {rel_name} MAML fixture, {spec["doc"]}')
+        block.append(f'    function {identifier}() result({spec["var"]})')
+        block.append(f'        type({spec["type"]}) :: {spec["var"]} !! the {rel_name} MAML, {spec["result_doc"]}')
+        block.append('')
+        block.append(f'        {name_target} = {fstr(rel_name)}')
+        if file_lines:
+            block.append(f'        allocate(character(len={max_len}) :: {lines_target}({len(file_lines)}))')
+            for idx, text in enumerate(file_lines):
+                block.extend(emit_assignment(f'{lines_target}({idx + 1})', text))
+        else:
+            block.append(f'        allocate(character(len=1) :: {lines_target}(0))')
+        block.extend(spec['trailer'])
+        block.append(f'    end function {identifier}')
+        function_blocks.append('\n'.join(block))
+
+        for label in case_labels(rel_name):
+            case_blocks.append(f'        case ({fstr(label)})')
+            case_blocks.append(f'            {spec["var"]} = {identifier}()')
+    return public_names, function_blocks, case_blocks
+
+
+# get_parquet_maml itself: the select case over every name the accessors above answer to. The
+# caller emits its !> doc block, which is the one part that differs. No validation call belongs
+# here in either form -- each accessor has already done whatever parsing its module promises.
+def emit_lookup(case_blocks: list, spec: dict) -> list:
+    out = [f'    function get_parquet_maml(name) result({spec["var"]})']
+    out.append('        character(len=*), intent(in) :: name !! embedded fixture name, with or without .maml.')
+    out.append(f'        type({spec["type"]}) :: {spec["var"]} !! the matching MAML, {spec["lookup_doc"]}')
+    out.append('')
+    out.append('        select case (trim(name))')
+    out.extend(case_blocks)
+    out.append('        case default')
+    out.append('            error stop "get_parquet_maml: unknown internal MAML file: " // trim(name)')
+    out.append('        end select')
+    out.append('    end function get_parquet_maml')
+    return out
+# ---- shared emitter (end) ---------------------------------------------------------------------
+
+check_for_collisions(maml_files, maml_source_dir, maml_dir_name)
+
+# Each accessor returns a fully parsed parquet_schema: parquet_parse_maml populates %cinfo and
+# %metadata from %maml right here, so a caller gets a ready-to-use schema with no separate parse
+# step. That is the whole of `trailer`.
+SPEC = {
+    'var': 'schema',
+    'type': 'parquet_schema',
+    'name_field': '%maml%name',
+    'lines_field': '%maml%lines',
+    'doc': 'already parsed into a schema.',
+    'result_doc': 'parsed into a schema.',
+    'lookup_doc': 'already parsed into a schema.',
+    'trailer': ['        call parquet_parse_maml(schema)'],
+}
+
+accessor_names, function_blocks, case_blocks = emit_accessors(maml_files, maml_source_dir, SPEC)
+
 lines = []
 lines.append('!===========================================')
 lines.append('! This file is automatically generated! Do not edit it directly!')
 lines.append(f'! Instead, edit the MAML files under {maml_dir_name}/ and run generate_parquet_maml.sh to regenerate this file.')
-lines.append('! Generator script: parquet-fortran/tools/generate_parquet_maml.sh')
+lines.append('! Generator script: generate_parquet_maml.sh')
 lines.append('!===========================================')
-if is_base:
-    lines.append(f'!> Base-library MAML fixtures: embeds every .maml file under {maml_dir_name}/ bundled')
-    lines.append('!> with this library as a compiled-in string array, addressable by filename via')
-    lines.append('!> get_parquet_maml, plus the shared parquet_maml_file type and its')
-    lines.append('!> add_col_qc/set_col_qc qc-maml builders.')
-else:
-    lines.append('!> Downstream-project MAML fixtures: embeds every local .maml schema file as a')
-    lines.append('!> compiled-in string array, addressable by name via get_parquet_maml/set_maml,')
-    lines.append('!> already parsed into a ready-to-use parquet_schema.')
+lines.append(f'!> Embedded MAML schemas: every .maml file under {maml_dir_name}/ compiled in as a')
+lines.append('!> string array, addressable by name via get_parquet_maml/set_maml and already')
+lines.append('!> parsed into a ready-to-use parquet_schema.')
 lines.append(f'module {module_name}')
-if not is_base:
-    lines.append('    use parquet, only: parquet_schema, parquet_load_maml_file')
-    lines.append('    use parquet, only: parquet_parse_maml, parquet_validate_user_maml')
+lines.append('    use parquet_io, only: parquet_schema, parquet_load_maml_file')
+lines.append('    use parquet_io, only: parquet_parse_maml, parquet_validate_user_maml')
 lines.append('    implicit none')
 lines.append('    private')
 lines.append('')
-if is_base:
-    lines.append('    !> One schema field the base MAML declares but a user-supplied MAML omits;')
-    lines.append('    !> populated by parquet_validate_user_maml, one entry per missing field.')
-    lines.append('    type, public :: parquet_maml_missing_column')
-    lines.append('        character(len=:), allocatable :: name      !! The name of the field [required].')
-    lines.append('        character(len=:), allocatable :: unit      !! The unit of measurement for the field.')
-    lines.append('        character(len=:), allocatable :: info      !! A short description of the field.')
-    lines.append('        character(len=:), allocatable :: ucd       !! Unified Content Descriptor for IVOA (can have many).')
-    lines.append('        character(len=:), allocatable :: data_type !! The data type of the field [required]; base token')
-    lines.append('        !! only for a temporal column (unit/utc are in time_unit/is_utc).')
-    lines.append('        integer :: time_unit = 0 !! time/timestamp stored unit (a parquet_unit_* selector; 0 if not temporal).')
-    lines.append('        logical :: is_utc = .false. !! timestamp UTC-adjusted flag.')
-    lines.append('        integer :: array_size = 1 !! Maximum length of character strings.')
-    lines.append('        integer :: col_size = 1   !! The number of elements in the vector column.')
-    lines.append('    end type parquet_maml_missing_column')
-    lines.append('')
-    lines.append('    !> One col_map: entry: `- <internal_name>: <output_name>`, i.e. the field')
-    lines.append('    !> declared as `output_name` in this MAML fields: actually corresponds to')
-    lines.append('    !> the internal/canonical column named `internal_name`.')
-    lines.append('    type, public :: parquet_maml_col_map_entry')
-    lines.append('        character(len=:), allocatable :: internal_name !! Canonical (internal) column name.')
-    lines.append('        character(len=:), allocatable :: output_name   !! Renamed name as declared in fields:.')
-    lines.append('    end type parquet_maml_col_map_entry')
-    lines.append('')
-    lines.append('    !> One embedded or user-supplied MAML file: its raw source lines plus, once')
-    lines.append('    !> parsed/validated, the columns missing relative to the base schema and any')
-    lines.append('    !> col_map: renames it declares. add_col_qc/set_col_qc build a qc-maml')
-    lines.append('    !> incrementally (see parquet_maml_base_add_col_qc.f90).')
-    lines.append('    type, public :: parquet_maml_file')
-    lines.append('        logical :: user_maml = .false. !! true if this is a user defined MAML file')
-    lines.append('        character(len=:), allocatable :: name !! This MAML file name (embedded fixture name or path).')
-    lines.append('        character(len=:), allocatable :: lines(:) !! Raw MAML source, one array element per line.')
-    lines.append('        !> Columns present in the base MAML but missing from this (user) MAML;')
-    lines.append('        !> populated by parquet_validate_user_maml, consumed by parquet_read_maml.')
-    lines.append('        type(parquet_maml_missing_column), allocatable :: missing_columns(:)')
-    lines.append('        !> Parsed col_map: section (see parquet_maml_col_map_entry): exposes the')
-    lines.append('        !> renames this MAML declares, for inspection; populated by')
-    lines.append('        !> parquet_validate_user_maml. Renames are applied automatically whenever')
-    lines.append('        !> this MAML lines are parsed, independent of whether this is set.')
-    lines.append('        type(parquet_maml_col_map_entry), allocatable :: col_map(:)')
-    lines.append('    contains')
-    lines.append("        procedure :: add_col_qc => parquet_maml_add_col_qc !! Appends one qc: field entry.")
-    lines.append("        procedure :: set_col_qc => parquet_maml_set_col_qc !! In-place form; parses the name into its argument.")
-    lines.append('    end type parquet_maml_file')
-    lines.append('')
-    # add_col_qc/set_col_qc are two forms of the same type-bound builder for
-    # read-time qc-mamls: both append one qc: field entry from a compact
-    # "col, min, max, miss" string. add_col_qc is a subroutine returning the
-    # parsed name via an optional out-argument; set_col_qc is also a
-    # subroutine, but takes its single col_name argument as intent(inout): it
-    # holds the compact string on entry and the parsed name on exit, so a
-    # caller reuses one variable (call maml%set_col_qc(col)) instead of
-    # assigning a function result back into it -- a subroutine can't alias the
-    # same actual argument to separate intent(in)/intent(out) dummies, and a
-    # function returning character(len=:), allocatable is never used in this
-    # codebase (see "Build and compiler notes" in CLAUDE.md for why). Both
-    # bodies are hand-written (string parsing + validation) in the submodule
-    # src/parquet_maml_base_add_col_qc.f90 rather than embedded here, so they
-    # are deferred via module-procedure interfaces: parquet_maml_base is at the
-    # bottom of the module stack, so the body must stay self-contained (it
-    # cannot use parquet_metadata's validation helpers without a cycle).
-    lines.append('    interface')
-    lines.append('        !> Appends one qc: field entry to this MAML from a compact')
-    lines.append('        !> "col, min, max, miss" string. col_name (optional) returns the')
-    lines.append('        !> parsed column name. Implemented in the submodule')
-    lines.append('        !> src/parquet_maml_base_add_col_qc.f90.')
-    lines.append('        module subroutine parquet_maml_add_col_qc(self, qc_input, col_name)')
-    lines.append('            class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains a fields: entry.')
-    lines.append('            character(len=*), intent(in) :: qc_input !! compact "col, min, max, miss" string.')
-    lines.append('            character(len=:), allocatable, intent(out), optional :: col_name !! parsed column name.')
-    lines.append('        end subroutine parquet_maml_add_col_qc')
-    lines.append('        !> In-place form of add_col_qc: appends the same qc: field entry. `col_name` is')
-    lines.append('        !> `intent(inout)`: it holds the compact "col, min, max, miss" string on entry and')
-    lines.append('        !> the parsed column name on exit, so a caller reuses one variable')
-    lines.append('        !> (call maml%set_col_qc(col)) instead of naming a separate input and output.')
-    lines.append('        module subroutine parquet_maml_set_col_qc(self, col_name)')
-    lines.append('            class(parquet_maml_file), intent(inout) :: self !! qc-maml being built; gains a fields: entry.')
-    lines.append('            character(len=:), allocatable, intent(inout) :: col_name !! compact "col, min, max, miss" string on')
-    lines.append('            !! entry; parsed column name on exit.')
-    lines.append('        end subroutine parquet_maml_set_col_qc')
-    lines.append('    end interface')
-    lines.append('')
-
-check_for_collisions(maml_files)
-
-public_names = ['get_parquet_maml']
-if not is_base:
-    public_names.append('set_maml')
-function_blocks = []
-case_blocks = []
-
-for path in maml_files:
-    identifier = make_identifier(path.name)
-    public_names.append(identifier)
-    file_lines = path.read_text(encoding='utf-8').splitlines()
-    max_len = max((len(x) for x in file_lines), default=1)
-    rel_name = path.relative_to(maml_source_dir).as_posix()
-
-    # Non-base (downstream) mode returns a fully parsed parquet_schema --
-    # parquet_parse_maml populates %cinfo/%metadata from %maml right here,
-    # so callers get a ready-to-use schema with no separate parse step.
-    # Base mode keeps returning the raw parquet_maml_file: it's this
-    # library's own internal fixture accessor (parquet_maml_base sits below
-    # parquet_core.f90/parquet_schema in the module stack, so it cannot return a
-    # parquet_schema without a circular dependency), and its own callers
-    # parse the result themselves via parquet_parse_maml.
-    result_var = 'maml' if is_base else 'schema'
-    result_type = 'parquet_maml_file' if is_base else 'parquet_schema'
-    name_target = f'{result_var}%name' if is_base else f'{result_var}%maml%name'
-    lines_target = f'{result_var}%lines' if is_base else f'{result_var}%maml%lines'
-
-    block = []
-    if is_base:
-        block.extend(emit_doc('    ', f'Returns the embedded {rel_name} MAML fixture, unparsed (raw lines only).'))
-    else:
-        block.extend(emit_doc('    ', f'Returns the embedded {rel_name} MAML fixture, already parsed into a schema.'))
-    block.append(f'    function {identifier}() result({result_var})')
-    if is_base:
-        block.append(f'        type({result_type}) :: {result_var} !! the {rel_name} MAML, unparsed.')
-    else:
-        block.append(f'        type({result_type}) :: {result_var} !! the {rel_name} MAML, parsed into a schema.')
-    block.append('')
-    block.append(f'        {name_target} = {fstr(rel_name)}')
-    if file_lines:
-        block.append(f'        allocate(character(len={max_len}) :: {lines_target}({len(file_lines)}))')
-        for idx, text in enumerate(file_lines):
-            block.extend(emit_assignment(f'{lines_target}({idx + 1})', text))
-    else:
-        block.append(f'        allocate(character(len=1) :: {lines_target}(0))')
-    if not is_base:
-        block.append(f'        call parquet_parse_maml({result_var})')
-    block.append(f'    end function {identifier}')
-    function_blocks.append('\n'.join(block))
-
-    for label in case_labels(rel_name):
-        case_blocks.append(f'        case ({fstr(label)})')
-        case_blocks.append(f'            {result_var} = {identifier}()')
-
-for public_name in public_names:
+for public_name in ['get_parquet_maml', 'set_maml'] + accessor_names:
     lines.append(f'    public :: {public_name}')
 lines.append('')
 lines.append('contains')
 lines.append('')
-result_var = 'maml' if is_base else 'schema'
-result_type = 'parquet_maml_file' if is_base else 'parquet_schema'
-if is_base:
-    lines.append(f'    !> Returns the named embedded .maml fixture from {maml_dir_name}/ as a raw parquet_maml_file')
-    lines.append('    !> (unparsed lines only); error stops on an unknown name. A fixture is matched')
-    lines.append('    !> by its filename, with or without the .maml extension; one held in a')
-    lines.append('    !> subdirectory is also matched by its full relative path.')
-else:
-    lines.append('    !> Returns the named embedded MAML fixture, already parsed into a ready-to-use')
-    lines.append('    !> parquet_schema; error stops on an unknown name. A fixture is matched by its')
-    lines.append('    !> filename, with or without the .maml extension; one held in a subdirectory is')
-    lines.append('    !> also matched by its full relative path.')
-lines.append(f'    function get_parquet_maml(name) result({result_var})')
-lines.append('        character(len=*), intent(in) :: name !! embedded fixture name, with or without .maml.')
-if is_base:
-    lines.append(f'        type({result_type}) :: {result_var} !! the matching MAML, unparsed (raw lines only).')
-else:
-    lines.append(f'        type({result_type}) :: {result_var} !! the matching MAML, already parsed into a schema.')
+lines.append('    !> Returns the named embedded MAML fixture, already parsed into a ready-to-use')
+lines.append('    !> parquet_schema; error stops on an unknown name. A fixture is matched by its')
+lines.append('    !> filename, with or without the .maml extension; one held in a subdirectory is')
+lines.append('    !> also matched by its full relative path.')
+lines.extend(emit_lookup(case_blocks, SPEC))
 lines.append('')
-lines.append('        select case (trim(name))')
-lines.extend(case_blocks)
-lines.append('        case default')
-lines.append('            error stop "get_parquet_maml: unknown internal MAML file: " // trim(name)')
-lines.append('        end select')
-# No explicit validate call needed here in either mode: base mode never
-# validated at this point (its own callers parse/validate explicitly), and
-# non-base no longer needs to either -- each per-file function above already
-# ran parquet_parse_maml (which validates first) before returning its schema.
-lines.append('    end function get_parquet_maml')
+lines.append('    !> Resolves to a parquet_schema for either a user-supplied MAML file (parsed')
+lines.append('    !> and validated against the maml_default embedded schema) or, if maml_file')
+lines.append('    !> is absent/blank, straight to the embedded maml_default fixture itself.')
+lines.append('    function set_maml(maml_default, maml_file) result(schema)')
+lines.append("        character(len=*),intent(in) :: maml_default       !! default MAML name (input to get_parquet_maml)")
+lines.append("        character(len=*),intent(in),optional :: maml_file !! MAML file name (if provided, overrides default)")
+lines.append('        type(parquet_schema) :: schema !! resulting parsed schema.')
+lines.append('        type(parquet_schema) :: schema_base')
+lines.append('        logical :: has_maml_file')
+lines.append('        !')
+lines.append('        has_maml_file = present(maml_file)')
+lines.append('        if (has_maml_file) then')
+lines.append("            has_maml_file = trim(maml_file) /= ''")
+lines.append('        end if')
+lines.append('        !')
+lines.append('        if (has_maml_file) then')
+lines.append('            ! read MAML from file')
+lines.append('            schema%maml = parquet_load_maml_file(trim(maml_file))')
+lines.append('            ! validate user defined MAML file against the default (base) schema')
+lines.append('            schema_base = get_parquet_maml(trim(maml_default))')
+lines.append('            call parquet_validate_user_maml(schema_base%maml, schema%maml)')
+lines.append('            call parquet_parse_maml(schema)')
+lines.append('        else')
+lines.append('            ! no MAML provided, use default MAML')
+lines.append('            schema = get_parquet_maml(trim(maml_default))')
+lines.append('        end if')
+lines.append('        !')
+lines.append('    end function set_maml')
 lines.append('')
-if not is_base:
-    lines.append('    !> Resolves to a parquet_schema for either a user-supplied MAML file (parsed')
-    lines.append('    !> and validated against the maml_default embedded schema) or, if maml_file')
-    lines.append('    !> is absent/blank, straight to the embedded maml_default fixture itself.')
-    lines.append('    function set_maml(maml_default, maml_file) result(schema)')
-    lines.append("        character(len=*),intent(in) :: maml_default       !! default MAML name (input to get_parquet_maml)")
-    lines.append("        character(len=*),intent(in),optional :: maml_file !! MAML file name (if provided, overrides default)")
-    lines.append('        type(parquet_schema) :: schema !! resulting parsed schema.')
-    lines.append('        type(parquet_schema) :: schema_base')
-    lines.append('        logical :: has_maml_file')
-    lines.append('        !')
-    lines.append('        has_maml_file = present(maml_file)')
-    lines.append('        if (has_maml_file) then')
-    lines.append("            has_maml_file = trim(maml_file) /= ''")
-    lines.append('        end if')
-    lines.append('        !')
-    lines.append('        if (has_maml_file) then')
-    lines.append('            ! read MAML from file')
-    lines.append('            schema%maml = parquet_load_maml_file(trim(maml_file))')
-    lines.append('            ! validate user defined MAML file against the default (base) schema')
-    lines.append('            schema_base = get_parquet_maml(trim(maml_default))')
-    lines.append('            call parquet_validate_user_maml(schema_base%maml, schema%maml)')
-    lines.append('            call parquet_parse_maml(schema)')
-    lines.append('        else')
-    lines.append('            ! no MAML provided, use default MAML')
-    lines.append('            schema = get_parquet_maml(trim(maml_default))')
-    lines.append('        end if')
-    lines.append('        !')
-    lines.append('    end function set_maml')
-    lines.append('')
 lines.extend(function_blocks)
 lines.append('')
 lines.append(f'end module {module_name} ! GCOVR_EXCL_LINE')

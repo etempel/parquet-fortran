@@ -649,7 +649,7 @@ def wrap_doc(indent, marker, text, width=MAX_LINE):
     """Wraps a doc-comment to the project's 132-column limit, on word boundaries.
 
     Needed because column `info:`/`unit:` text is arbitrary-length user data interpolated into a
-    comment -- exactly what blows the limit. Mirrors generate_parquet_maml.sh's own emit_doc.
+    comment -- exactly what blows the limit. Mirrors the MAML generators' own emit_doc.
     """
     # `!>` opens the block and `!!` continues it, which is this project's convention (see
     # `.claude/rules/documentation.md`'s "FORD doc-comment conventions"): a leading `!>` is a predoc, and every

@@ -26,7 +26,7 @@ in `api-conventions.md`; module placement in `module-structure.md`; language and
   template) and the generator is re-run. Trust the banner, not the list below.
 - **Re-derive the set, never quote one**: `grep -lniE "GENERATED FILE -- DO NOT EDIT|automatically
   generated" src/*.f90`; each banner names its generator. One generator per area — MAML
-  (`generate_parquet_maml.sh` + `schemas/*.maml`), columns, tables, sorting/argsort, ziggurat,
+  (`generate_parquet_maml_base.sh` + `schemas/*.maml`), columns, tables, sorting/argsort, ziggurat,
   stats, the consumer-facing table example (`generate_user_table_code.py` from `table_types/`).
   Two carry a caveat: `generate_parquet_columns.py`'s kind table is the single declaration of a
   supported column kind, and `generate_parquet_stats.py` emits only the spec, the other stats

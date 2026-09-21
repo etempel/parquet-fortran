@@ -144,7 +144,7 @@ lint:
     - python3 tools/generate_stats_vectors.py --check
     - python3 tools/generate_kde_vectors.py --check
     - python3 tools/generate_interpolate_vectors.py --check
-    - bash tools/generate_parquet_maml.sh base --check
+    - bash tools/generate_parquet_maml_base.sh --check
     - python3 tools/generate_user_table_code.py --self-test
     - python3 tools/generate_user_table_code.py --check
     - python3 tools/generate_parquet_ziggurat.py --self-test
@@ -242,10 +242,11 @@ test:
     # graph got -- and is deliberately NOT here: it cold-builds a probe project per module,
     # including the C++ wrapper each time, which is minutes rather than seconds.
     - tools/check_argsort_standalone.sh
-    # Compiles what tools/generate_parquet_maml.sh emits in its DOWNSTREAM (no-argument) mode --
-    # the consumer-facing mode documented in doc/pages/utilities/embedding-maml-schemas.md, which
-    # nothing else here builds. The lint stage above runs `base --check`, and base mode emits no
-    # `use` statement at all, so the four names the downstream module imports from `parquet` are
+    # Compiles what the CONSUMER-FACING tools/generate_parquet_maml.sh emits -- the generator
+    # documented in doc/pages/utilities/embedding-maml-schemas.md for a downstream project's own
+    # schemas, which nothing else here builds. The lint stage above runs the sibling
+    # generate_parquet_maml_base.sh --check, and the module that one emits carries no `use`
+    # statement at all, so the four names the downstream module imports from `parquet_io` are
     # unchecked by it: rename one and every check stays green while every downstream project's next
     # regeneration fails to compile. It belongs in this stage rather than lint because it needs a
     # Fortran compiler and the library's own .mod files, neither of which the lint image has.

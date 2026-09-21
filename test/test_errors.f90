@@ -14853,9 +14853,9 @@ contains
             required_stderr="exceeds")
     end subroutine test_maml_line_too_long_aborts
 
-    !> get_parquet_maml's `case default` arm -- the one tools/generate_parquet_maml.sh emits into
-    !! both of its modes from the same template, so this pins the message a downstream project's
-    !! own generated parquet_maml produces too (doc/pages/utilities/embedding-maml-schemas.md).
+    !> get_parquet_maml's `case default` arm -- the one both MAML generators emit from the same
+    !! shared template, so this pins the message a downstream project's own generated parquet_maml
+    !! produces too (doc/pages/utilities/embedding-maml-schemas.md).
     !! The scenario looks a real fixture up first, so an implementation that aborted on every name
     !! would fail its control rather than pass this test.
     subroutine test_embedded_maml_unknown_name_aborts(error)

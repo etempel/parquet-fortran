@@ -802,10 +802,10 @@ contains
 
     module procedure kde_lscv_bandwidth
 
-        real(real64), allocatable :: y(:), v(:), hj(:)
-        real(real64) :: a, b, c, d, fc, fd
-        integer(int64) :: m
-        integer :: it
+        real(real64), allocatable :: y(:), v(:), hj(:), bw(:), bhat(:)
+        real(real64) :: a, b, c, d, fc, fd, dx, sv2
+        integer(int64) :: m, i
+        integer :: it, nl
         logical :: ok
 
         h = ieee_value(1.0_real64, ieee_quiet_nan)
@@ -817,6 +817,20 @@ contains
         call lscv_subsample(x, weights, y, v, m)
         if (m < 3_int64) return
         allocate(hj(m))
+        ! The fixed arm's two terms are self-convolutions of the weighted sample, so one binning
+        ! and one transform of it serve every candidate: each then costs a filter and an inverse
+        ! rather than a pass over every pair. The adaptive arm gets a zero-length `bhat` and the
+        ! exact double sum, its pair widths depending on the pair.
+        nl = 0
+        if (.not. adaptive .and. kde_lscv_grid_on) call lscv_binned_setup(y, v, m, h0, bw, bhat, dx, nl)
+        if (nl == 0) then
+            allocate(bw(0), bhat(0))
+            dx = 0.0_real64
+        end if
+        sv2 = 0.0_real64
+        do i = 1_int64, m
+            sv2 = sv2 + v(i)*v(i)
+        end do
 
         ! ---- golden section over the bracket ----
         ! The criterion has no derivative to follow and can have a shallow second minimum on a
@@ -828,10 +842,10 @@ contains
         c = b - KDE_GOLDEN*(b - a)
         d = a + KDE_GOLDEN*(b - a)
         fc = lscv_at(y, v, hj, m, c, adaptive, alpha, kernel_code, has_lower, lo, has_upper, hi, &
-            boundary_code, w_total, ok)
+            boundary_code, w_total, bw, bhat, dx, sv2, ok)
         if (.not. ok) return
         fd = lscv_at(y, v, hj, m, d, adaptive, alpha, kernel_code, has_lower, lo, has_upper, hi, &
-            boundary_code, w_total, ok)
+            boundary_code, w_total, bw, bhat, dx, sv2, ok)
         if (.not. ok) return
         do it = 1, KDE_LSCV_STEPS
             if (fc < fd) then
@@ -840,17 +854,17 @@ contains
                 fd = fc
                 c = b - KDE_GOLDEN*(b - a)
                 fc = lscv_at(y, v, hj, m, c, adaptive, alpha, kernel_code, has_lower, lo, has_upper, &
-                    hi, boundary_code, w_total, ok)
+                    hi, boundary_code, w_total, bw, bhat, dx, sv2, ok)
             else
                 a = c
                 c = d
                 fc = fd
                 d = a + KDE_GOLDEN*(b - a)
                 fd = lscv_at(y, v, hj, m, d, adaptive, alpha, kernel_code, has_lower, lo, has_upper, &
-                    hi, boundary_code, w_total, ok)
+                    hi, boundary_code, w_total, bw, bhat, dx, sv2, ok)
             end if
             if (.not. ok) return
-            if (b - a <= 1.0e-4_real64*(a + b)) exit
+            if (b - a <= KDE_LSCV_TOL*(a + b)) exit
         end do
         h = 0.5_real64*(a + b)
         if (.not. kde_positive_finite(h)) then
@@ -949,7 +963,7 @@ contains
     !! points AT THIS `h` -- which is what makes the criterion score the adaptive estimator rather
     !! than the fixed one, and what no plug-in rule can do.
     function lscv_at(y, v, hj, m, h, adaptive, alpha, kernel_code, has_lower, lo, has_upper, hi, &
-            boundary_code, w_total, ok) result(crit)
+            boundary_code, w_total, bw, bhat, dx, sv2, ok) result(crit)
         real(real64), intent(in)    :: y(:)     !! the drawn points, ascending
         real(real64), intent(in)    :: v(:)     !! their weights
         real(real64), intent(inout) :: hj(:)    !! scratch: each point's bandwidth at this `h`
@@ -964,6 +978,11 @@ contains
         real(real64), intent(in)    :: hi            !! the upper bound
         integer, intent(in)         :: boundary_code !! the boundary correction
         real(real64), intent(in)    :: w_total       !! the population's total weight
+        real(real64), intent(in)    :: bw(:)         !! the binned weights, or zero-length for the
+                                                     !! exact double sum
+        real(real64), intent(in)    :: bhat(:)       !! their cosine transform, the same length
+        real(real64), intent(in)    :: dx            !! the binning's cell width
+        real(real64), intent(in)    :: sv2           !! `sum(v**2)`, the exact diagonal's weight
         logical, intent(out)        :: ok            !! the criterion could be formed
         real(real64)                :: crit          !! the criterion's value
 
@@ -1005,6 +1024,13 @@ contains
             sw = sw + v(i)
         end do
         if (.not. (sw > 0.0_real64)) return
+
+        ! ---- the fixed arm: two convolutions instead of a pass over every pair ----
+        if (size(bhat) > 0) then
+            crit = lscv_binned_at(bw, bhat, dx, h, sw, sv2)
+            ok = crit == crit .and. abs(crit) <= huge(1.0_real64)
+            return
+        end if
 
         ! ---- the window each point's partners lie in ----
         ! `kde_norm_at` is EXACTLY zero beyond `KDE_NORM_CUT` standard deviations, and adding
@@ -1054,6 +1080,132 @@ contains
         ok = crit == crit .and. abs(crit) <= huge(1.0_real64)
 
     end function lscv_at
+
+    !> The binning the fixed arm's criterion reads, and its cosine transform: formed ONCE for the
+    !! whole golden section, since neither depends on the candidate bandwidth.
+    !!
+    !! `nl` comes back zero where no usable geometry exists -- a range too many narrow bandwidths
+    !! wide for `KDE_LSCV_GRID_MAX`, or a degenerate `h0` -- and every candidate then takes the
+    !! exact double sum instead.
+    !!
+    !! The geometry answers to the two ends of the bracket at once. The cells resolve the NARROWEST
+    !! candidate, `h0/KDE_LSCV_BRACKET`, at `KDE_CURVE_BINNED_PER_H` of them to a bandwidth, which
+    !! is where the binned estimate stops being distinguishable from the exact sum; the range
+    !! reaches the WIDEST candidate's own cut beyond both extreme points, `KDE_NORM_CUT*sqrt(2)`
+    !! times `h0*KDE_LSCV_BRACKET`, so that no pair's kernel is truncated by the array's end and
+    !! nothing wraps onto the far side of the cosine basis.
+    subroutine lscv_binned_setup(y, v, m, h0, bw, bhat, dx, nl)
+        real(real64), intent(in)               :: y(:)    !! the drawn points, ascending
+        real(real64), intent(in)               :: v(:)    !! their weights
+        integer(int64), intent(in)             :: m       !! how many points
+        real(real64), intent(in)               :: h0      !! the bracket's centre
+        real(real64), allocatable, intent(out) :: bw(:)   !! the binned weights
+        real(real64), allocatable, intent(out) :: bhat(:) !! their cosine transform
+        real(real64), intent(out)              :: dx      !! the cell width
+        integer, intent(out)                   :: nl      !! the transform's length; 0 where none
+
+        real(real64) :: reach, span, x0, t, frac, cells
+        integer(int64) :: i
+        integer :: k
+
+        nl = 0
+        dx = 0.0_real64
+        if (.not. kde_positive_finite(h0)) return
+        dx = h0/(KDE_LSCV_BRACKET*KDE_CURVE_BINNED_PER_H)
+        if (.not. (dx > 0.0_real64)) return
+        reach = KDE_NORM_CUT*sqrt(2.0_real64)*KDE_LSCV_BRACKET*h0
+        span = (y(m) - y(1)) + 2.0_real64*reach
+        if (.not. (span > 0.0_real64 .and. span <= huge(1.0_real64))) return
+        ! Formed in real64 and compared before any conversion: the quotient can be far past the
+        ! largest integer, and `int()` of that is undefined rather than large.
+        cells = span/dx + 2.0_real64
+        if (.not. (cells <= real(KDE_LSCV_GRID_MAX, real64))) return
+        nl = pf_next_pow2(max(4, int(ceiling(cells))))
+        if (nl > KDE_LSCV_GRID_MAX) then
+            nl = 0
+            return
+        end if
+        allocate(bw(nl), bhat(nl))
+        bw = 0.0_real64
+        x0 = y(1) - reach
+        ! Linear binning: each point's weight is split between the two centres around it, in
+        ! proportion to how near it lies to each. `reach` keeps every point clear of both ends, so
+        ! no weight is lost off the array.
+        do i = 1_int64, m
+            t = (y(i) - x0)/dx - 0.5_real64
+            k = int(floor(t)) + 1
+            frac = t - real(k - 1, real64)
+            if (k >= 1 .and. k <= nl) bw(k) = bw(k) + v(i)*(1.0_real64 - frac)
+            if (k + 1 >= 1 .and. k + 1 <= nl) bw(k + 1) = bw(k + 1) + v(i)*frac
+        end do
+        call pf_dct(bw, bhat, context="the LSCV criterion's binning")
+
+    end subroutine lscv_binned_setup
+
+    !> The LSCV criterion at one bandwidth, read off the binning rather than off every pair.
+    !!
+    !! Both terms are self-convolutions of the weighted sample: the integral term at the combined
+    !! width `h*sqrt(2)`, since the product of two normal densities integrates to one normal
+    !! density of that width at their separation, and the leave-one-out term at `h` with the
+    !! diagonal removed. A self-convolution read at the points themselves is, once the sample is
+    !! binned, the inner product of the binning with its own smoothing -- one filter and one
+    !! inverse transform each, whatever the sample's size.
+    !!
+    !! **The diagonal is subtracted EXACTLY, not from the binning.** `sum_i w_i**2 phi_h(0)` is a
+    !! closed form over the true weights, and it is the one part of the criterion that decides
+    !! whether every bandwidth below the data's resolution wins; leaving it to the binning would
+    !! put the binning's own error into the term the minimisation is most sensitive to.
+    !!
+    !! `KDE_GAUSS_MASS` puts the answer on the exact form's scale. The filter is normalised to one
+    !! at zero frequency, so the convolution carries the kernel RENORMALISED over its cut, while
+    !! `kde_norm_at` carries it unrenormalised; the factor between them is that mass. It is the
+    !! same at both widths, so it could not move the minimiser -- it is applied so that this
+    !! function and `lscv_at`'s pair loop can be compared as numbers.
+    function lscv_binned_at(bw, bhat, dx, h, sw, sv2) result(crit)
+        real(real64), intent(in) :: bw(:)   !! the binned weights
+        real(real64), intent(in) :: bhat(:) !! their cosine transform
+        real(real64), intent(in) :: dx      !! the cell width
+        real(real64), intent(in) :: h       !! the candidate bandwidth
+        real(real64), intent(in) :: sw      !! the drawn points' total weight
+        real(real64), intent(in) :: sv2     !! `sum(v**2)`
+        real(real64)             :: crit    !! the criterion's value
+
+        real(real64) :: s_int, s_all, s_loo
+
+        s_int = KDE_GAUSS_MASS*lscv_self_convolve(bw, bhat, dx, h*sqrt(2.0_real64))
+        s_all = KDE_GAUSS_MASS*lscv_self_convolve(bw, bhat, dx, h)
+        s_loo = s_all - kde_norm_at(0.0_real64, h)*sv2
+        crit = s_int/(sw*sw) - 2.0_real64*s_loo/(sw*(sw - 1.0_real64))
+
+    end function lscv_binned_at
+
+    !> `sum_i sum_j w_i w_j K_s(y_i - y_j)` over the binned sample: the inner product of the
+    !! binning with the binning convolved against the kernel at width `s`, divided by the cell
+    !! width because the filter conserves WEIGHT rather than answering a density.
+    function lscv_self_convolve(bw, bhat, dx, s) result(total)
+        real(real64), intent(in) :: bw(:)   !! the binned weights
+        real(real64), intent(in) :: bhat(:) !! their cosine transform
+        real(real64), intent(in) :: dx      !! the cell width
+        real(real64), intent(in) :: s       !! the kernel's standard deviation
+        real(real64)             :: total   !! the double sum
+
+        real(real64), allocatable :: lam(:), wk(:), sm(:)
+        integer :: nl, k
+
+        nl = size(bw)
+        allocate(lam(nl), wk(nl), sm(nl))
+        call kde_dct_filter(KDE_GAUSSIAN, s, dx, lam)
+        do k = 1, nl
+            wk(k) = bhat(k)*lam(k)
+        end do
+        call pf_idct(wk, sm, context="the LSCV criterion's convolution")
+        total = 0.0_real64
+        do k = 1, nl
+            total = total + bw(k)*sm(k)
+        end do
+        total = total/dx
+
+    end function lscv_self_convolve
 
     !> The normal density of standard deviation `s` at `z`, which both of the criterion's terms are
     !! built from. Zero where `s` is not usable, so a degenerate bandwidth contributes nothing
@@ -1146,6 +1298,10 @@ contains
     module procedure parquet_debug_set_kde_scan_grid
         kde_scan_grid_on = on
     end procedure parquet_debug_set_kde_scan_grid
+
+    module procedure parquet_debug_set_kde_lscv_grid
+        kde_lscv_grid_on = on
+    end procedure parquet_debug_set_kde_lscv_grid
 
     module procedure kde_term_integral
 

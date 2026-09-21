@@ -109,6 +109,7 @@ module parquet_kde
     public :: pf_kde_bandwidth
     public :: parquet_debug_kde_threads_used, parquet_debug_set_kde_pilot_cells, parquet_debug_kde_fit_nanos
     public :: parquet_debug_kde_scan_counts, parquet_debug_set_kde_scan_grid
+    public :: parquet_debug_set_kde_lscv_grid
     public :: parquet_debug_set_kde_isj_cells, parquet_debug_set_kde_sample_tries
     public :: parquet_debug_set_kde_binned_classes
     public :: parquet_set_verbosity, parquet_get_verbosity
@@ -402,6 +403,22 @@ module parquet_kde
     !! nothing a caller can use.
     integer, parameter :: KDE_LSCV_STEPS = 40
 
+    !> Where the golden section stops, as a share of the bracket's midpoint.
+    !!
+    !! The criterion is an ESTIMATE of the integrated squared error, and it lands tens of per cent
+    !! from the MISE optimum on an ordinary sample; four significant figures of its minimiser's
+    !! POSITION is precision it does not have. A per cent costs about nine of the two dozen
+    !! evaluations a ten-thousandth needs, and moves the chosen bandwidth by less than the
+    !! criterion's own scatter.
+    real(real64), parameter :: KDE_LSCV_TOL = 1.0e-2_real64
+
+    !> The longest transform the fixed arm's criterion will lay over its points. Its cells resolve
+    !! the NARROWEST candidate at `KDE_CURVE_BINNED_PER_H` to a bandwidth and its range covers the
+    !! WIDEST candidate's reach beyond both ends, so a sample whose range is very many bandwidths
+    !! wide asks for more than this; the criterion then falls back to the exact double sum, which
+    !! answers the same question more slowly.
+    integer, parameter :: KDE_LSCV_GRID_MAX = 262144
+
     !> `1/phi`, the golden section's ratio, at which the criterion's bracket is split.
     real(real64), parameter :: KDE_GOLDEN = 0.6180339887498949_real64
 
@@ -419,16 +436,31 @@ module parquet_kde
     !! where its range is known, which is the first place the default can be decided.
     integer, parameter :: KDE_METHOD_AUTO = -1
 
-    !> How many points per bandwidth a curve must have before it is filled by the binned method
-    !! rather than the exact sum, when the caller named neither.
+    !> How finely the binned method has to resolve the narrowest kernel before its answer stops
+    !! being distinguishable from the exact sum's: cells, or curve points, per bandwidth.
     !!
-    !! The binned curve's error falls as the SQUARE of its spacing, so the point count decides the
+    !! The binned estimate's error falls as the SQUARE of its spacing, so the spacing decides the
     !! accuracy as much as the kernel does: on one sample it is a quarter of the peak density at
     !! three points, a twentieth at eleven, and only past a few hundred does it reach the exact
-    !! sum's own agreement. Sixteen points per bandwidth is where the difference stops being
-    !! visible on a plot, and it is also where binning starts being worth doing: a curve too coarse
-    !! to bin accurately is too short for the saving to matter.
+    !! sum's own agreement. Sixteen per bandwidth is where the difference stops being visible on a
+    !! plot. Two places read it, and they ask the same question from opposite sides: `%curve`
+    !! GATES on it, filling a curve the caller spaced at least this finely by the binned method
+    !! rather than the exact sum when neither was named -- a curve too coarse to bin accurately is
+    !! too short for the saving to matter -- and `%fit(method="binned")` CHOOSES by it, giving its
+    !! grid this many cells to the narrowest kernel.
     real(real64), parameter :: KDE_CURVE_BINNED_PER_H = 16.0_real64
+
+    ! ---- the binned fit's own grid --------------------------------------------------------------
+
+    !> The fewest and the most cells the grid behind `pf_kde%fit(method="binned")` is given, either
+    !! side of the count `KDE_CURVE_BINNED_PER_H` asks for over the estimate's extent.
+    !!
+    !! The lower clamp keeps an estimate narrower than a few bandwidths from getting a grid too
+    !! coarse to interpolate; the upper one bounds the memory the transform's padded array takes,
+    !! and is reached only where the extent is thousands of narrow kernels wide -- a spread near
+    !! `KDE_SPREAD_MAX` over a range of many bandwidths. The cells are then wider than the
+    !! sixteenth, so the fit SAYS the clamp bound rather than quietly answering a coarser estimate.
+    integer, parameter :: KDE_FIT_MIN_CELLS = 64, KDE_FIT_MAX_CELLS = 65536
 
     !> The pilot `pf_kde%fit(adaptive=.true.)` builds reaches this many global bandwidths beyond the
     !! extreme points, clipped to the support.
@@ -525,6 +557,11 @@ module parquet_kde
     !! (`parquet_debug_set_kde_scan_grid`). Test-only, process-global and unsynchronised: the test
     !! that turns it off runs serially, and turns it back on.
     logical, save :: kde_scan_grid_on = .true.
+
+    !> Whether the fixed arm's LSCV criterion may read its binning and transform
+    !! (`parquet_debug_set_kde_lscv_grid`). Test-only, process-global and unsynchronised: the test
+    !! that turns it off runs serially, and turns it back on.
+    logical, save :: kde_lscv_grid_on = .true.
 
     ! ---- the types --------------------------------------------------------------------------
 
@@ -799,6 +836,8 @@ module parquet_kde
         integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
         integer :: rule_code = KDE_RULE_ISJ          !! how the bandwidth was chosen
         integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
+        integer :: method_code = KDE_METHOD_EXACT    !! how the queries are answered: the exact sum over
+                                                     !! the retained points, or the grid in `fit_grid`
         logical :: has_lower = .false.               !! a lower bound was given
         logical :: has_upper = .false.               !! an upper bound was given
         real(real64) :: lo = 0.0_real64              !! the lower bound, when given
@@ -861,6 +900,9 @@ module parquet_kde
         !! the adaptive rule; off for a fixed bandwidth
         type(pf_kde_grid) :: pilot_grid
         !! the pilot the adaptive rule reads, which `%pilot` hands back; uninitialised otherwise
+        type(pf_kde_grid) :: fit_grid
+        !! under `method = "binned"`, the finished grid every query is served from, over the whole
+        !! extent the retained kernels reach; uninitialised under `"exact"`, which is the default
     contains
         generic :: fit => kde_fit_f64, kde_fit_f32, kde_fit_col !! fits the estimate to a sample
         procedure, private :: kde_fit_f64 !! the `real64` sample
@@ -887,6 +929,7 @@ module parquet_kde
         procedure :: bandwidth => kde_bandwidth !! the resolved global bandwidth
         procedure :: kernel => kde_kernel_name !! the kernel's token
         procedure :: rule => kde_rule_name !! the bandwidth rule's token, or `"explicit"`
+        procedure :: method => kde_method_name !! how the queries are answered
         procedure :: bounds => kde_bounds !! the support; infinite where unbounded
         procedure :: n => kde_n !! `size(x)` at `%fit`
         procedure :: n_valid => kde_n_valid !! the population's size
@@ -935,7 +978,7 @@ module parquet_kde
         !> Fits the estimate to a `real64` sample: `call k%fit(x, [bandwidth], [rule], [adjust],
         !! [kernel], [adaptive], [alpha], [bandwidth_max], [spread_max], [lower], [upper],
         !! [boundary], [is_valid], [weights], [weight_type], [skipnan], [n_null], [n_nan],
-        !! [n_outside], [ok], [threads])`.
+        !! [n_outside], [ok], [threads], [method])`.
         !!
         !! `x` is the sample, retained as a sorted copy of its population. `bandwidth` is the
         !! kernel's standard deviation, a finite positive number; without it the bandwidth comes
@@ -982,9 +1025,23 @@ module parquet_kde
         !! `n_outside` report what each exclusion removed, and `ok` is `.false.` when the estimate
         !! is undefined. `threads` is the team for the sort, the rules' statistics and the pilot;
         !! the answer does not depend on it. Tokens are matched without regard to case.
+        !!
+        !! `method` chooses how every query is ANSWERED, and it is the one argument here that
+        !! changes what the fitted object MEANS rather than only what it costs. `"exact"`, the
+        !! default, sums the kernels of the points within reach of each query point. `"binned"`
+        !! answers from one grid `%fit` builds over the estimate's whole extent: each point is split
+        !! between the two cell centres around it and the cells are filled by one cosine transform,
+        !! so `%pdf`, `%cdf`, `%quantile`, `%curve` and `%sample` cost the CELLS rather than the
+        !! points, and a boundary correction costs nothing beyond them. It answers the estimate of a
+        !! sample whose points have been moved to the cell centres, which converges to the exact one
+        !! as the SQUARE of the cell width; the cells resolve the narrowest kernel, and the fit
+        !! advises where the extent is too wide for that. The square is the `"gaussian"` and
+        !! `"bspline"` kernels' rate; the other two converge more slowly, as they do on a binned
+        !! `%curve`. `%bandwidths`, `%bandwidth_at`, `%pilot` and `%bandwidth` read the rule and
+        !! answer the same under either method, and `%method` says which is in force.
         module subroutine kde_fit_f64(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
                 bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
-                n_null, n_nan, n_outside, ok, threads)
+                n_null, n_nan, n_outside, ok, threads, method)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real64), intent(in)               :: x(:)          !! the sample
@@ -1010,6 +1067,7 @@ module parquet_kde
             integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
             logical, intent(out), optional         :: ok            !! the estimate is defined
             integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
+            character(len=*), intent(in), optional :: method        !! how the queries are answered
         end subroutine kde_fit_f64
 
         !> The shared body of `pf_kde%fit` and `pf_kde_bandwidth`: everything up to and including
@@ -1021,7 +1079,7 @@ module parquet_kde
         !! to guarantee that is for there to be one of each rather than two written alike.
         module subroutine kde_fit_core(self, x, bandwidth_only, bandwidth, rule, adjust, kernel, adaptive, &
                 pilot, alpha, bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, &
-                skipnan, n_null, n_nan, n_outside, ok, threads)
+                skipnan, n_null, n_nan, n_outside, ok, threads, method)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real64), intent(in)               :: x(:)          !! the sample
@@ -1048,6 +1106,7 @@ module parquet_kde
             integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
             logical, intent(out), optional         :: ok            !! the estimate is defined
             integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
+            character(len=*), intent(in), optional :: method        !! how the queries are answered
         end subroutine kde_fit_core
 
         !> `pf_kde_bandwidth` over a `real64` sample; see the generic's own documentation.
@@ -1127,7 +1186,7 @@ module parquet_kde
         !! form.
         module subroutine kde_fit_f32(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
                 bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
-                n_null, n_nan, n_outside, ok, threads)
+                n_null, n_nan, n_outside, ok, threads, method)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real32), intent(in)               :: x(:)          !! the sample
@@ -1153,6 +1212,7 @@ module parquet_kde
             integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
             logical, intent(out), optional         :: ok            !! the estimate is defined
             integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
+            character(len=*), intent(in), optional :: method        !! how the queries are answered
         end subroutine kde_fit_f32
 
         !> A numeric `parquet_column`, widened to `real64` first: `int32`, `int64`, `float32` or
@@ -1160,7 +1220,7 @@ module parquet_kde
         !! mask, so `is_valid` cannot be given beside it; every other argument as the `real64` form.
         module subroutine kde_fit_col(self, x, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
                 bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
-                n_null, n_nan, n_outside, ok, threads)
+                n_null, n_nan, n_outside, ok, threads, method)
             implicit none
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             type(parquet_column), intent(in)       :: x             !! the sample, one numeric column
@@ -1186,6 +1246,7 @@ module parquet_kde
             integer(int64), intent(out), optional  :: n_outside     !! excluded as outside the support
             logical, intent(out), optional         :: ok            !! the estimate is defined
             integer, intent(in), optional          :: threads       !! the team for the sort and the pilot
+            character(len=*), intent(in), optional :: method        !! how the queries are answered
         end subroutine kde_fit_col
 
     end interface
@@ -1389,6 +1450,14 @@ module parquet_kde
             class(pf_kde), intent(in)                  :: self !! the fitted estimate
             character(len=:), allocatable, intent(out) :: name !! the rule's token
         end subroutine kde_rule_name
+
+        !> How the queries are answered, as its token: `call k%method(name)`, `"exact"` or
+        !! `"binned"` -- whichever `%fit`'s `method=` selected, which is `"exact"` by default.
+        module subroutine kde_method_name(self, name)
+            implicit none
+            class(pf_kde), intent(in)                  :: self !! the fitted estimate
+            character(len=:), allocatable, intent(out) :: name !! the method's token
+        end subroutine kde_method_name
 
         !> The support: `call k%bounds(lo, hi)`, with `-Infinity`/`+Infinity` where unbounded.
         module subroutine kde_bounds(self, lo, hi)
@@ -2595,6 +2664,18 @@ module parquet_kde
             implicit none
             logical, intent(in) :: on !! `.false.` scans every sample exactly
         end subroutine parquet_debug_set_kde_scan_grid
+
+        !> Turns the fixed arm's LSCV transform route off, so that the criterion is summed over
+        !! every pair, and on again.
+        !!
+        !! Test-only, and public for that reason: it is the control arm for the transform. A test
+        !! resolves a bandwidth with it on, resolves it again with it off and compares, which is
+        !! the only way from inside one process to show that the two routes score the same
+        !! criterion. Process-global and unsynchronised; turn it back on.
+        module subroutine parquet_debug_set_kde_lscv_grid(on)
+            implicit none
+            logical, intent(in) :: on !! `.false.` sums the criterion over every pair
+        end subroutine parquet_debug_set_kde_lscv_grid
 
     end interface
 

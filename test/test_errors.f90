@@ -3678,6 +3678,10 @@ contains
                 test_kde_grid_binned_too_long_aborts), &
             new_unittest('%curve(method="binned") refuses a single point', &
                 test_kde_curve_binned_one_point_aborts), &
+            new_unittest('pf_kde%fit refuses an unknown method token', &
+                test_kde_fit_method_token_aborts), &
+            new_unittest('%curve refuses a method= on a binned fit', &
+                test_kde_curve_method_on_binned_aborts), &
             new_unittest("pf_kde_grid%add after %finish aborts", &
                 test_kde_grid_add_after_finish_aborts), &
             new_unittest("pf_kde_grid%merge after %finish aborts", &
@@ -21706,6 +21710,18 @@ contains
         call check_kde_scenario(error, "kde_curve_binned_one_point", &
             'pf_kde%curve: method="binned" needs at least two points')
     end subroutine test_kde_curve_binned_one_point_aborts
+    !
+    subroutine test_kde_fit_method_token_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_method_token", &
+            'pf_kde%fit: method must be "exact" or "binned"')
+    end subroutine test_kde_fit_method_token_aborts
+    !
+    subroutine test_kde_curve_method_on_binned_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_method_on_binned", &
+            'pf_kde%curve: method= cannot be given for a fit made with method="binned"')
+    end subroutine test_kde_curve_method_on_binned_aborts
     !
     subroutine test_kde_grid_add_after_finish_aborts(error)
         type(error_type), allocatable, intent(out) :: error

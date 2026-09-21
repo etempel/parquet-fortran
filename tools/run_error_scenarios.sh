@@ -1936,6 +1936,8 @@ scenarios=(
     "kde_grid_method_token:1"
     "kde_grid_binned_too_long:1"
     "kde_curve_binned_one_point:1"
+    "kde_fit_method_token:1"
+    "kde_curve_method_on_binned:1"
     "kde_grid_add_after_finish:1"
     "kde_grid_merge_after_finish:1"
     "kde_grid_pilot_unfinished:1"

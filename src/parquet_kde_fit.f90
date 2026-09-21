@@ -73,7 +73,7 @@ contains
 
         call kde_fit_core(self, x, .false., bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, &
             bandwidth_max, spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, &
-            n_null, n_nan, n_outside, ok, threads)
+            n_null, n_nan, n_outside, ok, threads, method)
 
     end procedure kde_fit_f64
 
@@ -119,6 +119,10 @@ contains
         end if
         call kde_resolve_setup(EP, kernel, lower, upper, boundary, self%kernel_code, self%has_lower, &
             self%lo, self%has_upper, self%hi, self%boundary_code)
+        ! How the queries will be answered. Resolved with the other tokens although nothing reads it
+        ! until the bandwidths are known, so that an unknown token is refused before any work.
+        self%method_code = KDE_METHOD_EXACT
+        if (present(method)) call kde_resolve_method(EP, method, self%method_code)
         want_adaptive = .false.
         if (present(adaptive)) want_adaptive = adaptive
         if (present(alpha) .or. present(bandwidth_max) .or. present(spread_max)) then
@@ -391,28 +395,40 @@ contains
         call set_extent(self)
         call set_density_ends(self)
 
-        ! ---- each point's mass inside the support, where it can differ from one ----
-        call build_mass(self, usable)
-        ! A divisor that underflowed leaves nothing to answer with: a data condition, as every
-        ! other undefined estimate is.
-        if (.not. usable) then
-            self%h = ieee_value(1.0_real64, ieee_quiet_nan)
-            return
-        end if
-        ! ---- under a local-polynomial correction, the zones, their tables and `Z` ----
-        if (kde_is_corrected(self%boundary_code)) then
-            ! Said BEFORE the scan rather than after it: the advice is what tells a caller why the
-            ! call they are waiting on is taking so long.
-            if (self%has_lower .and. self%has_upper) then
-                if (2.0_real64*self%reach > self%hi - self%lo) &
-                    call advise_zone_covers_support(self%reach, self%hi - self%lo)
-            end if
-            call build_corrected(self)
-            ! The clipped estimate holding no mass leaves nothing to normalise by: a data condition,
-            ! answered as every other undefined estimate is.
-            if (.not. (self%znorm > 0.0_real64 .and. self%znorm <= huge(1.0_real64))) then
+        if (self%method_code == KDE_METHOD_BINNED) then
+            ! ---- the grid every query is served from ----
+            ! The exact sum's tables are not built at all here: no per-point mass, and no boundary
+            ! scan. The correction is carried by the cells, which is where a `"linear"` fit's whole
+            ! cost otherwise sits.
+            call build_fit_grid(self, EP, usable)
+            if (.not. usable) then
                 self%h = ieee_value(1.0_real64, ieee_quiet_nan)
                 return
+            end if
+        else
+            ! ---- each point's mass inside the support, where it can differ from one ----
+            call build_mass(self, usable)
+            ! A divisor that underflowed leaves nothing to answer with: a data condition, as every
+            ! other undefined estimate is.
+            if (.not. usable) then
+                self%h = ieee_value(1.0_real64, ieee_quiet_nan)
+                return
+            end if
+            ! ---- under a local-polynomial correction, the zones, their tables and `Z` ----
+            if (kde_is_corrected(self%boundary_code)) then
+                ! Said BEFORE the scan rather than after it: the advice is what tells a caller why
+                ! the call they are waiting on is taking so long.
+                if (self%has_lower .and. self%has_upper) then
+                    if (2.0_real64*self%reach > self%hi - self%lo) &
+                        call advise_zone_covers_support(self%reach, self%hi - self%lo)
+                end if
+                call build_corrected(self)
+                ! The clipped estimate holding no mass leaves nothing to normalise by: a data
+                ! condition, answered as every other undefined estimate is.
+                if (.not. (self%znorm > 0.0_real64 .and. self%znorm <= huge(1.0_real64))) then
+                    self%h = ieee_value(1.0_real64, ieee_quiet_nan)
+                    return
+                end if
             end if
         end if
         call system_clock(count=c1)
@@ -477,7 +493,7 @@ contains
         xw = real(x, real64)
         call kde_fit_f64(self, xw, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, bandwidth_max, &
             spread_max, lower, upper, boundary, is_valid, weights, weight_type, skipnan, n_null, n_nan, &
-            n_outside, ok, threads)
+            n_outside, ok, threads, method)
 
     end procedure kde_fit_f32
 
@@ -490,7 +506,7 @@ contains
         call kde_widen_column("pf_kde%fit", x, is_valid, wide, mask)
         call kde_fit_f64(self, wide, bandwidth, rule, adjust, kernel, adaptive, pilot, alpha, bandwidth_max, &
             spread_max, lower, upper, boundary, mask, weights, weight_type, skipnan, n_null, n_nan, &
-            n_outside, ok, threads)
+            n_outside, ok, threads, method)
 
     end procedure kde_fit_col
 
@@ -501,6 +517,10 @@ contains
     module procedure kde_pdf_r0
 
         call require_fitted(self, "pf_kde%pdf")
+        if (serves_from_grid(self)) then
+            call grid_pdf_r0(self%fit_grid, x, f)
+            return
+        end if
         f = density_at(self, x)
 
     end procedure kde_pdf_r0
@@ -514,6 +534,12 @@ contains
         call require_fitted(self, EP)
         n = size(x, kind=int64)
         if (size(f, kind=int64) /= n) call kde_abort(EP, "f must have one element per point of x")
+        ! Routed AFTER this binding's own size check, so that a mismatch is reported by the name
+        ! the caller used rather than by the grid's.
+        if (serves_from_grid(self)) then
+            call grid_pdf_r1(self%fit_grid, x, f, threads)
+            return
+        end if
         call kde_query_team(EP, threads, n, query_work(self), team)
         if (team <= 1) then
             kde_team_used = 1
@@ -536,6 +562,10 @@ contains
     module procedure kde_cdf_r0
 
         call require_fitted(self, "pf_kde%cdf")
+        if (serves_from_grid(self)) then
+            call grid_cdf_r0(self%fit_grid, x, p)
+            return
+        end if
         p = cdf_at(self, x)
 
     end procedure kde_cdf_r0
@@ -549,6 +579,10 @@ contains
         call require_fitted(self, EP)
         n = size(x, kind=int64)
         if (size(p, kind=int64) /= n) call kde_abort(EP, "p must have one element per point of x")
+        if (serves_from_grid(self)) then
+            call grid_cdf_r1(self%fit_grid, x, p, threads)
+            return
+        end if
         call kde_query_team(EP, threads, n, cdf_work(self), team)
         if (team <= 1) then
             kde_team_used = 1
@@ -572,6 +606,10 @@ contains
 
         call require_fitted(self, "pf_kde%quantile")
         call check_probability(p)
+        if (serves_from_grid(self)) then
+            call grid_quantile_r0(self%fit_grid, p, x)
+            return
+        end if
         x = quantile_at(self, p)
 
     end procedure kde_quantile_r0
@@ -591,6 +629,10 @@ contains
         do i = 1_int64, n
             call check_probability(p(i))
         end do
+        if (serves_from_grid(self)) then
+            call grid_quantile_r1(self%fit_grid, p, x, threads)
+            return
+        end if
         if (team <= 1) then
             kde_team_used = 1
             do i = 1_int64, n
@@ -624,6 +666,11 @@ contains
         ! read. `KDE_METHOD_AUTO` carries "the caller named none" as far as that point.
         mcode = KDE_METHOD_AUTO
         if (present(method)) then
+            ! The estimator was chosen at `%fit`: a binned fit has no exact sum to offer, and a
+            ! curve of it is its grid read at the curve's points. Naming a method here would be
+            ! asking this object to be the other one, so it is refused rather than ignored.
+            if (self%method_code == KDE_METHOD_BINNED) call kde_abort(EP, &
+                'method= cannot be given for a fit made with method="binned"')
             call kde_resolve_method(EP, method, mcode)
             ! The binned curve is one transform over the whole curve, so it needs two points to have
             ! a spacing at all. Asked for by name at one point, that is a refusal: the caller asked
@@ -674,6 +721,13 @@ contains
             end if
         end if
         call spaced(a, b, x)
+        ! A binned fit IS its grid, so the curve is that grid read at these points -- not a
+        ! second binning of the sample, which would answer a different estimate at a second
+        ! resolution. `%curve` refused a `method=` above for the same reason.
+        if (serves_from_grid(self)) then
+            call grid_pdf_r1(self%fit_grid, x, f, threads)
+            return
+        end if
         if (mcode == KDE_METHOD_AUTO) mcode = default_curve_method(self, n, a, b)
         if (mcode == KDE_METHOD_BINNED) then
             kde_team_used = 1
@@ -798,6 +852,17 @@ contains
         end select
     end procedure kde_kernel_name
 
+    module procedure kde_method_name
+        call require_fitted(self, "pf_kde%method")
+        ! What `%fit` was ASKED for, on a defined estimate and an undefined one alike, unlike
+        ! `%rule`: an unknown method is refused at `%fit`, so there is always one to name.
+        if (self%method_code == KDE_METHOD_BINNED) then
+            name = "binned"
+        else
+            name = "exact"
+        end if
+    end procedure kde_method_name
+
     module procedure kde_rule_name
         call require_fitted(self, "pf_kde%rule")
         ! An undefined estimate was given no bandwidth by anything, so no rule produced one and
@@ -887,6 +952,8 @@ contains
         write(u, '(2x,a,a)') kde_label("kernel"), token
         call kde_rule_name(self, token)
         write(u, '(2x,a,a)') kde_label("rule"), token
+        call kde_method_name(self, token)
+        write(u, '(2x,a,a)') kde_label("method"), token
         write(u, '(2x,a,es24.16e3)') kde_label("bandwidth"), self%h
         write(u, '(2x,a,i0)') kde_label("n"), self%cnt_all
         write(u, '(2x,a,i0)') kde_label("n_valid"), self%cnt_valid
@@ -941,6 +1008,7 @@ contains
         self%a0min = 1.0_real64
         self%adapt = kde_adapt()
         self%pilot_grid = pf_kde_grid()
+        self%fit_grid = pf_kde_grid()
         self%hmax = 0.0_real64
         self%reach = 0.0_real64
         self%ext_lo = 0.0_real64
@@ -952,6 +1020,7 @@ contains
         self%kernel_code = KDE_GAUSSIAN
         self%rule_code = KDE_RULE_ISJ
         self%boundary_code = KDE_BOUNDARY_NONE
+        self%method_code = KDE_METHOD_EXACT
         self%has_lower = .false.
         self%has_upper = .false.
         self%lo = 0.0_real64
@@ -1018,10 +1087,35 @@ contains
         call parquet_emit_advice('pf_kde%fit: under boundary="linear" the corrected zones span ' // &
             'about ' // trim(ratio_text) // ' times the whole support, so the fit scans the entire ' // &
             'domain at the narrowest kernel''s resolution rather than correcting a boundary. Narrow ' // &
-            'the widest kernel with spread_max= or bandwidth_max=, or use %curve(method="binned") ' // &
-            'or pf_kde_grid for a grid estimate.')
+            'the widest kernel with spread_max= or bandwidth_max=, or refit with method="binned", ' // &
+            'which carries the correction in its cells and builds no scan at all.')
 
     end subroutine advise_zone_covers_support
+
+    !> Says when a `method = "binned"` fit had to take fewer cells than the narrowest kernel asks
+    !! for, so that its grid resolves that kernel more coarsely than `KDE_CURVE_BINNED_PER_H`.
+    !!
+    !! The binned estimate's error falls as the SQUARE of the cell width, so a clamp that costs a
+    !! factor `k` in cells costs `k**2` in accuracy. It is reached only where the extent is
+    !! thousands of narrow kernels wide, which is a spread near the cap over a wide range -- and
+    !! there the remedy is to narrow the spread, not to want more cells.
+    !!
+    !! ADVICE, and not a warning, on the same reasoning as the other two here: it is a remark about
+    !! the configuration, not a finding about the data.
+    subroutine advise_fit_cells_clamped(want)
+        real(real64), intent(in) :: want !! the cells the narrowest kernel asked for
+
+        character(len=32) :: want_text, got_text
+
+        write (want_text, "(i0)") int(min(want, 1.0e18_real64), int64)
+        write (got_text, "(i0)") KDE_FIT_MAX_CELLS
+        call parquet_emit_advice('pf_kde%fit: method="binned" wanted about ' // trim(want_text) // &
+            ' cells to resolve the narrowest kernel over the estimate''s extent and is held to ' // &
+            trim(got_text) // ', so the cells are wider than that kernel''s sixteenth and the ' // &
+            'estimate is correspondingly coarser. Narrow the spread with spread_max= or ' // &
+            'bandwidth_max=, or bound the support, to bring the extent back inside the count.')
+
+    end subroutine advise_fit_cells_clamped
 
     !> Which method `%curve` fills itself by when the caller named none: `"binned"` only where it is
     !! as accurate as the exact sum, `"exact"` everywhere else.
@@ -1069,6 +1163,18 @@ contains
         mcode = KDE_METHOD_BINNED
 
     end function default_curve_method
+
+    !> Whether a query is answered from the fit's own grid rather than by the exact sum: a
+    !! `method = "binned"` fit that is DEFINED, which is the one state in which `fit_grid` holds an
+    !! estimate to read. An undefined fit keeps the exact path, whose NaN is the documented answer
+    !! under either method and which the grid would abort on instead, never having been filled.
+    pure function serves_from_grid(self) result(yes)
+        class(pf_kde), intent(in) :: self !! the fitted estimate
+        logical                   :: yes  !! the grid answers this query
+
+        yes = self%method_code == KDE_METHOD_BINNED .and. self%defined
+
+    end function serves_from_grid
 
     !> Aborts unless the object has been fitted. Impure deliberately, like every guard here.
     subroutine require_fitted(self, entry)
@@ -1666,6 +1772,12 @@ contains
 
         call require_fitted(self, EP)
         n = size(v, kind=int64)
+        ! The grid draws by inverting its own piecewise-linear density, so a binned fit's draws
+        ! follow the estimate it actually answers rather than the exact sum it does not.
+        if (serves_from_grid(self)) then
+            call grid_sample_s64(self%fit_grid, v, seed, stream, threads)
+            return
+        end if
         call kde_query_team(EP, threads, n, draw_work(self), team)
         if (.not. self%defined) then
             v = ieee_value(1.0_real64, ieee_quiet_nan)
@@ -2041,6 +2153,136 @@ contains
         call grid_density(g, f)
 
     end subroutine binned_curve
+
+    !> The grid a `method = "binned"` fit answers every query from: one binned `pf_kde_grid` over
+    !! the whole extent the retained kernels reach, filled from the fit's own points, weights and
+    !! per-point bandwidths.
+    !!
+    !! Built by hand rather than through `%init`, as `binned_curve` and `zone_grid` are, because the
+    !! bandwidths handed to the binning are the FIT's own -- one per point, already capped and
+    !! already read off the pilot -- where a grid built through `%init` would read the pilot a
+    !! second time. KEEP THE THREE IN STEP.
+    !!
+    !! `ok` is `.false.` where no grid can be laid over the extent, which leaves the estimate
+    !! undefined exactly as every other data condition does.
+    subroutine build_fit_grid(self, entry, ok)
+        class(pf_kde), intent(inout) :: self  !! the estimate; its `fit_grid` filled
+        character(len=*), intent(in) :: entry !! the binding, for the message
+        logical, intent(out)         :: ok    !! a grid was built
+
+        real(real64), allocatable :: cb(:), one(:)
+        real(real64) :: a, b, lim, hmin, hhi, want, below, above
+        integer(int64) :: j, m
+        integer :: nc
+
+        ok = .false.
+        m = size(self%x, kind=int64)
+        if (m < 1_int64) return
+        ! The range: the extent the kernels reach, held inside half the largest number at either end
+        ! so that its width is finite, then clipped to the support. Every bound is tested before it
+        ! is formed, as `kde_build_pilot` tests its own: the overflow itself would stop a program
+        ! under nagfor. Written as comparisons rather than `min`/`max`, which raise IEEE_INVALID on
+        ! the NaN a kept NaN puts in the extent.
+        lim = 0.5_real64*huge(1.0_real64)
+        a = -lim
+        b = lim
+        if (self%ext_lo > -lim) a = self%ext_lo
+        if (self%ext_hi < lim) b = self%ext_hi
+        if (self%has_lower) then
+            if (a < self%lo) a = self%lo
+        end if
+        if (self%has_upper) then
+            if (b > self%hi) b = self%hi
+        end if
+        ! Under `"linear"` a grid keeps the two rules `%init` states: its range starts at a bound
+        ! that was given and ends at the other, and where only one is given its FREE edge lies at
+        ! least one reach from that bound, because the weight a grid counts beyond its own range is
+        ! the plain kernel's mass there.
+        if (self%boundary_code == KDE_BOUNDARY_LINEAR) then
+            if (self%has_lower) a = self%lo
+            if (self%has_upper) b = self%hi
+            if (self%has_lower .neqv. self%has_upper) then
+                if (self%has_lower) then
+                    if (b - a < self%reach .and. a <= lim - self%reach) b = a + self%reach
+                else
+                    if (b - a < self%reach .and. b >= self%reach - lim) a = b - self%reach
+                end if
+            end if
+        end if
+        if (.not. (a < b)) return
+        ! The narrowest and the widest kernel: the first sets how fine the cells have to be, the
+        ! second how far the transform has to reach.
+        hmin = self%hb(1)
+        hhi = self%hb(1)
+        if (self%hstride /= 0_int64) then
+            do j = 1_int64, m
+                if (self%hb(j) < hmin) hmin = self%hb(j)
+                if (self%hb(j) > hhi) hhi = self%hb(j)
+            end do
+        end if
+        if (.not. (hmin > 0.0_real64)) return
+        ! The cells: `KDE_CURVE_BINNED_PER_H` to the NARROWEST kernel, which is the sharpest feature
+        ! they have to resolve. Formed in real64 and compared before any conversion, since the
+        ! quotient can be far past the largest integer and `int()` of that is undefined rather than
+        ! large.
+        want = KDE_CURVE_BINNED_PER_H*((b - a)/hmin)
+        if (want <= real(KDE_FIT_MAX_CELLS, real64)) then
+            nc = int(ceiling(want))
+            if (nc < KDE_FIT_MIN_CELLS) nc = KDE_FIT_MIN_CELLS
+        else
+            nc = KDE_FIT_MAX_CELLS
+            call advise_fit_cells_clamped(want)
+        end if
+
+        self%fit_grid%initialised = .true.
+        self%fit_grid%nc = nc
+        self%fit_grid%dx = (b - a)/real(nc, real64)
+        self%fit_grid%x0 = a
+        self%fit_grid%x1 = b
+        self%fit_grid%h = self%h
+        self%fit_grid%kernel_code = self%kernel_code
+        self%fit_grid%boundary_code = self%boundary_code
+        self%fit_grid%has_lower = self%has_lower
+        self%fit_grid%has_upper = self%has_upper
+        self%fit_grid%lo = self%lo
+        self%fit_grid%hi = self%hi
+        self%fit_grid%method_code = KDE_METHOD_BINNED
+        if (.not. (self%fit_grid%dx > 0.0_real64)) return
+        allocate(self%fit_grid%acc(nc))
+        self%fit_grid%acc = 0.0_real64
+        ! Declines rather than aborting: a transform too long for the cells is a property of the
+        ! bandwidths this sample produced, so it leaves the estimate undefined like every other one.
+        call kde_binned_setup(self%fit_grid, entry, hmin, hhi, ok)
+        if (.not. ok) return
+        allocate(self%fit_grid%bins(self%fit_grid%ntr, self%fit_grid%nclass), cb(self%fit_grid%ntr))
+        self%fit_grid%bins = 0.0_real64
+        call kde_padded_centres(self%fit_grid, cb)
+        below = 0.0_real64
+        above = 0.0_real64
+        if (self%weighted) then
+            call kde_bin_range(self%fit_grid, cb, self%x, self%w, .true., self%hb, self%hstride, &
+                1_int64, m, self%fit_grid%bins, below, above)
+        else
+            allocate(one(1))
+            one(1) = 1.0_real64
+            call kde_bin_range(self%fit_grid, cb, self%x, one, .false., self%hb, self%hstride, &
+                1_int64, m, self%fit_grid%bins, below, above)
+        end if
+        self%fit_grid%w_below = below
+        self%fit_grid%w_above = above
+        self%fit_grid%w_total = self%w_total
+        self%fit_grid%cnt_all = self%cnt_all
+        self%fit_grid%cnt_valid = self%cnt_valid
+        self%fit_grid%cnt_null = self%cnt_null
+        self%fit_grid%cnt_nan = self%cnt_nan
+        self%fit_grid%cnt_out = self%cnt_out
+        ! Closed through the grid's own seam, so that a binned fit and a binned grid of the same
+        ! geometry answer the same bits: `%finish` transforms the bins, forms the mass every query
+        ! normalises by, and builds the running integral `%cdf` and `%quantile` read.
+        call grid_finish(self%fit_grid)
+        ok = .true.
+
+    end subroutine build_fit_grid
 
     ! ==========================================================================================
     ! The local-polynomial boundary corrections

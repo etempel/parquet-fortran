@@ -33,7 +33,8 @@ bracket:
 ```fortran
 call k%fit(x, [bandwidth], [rule], [adjust], [kernel], [adaptive], [pilot], [alpha], &
            [bandwidth_max], [spread_max], [lower], [upper], [boundary], [is_valid], [weights], &
-           [weight_type], [skipnan], [n_null], [n_nan], [n_outside], [ok], [threads])
+           [weight_type], [skipnan], [n_null], [n_nan], [n_outside], [ok], [threads], &
+           [method])
 call k%pdf(x, f, [threads])
 call k%cdf(x, p, [threads])
 call k%quantile(p, x, [threads])
@@ -84,6 +85,33 @@ in proportion to the number of points within one kernel's reach rather than to t
   every kernel, or binning and one transform -- and
   [Two ways to fill a grid](#two-ways-to-fill-a-grid) says which to reach for. See
   [Streaming into a grid](#streaming-into-a-grid-pf_kde_grid).
+
+### `method="binned"`: a fit that answers from a grid
+
+`%fit(..., method="binned")` takes the second form's speed without its bookkeeping. The
+sample, the population rules, the bandwidth rule and the adaptive kernel are all the first
+form's; what changes is that `%fit` ends by laying one grid over the whole extent its kernels
+reach and every query afterwards reads that grid. `"exact"` is the default and is what every
+call that names no method gets.
+
+It is an opt-in because it changes what the object MEANS, not only what it costs: the binned
+estimate is the estimate of a sample whose points have been moved to the cell centres, and it
+converges to the exact one as the square of the cell width. `%fit` gives its grid sixteen
+cells to the narrowest kernel, which is where that difference stops being visible, and says so
+when the extent is too wide for the count it is held to.
+
+**It is worth reaching for where the exact estimator's cost is in the boundary, not in the
+points.** Under `boundary="linear"` with an adaptive kernel, a fit scans each corrected zone
+for the stretches the clip removes; on a density that approaches zero the widened kernels make
+that zone the whole support, and the scan is the dominant cost of the fit. A binned fit has no
+scan at all -- the correction is carried by the cells -- so its cost is set by the cells rather
+than by the sample, and it is flat in the number of points. `bench/benchmark_kde.sh` measures
+both.
+
+What is unchanged: `%bandwidths`, `%bandwidth_at`, `%pilot` and `%bandwidth` read the rule and
+answer the same under either method, and the counts and the support are the same. What is
+different: `%pdf`, `%cdf`, `%quantile`, `%curve` and `%sample` are answered from the grid, and
+`%curve` refuses a `method=` of its own. `%method(name)` says which is in force.
 
 ## Kernels, and what `bandwidth` means
 
@@ -267,13 +295,20 @@ without assuming anything about the density.
   adaptive estimator's own bandwidth, which no plug-in rule can do: a plug-in rule answers the
   question the fixed estimator asks. This is what to reach for when the adaptive kernel's
   bandwidth has to be measured on the data rather than derived from the fixed one's.
-- **It is the expensive rule.** The criterion is a double sum over the points, evaluated a few tens
-  of times, so it is quadratic where the other rules are linear. Above a few thousand points it is
-  evaluated over a subsample drawn at a fixed seed, which bounds the cost whatever the sample's
-  size; the answer is then reproducible but is not a function of every point.
+- **It is the expensive rule**, and how expensive depends on which estimator it is scoring. For a
+  FIXED bandwidth both of its terms are self-convolutions of the weighted sample, so the sample is
+  binned once and each candidate costs one filtered transform rather than a pass over every pair.
+  For the ADAPTIVE kernel the widths depend on the pair, which no single convolution gives, and the
+  criterion is summed over the pairs within five bandwidths of each other. Either way it is
+  evaluated, above a few thousand points, over a subsample drawn at a fixed seed, which bounds the
+  cost whatever the sample's size; the answer is then reproducible but is not a function of every
+  point.
 - **It is a high-variance criterion.** That is its known weakness, and the price of assuming
   nothing: on one sample its bandwidth can sit some tens of per cent from the one that minimises
-  the true error, in either direction. The ISJ rule is the better default and remains it.
+  the true error, in either direction. The ISJ rule is the better default and remains it. The
+  minimiser is located to a per cent of its own position and no further, because a criterion that
+  scatters by tens of per cent does not resolve more than that; `bench/benchmark_kde.sh MODE=mise`
+  scores the rule against the exact error, and scores the binned criterion beside the summed one.
 - **Where the criterion has no minimum to find**, the fit is undefined (`ok = .false.`, every
   answer NaN), as it is for any rule that finds no scale.
 
@@ -571,6 +606,10 @@ instead of the grid pass.
     resolve the kernel whatever the rest says. A one-point curve is always exact, since it cannot
     be binned at all -- though `method="binned"` named there still refuses. `%curve` does not
     report which method it used; those are the rules.
+
+    **On a fit made with `method="binned"` the argument is refused.** That object is its
+    grid, so a curve of it is that grid read at the curve's points and there is no exact sum
+    to choose instead; the choice was made at `%fit`.
 - **`threads=`** on the array forms of `%pdf`, `%cdf` and `%quantile`, and on `%curve`, shares the
   points among a team. Each point is answered by one thread alone, so the answer is the same bits at
   every thread count, and a team opens only where the points within the kernels' reach make the
@@ -578,8 +617,9 @@ instead of the grid pass.
 
 The counts come back as `int64` functions: `%n()` (the elements passed to `%fit`), `%n_valid()`
 (the population), `%n_null()`, `%n_nan()` and `%n_outside()`. `%sum_weights()` is `sum(w)` over the
-population, `%kernel(name)` the kernel's token, and `%is_fitted()` says whether `%fit` has run since
-the last `%clear()`. `%print([unit])` writes all of it as one block.
+population, `%kernel(name)` the kernel's token, `%method(name)` how the queries are answered, and
+`%is_fitted()` says whether `%fit` has run since the last `%clear()`. `%print([unit])` writes all of
+it as one block.
 
 ## Streaming into a grid: `pf_kde_grid`
 
@@ -981,7 +1021,8 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | a range wider than the largest number, or cells too narrow to represent | `pf_kde_grid%init: the cell width (xmax - xmin)/ncells must be a finite, positive number` |
 | `[xmin, xmax]` reaching outside `[lower, upper]` | `pf_kde_grid%init: the grid's range must lie inside the support` |
 | under `boundary="linear"`, a range that does not start at `lower` or end at `upper` (R1) | `pf_kde_grid%init: under boundary="linear" the grid's range must start at lower and end at upper` |
-| an unknown `method` | `pf_kde_grid%init: method must be "exact" or "binned"` (or `pf_kde%curve`) |
+| an unknown `method` | `pf_kde_grid%init: method must be "exact" or "binned"` (or `pf_kde%fit`, `pf_kde%curve`) |
+| `%curve(method=)` on a fit made with `method="binned"` | `pf_kde%curve: method= cannot be given for a fit made with method="binned"` |
 | `method="binned"` with a bandwidth whose padded transform would be too long | `pf_kde_grid%init: method="binned" needs a transform longer than ... cells can carry` |
 | `%curve(method="binned")` on a single point | `pf_kde%curve: method="binned" needs at least two points` |
 | `pilot=` without `adaptive=.true.` | `pf_kde%fit: pilot= needs adaptive=.true.` |

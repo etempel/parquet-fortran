@@ -17,7 +17,7 @@ program benchmark_kde
     use iso_fortran_env, only : real64, int64, error_unit
     use parquet_kde, only : pf_kde, pf_kde_grid, pf_kde_bandwidth, parquet_debug_kde_fit_nanos, &
         parquet_debug_kde_threads_used, parquet_debug_set_kde_sample_tries, &
-        parquet_debug_kde_scan_counts
+        parquet_debug_kde_scan_counts, parquet_debug_set_kde_lscv_grid
     use parquet_argsort, only : pf_argsort
     use parquet_random, only : pf_random_at, pf_random_normal_at, pf_random_key
 #ifdef _OPENMP
@@ -336,6 +336,9 @@ contains
             "reflect"]
         !> The two rules the document measures: a plug-in rule and the cross-validated one.
         character(len=4), parameter :: RULES(2) = [character(len=4) :: "isj", "lscv"]
+        !> How the fit answers: the exact sum over the retained points, or one grid over the whole
+        !! extent. The second builds no boundary scan at all, which is what this mode watches.
+        character(len=6), parameter :: HOWS(2) = [character(len=6) :: "exact", "binned"]
         !> The support's upper bound, as `analyse_kde` has it.
         real(real64), parameter :: XMAX = 2.0_real64
         !> What the document calls usable in practice, for the largest adaptive linear fit.
@@ -343,13 +346,14 @@ contains
 
         type(pf_kde) :: k
         real(real64), allocatable :: x(:), hb(:)
-        real(real64) :: best, fit_ms, hh, hmax, hmin, checksum, target_fit(2), exact_pc
+        real(real64) :: best, fit_ms, hh, hmax, hmin, checksum, target_fit(2), binned_fit(2), exact_pc
         integer(int64) :: sizes(3), nn, ns(3), sc(2)
-        integer :: sz, ru, ad, mm
+        integer :: sz, ru, ad, mm, hw
 
         sizes = [max(1000_int64, n/100_int64), max(1000_int64, n/10_int64), n]
         checksum = 0.0_real64
         target_fit = -1.0_real64
+        binned_fit = -1.0_real64
         print '(a)', "=== the boundary scan: what the adaptive linear fit costs, and why ==="
         print '(a,i0,a)', "the linear density f(x) = x/2 on [0, 2] at its own quantiles, bspline " // &
             "kernel, lower = 0, upper = 2, fastest of ", rounds, " laps (one lap once a fit passes a second)"
@@ -358,7 +362,7 @@ contains
         print '(a)', "steps: samples the boundary scan took; exact%: those of them the grid could " // &
             "not decide and the exact estimator answered"
         print '(a)', ""
-        print '(a)', "        n  rule  adapt  boundary        fit ms   sort ms  pilot ms lookup ms" // &
+        print '(a)', "        n  rule  adapt  boundary  method      fit ms   sort ms  pilot ms lookup ms" // &
             "     h_max/h h_max/h_min     steps  exact%"
         do sz = 1, 3
             nn = sizes(sz)
@@ -371,8 +375,9 @@ contains
             do ru = 1, 2
                 do ad = 1, 2
                     do mm = 1, 3
+                    do hw = 1, 2
                         best = time_scan_fit(k, x, trim(RULES(ru)), ad == 2, trim(METHODS(mm)), &
-                            XMAX, rounds, ns)
+                            trim(HOWS(hw)), XMAX, rounds, ns)
                         call parquet_debug_kde_scan_counts(sc(1), sc(2))
                         fit_ms = 1000.0_real64*best
                         hh = k%bandwidth()
@@ -388,11 +393,13 @@ contains
                         ! everywhere has removed nothing.
                         exact_pc = 0.0_real64
                         if (sc(1) > 0_int64) exact_pc = 100.0_real64*real(sc(2), real64)/real(sc(1), real64)
-                        print '(i9,2x,a4,2x,a5,2x,a11,4f10.2,2f12.3,i10,f8.1)', nn, RULES(ru), &
-                            merge("yes  ", "no   ", ad == 2), METHODS(mm), fit_ms, &
+                        print '(i9,2x,a4,2x,a5,2x,a11,2x,a6,4f10.2,2f12.3,i10,f8.1)', nn, RULES(ru), &
+                            merge("yes  ", "no   ", ad == 2), METHODS(mm), HOWS(hw), fit_ms, &
                             1.0e-6_real64*real(ns(1), real64), 1.0e-6_real64*real(ns(2), real64), &
                             1.0e-6_real64*real(ns(3), real64), hmax/hh, hmax/hmin, sc(1), exact_pc
-                        if (sz == 3 .and. ad == 2 .and. mm == 1) target_fit(ru) = fit_ms
+                        if (sz == 3 .and. ad == 2 .and. mm == 1 .and. hw == 1) target_fit(ru) = fit_ms
+                        if (sz == 3 .and. ad == 2 .and. mm == 1 .and. hw == 2) binned_fit(ru) = fit_ms
+                    end do
                     end do
                 end do
             end do
@@ -405,11 +412,12 @@ contains
         print '(a)', "this mode never exits nonzero on it, since a timing on a shared machine is " // &
             "not a property of the code."
         print '(a)', ""
-        print '(a)', "  rule        n     fit ms    target      verdict"
+        print '(a)', "  rule        n     fit ms    target      verdict   binned ms     ratio"
         do ru = 1, 2
             if (target_fit(ru) < 0.0_real64) cycle
-            print '(2x,a4,i9,2f10.2,6x,a)', RULES(ru), sizes(3), target_fit(ru), TARGET_MS, &
-                merge("met   ", "MISSED", target_fit(ru) <= TARGET_MS)
+            print '(2x,a4,i9,2f10.2,6x,a,2f10.2)', RULES(ru), sizes(3), target_fit(ru), TARGET_MS, &
+                merge("met   ", "MISSED", target_fit(ru) <= TARGET_MS), binned_fit(ru), &
+                target_fit(ru)/max(binned_fit(ru), 1.0e-9_real64)
         end do
         print '(a)', ""
         print '(a,es22.14)', "checksum ", checksum
@@ -420,12 +428,13 @@ contains
     !> the fastest lap's three phase timings in `ns`. A lap already past `SCAN_LAP_CAP` is not
     !> repeated: the quadratic cells cost a minute each and the machine's other work moves them by
     !> far less than the difference the mode is looking at.
-    function time_scan_fit(k, x, rule, adaptive, boundary, xmax, rounds, ns) result(best)
+    function time_scan_fit(k, x, rule, adaptive, boundary, how, xmax, rounds, ns) result(best)
         type(pf_kde), intent(inout)  :: k        !! the estimate; refitted every lap
         real(real64), intent(in)     :: x(:)     !! the sample
         character(len=*), intent(in) :: rule     !! the bandwidth rule's token
         logical, intent(in)          :: adaptive !! fit the adaptive kernel
         character(len=*), intent(in) :: boundary !! the boundary correction's token
+        character(len=*), intent(in) :: how      !! the fit's `method=` token
         real(real64), intent(in)     :: xmax     !! the support's upper bound
         integer, intent(in)          :: rounds   !! laps
         integer(int64), intent(out)  :: ns(3)    !! the fastest lap's sort, pilot and lookup nanos
@@ -441,7 +450,7 @@ contains
         do lap = 1, max(1, rounds)
             t0 = clock()
             call k%fit(x, rule=rule, kernel="bspline", adaptive=adaptive, lower=0.0_real64, &
-                upper=xmax, boundary=boundary, threads=1)
+                upper=xmax, boundary=boundary, threads=1, method=how)
             t = clock() - t0
             call parquet_debug_kde_fit_nanos(cur(1), cur(2), cur(3))
             if (t < best) then
@@ -1055,8 +1064,13 @@ contains
     subroutine run_mise(n)
         integer(int64), intent(in) :: n !! the sample's size
 
-        integer, parameter :: NRULE = 3
-        character(len=9), parameter :: RULES(NRULE) = [character(len=9) :: "isj", "silverman", "scott"]
+        !> The rules scored, and `"lscv"` twice: once as the library resolves it, by one transform
+        !! over the binned sample, and once with that route turned off so the criterion is summed
+        !! over every pair. The pair is what says whether the transform ranks bandwidths as the
+        !! exact criterion does -- the comparison feature_kde_speedup.md's Q6 gates S8 on.
+        integer, parameter :: NRULE = 5
+        character(len=9), parameter :: RULES(NRULE) = [character(len=9) :: "isj", "silverman", &
+            "scott", "lscv", "lscv-pairs"]
         real(real64) :: w(MW_MAXC), mu(MW_MAXC), sg(MW_MAXC)
         real(real64), allocatable :: x(:), ratio(:)
         real(real64) :: hopt, mopt, h, pen(NRULE), hf, ha
@@ -1075,13 +1089,16 @@ contains
         write(*, '(a)') ""
         do is = 1, nsize
             write(*, '(a,i0)') "n = ", nn(is)
-            write(*, '(a20,a12,a12,3a12)') "density", "h_optimal", "MISE_opt", (trim(RULES(r)), r = 1, NRULE)
+            write(*, '(a20,a12,a12,5a12)') "density", "h_optimal", "MISE_opt", (trim(RULES(r)), r = 1, NRULE)
             do d = 1, MW_N
                 call mw_density(d, w, mu, sg, nc)
                 call mw_sample(d, nn(is), x)
                 call mise_optimal(nn(is), w, mu, sg, nc, hopt, mopt)
                 do r = 1, NRULE
-                    call k%fit(x, rule=trim(RULES(r)), ok=ok)
+                    ! The last column is `"lscv"` with the transform route off; every other rule
+                    ! is fitted as a caller would get it.
+                    call parquet_debug_set_kde_lscv_grid(r /= NRULE)
+                    call k%fit(x, rule=trim(merge("lscv     ", RULES(r), r == NRULE)), ok=ok)
                     if (ok) then
                         h = k%bandwidth()
                         pen(r) = mise_exact(h, nn(is), w, mu, sg, nc)/mopt
@@ -1089,7 +1106,8 @@ contains
                         pen(r) = -1.0_real64
                     end if
                 end do
-                write(*, '(a20,es12.4,es12.4,3f12.4)') trim(MW_NAME(d)), hopt, mopt, (pen(r), r = 1, NRULE)
+                call parquet_debug_set_kde_lscv_grid(.true.)
+                write(*, '(a20,es12.4,es12.4,5f12.4)') trim(MW_NAME(d)), hopt, mopt, (pen(r), r = 1, NRULE)
             end do
             write(*, '(a)') ""
         end do

@@ -109,7 +109,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   grid. Four kernels (`gaussian`, `epanechnikov`, `bspline`, `box`), with the bandwidth the
   kernel's standard deviation; the Improved Sheather-Jones rule (the default), least-squares
   cross-validation (`rule="lscv"`, which scores whichever estimator is in force and so can measure
-  the adaptive kernel's own bandwidth), Silverman's and
+  the adaptive kernel's own bandwidth, and which for a fixed bandwidth reads its criterion off one
+  binning of the sample and a filtered transform per candidate rather than off every pair),
+  Silverman's and
   Scott's rules, a number, and `adjust=`; `pf_kde_bandwidth` answers a rule's bandwidth on its own,
   without building an estimate, over the same sample forms; per-element weights and nulls under the
   `pf_*` family's rules, with `n_eff` in the rules; `lower=`/`upper=` for a bounded support, corrected by
@@ -131,12 +133,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   theirs. `%add` counts the points whose adaptive reach exceeds a grid's range in `n_overreach=`
   and `%n_overreach()`, and says so. A grid's lifecycle is `%init` -> `%add`* -> `%finish` -> query, with
   `%is_finished`, `finish=.true.` on `%add` and `%merge` as the one-line form, and `%clear` to
-  reopen it. `method="binned"` on `pf_kde_grid%init` and on `pf_kde%curve` fills the cells by
+  reopen it. `method="binned"` on `pf_kde_grid%init`, on `pf_kde%fit` and on `pf_kde%curve` fills
+  the cells by
   linear binning and one cosine transform instead of by depositing each kernel -- with the
   bandwidths bucketed into geometrically spaced classes under the adaptive kernel, a second
   transform against the odd kernel under `boundary="linear"`, and `%method(name)` reading the token
-  back; the exact deposit stays the grid's default, while a `%curve` given no `method=` picks the
-  binned transform only where it is as accurate as the exact sum and the exact sum otherwise. `threads=` on the bulk forms of both; draws addressed
+  back on both types; the exact deposit stays the grid's default, while a `%curve` given no
+  `method=` picks the
+  binned transform only where it is as accurate as the exact sum and the exact sum otherwise. On
+  `%fit` the token chooses how every later query is answered: `"binned"` lays one grid over the
+  estimate's whole extent and serves `%pdf`, `%cdf`, `%quantile`, `%curve` and `%sample` from it,
+  building no boundary scan at all, and `%curve` then refuses a `method=` of its own. `threads=` on the bulk forms of both; draws addressed
   by `(seed, stream)`. An Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
   [Kernel density estimation](doc/pages/utilities/kernel-density.md).
 - **A direction inside a HEALPix pixel, not just at its centre**:

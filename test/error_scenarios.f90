@@ -4183,6 +4183,10 @@ program error_scenarios
         call scenario_kde_grid_binned_too_long()
     case ("kde_curve_binned_one_point")
         call scenario_kde_curve_binned_one_point()
+    case ("kde_fit_method_token")
+        call scenario_kde_fit_method_token()
+    case ("kde_curve_method_on_binned")
+        call scenario_kde_curve_method_on_binned()
     case ("kde_grid_add_after_finish")
         call scenario_kde_grid_add_after_finish()
     case ("kde_grid_merge_after_finish")
@@ -35285,6 +35289,33 @@ contains
         call k%curve(x, f, xmin=0.0_real64, xmax=1.0_real64, method="binned")
         print '(a)', "accepted a binned curve of one point"
     end subroutine scenario_kde_curve_binned_one_point
+
+    !> `pf_kde%fit` refuses a `method=` token it does not know, naming the two it accepts, through
+    !! the same resolver `pf_kde_grid%init` uses. The control is the same call with a token it does.
+    subroutine scenario_kde_fit_method_token()
+        type(pf_kde) :: k
+        character(len=:), allocatable :: token
+
+        call k%fit([0.25_real64, 0.5_real64, 0.75_real64], bandwidth=0.1_real64, method="BINNED")
+        call k%method(token)
+        print '(a, a)', "kde control fitted: ", token
+        call k%fit([0.25_real64, 0.5_real64, 0.75_real64], bandwidth=0.1_real64, method="fft")
+        print '(a)', "accepted a fit method token that is neither exact nor binned"
+    end subroutine scenario_kde_fit_method_token
+
+    !> `pf_kde%curve` refuses a `method=` on a fit made with `method="binned"`: that object IS its
+    !! grid, so there is no exact sum for a curve of it to choose instead, and the choice was made
+    !! at `%fit`. The control is the same curve with no `method=`, which the grid fills.
+    subroutine scenario_kde_curve_method_on_binned()
+        type(pf_kde) :: k
+        real(real64) :: x(8), f(8)
+
+        call k%fit([0.25_real64, 0.5_real64, 0.75_real64], bandwidth=0.1_real64, method="binned")
+        call k%curve(x, f, xmin=0.0_real64, xmax=1.0_real64)
+        print '(a, es22.15)', "kde control curved: ", f(1)
+        call k%curve(x, f, xmin=0.0_real64, xmax=1.0_real64, method="exact")
+        print '(a)', "accepted a method= on a curve of a binned fit"
+    end subroutine scenario_kde_curve_method_on_binned
 
     !> `%add` after `%finish` aborts, naming `%clear` as the way back. The control is the same
     !! `%add` before it.

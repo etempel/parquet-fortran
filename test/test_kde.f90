@@ -267,7 +267,9 @@ contains
                 test_binned_linear), &
             new_unittest('binned adaptive with boundary="linear" matches the exact grid', &
                 test_binned_adaptive_linear), &
-            new_unittest("the binned grid reproduces the golden vectors", test_binned_golden) &
+            new_unittest("the binned grid reproduces the golden vectors", test_binned_golden), &
+            new_unittest('%fit(method="binned") answers from its own grid, and %method says so', &
+                test_fit_binned_method) &
             ]
 
     end subroutine collect_tests_kde
@@ -290,7 +292,9 @@ contains
             new_unittest("the binned adaptive kernel splits each point between two bandwidth classes", &
                 test_binned_adaptive), &
             new_unittest("the boundary scan's grid changes where the exact estimator is asked, " // &
-                "not what the fit answers", test_scan_grid_agrees) &
+                "not what the fit answers", test_scan_grid_agrees), &
+            new_unittest("the fixed arm's LSCV criterion scores the same by transform and by pairs", &
+                test_lscv_transform_agrees) &
             ]
 
     end subroutine collect_tests_kde_serial
@@ -2363,9 +2367,18 @@ contains
         call k%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "n_outside", seen)
-        ! The heading, eight rows, the lower bound and the correction. The count is asserted, not
+        ! The heading, nine rows, the lower bound and the correction. The count is asserted, not
         ! the text, so that a reworded label is not a failure while a dropped row is.
-        call check(error, nlines == 11 .and. seen, "%print must write a heading and ten rows")
+        call check(error, nlines == 12 .and. seen, "%print must write a heading and eleven rows")
+        if (allocated(error)) return
+        ! The method row is asserted by NAME as well as by the count, because it is the one row
+        ! saying which estimator answered: a count alone would not notice it being replaced.
+        ! Reprinted first, since `read_back` deletes the file it reads.
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call k%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "method       exact", seen)
+        call check(error, seen, "%print must name the method the queries are answered by")
         if (allocated(error)) return
         ! Under the other corrections there is no quadrature to report, and no row for one.
         open(newunit=u, file=PATH, status="replace", action="write")
@@ -2381,7 +2394,7 @@ contains
         call k%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "boundary     linear", seen)
-        call check(error, nlines == 11 .and. seen, &
+        call check(error, nlines == 12 .and. seen, &
             "%print under linear must name the correction and write no quadrature row")
         if (allocated(error)) return
         open(newunit=u, file=PATH, status="replace", action="write")
@@ -4267,6 +4280,148 @@ contains
 
     end subroutine test_scan_grid_agrees
 
+    !> `%fit(method="binned")` answers from a grid of its own, and answers the estimate the exact
+    !! sum answers to the binning's own accuracy.
+    !!
+    !! The two are DIFFERENT estimators, which is why `method=` is opt-in: the binned one answers
+    !! the estimate of a sample whose points have been moved to the cell centres, converging to the
+    !! exact one as the SQUARE of the cell width. `%fit` gives its grid `KDE_CURVE_BINNED_PER_H`
+    !! cells to the narrowest kernel, so the gap is a small share of the peak rather than zero, and
+    !! every assertion here is written against a share of the peak rather than an absolute
+    !! tolerance.
+    !!
+    !! The fixture is a density that VANISHES at its lower bound, fitted with an adaptive kernel
+    !! under `boundary="linear"`: the case Design B exists for -- where the exact estimator pays
+    !! for a boundary scan over the whole support -- and the one where the two routes would most
+    !! easily disagree, since the correction is carried by the cells on one side and by the zones'
+    !! tables on the other.
+    !!
+    !! `%method` is asserted on both objects FIRST. Without it a run in which `method=` was
+    !! silently ignored would compare the exact fit with itself and pass while testing nothing.
+    !! The bandwidths are asserted equal for the same reason from the other side: both routes read
+    !! the same rule, so a binned fit that rebuilt its own would be answering a different estimate
+    !! for a reason this test could not see.
+    subroutine test_fit_binned_method(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kb, ke
+        real(real64), allocatable :: x(:), hb(:), he(:)
+        real(real64) :: t(120), fb(120), fe(120), cb(120), ce(120)
+        real(real64) :: cx(64), cf(64), cp(64), draws(32)
+        real(real64) :: peak, qb, qe
+        character(len=:), allocatable :: mb, me
+        integer :: i
+        logical :: okb, oke
+
+        ! f(x) = x/2 on [0, 2], by inversion: zero at the lower bound, so the adaptive rule widens
+        ! there and the corrected zone spreads across the support.
+        allocate(x(4000))
+        do i = 1, 4000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/4000.0_real64)
+        end do
+        call spread_points(0.0_real64, 2.0_real64, t)
+
+        call ke%fit(x, rule="silverman", adaptive=.true., lower=0.0_real64, upper=2.0_real64, &
+            boundary="linear", ok=oke)
+        call kb%fit(x, rule="silverman", adaptive=.true., lower=0.0_real64, upper=2.0_real64, &
+            boundary="linear", method="binned", ok=okb)
+        call ke%method(me)
+        call kb%method(mb)
+
+        call check(error, me == "exact", "a fit with no method= must answer %method = exact")
+        if (allocated(error)) return
+        call check(error, mb == "binned", 'method="binned" must reach %method, or this test ' // &
+            "compares the exact fit with itself")
+        if (allocated(error)) return
+        call check(error, oke .and. okb, "both fits must be defined")
+        if (allocated(error)) return
+        call check(error, kb%bandwidth() == ke%bandwidth(), &
+            "both methods must resolve the same global bandwidth")
+        if (allocated(error)) return
+        allocate(hb(kb%n_valid()), he(ke%n_valid()))
+        call kb%bandwidths(hb)
+        call ke%bandwidths(he)
+        call check(error, size(hb) == size(he), "both methods must retain the same points")
+        if (allocated(error)) return
+        call check(error, maxval(abs(hb - he)) == 0.0_real64, &
+            "the binned fit must bin at the bandwidths the rule gave, not at its own")
+        if (allocated(error)) return
+
+        call ke%pdf(t, fe)
+        call kb%pdf(t, fb)
+        peak = maxval(fe)
+        call check(error, peak > 0.0_real64, "the exact fit must have a density to compare against")
+        if (allocated(error)) return
+        call check(error, maxval(abs(fb - fe)) <= 0.02_real64*peak, &
+            "the binned fit's density must follow the exact one to the binning's accuracy")
+        if (allocated(error)) return
+        call ke%cdf(t, ce)
+        call kb%cdf(t, cb)
+        call check(error, maxval(abs(cb - ce)) <= 0.01_real64, &
+            "the binned fit's distribution must follow the exact one")
+        if (allocated(error)) return
+        call ke%quantile(0.5_real64, qe)
+        call kb%quantile(0.5_real64, qb)
+        call check(error, abs(qb - qe) <= 0.02_real64, &
+            "the binned fit's median must follow the exact one")
+        if (allocated(error)) return
+
+        ! A curve of a binned fit is its grid read at the curve's points, so it must agree with
+        ! that fit's own `%pdf` exactly -- not to a tolerance, since it is the same call.
+        call kb%curve(cx, cf, xmin=0.1_real64, xmax=1.9_real64)
+        call kb%pdf(cx, cp)
+        call check(error, maxval(abs(cf - cp)) == 0.0_real64, &
+            "a binned fit's %curve must be its own %pdf at those points")
+        if (allocated(error)) return
+        ! The grid draws by inverting the density it holds, so every draw lies inside the support.
+        call kb%sample(draws, 20260921_int64)
+        call check(error, all(draws >= 0.0_real64) .and. all(draws <= 2.0_real64), &
+            "a binned fit's draws must lie inside the support")
+
+    end subroutine test_fit_binned_method
+
+    !> The fixed arm's LSCV criterion, scored by one transform over the binned sample and by the
+    !! double sum over every pair, chooses the same bandwidth.
+    !!
+    !! The two are not the same number. The transform route scores the sample BINNED onto cells a
+    !! sixty-fourth of the bracket's narrowest candidate wide, so its criterion differs from the
+    !! exact one by the binning's error, and the golden section can then split a late bracket the
+    !! other way. What must hold is that the two land within the search's own resolution of each
+    !! other -- `KDE_LSCV_TOL`, a per cent -- because a criterion that ranked bandwidths
+    !! differently would not.
+    !!
+    !! `parquet_debug_set_kde_lscv_grid(.false.)` is the control arm, and the only way from inside
+    !! one process to compare them. It writes process-global state, so this test lives in the
+    !! suite that runs serially.
+    !!
+    !! It asserts both arms found a bandwidth first: two NaNs compare equal to nothing, and a run
+    !! in which neither route ran would otherwise pass while testing nothing.
+    subroutine test_lscv_transform_agrees(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        real(real64), allocatable :: x(:)
+        real(real64) :: hg, he
+        integer :: i
+        logical :: okg, oke
+
+        allocate(x(3000))
+        do i = 1, 3000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/3000.0_real64)
+        end do
+
+        call parquet_debug_set_kde_lscv_grid(.true.)
+        call pf_kde_bandwidth(x, hg, rule="lscv", ok=okg)
+        call parquet_debug_set_kde_lscv_grid(.false.)
+        call pf_kde_bandwidth(x, he, rule="lscv", ok=oke)
+        call parquet_debug_set_kde_lscv_grid(.true.)
+
+        call check(error, okg .and. oke, "both routes must resolve a bandwidth")
+        if (allocated(error)) return
+        call check(error, he > 0.0_real64, "the control arm must give a positive bandwidth")
+        if (allocated(error)) return
+        call check(error, abs(hg - he) <= 1.0e-2_real64*he, &
+            "the transform route must choose the bandwidth the pair sum chooses")
+
+    end subroutine test_lscv_transform_agrees
+
     subroutine test_bandwidth_max_caps(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k, kc
@@ -4832,10 +4987,10 @@ contains
         call k%print(unit=u)
         close(u)
         call read_back(PATH, nlines, "bandwidth_max", seen)
-        ! The heading and the fixed summary's nine rows, then alpha, the two caps, the pilot and
+        ! The heading and the fixed summary's ten rows, then alpha, the two caps, the pilot and
         ! the two ends of the bandwidths. `spread_max` is printed whether it was given or not,
         ! being always in force.
-        call check(error, nlines == 16 .and. seen, "%print must add the adaptive rule's six rows")
+        call check(error, nlines == 17 .and. seen, "%print must add the adaptive rule's six rows")
         if (allocated(error)) return
         ! `read_back` deletes what it read, so the second needle needs the file written again.
         open(newunit=u, file=PATH, status="replace", action="write")

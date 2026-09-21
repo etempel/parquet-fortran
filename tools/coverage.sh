@@ -9,6 +9,12 @@
 #                                   # skipped in this mode, since they're
 #                                   # independent of a runner's suite selection)
 #
+# Every error scenario IS measured by the no-argument form, but `run_tester_errors` is what runs
+# them (its prime_error_scenarios spawns the whole list in parallel); the separate
+# run_error_scenarios.sh pass afterwards adds the concurrency scenarios priming skips, plus any
+# scenario priming did not reach. The block that decides this, near the end of the runner section,
+# carries the measurement.
+#
 # THE SUITES ARE SPREAD ACROSS FIVE RUNNERS, not one, so neither half of the usage
 # above can assume `run_tester`. `test/run_tester{,_pf,_cpp,_errors,_noundef}.f90`
 # partition them (tools/check_source_conventions.py's check_test_runner_partition
@@ -149,6 +155,15 @@ cleanup_coverage_build() {
 trap cleanup_coverage_build EXIT
 
 if [ "$#" -eq 0 ]; then
+    # Drop any capture directory an earlier run left behind. run_tester_errors' priming wipes and
+    # rewrites it too, but only if it gets that far -- and the error-scenario block after this loop
+    # reads "this scenario has a capture" as "this scenario has run under THIS instrumented build".
+    # A stale directory would make that false for every scenario it still holds, silently, and a
+    # silently smaller measurement is the one failure this script must not have. Observed on this
+    # machine: a .primed left over from another run held a capture for a scenario name that no
+    # longer exists anywhere in the tree.
+    rm -rf test_run/.primed
+
     echo "Building + running every test runner with coverage instrumentation..." >&2
     for runner in "$ROOT_DIR"/test/run_tester*.f90; do
         runner="$(basename "$runner" .f90)"
@@ -161,22 +176,39 @@ else
 fi
 
 if [ "$#" -eq 0 ]; then
-    echo "Running tools/run_error_scenarios.sh for additional error-path coverage..." >&2
-    # Reuses FPM_BUILD_DIR/FPM_FFLAGS from this script's environment, since
-    # both this script and test_errors.f90's own subprocess checks just
-    # invoke `fpm test error_scenarios -- <scenario>`, which inherits them --
-    # so every scenario run here accumulates into the same .gcda files.
+    # `run_tester_errors` above has ALREADY run every `scenarios=(...)` entry in
+    # tools/run_error_scenarios.sh, once, in parallel: that is what its prime_error_scenarios
+    # does (test/test_errors.f90), and it spawns the same instrumented binary out of this same
+    # FPM_BUILD_DIR, so all of those processes have already merged their counters into the .gcda
+    # files this report is computed from. Re-running that array here therefore measures nothing --
+    # verified rather than assumed: replaying all of it after the runner added 0 covered src/
+    # lines, at 0.226 s per scenario serially, i.e. about eight minutes of silence. Its verdict
+    # was not being used either (the `|| true` below), so it was not acting as a check.
     #
-    # ...which is exactly why the scenarios are run SERIALLY here and nowhere else. The runner
-    # normally dispatches them across `nproc` workers, and each worker merges its counters into
-    # those same shared .gcda files as it exits -- hundreds of processes writing one file. Under
-    # coverage that reliably corrupts one: three consecutive runs on this machine died with
-    # `src_parquet_tables_rowmutate.f90.gcda: not a gcov data file`, always the same file, and a
-    # serial run has not reproduced it. Milder instances are worse, because they do not stop the
-    # run: a whole untouched source file coming back at 47%, or a handful of lines flipping
-    # between covered and uncovered, both of which read as regressions. Override with
-    # RUN_ERROR_SCENARIOS_JOBS if you want the speed back and can live with that.
-    RUN_ERROR_SCENARIOS_JOBS="${RUN_ERROR_SCENARIOS_JOBS:-1}" \
+    # What priming does NOT run is `concurrency_scenarios=(...)`: it reads the `scenarios=(`
+    # array alone, and those live in a second one. They are worth about ninety further src/ lines
+    # (parquet_sampling, the optimiser multistart, the table parallel guards) and cost seconds, so
+    # they are what this pass now runs.
+    #
+    # RUN_ERROR_SCENARIOS_SKIP_PRIMED is what keeps that safe, and it is deliberately a filter per
+    # SCENARIO rather than a decision about the pass as a whole. Priming degrades to on-demand
+    # spawning whenever anything about it fails, and then only the scenarios some test NAMES are
+    # reached -- about 120 fewer than the list holds. Asking "does this one have a capture?" runs
+    # exactly those and nothing else, with no count to compare and nothing to go stale. The
+    # `rm -rf test_run/.primed` before the runner loop is the other half: without it a capture left
+    # by an EARLIER run would answer for this one, and the scenario would be skipped having never
+    # run under this build.
+    #
+    # NOTE on concurrency and .gcda corruption. Running the scenarios serially used to be this
+    # script's guard against concurrent .gcda merges corrupting a file (`... .gcda: not a gcov
+    # data file`, three consecutive runs; milder instances silently flip lines between covered and
+    # uncovered). That guard never covered the run: priming reaches the same .gcda files from
+    # `nproc` processes at once, and does so before this point. The lever that actually bounds it
+    # is PARQUET_TEST_PRIME_JOBS=1, which would have to be exported before the runner loop above --
+    # reach for that, not for RUN_ERROR_SCENARIOS_JOBS, if a corrupt .gcda reappears.
+    echo "Running tools/run_error_scenarios.sh for the error paths priming did not reach..." >&2
+    RUN_ERROR_SCENARIOS_SKIP_PRIMED=1 \
+        RUN_ERROR_SCENARIOS_JOBS="${RUN_ERROR_SCENARIOS_JOBS:-1}" \
         "$ROOT_DIR/tools/run_error_scenarios.sh" >&2 || true
 fi
 

@@ -12,9 +12,20 @@ paths:
 - `tools/coverage.sh [suite]` reports per-file and total `src/` line coverage plus uncovered
   ranges; no argument runs everything including every error scenario. It selects the `gcov`
   matching the active `gfortran` (a mismatch fails with `Invalid .gcno file!`), runs `fpm clean`
-  first, passes `-fprofile-update=atomic` (test-drive's concurrent tests otherwise lose counter
-  increments and report a covered line as uncovered), and runs the error scenarios serially
-  (concurrent `.gcda` merges corrupt the file; `RUN_ERROR_SCENARIOS_JOBS` overrides). Keep both.
+  first, and passes `-fprofile-update=atomic` (test-drive's concurrent tests otherwise lose counter
+  increments and report a covered line as uncovered). Keep that flag.
+- **The error scenarios are measured by `run_tester_errors`, not by the `run_error_scenarios.sh`
+  pass**: `prime_error_scenarios` spawns the whole `scenarios=(...)` list from the instrumented
+  tree, so replaying it adds nothing (measured: 0 lines, ~8 minutes). `coverage.sh` deletes
+  `test_run/.primed`, runs the runners, then passes `RUN_ERROR_SCENARIOS_SKIP_PRIMED=1`, which
+  skips a scenario that left a capture there and runs every one that did not — priming degrades to
+  on-demand spawning, so the set it misses is not empty by construction. Keep both halves: without
+  the wipe an older run's capture answers for this one.
+- **Concurrent `.gcda` merges can corrupt a file** (`... .gcda: not a gcov data file`, three
+  consecutive runs; milder instances flip lines between covered and uncovered instead of stopping
+  the run). The bound is `PARQUET_TEST_PRIME_JOBS=1`, since priming is what reaches those files
+  from `nproc` processes at once; `RUN_ERROR_SCENARIOS_JOBS` no longer governs anything a coverage
+  run does.
 - Noise can only LOSE counts: a line reported covered in any run is covered; compare two runs
   before chasing a line.
 - **`run_tester_cpp` fails intermittently under the INSTRUMENTED build only** (order 1 run in 15,

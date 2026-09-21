@@ -9,10 +9,38 @@
 # it is intentionally a complete, independent mirror of every scenario name
 # there (not a curated subset), since a script that silently only covers some
 # scenarios would be misleading for the "quick manual check"/"CI step" use
-# this is documented for in README.md.
+# this is documented for in README.md. `check_scenario_list_is_complete` proves
+# every dispatched name is listed and `check_scenario_list_has_no_duplicates`
+# proves no name is listed twice.
+#
+# Environment:
+#   RUN_ERROR_SCENARIOS_JOBS=N          scenarios to run at once (default: one per logical CPU).
+#   RUN_ERROR_SCENARIOS_SKIP_PRIMED=1   skip a scenario that already has a capture under
+#                                       test_run/.primed; see the `skip_primed` note below.
+#   PARQUET_SCENARIO_TIMEOUT=S          per-scenario wall-clock cap in seconds (default: 120).
+#
+# Progress is reported while the scenarios=(...) pass runs, at about twenty milestones whatever
+# its duration; the per-scenario PASS/FAIL lines are printed in list order once it finishes. The
+# concurrency_scenarios=(...) pass always runs -- priming never reaches it -- and prints as it goes.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+
+# With RUN_ERROR_SCENARIOS_SKIP_PRIMED=1, a `scenarios=(...)` entry that already has a capture
+# under test_run/.primed is not run again. That directory is written by test_errors.f90's
+# prime_error_scenarios, which runs the very same array through the very same binary, so for a
+# caller that has just driven `run_tester_errors` those runs are pure repetition -- and under gcov
+# instrumentation, serialised, repeating them cost about eight minutes and measured nothing.
+# tools/coverage.sh is that caller.
+#
+# The filter is per SCENARIO, never all-or-nothing, which is what makes it safe to leave on:
+# priming degrades to on-demand spawning whenever anything about it fails, and each scenario it
+# did not reach simply has no capture and is run here. A caller relying on this wipes
+# test_run/.primed before the run that populates it, so "has a capture" cannot mean an older run's.
+skip_primed=""
+if [ "${RUN_ERROR_SCENARIOS_SKIP_PRIMED:-0}" != "0" ]; then
+    skip_primed=1
+fi
 
 # A per-scenario wall-clock cap, so one wedged scenario cannot stall the whole run.
 #
@@ -229,7 +257,6 @@ scenarios=(
     "validate_qc_max_not_numeric:1"
     "validate_qc_min_non_integral_for_int32:1"
     "validate_qc_min_out_of_int32_range:1"
-    "validate_qc_min_overflows_int64:1"
     "validate_qc_min_overflows_int64:1"
     "validate_qc_min_wrong_operator:1"
     "validate_qc_max_wrong_operator:1"
@@ -2304,28 +2331,70 @@ trap 'rm -rf "$results_dir"' EXIT
 # aggressive for a given machine.
 jobs_n="${RUN_ERROR_SCENARIOS_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
+failures=0
 idx=0
+skipped=0
+
 tokens=()
 for entry in "${scenarios[@]}"; do
     scenario="${entry%%:*}"
     expect_abort="${entry##*:}"
+    # 127 is the shell's own "command not found", i.e. priming never ran the binary, and an empty
+    # file is a capture that was not finished -- test_errors.f90's read_scenario_status rejects
+    # both for the same reason. Treating either as "already run" is how a bad binary path would
+    # turn into a silently empty pass rather than a loud one.
+    if [ -n "$skip_primed" ] && [ -f "test_run/.primed/$scenario.status" ]; then
+        primed_status="$(cat "test_run/.primed/$scenario.status" 2>/dev/null)"
+        if [ -n "$primed_status" ] && [ "$primed_status" != "127" ]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+    fi
     idx=$((idx + 1))
     tokens+=("$idx" "$scenario" "$expect_abort")
 done
 
-printf '%s\n' "${tokens[@]}" | xargs -P "$jobs_n" -n 3 "$0" __worker__ "$bin" "$results_dir"
+if [ "$skipped" -gt 0 ]; then
+    echo "Skipping $skipped scenario(s) already run into test_run/.primed by run_tester_errors."
+fi
 
-failures=0
-i=1
-while [ "$i" -le "$idx" ]; do
-    echo "$(cat "$results_dir/$i.line")"
-    if [ "$(cat "$results_dir/$i.status")" = "FAIL" ]; then
-        failures=$((failures + 1))
-    fi
-    i=$((i + 1))
-done
+if [ "$idx" -gt 0 ]; then
+    echo "Running $idx scenarios, $jobs_n at a time..."
 
-echo
+    # Dispatched in the BACKGROUND so this shell can report progress while it runs. Every result
+    # is a file under $results_dir and the ordered report below is unchanged; what this adds is a
+    # bounded heartbeat, because the alternative is silence for the whole pass. At
+    # RUN_ERROR_SCENARIOS_JOBS=1 -- what tools/coverage.sh used to ask for -- that silence ran to
+    # minutes, and a run that prints nothing for minutes is indistinguishable from a hung one.
+    # Milestones rather than a timer, so the line count is the same (about twenty) whether the
+    # pass takes ten seconds or ten minutes, and `\n` rather than `\r`, so a redirected log reads
+    # as well as a terminal.
+    printf '%s\n' "${tokens[@]}" | xargs -P "$jobs_n" -n 3 "$0" __worker__ "$bin" "$results_dir" &
+    dispatch_pid=$!
+    next_mark=$(( (idx + 19) / 20 ))
+    while kill -0 "$dispatch_pid" 2>/dev/null; do
+        sleep 2
+        done_n="$(find "$results_dir" -name '*.status' | wc -l | tr -d ' ')"
+        if [ "$done_n" -ge "$next_mark" ] && [ "$done_n" -lt "$idx" ]; then
+            printf "  ... %d/%d scenarios done\n" "$done_n" "$idx"
+            while [ "$next_mark" -le "$done_n" ]; do
+                next_mark=$(( next_mark + (idx + 19) / 20 ))
+            done
+        fi
+    done
+    wait "$dispatch_pid"
+
+    i=1
+    while [ "$i" -le "$idx" ]; do
+        echo "$(cat "$results_dir/$i.line")"
+        if [ "$(cat "$results_dir/$i.status")" = "FAIL" ]; then
+            failures=$((failures + 1))
+        fi
+        i=$((i + 1))
+    done
+    echo
+fi
+
 echo "Concurrency scenarios (best-effort, need FPM_FFLAGS with a real OpenMP flag to reliably trigger):"
 for scenario in "${concurrency_scenarios[@]}"; do
     $TIMEOUT_CMD "$bin" "$scenario" > /dev/null 2>&1

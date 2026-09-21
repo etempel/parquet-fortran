@@ -224,6 +224,10 @@ docstring and in the message it prints:
     its priming -- it just falls back to spawning on demand, so nothing fails and nothing says
     anything. Names are derived by shape from the `select case` itself, and an empty result is a
     failure, so the check cannot go blind the way an enumerated list would.
+  * No scenario is named twice in `tools/run_error_scenarios.sh`. A repeat cannot be seen by
+    reading a two-thousand-entry array, and it makes the entry count and the number of distinct
+    scenarios disagree -- which `tools/coverage.sh` compares against the capture files priming
+    leaves in `test_run/.primed` to decide whether it still has to replay the whole list.
   * Every `omp_*` reference in `src/` and `test/` must sit inside `#ifdef _OPENMP`. A build without
     OpenMP compiles the `!$omp` directives away -- they are comments -- but not the ordinary Fortran
     around them, so an unguarded `use omp_lib`, `omp_get_thread_num()` or `omp_lock_kind` is an
@@ -3816,6 +3820,48 @@ def check_scenario_list_is_complete():
         "not named in its scenarios=() or concurrency_scenarios=() arrays, so the script does not "
         "run them and test_errors.f90's prime_error_scenarios cannot pre-run them: %s"
         % (len(missing), ", ".join(missing))
+    ]
+
+
+def check_scenario_list_has_no_duplicates():
+    """No scenario is named twice in run_error_scenarios.sh's two arrays.
+
+    A repeat is invisible by inspection in a two-thousand-line array and costs a pointless extra
+    process on every run, but the reason it is worth a check is that two counts stop agreeing:
+    test_errors.f90's prime_error_scenarios writes ONE capture triple per scenario NAME, so a list
+    with N entries and N-1 distinct names leaves N-1 files behind. tools/coverage.sh compares those
+    two numbers to decide whether priming covered the list -- an undercount there silently sends it
+    back to the eight-minute full replay, which is exactly the shape of failure that gets diagnosed
+    as "the coverage script hangs".
+
+    Both arrays are read, since a name repeated ACROSS them would run under two different sets of
+    expectations.
+    """
+    runner = TOOLS / "run_error_scenarios.sh"
+    if not runner.is_file():
+        return ["%s: not found -- this check needs updating" % runner.relative_to(REPO_ROOT)]
+
+    text = runner.read_text(encoding="utf-8")
+    names = re.findall(r'"([a-z0-9_]+):[01]"', text)
+    names += re.findall(r'^\s*"([a-z0-9_]+)"\s*$', text, re.M)
+    if not names:
+        return [
+            "tools/run_error_scenarios.sh: neither scenarios=() nor concurrency_scenarios=() "
+            "yielded a scenario name -- the arrays moved or changed shape, so this check is blind"
+        ]
+
+    seen = set()
+    repeated = []
+    for name in names:
+        if name in seen and name not in repeated:
+            repeated.append(name)
+        seen.add(name)
+    if not repeated:
+        return []
+    return [
+        "tools/run_error_scenarios.sh: %d scenario name(s) listed more than once, so the entry "
+        "count and the number of distinct scenarios disagree (tools/coverage.sh compares the "
+        "latter against test_run/.primed): %s" % (len(repeated), ", ".join(repeated))
     ]
 
 
@@ -8504,6 +8550,7 @@ CHECKS = (
     ("no per-element helper takes a shared_ptr", check_no_per_element_shared_ptr),
     ("no per-element string allocation in a bulk loop", check_no_per_element_string_alloc),
     ("every error scenario is named in the shell runner", check_scenario_list_is_complete),
+    ("no error scenario is named twice", check_scenario_list_has_no_duplicates),
     ("the test runners partition the suites", check_test_runner_partition),
     ("test fixtures live under test_run/", check_test_fixtures_live_under_test_run),
     ("every intent(inout) temporal setter assigns all components", check_temporal_setters_assign_all),

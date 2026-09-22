@@ -1303,6 +1303,61 @@ contains
         kde_lscv_grid_on = on
     end procedure parquet_debug_set_kde_lscv_grid
 
+    module procedure parquet_debug_kde_lscv_at
+
+        real(real64), allocatable :: y(:), v(:), hj(:), bw(:), bhat(:)
+        real(real64) :: dx, sv2, w_total
+        integer(int64) :: m, i
+        integer :: nl
+
+        crit = 0.0_real64
+        ok = .false.
+        m = size(x, kind=int64)
+        ! Leaving one point out of a sample of one leaves nothing to estimate from, and the
+        ! criterion's `sw - 1` denominator wants a second point besides. The same floor the rule
+        ! itself takes.
+        if (m < 3_int64) return
+        if (.not. kde_positive_finite(h)) return
+        if (present(weights)) then
+            if (size(weights, kind=int64) /= m) return
+        end if
+        allocate(y(m), v(m), hj(m))
+        y = x
+        if (present(weights)) then
+            v = weights
+        else
+            v = 1.0_real64
+        end if
+        ! `lscv_at` reads its points ascending: the window it sums inside walks two monotone
+        ! pointers over them. The rule reaches it through `lscv_subsample`, which sorts; this hook
+        ! draws nothing, so it sorts here instead.
+        call lscv_sort_pairs(y, v, m)
+        w_total = 0.0_real64
+        sv2 = 0.0_real64
+        do i = 1_int64, m
+            w_total = w_total + v(i)
+            sv2 = sv2 + v(i)*v(i)
+        end do
+        ! Sized for a bracket centred on the one bandwidth asked about, which is what the rule
+        ! would do at `h0 = h`; `nl == 0` where no usable geometry exists, and the pair sum carries
+        ! it, exactly as it does inside the rule.
+        nl = 0
+        if (kde_lscv_grid_on) call lscv_binned_setup(y, v, m, h, bw, bhat, dx, nl)
+        if (nl == 0) then
+            allocate(bw(0), bhat(0))
+            dx = 0.0_real64
+        end if
+        ! The FIXED arm only: the adaptive one's pair widths come from a pilot built at the
+        ! candidate bandwidth, which is a function of the rule's own machinery rather than a closed
+        ! form over the arguments, and it is the closed form that an oracle can certify. The
+        ! kernel, the bounds and the boundary reach `lscv_at` only through that pilot, so their
+        ! values here are inert.
+        crit = lscv_at(y, v, hj, m, h, .false., 0.0_real64, KDE_GAUSSIAN, .false., 0.0_real64, &
+            .false., 0.0_real64, KDE_BOUNDARY_NONE, w_total, bw, bhat, dx, sv2, ok)
+        if (.not. ok) crit = 0.0_real64
+
+    end procedure parquet_debug_kde_lscv_at
+
     module procedure kde_term_integral
 
         real(real64) :: reach, s2, t2, cj, dj, ps, pe

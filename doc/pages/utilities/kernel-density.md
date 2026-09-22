@@ -105,8 +105,16 @@ points.** Under `boundary="linear"` with an adaptive kernel, a fit scans each co
 for the stretches the clip removes; on a density that approaches zero the widened kernels make
 that zone the whole support, and the scan is the dominant cost of the fit. A binned fit has no
 scan at all -- the correction is carried by the cells -- so its cost is set by the cells rather
-than by the sample, and it is flat in the number of points. `bench/benchmark_kde.sh` measures
-both.
+than by the sample, and it is flat in the number of points.
+
+**It is not the cheaper route everywhere, and the two costs cross.** The exact route's cost grows
+with the points and the binned route's does not, so which is cheaper depends on how many points
+there are and on how dear the correction is. Where the correction is already cheap -- unbounded,
+or `boundary="reflect"`, which is one division per point -- the exact route is still the cheaper
+of the two at a hundred thousand points and the crossing lies somewhere beyond it, so reaching
+for `method="binned"` there makes the fit slower rather than faster. Where the correction is the
+scan described above, the crossing lies far below that and the binned fit wins by orders of
+magnitude. `bench/benchmark_kde.sh` measures both, under each boundary.
 
 What is unchanged: `%bandwidths`, `%bandwidth_at`, `%pilot` and `%bandwidth` read the rule and
 answer the same under either method, and the counts and the support are the same. What is
@@ -401,8 +409,10 @@ reports is still bisected on the exact estimate. So the grid decides only WHERE 
 estimator is asked, and the spacing above -- which is what the paragraph's guarantee rests on --
 is unchanged. It is used for the `"gaussian"` and `"bspline"` kernels, whose binned estimate
 converges as the square of the cell width, and not for the other two. Without it the scan sums
-every retained point at every sample, which is why an adaptive `"linear"` fit of a density that
-approaches zero used to cost time growing as the SQUARE of the sample size.
+every retained point at every sample, so under `"epanechnikov"` and `"box"` an adaptive
+`"linear"` fit of a density that approaches zero costs time growing as the SQUARE of the sample
+size. `method="binned"` builds no scan at all and is what removes that cost under those two
+kernels; so does narrowing the widest kernel with `spread_max=` or `bandwidth_max=`.
 
 **Where the kernel is wider than the whole support** -- both bounds given and closer together than
 a kernel's reach -- a mirror image reaches the far bound too. Each point's kernel is then

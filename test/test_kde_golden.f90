@@ -567,4 +567,28 @@ module test_kde_golden
         0.00084683859136414454_real64, 0.00078528529189987226_real64, 0.00089210147726622845_real64,  &
         0.001369302638413479_real64]
 
+    !> How many bandwidths each cross-validation case is read at.
+    integer, parameter :: NKH = 6
+
+    !> The bandwidths every cross-validation case is read at.
+    real(real64), parameter :: KG_LSCV_H(NKH) = [37.0_real64, 53.0_real64, 71.0_real64, 97.0_real64, 131.0_real64, 179.0_real64]
+
+    !> the criterion over the recipe at n = 32, unweighted: the normalisers, the combined width of the integral term and the
+    !! `sum(w) - 1` of the leave-one-out term
+    real(real64), parameter :: KG_LSCV_CRIT(NKH) = [-0.0006736269449224108_real64, -0.00076935348641286394_real64,  &
+        -0.00082367218500080711_real64, -0.00086343374779387309_real64, -0.00087995203623542973_real64,  &
+        -0.00087470251685530182_real64]
+
+    !> the criterion under weights mod 5: both terms weighted by the pair's product, the denominators by the weight total rather
+    !! than the count
+    real(real64), parameter :: KG_LSCV_W_CRIT(NKH) = [-0.00053302470922022692_real64, -0.00069836067009217703_real64,  &
+        -0.00078473711426954129_real64, -0.00082850882399906271_real64, -0.00084557754053015766_real64,  &
+        -0.00085208715504558657_real64]
+
+    !> the criterion over the two-component recipe rounded to multiples of 8, whose values repeat: the leave-one-out term omits the
+    !! point's own INDEX, so a coincident pair still contributes to it, which a term omitting equal VALUES would drop
+    real(real64), parameter :: KG_LSCV_DUP_CRIT(NKH) = [-0.0052450747543699603_real64, -0.0041311369563009417_real64,  &
+        -0.0033036487679953689_real64, -0.0025574995946355326_real64, -0.0019650393141411545_real64,  &
+        -0.0014554800852160095_real64]
+
 end module test_kde_golden ! GCOVR_EXCL_LINE

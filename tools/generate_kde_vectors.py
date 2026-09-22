@@ -15,10 +15,14 @@ certifies. The Fortran side builds the fixture from the same recipe (`kde_fixtur
 test/test_kde.f90) and asserts `KG_PROBE`, which reports a recipe that has drifted.
 
 What each case pins is named in its own comment in the generated file: every kernel's density
-and distribution function, both rules, `adjust`, both weight conventions, both boundary
-corrections at each bound and at both, the case where the kernel is wider than the whole support
-(which only the mass normalisation keeps at unit mass), the single-point degenerate cases, and the
-adaptive kernel over a two-component recipe of its own.
+and distribution function, Silverman's and Scott's rules, the ISJ rule, `adjust`, both weight
+conventions, both boundary corrections at each bound and at both, the case where the kernel is
+wider than the whole support (which only the mass normalisation keeps at unit mass), the
+single-point degenerate cases, the adaptive kernel over a two-component recipe of its own, and
+the least-squares cross-validation CRITERION.
+
+**The bandwidth `rule="lscv"` chooses is deliberately not pinned here**, although its criterion
+is; the reasoning is at "The cross-validation criterion's oracle" below, beside the cases.
 
 **The ISJ cases solve the rule's fixed point at 50 digits on the library's own grid.** The Improved
 Sheather-Jones rule bins the sample onto cell centres, takes the discrete cosine transform and finds
@@ -1311,6 +1315,120 @@ def binned_cells(case):
         return None
     return [c / mass for c in cells]
 
+
+# ======================================================================================
+# The cross-validation criterion's oracle
+# ======================================================================================
+#
+# **The criterion is pinned here; the bandwidth `rule="lscv"` chooses is not, and that is a
+# decision rather than a gap.** LSCV's answer is the minimiser of a search, so an oracle for it
+# would have to reproduce the golden section, the bracket, the subsample's draw and
+# `KDE_LSCV_TOL` -- it would pin the implementation rather than the mathematics, and every change
+# to any of those four would move a vector that is not about them. The criterion itself is a
+# closed form over the points, which is exactly what this file can certify honestly, so the
+# criterion gets a vector and the minimiser is left to `test_lscv_rule` (which holds it to the
+# closed-form normal-reference optimum within a factor of two, LSCV's own variability being wide)
+# and `test_lscv_transform_agrees` (which holds the transform route and the pair sum to each
+# other). A change that moves the criterion's VALUE fails here; a change that moves only where
+# the search stops does not, by design.
+
+#: The bandwidths every criterion case is read at. Deliberately not round against the fixtures'
+#: own spacing: the criterion's normal density is EXACTLY zero beyond `LSCV_CUT` standard
+#: deviations, so a pair landing on that cut would have its contribution decided by the last bit
+#: of one division. `lscv_criterion` asserts the margin each case actually keeps.
+LSCV_HS = [37.0, 53.0, 71.0, 97.0, 131.0, 179.0]
+
+#: Where the criterion's normal density is taken as zero, in standard deviations: `KDE_NORM_CUT`
+#: in `src/parquet_kde.f90`.
+LSCV_CUT = mpf(5)
+
+#: How near that cut any pair may come, in standard deviations. Ten orders of magnitude above the
+#: `real64` rounding of the library's own `z/s`, so no case can be decided one way by the library
+#: and the other way here.
+LSCV_MARGIN = mpf("1e-6")
+
+
+def lscv_normal(z, s):
+    """The criterion's normal density, cut exactly where `kde_norm_at` cuts it."""
+    if s <= 0:
+        return mpf(0)
+    t = z / s
+    if abs(t) > LSCV_CUT:
+        return mpf(0)
+    return mp.exp(-t * t / 2) / (s * mp.sqrt(2 * mp.pi))
+
+
+def lscv_criterion(case):
+    """`[the criterion at each of LSCV_HS]` for one case, summed over every pair.
+
+    `integral of fhat**2 - (2/n) sum_i fhat_{-i}(x_i)` for the FIXED estimator, both terms exact
+    for the normal: the integral of a product of two normal densities is a normal density of the
+    combined width at their separation, and the leave-one-out sum omits `i == j` -- the INDEX and
+    not the value, which is what the repeated-value case is here to pin.
+
+    The points are taken as given, with no exclusion pass: `parquet_debug_kde_lscv_at` takes them
+    the same way, and a zero weight contributes nothing to either term or to `sum(w)`, so dropping
+    one and keeping one are the same number.
+    """
+    n = case.get("n", 32)
+    if case.get("fixture") == "two_rounded8":
+        xs = two_component_rounded(n, 8.0)
+    elif case.get("fixture") == "two":
+        xs = two_component(n)
+    else:
+        xs = gsv.fixture(n)
+    xs = [mpf(v) for v in xs]
+    if case.get("weights") == "mod5":
+        ws = [mpf(w) for w in gsv.weights_mod5(n)]
+    else:
+        ws = [mpf(1)] * len(xs)
+    m = len(xs)
+    sw = sum(ws)
+    out = []
+    for hv in LSCV_HS:
+        h = mpf(hv)
+        wide = mp.sqrt(h * h + h * h)
+        # No pair may sit on the cut, for either of the two widths the criterion reads.
+        for s in (wide, h):
+            for i in range(m):
+                for j in range(m):
+                    d = abs(abs((xs[i] - xs[j]) / s) - LSCV_CUT)
+                    if d < LSCV_MARGIN:
+                        raise SystemExit(
+                            "lscv_criterion: a pair sits %s from the %s-sigma cut at h = %s; "
+                            "this case would be decided by rounding" % (mp.nstr(d, 4), LSCV_CUT, hv))
+        s_int = mpf(0)
+        s_loo = mpf(0)
+        for i in range(m):
+            for j in range(m):
+                wij = ws[i] * ws[j]
+                if wij == 0:
+                    continue
+                dz = xs[i] - xs[j]
+                s_int += wij * lscv_normal(dz, wide)
+                if i != j:
+                    s_loo += wij * lscv_normal(dz, h)
+        out.append(s_int / (sw * sw) - 2 * s_loo / (sw * (sw - mpf(1))))
+    return out
+
+
+#: One population per criterion case; the bandwidths are `LSCV_HS` for all of them.
+#: `test/test_kde.f90`'s `test_lscv_criterion_golden` builds the same population and reads the
+#: criterion back through `parquet_debug_kde_lscv_at`.
+LSCV_CASES = [
+    ("LSCV", "the criterion over the recipe at n = 32, unweighted: the normalisers, the combined "
+     "width of the integral term and the `sum(w) - 1` of the leave-one-out term",
+     {}),
+    ("LSCV_W", "the criterion under weights mod 5: both terms weighted by the pair's product, the "
+     "denominators by the weight total rather than the count",
+     {"weights": "mod5"}),
+    ("LSCV_DUP", "the criterion over the two-component recipe rounded to multiples of 8, whose "
+     "values repeat: the leave-one-out term omits the point's own INDEX, so a coincident pair "
+     "still contributes to it, which a term omitting equal VALUES would drop",
+     {"fixture": "two_rounded8", "n": 60}),
+]
+
+
 def emit():
     """Return the whole generated file as text."""
     out = [HEADER.replace("@NKX@", str(len(PROBES)))]
@@ -1353,6 +1471,21 @@ def emit():
                    % (name, gsv.fortran_real(mpf(case["xmax"]))))
         out += gsv.wrap_array("    real(real64), parameter :: KG_%s_F(KG_%s_NC) =" % (name, name),
                               [gsv.fortran_real(v) for v in cells])
+    out.append("")
+    out.append("    !> How many bandwidths each cross-validation case is read at.")
+    out.append("    integer, parameter :: NKH = %d" % len(LSCV_HS))
+    out.append("")
+    out.append("    !> The bandwidths every cross-validation case is read at.")
+    out += gsv.wrap_array("    real(real64), parameter :: KG_LSCV_H(NKH) =",
+                          [gsv.fortran_real(mpf(v)) for v in LSCV_HS])
+    for (name, doc, _), crit in zip(LSCV_CASES, map_cases(
+            lscv_criterion, [case for _, _, case in LSCV_CASES])):
+        out.append("")
+        lines = textwrap.wrap(doc, width=124)
+        out.append("    !> %s" % lines[0])
+        out += ["    !! %s" % line for line in lines[1:]]
+        out += gsv.wrap_array("    real(real64), parameter :: KG_%s_CRIT(NKH) =" % name,
+                              [gsv.fortran_real(v) for v in crit])
     out.append("")
     out.append("end module test_kde_golden ! GCOVR_EXCL_LINE")
     return "\n".join(out) + "\n"

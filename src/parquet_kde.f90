@@ -109,7 +109,7 @@ module parquet_kde
     public :: pf_kde_bandwidth
     public :: parquet_debug_kde_threads_used, parquet_debug_set_kde_pilot_cells, parquet_debug_kde_fit_nanos
     public :: parquet_debug_kde_scan_counts, parquet_debug_set_kde_scan_grid
-    public :: parquet_debug_set_kde_lscv_grid
+    public :: parquet_debug_set_kde_lscv_grid, parquet_debug_kde_lscv_at
     public :: parquet_debug_set_kde_isj_cells, parquet_debug_set_kde_sample_tries
     public :: parquet_debug_set_kde_binned_classes
     public :: parquet_set_verbosity, parquet_get_verbosity
@@ -387,6 +387,12 @@ module parquet_kde
     !! cost is quadratic in this; capping it makes the rule's cost bounded and predictable whatever
     !! the sample's size, at the price of making the answer a draw rather than a function of the
     !! whole sample. The draw is addressed by `(seed, stream)` like `%sample`, so it is reproducible.
+    !!
+    !! **It bounds two things, and raising it must answer for both.** Besides the criterion's own
+    !! double sum, it is what keeps the fixed arm's FALLBACK bounded: where the transform's geometry
+    !! does not fit inside `KDE_LSCV_GRID_MAX` every candidate takes the pair sum instead, which is
+    !! quadratic in whatever this cap allows through. The transform route does not lift the cap --
+    !! it makes the cap cheap on the arm that has one.
     integer(int64), parameter :: KDE_LSCV_MAX = 2000_int64
 
     !> The seed the LSCV subsample is drawn at, so that one sample gives one bandwidth however
@@ -416,7 +422,8 @@ module parquet_kde
     !! the NARROWEST candidate at `KDE_CURVE_BINNED_PER_H` to a bandwidth and its range covers the
     !! WIDEST candidate's reach beyond both ends, so a sample whose range is very many bandwidths
     !! wide asks for more than this; the criterion then falls back to the exact double sum, which
-    !! answers the same question more slowly.
+    !! answers the same question more slowly. That fallback is quadratic, and what bounds it is
+    !! `KDE_LSCV_MAX` rather than anything here.
     integer, parameter :: KDE_LSCV_GRID_MAX = 262144
 
     !> `1/phi`, the golden section's ratio, at which the criterion's bracket is split.
@@ -2676,6 +2683,33 @@ module parquet_kde
             implicit none
             logical, intent(in) :: on !! `.false.` sums the criterion over every pair
         end subroutine parquet_debug_set_kde_lscv_grid
+
+        !> The least-squares cross-validation criterion of the FIXED estimator, at one bandwidth,
+        !! over the points given.
+        !!
+        !! `integral of fhat**2 - (2/n) sum_i fhat_{-i}(x_i)`, with the normal density
+        !! `exp(-z**2/(2 s**2))/(s sqrt(2 pi))` taken as exactly zero beyond `KDE_NORM_CUT`
+        !! standard deviations, summed over every pair of the points as given: **no subsample is
+        !! drawn and nothing is minimised**, so the answer is a closed form over its arguments and
+        !! nothing else. `rule="lscv"` minimises this same function; this reads it at a point.
+        !!
+        !! Test-only, and public for that reason: it is what lets the golden oracle
+        !! (`tools/generate_kde_vectors.py`) certify the criterion itself at fifty digits. The
+        !! MINIMISER cannot be certified that way -- an oracle for it would have to reproduce the
+        !! golden section, the bracket and `KDE_LSCV_TOL`, pinning the implementation rather than
+        !! the mathematics -- so the criterion is pinned here and the bandwidth is pinned by
+        !! `test_lscv_rule` and `test_lscv_transform_agrees` instead.
+        !!
+        !! Honours `parquet_debug_set_kde_lscv_grid`, so a test can read the same criterion by the
+        !! transform route and by the pair sum and compare them. The points need not be ordered.
+        module subroutine parquet_debug_kde_lscv_at(x, h, crit, ok, weights)
+            implicit none
+            real(real64), intent(in)           :: x(:)       !! the points, in any order
+            real(real64), intent(in)           :: h          !! the bandwidth to read the criterion at
+            real(real64), intent(out)          :: crit       !! the criterion's value there
+            logical, intent(out)               :: ok         !! the criterion could be formed
+            real(real64), intent(in), optional :: weights(:) !! per-point weights; all one when absent
+        end subroutine parquet_debug_kde_lscv_at
 
     end interface
 

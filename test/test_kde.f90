@@ -294,7 +294,9 @@ contains
             new_unittest("the boundary scan's grid changes where the exact estimator is asked, " // &
                 "not what the fit answers", test_scan_grid_agrees), &
             new_unittest("the fixed arm's LSCV criterion scores the same by transform and by pairs", &
-                test_lscv_transform_agrees) &
+                test_lscv_transform_agrees), &
+            new_unittest("the LSCV criterion reproduces the golden vectors by both routes", &
+                test_lscv_criterion_golden) &
             ]
 
     end subroutine collect_tests_kde_serial
@@ -4234,7 +4236,7 @@ contains
         type(pf_kde) :: kg, ke
         real(real64), allocatable :: x(:)
         real(real64) :: t(120), fg(120), fe(120), cg(120), ce(120), peak
-        integer(int64) :: steps, exact, steps_e, exact_e
+        integer(int64) :: steps, exact, steps_e, exact_e, steps4, exact4, steps4_e, exact4_e
         integer :: i
 
         ! A density that vanishes at its lower bound, which is what makes the adaptive rule widen
@@ -4277,6 +4279,44 @@ contains
         if (allocated(error)) return
         call check(error, maxval(abs(cg - ce)) <= 1.0e-9_real64, &
             "the grid-assisted scan must answer the exact scan's distribution")
+        if (allocated(error)) return
+
+        ! ---- and that the grid's whole point survives: the scan stops growing with the sample ----
+        ! The assertions above would all hold of a grid that fired on a handful of samples and left
+        ! the rest to the exact estimator, which is most of the quadratic back. What forbids that is
+        ! how the sample count SCALES. The grid lays a uniform spacing of `h_min/KDE_LINEAR_SCAN_PER_H`,
+        ! and `h_min` follows the rule as `n**(-1/5)`, so four times the points asks for about
+        ! `4**0.2 = 1.32` times the samples; the exact scan stops at every kernel start instead, so
+        ! its count follows the POINTS. Both arms are measured, because a count that stayed flat on
+        ! a fixture the exact scan also found flat would say nothing.
+        deallocate(x)
+        allocate(x(8000))
+        do i = 1, 8000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/8000.0_real64)
+        end do
+        call parquet_debug_set_kde_scan_grid(.true.)
+        call kg%fit(x, rule="silverman", kernel="bspline", adaptive=.true., lower=0.0_real64, &
+            upper=2.0_real64, boundary="linear")
+        call parquet_debug_kde_scan_counts(steps4, exact4)
+        call parquet_debug_set_kde_scan_grid(.false.)
+        call ke%fit(x, rule="silverman", kernel="bspline", adaptive=.true., lower=0.0_real64, &
+            upper=2.0_real64, boundary="linear")
+        call parquet_debug_kde_scan_counts(steps4_e, exact4_e)
+        call parquet_debug_set_kde_scan_grid(.true.)
+
+        call check(error, steps4 > 0_int64 .and. steps4_e > 0_int64, &
+            "both arms must have scanned at the larger size too")
+        if (allocated(error)) return
+        call check(error, steps4 < 2_int64*steps, &
+            "four times the sample must not double the grid arm's scan: its spacing follows the " // &
+            "narrowest bandwidth, not the points")
+        if (allocated(error)) return
+        call check(error, steps4_e >= 2_int64*steps_e, &
+            "the control arm's scan must grow with the points, or the fixture is not one the " // &
+            "grid is saving anything on and the assertion above holds for the wrong reason")
+        if (allocated(error)) return
+        call check(error, 4_int64*exact4 <= steps4, &
+            "the grid must still decide the great majority of its samples at the larger size")
 
     end subroutine test_scan_grid_agrees
 
@@ -4421,6 +4461,103 @@ contains
             "the transform route must choose the bandwidth the pair sum chooses")
 
     end subroutine test_lscv_transform_agrees
+
+    !> The least-squares cross-validation CRITERION against the golden oracle, at six bandwidths
+    !! over three populations, by both routes.
+    !!
+    !! **This is the pin on `rule="lscv"`'s mathematics; nothing pins its minimiser to a vector,
+    !! and that is deliberate.** The rule's answer is where a golden section stops, so an oracle
+    !! for it would have to reproduce the section, the bracket, the subsample's draw and
+    !! `KDE_LSCV_TOL` -- it would fail on a change to any of those four while saying nothing about
+    !! the criterion they search. So the criterion is certified at fifty digits here and the
+    !! bandwidth is left to `test_lscv_rule` and `test_lscv_transform_agrees`. A change that moves
+    !! what the criterion IS fails this test; a change that moves only where the search stops does
+    !! not.
+    !!
+    !! The three populations answer three different questions: the plain recipe pins the
+    !! normalisers, the combined width `sqrt(h**2 + h**2)` of the integral term and the
+    !! `sum(w) - 1` of the leave-one-out term; the weighted one pins that both terms carry the
+    !! pair's weight product and that the denominators are weight totals and not counts; the
+    !! rounded one repeats its values, so it pins that the leave-one-out term omits the point's own
+    !! INDEX and not every point sharing its value.
+    !!
+    !! Both routes are read at every point. The pair sum is the definition and is held to a tight
+    !! tolerance; the transform route bins the sample first, so it is held to the binning's own
+    !! error -- loosely, but not so loosely that a route computing a different functional would
+    !! pass. It asserts the two routes differ somewhere, since a run in which the transform was
+    !! declined everywhere would compare the pair sum with itself and pass while testing nothing.
+    !!
+    !! It writes process-global state (`parquet_debug_set_kde_lscv_grid`), so it lives in the
+    !! suite that runs serially.
+    subroutine test_lscv_criterion_golden(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: ce, cg, want, worst_e, worst_g, spread
+        integer(int64) :: n
+        integer :: c, i
+        logical :: oke, okg
+
+        worst_e = 0.0_real64
+        worst_g = 0.0_real64
+        spread = 0.0_real64
+        do c = 1, 3
+            n = 32_int64
+            if (c == 3) n = 60_int64
+            if (allocated(x)) deallocate(x)
+            if (allocated(w)) deallocate(w)
+            allocate(x(n), w(n))
+            select case (c)
+            case (1)
+                call kde_fixture(n, x)
+                w = 1.0_real64
+            case (2)
+                call kde_fixture(n, x)
+                call kde_weights_mod5(n, w)
+            case (3)
+                call kde_two_component(n, x)
+                call kde_rounded(8.0_real64, x)
+                w = 1.0_real64
+            end select
+            do i = 1, NKH
+                select case (c)
+                case (1)
+                    want = KG_LSCV_CRIT(i)
+                case (2)
+                    want = KG_LSCV_W_CRIT(i)
+                case (3)
+                    want = KG_LSCV_DUP_CRIT(i)
+                end select
+
+                ! ---- the pair sum: the criterion's definition ----
+                call parquet_debug_set_kde_lscv_grid(.false.)
+                call parquet_debug_kde_lscv_at(x, KG_LSCV_H(i), ce, oke, weights=w)
+                ! ---- the transform route, over the same points ----
+                call parquet_debug_set_kde_lscv_grid(.true.)
+                call parquet_debug_kde_lscv_at(x, KG_LSCV_H(i), cg, okg, weights=w)
+
+                call check(error, oke .and. okg, "both routes must form the criterion")
+                if (allocated(error)) return
+                call check(error, want < 0.0_real64, &
+                    "the golden criterion must be negative here, or the case has drifted")
+                if (allocated(error)) return
+                worst_e = max(worst_e, abs(ce - want)/abs(want))
+                worst_g = max(worst_g, abs(cg - want)/abs(want))
+                spread = max(spread, abs(cg - ce)/abs(want))
+            end do
+        end do
+        call parquet_debug_set_kde_lscv_grid(.true.)
+
+        call check(error, worst_e <= 1.0e-12_real64, &
+            "the pair sum must reproduce the golden criterion: it IS the criterion's definition")
+        if (allocated(error)) return
+        call check(error, worst_g <= 1.0e-3_real64, &
+            "the transform route must score the same criterion to within its binning's error")
+        if (allocated(error)) return
+        call check(error, spread > 0.0_real64, &
+            "the two routes must differ somewhere, or the transform was declined everywhere and " // &
+            "this test compared the pair sum with itself")
+
+    end subroutine test_lscv_criterion_golden
 
     subroutine test_bandwidth_max_caps(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check

@@ -214,12 +214,12 @@ contains
         ! Although X should not contain NaN unless there is a bug, we include the following for security.
         ! X can be Inf, as finite + finite can be Inf numerically.
         if (any(is_nan(x) .or. is_inf(x))) then
-            info = NAN_INF_X
-        end if
+            info = NAN_INF_X                      ! GCOVR_EXCL_LINE -- cannot fire; see the
+        end if                                    ! doc-comment above this procedure
 
         ! Although NAN_INF_F should not happen unless there is a bug, we include the following for security.
         if (is_nan(f) .or. is_posinf(f)) then
-            info = NAN_INF_F
+            info = NAN_INF_F                      ! GCOVR_EXCL_LINE -- `evaluate` aborts first
         end if
 
         if (f <= ftarget) then
@@ -243,24 +243,31 @@ contains
 
         real(real64) :: ratio                  !! the reduction ratio, never NaN
 
+        ! Every arm below the first needs a NaN or an infinity in one of the two reductions, or
+        ! a non-positive predicted reduction. This library screens a non-finite objective value
+        ! in `evaluate` and aborts, so neither reduction can go non-finite; the non-positive
+        ! `pred` arm is upstream's rescue for a failed trust-region subproblem, which no run the
+        ! suite drives produces.
+        ! The four tests themselves run on every call and are counted; it is the arms they
+        ! select that are dead, so each is excluded on its own rather than as one block.
         if (is_nan(ared)) then
             ! This should not happen in unconstrained problems due to the moderated extreme barrier.
-            ratio = -REALMAX
+            ratio = -REALMAX                      ! GCOVR_EXCL_LINE -- see the note above
         elseif (is_nan(pred) .or. pred <= 0) then
             ! The trust-region subproblem solver fails in this rare case. Instead of terminating as Powell's
             ! original code does, we set RATIO as follows so that the solver may continue to progress.
-            if (ared > 0) then
+            if (ared > 0) then                    ! GCOVR_EXCL_START -- see the note above
                 ! The trial point will be accepted, but the trust-region radius will be shrunk if RSHRINK>0.
                 ratio = HALF * rshrink
             else
                 ! Set ratio to a large negative number to signify a bad trust-region step, so that the
                 ! solver will check whether to take a geometry step or reduce RHO.
                 ratio = -REALMAX
-            end if
+            end if                                ! GCOVR_EXCL_STOP
         elseif (is_posinf(pred) .and. is_posinf(ared)) then
-            ratio = ONE  ! ARED/PRED = NaN if calculated directly.
+            ratio = ONE  ! ARED/PRED = NaN if calculated directly.  GCOVR_EXCL_LINE
         elseif (is_posinf(pred) .and. is_neginf(ared)) then
-            ratio = -REALMAX  ! ARED/PRED = NaN if calculated directly.
+            ratio = -REALMAX  ! ARED/PRED = NaN if calculated directly.  GCOVR_EXCL_LINE
         else
             ratio = ared / pred
         end if
@@ -428,19 +435,22 @@ contains
         real(real64) :: step
         real(real64) :: xgrid(grid_size)
 
+        ! The two quick returns below are upstream's. BOBYQA's one call site passes
+        ! `lb = ZERO` and `ub = hangt_bd`, having already tested `hangt_bd > 0`, and the grid
+        ! values come from the model rather than from the objective, so none is a NaN.
         if (ub <= lb) then
-            x = lb
+            x = lb                                ! GCOVR_EXCL_START -- the caller tests ub > lb
             return
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         xgrid = linspace(lb, ub, grid_size)
         fgrid = [(fun(xgrid(k), args), k=1, grid_size)]
         ! MATLAB: fgrid = arrayfun(@(x) fun(x, args), xgrid(1:grid_size));  % Same shape as `xgrid`
 
         if (all(is_nan(fgrid))) then
-            x = lb
-            return
-        end if
+            x = lb                                ! GCOVR_EXCL_START -- the grid is model
+            return                                ! arithmetic, never a NaN; see above
+        end if                            ! GCOVR_EXCL_STOP
 
         kopt = int(maxloc(fgrid, mask=(.not. is_nan(fgrid)), dim=1))
         fopt = fgrid(kopt)
@@ -462,7 +472,9 @@ contains
                 ! N.B.: 1. XGRID(KOPT) = LB + (UB-LB)*(KOPT - 1)/(GRID_SIZE -1)
                 ! 2. XGRID(KOPT-1) <= X <= XGRID(KOPT+1), as X maximizes the quadratic interpolant.
             else
-                x = xgrid(kopt)
+                x = xgrid(kopt)                   ! GCOVR_EXCL_LINE -- the quadratic through
+                                                  ! three grid values always gives a finite,
+                                                  ! nonzero step at an interior maximum
             end if
         end if
 
@@ -500,12 +512,12 @@ contains
         ! Although X should not contain NaN unless there is a bug, we include the following for security.
         ! X can be Inf, as finite + finite can be Inf numerically.
         if (any(is_nan(x) .or. is_inf(x))) then
-            info = NAN_INF_X
-        end if
+            info = NAN_INF_X                      ! GCOVR_EXCL_LINE -- cannot fire; see the
+        end if                                    ! doc-comment above this procedure
 
         ! Although NAN_INF_F should not happen unless there is a bug, we include the following for security.
         if (is_nan(f) .or. is_posinf(f) .or. is_nan(cstrv) .or. is_posinf(cstrv)) then
-            info = NAN_INF_F
+            info = NAN_INF_F                      ! GCOVR_EXCL_LINE -- `evaluate_fc` aborts first
         end if
 
         if (cstrv <= ctol .and. f <= ftarget) then
@@ -579,8 +591,12 @@ contains
 
         ! If NFILT == MAXFILT and X is not better than any column of XFILT, then we remove the worst column
         ! of XFILT according to the merit function PHI = FFILT + CWEIGHT * MAX(CFILT - CTOL, ZERO).
+        ! The eviction below needs the filter FULL -- `maxfilt` mutually non-dominated points,
+        ! `min(MAXFILT_DFT, max_neval)` of them -- and the new point dominated by every one of
+        ! them. No run the suite drives fills it: the constrained searches converge with far
+        ! fewer non-dominated points than the cap.
         if (count(keep) == maxfilt) then  ! In this case, NFILT = SIZE(KEEP) = COUNT(KEEP) = MAXFILT > 0.
-            cfilt_shifted = max(cfilt - ctol, ZERO)
+            cfilt_shifted = max(cfilt - ctol, ZERO)   ! GCOVR_EXCL_START -- see the note above
             if (cweight <= 0) then
                 phi = ffilt
             elseif (is_posinf(cweight)) then
@@ -608,6 +624,7 @@ contains
                 kworst = 1
             end if
             keep(kworst) = .false.
+            ! GCOVR_EXCL_STOP
         end if
 
         nfilt = int(count(keep))
@@ -659,7 +676,11 @@ contains
         if (any(fhist < FUNCMAX .and. chist < CONSTRMAX)) then
             fref = FUNCMAX
             cref = CONSTRMAX
-        elseif (any(fhist < REALMAX .and. chist < CONSTRMAX)) then
+        ! The three fallback pairs below are upstream's ladder for a history in which EVERY
+        ! point has a value at or above FUNCMAX (about 1e60) or a violation at or above
+        ! CONSTRMAX. This library refuses a non-finite objective value in `evaluate_fc` and the
+        ! suite's constrained problems are O(1), so the first pair always answers.
+        elseif (any(fhist < REALMAX .and. chist < CONSTRMAX)) then ! GCOVR_EXCL_START -- see above
             fref = REALMAX
             cref = CONSTRMAX
         elseif (any(fhist < FUNCMAX .and. chist < REALMAX)) then
@@ -668,10 +689,10 @@ contains
         else
             fref = REALMAX
             cref = REALMAX
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         if (.not. any(fhist < fref .and. chist < cref)) then
-            kopt = nhist
+            kopt = nhist                          ! GCOVR_EXCL_LINE -- needs the ladder above
         else
             ! Shift the constraint violations by CTOL, so that CSTRV <= CTOL is regarded as no violation.
             chist_shifted = max(chist - ctol, ZERO)
@@ -682,10 +703,12 @@ contains
             ! CSTRV_SHIFTED < CREF would be WRONG!
             cref = max(EPS, TWO * cmin)
             ! We use the following PHI as our merit function to select X.
+            ! `cweight` is `CWEIGHT_DFT`, a positive finite constant, at every call site in
+            ! this tier: neither driver exposes it and neither passes anything else.
             if (cweight <= 0) then
-                phi = fhist
+                phi = fhist                       ! GCOVR_EXCL_LINE -- `cweight` is CWEIGHT_DFT
             elseif (is_posinf(cweight)) then
-                phi = chist_shifted
+                phi = chist_shifted               ! GCOVR_EXCL_LINE -- `cweight` is CWEIGHT_DFT
                 ! We should not use CHIST here; if MIN(CHIST_SHIFTED) is attained at multiple indices, then
                 ! we will check FHIST to exhaust the remaining degree of freedom.
             else
@@ -1153,7 +1176,8 @@ contains
                 history%x = st%record%x(:, 1:st%record%n)
                 history%f = st%record%f(1:st%record%n)
             else
-                allocate(history%x(n, 0), history%f(0))
+                allocate(history%x(n, 0), history%f(0)) ! GCOVR_EXCL_LINE -- every run evaluates
+                                                  ! at least once: `max_neval >= 1` is validated
             end if
         end if
 

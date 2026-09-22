@@ -525,4 +525,4 @@ contains
 
     end subroutine minimize_de_func
 
-end submodule parquet_optimize_de
+end submodule parquet_optimize_de ! GCOVR_EXCL_LINE

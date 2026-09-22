@@ -198,8 +198,12 @@ contains
         integer :: i
 
         if (present(a) .and. present(b)) then
+            ! GCOVR_EXCL_START -- gcov attribution artifact: the count for this two-line
+            ! `allocate` lands on its continuation line, so the first line reads as unhit while
+            ! the loop below it, which no branch separates from it, shows a positive count.
             allocate(a_out(size(a, 1, kind=int64), size(a, 2, kind=int64)), &
                      b_out(size(b, kind=int64)))
+            ! GCOVR_EXCL_STOP
             do i = 1, size(a, 1)
                 a_out(i, :) = a(i, :) * sc
             end do

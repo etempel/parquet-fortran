@@ -630,4 +630,4 @@ contains
 
     end function pf_infinity
 
-end module parquet_integrate
+end module parquet_integrate ! GCOVR_EXCL_LINE

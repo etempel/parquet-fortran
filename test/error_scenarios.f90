@@ -36,7 +36,7 @@ program error_scenarios
     ! test_optimize.f90, so a scenario and a test name the same objective and neither reaches an
     ! internal procedure.
     use test_optimize_support, only : quad1d, sphere, always_nan, nan_beyond_two, unit_disc, &
-        dist12, outside_disc, negative_count_disc, nan_constraint_disc
+        dist12, outside_disc, negative_count_disc, nan_constraint_disc, nan_value_disc
     ! The root-finding scenarios' functions: module procedures shared with test_root.f90, so a
     ! scenario and a test name the same function and neither reaches an internal procedure.
     use test_root_support, only : root_sq2, root_line_03, root_nan_beyond_two
@@ -4051,6 +4051,22 @@ program error_scenarios
         call scenario_prima_cobyla_negative_count()
     case ("prima_constraint_nonfinite")
         call scenario_prima_constraint_nonfinite()
+    case ("optimize_de_no_tolerance")
+        call scenario_optimize_de_no_tolerance()
+    case ("optimize_context_is_reported")
+        call scenario_optimize_context_is_reported()
+    case ("optimize_context_is_capped")
+        call scenario_optimize_context_is_capped()
+    case ("prima_cobyla_nonfinite_value")
+        call scenario_prima_cobyla_nonfinite_value()
+    case ("prima_ctol_nonfinite")
+        call scenario_prima_ctol_nonfinite()
+    case ("prima_context_is_reported")
+        call scenario_prima_context_is_reported()
+    case ("prima_context_is_capped")
+        call scenario_prima_context_is_capped()
+    case ("prima_lincoa_infeasible_start_context")
+        call scenario_prima_lincoa_infeasible_start_context()
     case ("root_reversed_bracket")
         call scenario_root_reversed_bracket()
     case ("root_nan_bracket_end")
@@ -34084,6 +34100,47 @@ contains
         print '(a, es22.15)', "accepted a lower bound not below its upper bound: ", fmin
     end subroutine scenario_optimize_de_bounds_order
 
+    !> Both tolerances at zero, which asks the search to stop at an accuracy it cannot reach.
+    !!
+    !! Each is separately legal -- `validate_tolerance` admits zero, so that a caller may drive
+    !! the stop on the other one alone -- and it is the PAIR that is refused. Without the
+    !! refusal the run would spend its whole generation budget and report a limit stop, which
+    !! looks like a hard problem rather than a contradictory request.
+    subroutine scenario_optimize_de_no_tolerance()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, ftol=0.0_real64, atol=0.0_real64)
+        print '(a, es22.15)', "accepted ftol and atol both zero: ", fmin
+    end subroutine scenario_optimize_de_no_tolerance
+
+    !> A `parquet_optimize` refusal whose message carries the caller's `context`.
+    !!
+    !! `optimize_abort` is this tier's shared abort, below `pf_minimize_de`, `_simplex`,
+    !! `_scalar` and `_multistart`; its context-carrying arm is a different line from the
+    !! plain one, and the `parquet_prima` tier has its own `prima_abort` covered separately.
+    subroutine scenario_optimize_context_is_reported()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = [-2.0_real64, 3.0_real64]
+        hi = [2.0_real64, 3.0_real64]
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, context="sweeping the grid")
+        print '(a, es22.15)', "accepted a degenerate box, with context: ", fmin
+    end subroutine scenario_optimize_context_is_reported
+
+    !> A `context` longer than the hundred characters `optimize_abort` carries, truncated.
+    subroutine scenario_optimize_context_is_capped()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        ! 150 characters, and the cap falls on a repeat boundary, so the truncated message ends
+        ! with a whole "abcdefghij" followed by the ellipsis -- which is what the test asserts.
+        lo = [-2.0_real64, 3.0_real64]
+        hi = [2.0_real64, 3.0_real64]
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, context=repeat("abcdefghij", 15))
+        print '(a, es22.15)', "accepted a degenerate box, with a long context: ", fmin
+    end subroutine scenario_optimize_context_is_capped
+
     !> An infinite bound, which no Latin hypercube can be laid out over.
     subroutine scenario_optimize_de_bounds_nonfinite()
         use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
@@ -34469,6 +34526,85 @@ contains
         call pf_minimize_cobyla(obj, x, fmin)
         print '(a, es22.15)', "accepted a NaN constraint value: ", fmin
     end subroutine scenario_prima_constraint_nonfinite
+
+    !> A NaN OBJECTIVE value from a constrained objective, screened by `evaluate_fc`.
+    !!
+    !! `prima_nonfinite_value` covers the same screen in `evaluate`, which is the unconstrained
+    !! route; only a `pf_constrained_objective` reaches `evaluate_fc`, and its objective screen
+    !! runs before it looks at the constraints at all. The `context=` here is what makes
+    !! `state_abort` take its context-carrying arm, so the message must name the call site too.
+    subroutine scenario_prima_cobyla_nonfinite_value()
+        type(nan_value_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = [2.0_real64, 0.5_real64]
+        call pf_minimize_cobyla(obj, x, fmin, context="fitting the disc model")
+        print '(a, es22.15)', "accepted a NaN objective value in COBYLA: ", fmin
+    end subroutine scenario_prima_cobyla_nonfinite_value
+
+    !> A `ctol` that is not finite, the companion of `prima_ctol_negative`.
+    !!
+    !! An infinite tolerance would declare every point feasible, including one whose violation is
+    !! itself infinite, so `info%cstrv > ctol` could never fire and `PF_OPT_INFEASIBLE` would
+    !! become unreachable. The finiteness test is its own statement ahead of the sign test,
+    !! because an ordered comparison against a NaN signals `IEEE_INVALID` even where it answers.
+    subroutine scenario_prima_ctol_nonfinite()
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_positive_inf
+        type(outside_disc) :: obj
+        real(real64) :: x(2), fmin
+
+        x = [2.0_real64, 0.5_real64]
+        call pf_minimize_cobyla(obj, x, fmin, ctol=ieee_value(1.0_real64, ieee_positive_inf))
+        print '(a, es22.15)', "accepted a non-finite ctol: ", fmin
+    end subroutine scenario_prima_ctol_nonfinite
+
+    !> A refusal whose message carries the caller's `context`, short enough to appear whole.
+    !!
+    !! Every abort in this tier reproduces the entry point and the optional context, and the
+    !! with-context arm is a different line from the without-context one. This is
+    !! `pf_minimize_bobyqa`'s own driver abort -- the `rhobeg` test -- rather than
+    !! `refuse_bad_call`'s, so the two abort sites are covered by two scenarios rather than one.
+    subroutine scenario_prima_context_is_reported()
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        x = 0.0_real64
+        lo = 0.0_real64
+        hi = 1.0_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi, rhobeg=1.0_real64, &
+                                context="calibrating the response curve")
+        print '(a, es22.15)', "accepted a rhobeg wider than half the box, with context: ", fmin
+    end subroutine scenario_prima_context_is_reported
+
+    !> A `context` longer than the hundred characters the message carries, which is truncated.
+    !!
+    !! The cap is `parquet_optimize`'s, so a caller who passes a whole rendered expression as
+    !! their context cannot push the rest of the message off a terminal. This one goes through
+    !! `refuse_bad_call`, whose with-context arm is a different site from the driver's above.
+    subroutine scenario_prima_context_is_capped()
+        real(real64) :: x(2), fmin
+
+        ! 150 characters, and the cap falls on a repeat boundary, so the truncated message ends
+        ! with a whole "abcdefghij" followed by the ellipsis -- which is what the test asserts.
+        x = 0.0_real64
+        call pf_minimize_bobyqa(sphere, x, fmin, npt=2, context=repeat("abcdefghij", 15))
+        print '(a, es22.15)', "accepted an npt below n+2, with a long context: ", fmin
+    end subroutine scenario_prima_context_is_capped
+
+    !> LINCOA's own feasibility refusal, with the caller's `context` attached.
+    !!
+    !! `prima_lincoa_infeasible_start` covers the same refusal without one; this reaches the
+    !! context-carrying arm of the abort helper that `pf_minimize_lincoa` contains, which is
+    !! separate from the one in `refuse_bad_call`.
+    subroutine scenario_prima_lincoa_infeasible_start_context()
+        real(real64) :: x(2), fmin, a(1, 2), b(1)
+
+        x = [2.0_real64, 2.0_real64]
+        a(1, :) = [1.0_real64, 1.0_real64]
+        b = 1.0_real64
+        call pf_minimize_lincoa(dist12, x, fmin, a_ineq=a, b_ineq=b, &
+                                context="projecting onto the budget plane")
+        print '(a, es22.15)', "accepted an infeasible start in LINCOA, with context: ", fmin
+    end subroutine scenario_prima_lincoa_infeasible_start_context
     !
     ! ---- pf_find_root: every caller contract it refuses ------------------------------------
     !

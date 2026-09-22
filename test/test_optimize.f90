@@ -101,7 +101,9 @@ contains
             new_unittest("no finite start is PF_OPT_NONFINITE, the box centre and +Inf", &
                          test_multistart_nothing_finite), &
             new_unittest("NaN starts are counted and skipped, and the best finite start wins", &
-                         test_multistart_some_nan_starts) &
+                         test_multistart_some_nan_starts), &
+            new_unittest("DE accepts an explicit f_weight, ftol and max_neval and honours each", &
+                         test_de_explicit_knobs) &
             ]
 
     end subroutine collect_tests_optimize
@@ -1295,5 +1297,80 @@ contains
             "default -ieee=stop")
 
     end subroutine test_multistart_some_nan_starts
+
+    !> `pf_minimize_de` takes an explicit `f_weight`, `ftol` and `max_neval`, and each has effect.
+    !!
+    !! The refusals around these three are covered by the `optimize_de_*` scenarios; what is
+    !! asserted here is the ACCEPTING side of the same validation -- a value inside the allowed
+    !! range is taken and used, not merely not refused. Each knob gets its own observable:
+    !!
+    !! 1. `max_neval` bounds the evaluation count, and the negative control is the same run
+    !!    without it, which spends more;
+    !! 2. `ftol` loose enough to stop the search early leaves a worse value than a tight one;
+    !! 3. `f_weight` inside `(0, 2]` is accepted and the run still reaches the basin.
+    subroutine test_de_explicit_knobs(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: lo(2), hi(2), x(2), fmin, x2(2), fmin2
+        type(pf_optimize_info) :: info, info2
+        type(shifted_quadratic) :: loose, tight
+
+        lo = [-3.0_real64, -3.0_real64]
+        hi = [3.0_real64, 3.0_real64]
+
+        ! 1. An explicit budget is honoured; the control below spends more than it.
+        call pf_minimize_de(sphere, lo, hi, 20260921_int64, x, fmin, max_neval=60, &
+                            atol=1.0e-12_real64, info=info)
+        call check(error, info%neval <= 60 + 1, &
+                   "an explicit max_neval must bound the evaluation count, soft by one step")
+        if (allocated(error)) return
+        call check(error, info%status == PF_OPT_LIMIT, "a spent budget is PF_OPT_LIMIT")
+        if (allocated(error)) return
+
+        call pf_minimize_de(sphere, lo, hi, 20260921_int64, x2, fmin2, max_gen=200, &
+                            atol=1.0e-12_real64, info=info2)
+        call check(error, info2%neval > 60, &
+                   "the control, with no budget, must spend more than the budgeted run")
+        if (allocated(error)) return
+        call check(error, fmin2 <= fmin, "and must reach at least as good a value")
+        if (allocated(error)) return
+
+        ! 2. An explicit f_weight inside (0, 2] is accepted, and the run still finds the basin.
+        !    `sphere` is the sum of squares about 1, so its minimiser is 1 in both coordinates.
+        call pf_minimize_de(sphere, lo, hi, 20260921_int64, x, fmin, f_weight=1.2_real64, &
+                            max_gen=300, atol=1.0e-10_real64, info=info)
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-3_real64, &
+                   "with f_weight = 1.2 the search must still reach the sphere's basin")
+        if (allocated(error)) return
+
+        ! 3. A loose ftol stops the search sooner than a tight one, so it is read rather than
+        !    validated and dropped. The objective is SHIFTED away from zero on purpose: DE's
+        !    `ftol` test is the relative spread `2*(fhi - flo)/(|fhi| + |flo|)`, which is
+        !    ill-conditioned at a minimum of exactly zero -- there the two runs converge alike
+        !    and the comparison below would be vacuous rather than wrong.
+        loose%shift = 10.0_real64
+        tight%shift = 10.0_real64
+        call pf_minimize_de(loose, lo, hi, 20260921_int64, x, fmin, ftol=1.0e-1_real64, &
+                            max_gen=300, info=info)
+        call pf_minimize_de(tight, lo, hi, 20260921_int64, x2, fmin2, ftol=1.0e-12_real64, &
+                            max_gen=300, info=info2)
+        call check(error, info%neval < info2%neval, &
+                   "a loose ftol must stop the search before a tight one does")
+        if (allocated(error)) return
+
+        ! 4. A polish that cannot improve leaves the population's own best in place. On a
+        !    CONSTANT objective the simplex returns the same value it was given, so
+        !    `fpolish < fmin` is false and the best individual is restored -- the arm the
+        !    improving case does not reach. The control is the improving case itself, which
+        !    the `polish lowers the value` test already asserts.
+        call pf_minimize_de(constant_one, lo, hi, 20260921_int64, x, fmin, max_gen=20, &
+                            polish=.true., atol=1.0e-8_real64, info=info)
+        call check(error, fmin == 1.0_real64, &
+                   "a constant objective's minimum is its constant, polished or not")
+        if (allocated(error)) return
+        call check(error, all(x >= lo) .and. all(x <= hi), &
+                   "and the restored point must still be the box's own")
+
+    end subroutine test_de_explicit_knobs
 
 end module test_optimize

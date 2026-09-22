@@ -23,14 +23,14 @@ module test_optimize_support
     private
 
     public :: shifted_quadratic, line_fit, unit_disc, table_sphere
-    public :: rosenbrock, rosenbrock_1e300, brown_almost_linear
+    public :: rosenbrock, rosenbrock_1e300, brown_almost_linear, sphere_1e13
     public :: sphere, origin_sphere, quad1d, quad1d_min, one_dim, one_dim_min
     public :: constant_one, shifted_norm, quartic, quartic_derivative
     public :: always_nan, always_inf, nan_beyond_two
     public :: rastrigin, rastrigin_gradient, twin_wells, nan_corner
     public :: bad_scaling, bad_scaling_unit, BAD_SCALING_SCALE, BAD_SCALING_MIN
     public :: disc_fit, outside_disc, dist12, sphere123, SPHERE123_CENTRE
-    public :: negative_count_disc, nan_constraint_disc, unscreened_solver
+    public :: negative_count_disc, nan_constraint_disc, nan_value_disc, unscreened_solver
 
     !> Sum of squares about `1` plus a shift, counting its own evaluations.
     !!
@@ -118,6 +118,16 @@ module test_optimize_support
     contains
         procedure :: constraints => nan_constraint                !! Returns a NaN.
     end type nan_constraint_disc
+
+    !> A constrained objective whose `eval` returns a NaN.
+    !!
+    !! The twin of `nan_constraint_disc` on the other screen: `evaluate_fc` checks the objective
+    !! value before it looks at the constraints at all, and that arm is reachable only from a
+    !! constrained objective, since an unconstrained one goes through `evaluate` instead.
+    type, extends(outside_disc) :: nan_value_disc
+    contains
+        procedure :: eval => nan_value                            !! Returns a NaN.
+    end type nan_value_disc
 
     !> A local solver that evaluates its start once and hands back whatever the objective said.
     !!
@@ -308,6 +318,31 @@ contains
         c(1) = ieee_value(1.0_real64, ieee_quiet_nan) + sum(x)*0.0_real64
 
     end subroutine nan_constraint
+
+    !> A NaN objective value, formed with `ieee_value` so no fixture arithmetic raises a flag.
+    function nan_value(this, x) result(f)
+        use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+        class(nan_value_disc), intent(inout) :: this !! the objective
+        real(real64), intent(in)             :: x(:) !! the point
+        real(real64)                         :: f    !! a NaN
+
+        f = ieee_value(1.0_real64, ieee_quiet_nan) + sum(x)*0.0_real64
+
+    end function nan_value
+
+    !> `sphere` scaled by `1e13`, so the model GRADIENT exceeds the engines' `1e12` threshold.
+    !!
+    !! `bad_scaling` makes the COORDINATES badly scaled; this makes the VALUE large, which is a
+    !! different thing and reaches the gradient-rescaling arm of LINCOA's trust-region step.
+    !! The minimiser is unchanged at 1 in every coordinate, since scaling by a positive constant
+    !! does not move it.
+    function sphere_1e13(x) result(f)
+        real(real64), intent(in) :: x(:) !! the point
+        real(real64)             :: f    !! `1e13` times `sphere(x)`
+
+        f = 1.0e13_real64*sum((x - 1.0_real64)**2)
+
+    end function sphere_1e13
 
     !> One evaluation at the start, reported as the minimum with no finiteness screen.
     subroutine unscreened_run(this, obj, x, fmin, lower, upper, info)

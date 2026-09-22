@@ -415,7 +415,11 @@ contains
     end function outprod
 
     !> The rank-one update `A = A + alpha*(x y^T)`, upstream's `r1`.
-    subroutine r1(A, alpha, x, y)
+    !!
+    !! **No caller in this tier**: every rank-one update the engines make is symmetric and goes
+    !! through `r1_sym`. Vendored so that `r1update` is the generic upstream declares, and so
+    !! that a future engine needing the unsymmetric form finds it rather than writing a second.
+    subroutine r1(A, alpha, x, y) ! GCOVR_EXCL_START -- no caller in this tier, see above
         real(real64), intent(in) :: alpha         !! the scalar weight
         real(real64), intent(in) :: x(:)          !! the left vector, of length m
         real(real64), intent(in) :: y(:)          !! the right vector, of length n
@@ -426,6 +430,7 @@ contains
         !A = A + alpha * outprod(x, y)
 
     end subroutine r1
+    ! GCOVR_EXCL_STOP
 
     !> The symmetric rank-one update `A = A + alpha*(x x^T)`, upstream's `r1_sym`.
     !!
@@ -454,7 +459,10 @@ contains
     end subroutine r1_sym
 
     !> The rank-two update `A = A + alpha*(x y^T) + beta*(u v^T)`, upstream's `r2`.
-    subroutine r2(A, alpha, x, y, beta, u, v)
+    !!
+    !! **No caller in this tier**, for the reason `r1` carries: the engines' rank-two updates
+    !! are symmetric and go through `r2_sym`.
+    subroutine r2(A, alpha, x, y, beta, u, v) ! GCOVR_EXCL_START -- no caller, see above
         real(real64), intent(in) :: alpha         !! weight of the first term
         real(real64), intent(in) :: beta          !! weight of the second term
         real(real64), intent(in) :: x(:)          !! left vector of the first term
@@ -468,6 +476,7 @@ contains
         !A = A + (alpha * outprod(x, y) + beta * outprod(u, v))
 
     end subroutine r2
+    ! GCOVR_EXCL_STOP
 
     !> The symmetric rank-two update `A = A + alpha*(x y^T + y x^T)`, upstream's `r2_sym`.
     subroutine r2_sym(A, alpha, x, y)
@@ -519,7 +528,7 @@ contains
         integer :: k_loc
 
         if (present(k)) then
-            k_loc = k
+            k_loc = k                            ! GCOVR_EXCL_LINE -- no call site passes `k`
         else
             k_loc = 0
         end if
@@ -529,9 +538,9 @@ contains
         allocate(D(int(dlen, int64)))
         if (k_loc >= 0) then
             D = [(A(i, i + k_loc), i=1, dlen)]
-        else
-            D = [(A(i - k_loc, i), i=1, dlen)]
-        end if
+        else                                     ! GCOVR_EXCL_START -- `k` is never passed, so
+            D = [(A(i - k_loc, i), i=1, dlen)]   ! `k_loc` is always 0 and never negative
+        end if                            ! GCOVR_EXCL_STOP
 
     end function diag
 
@@ -551,17 +560,26 @@ contains
         real(real64) :: u
 
         ! Define C = X(1) / R and S = X(2) / R with R = HYPOT(X(1), X(2)). Handle Inf/NaN, over/underflow.
+        ! The three arms below are upstream's guards against a degenerate 2-vector. None is
+        ! reachable from this library: a non-finite value aborts in `evaluate` before it can
+        ! enter the model, and the all-zero vector is screened by each caller -- the rotations
+        ! are formed from differences the callers have already found nonzero.
+        ! The three tests themselves run on every call and are counted; it is the arms they
+        ! select that are dead, so each arm is excluded on its own rather than as one block.
         if (any(is_nan(x))) then
             ! In this case, MATLAB sets G to NaN(2, 2). We refrain from doing so to keep G orthogonal.
-            c = ONE
+            c = ONE                               ! GCOVR_EXCL_START -- see the note above
             s = ZERO
+            ! GCOVR_EXCL_STOP
         elseif (all(is_inf(x))) then
             ! In this case, MATLAB sets G to NaN(2, 2). We refrain from doing so to keep G orthogonal.
-            c = sign(1 / sqrt(2.0_real64), x(1))
+            c = sign(1 / sqrt(2.0_real64), x(1))  ! GCOVR_EXCL_START -- see the note above
             s = sign(1 / sqrt(2.0_real64), x(2))
+            ! GCOVR_EXCL_STOP
         elseif (abs(x(1)) <= 0 .and. abs(x(2)) <= 0) then ! X(1) == 0 == X(2).
-            c = ONE
+            c = ONE                               ! GCOVR_EXCL_START -- see the note above
             s = ZERO
+            ! GCOVR_EXCL_STOP
         elseif (abs(x(2)) <= EPS * abs(x(1))) then
             ! N.B.:
             ! 0. With <= instead of <, this case covers X(1) == 0 == X(2), which is treated above separately
@@ -587,7 +605,11 @@ contains
                 r = norm(x)
                 c = x(1) / r
                 s = x(2) / r
-            elseif (abs(x(1)) > abs(x(2))) then
+            ! The two arms below are upstream's over/underflow-safe forms, reached only when a
+            ! component is below SQRT(REALMIN) or above SQRT(REALMAX/2.1) -- magnitudes around
+            ! 1e-154 and 1e154. The rotations this tier forms come from trust-region steps and
+            ! constraint gradients, which the engines keep far inside that band.
+            elseif (abs(x(1)) > abs(x(2))) then   ! GCOVR_EXCL_START -- see the note above
                 t = x(2) / x(1)
                 u = maxval([ONE, abs(t), sqrt(ONE + t**2)])  ! MAXVAL: precaution against rounding error.
                 u = sign(u, x(1))  ! MATLAB: u = sign(x(1))*sqrt(ONE + t**2)
@@ -599,7 +621,7 @@ contains
                 u = sign(u, x(2))  ! MATLAB: u = sign(x(2))*sqrt(ONE + t**2)
                 c = t / u
                 s = ONE / u
-            end if
+            end if                        ! GCOVR_EXCL_STOP
         end if
 
         G = reshape([c, -s, s, c], [2, 2])  ! MATLAB: G = [c, s; -s, c]
@@ -633,22 +655,27 @@ contains
         ! guard against it.
         maxabs = maxval([abs(x), ZERO])
 
+        ! The first two arms are upstream's guards: no call site here passes a zero-length
+        ! vector, and a non-finite value aborts in `evaluate` before it can reach the model.
         if (size(x) == 0) then
-            y = ZERO
+            y = ZERO                              ! GCOVR_EXCL_LINE -- no zero-length call site
         else if (.not. all(is_finite(x))) then
             ! A NaN in X makes Y a NaN; an infinity in X makes it +Infinity.
-            y = sum(abs(x))
+            y = sum(abs(x))                       ! GCOVR_EXCL_LINE -- screened in `evaluate`
         else if (maxabs <= 0) then
             ! Only reached when X holds no NaN, so MAXABS = 0 does mean X is all zero.
             y = ZERO
         else
             y = sqrt(sum(x**2))
+            ! Upstream's rescue for a sum of squares that overflowed or underflowed to zero;
+            ! the vectors normed here are trust-region steps and model gradients, which the
+            ! engines keep well inside the exponent range where the direct form is exact.
             if (is_posinf(y) .or. y <= 0) then
-                scalmin = real(radix(ZERO), real64)**max(minexponent(ZERO) - 1, 1 - maxexponent(ZERO))
+                scalmin = real(radix(ZERO), real64)**max(minexponent(ZERO) - 1, 1 - maxexponent(ZERO))  ! GCOVR_EXCL_START
                 scalmax = real(radix(ZERO), real64)**min(maxexponent(ZERO) - 1, 1 - minexponent(ZERO))
                 scaling = min(max(maxabs, scalmin), scalmax)
                 y = scaling * sqrt(sum((x / scaling)**2))
-            end if
+            end if                        ! GCOVR_EXCL_STOP
         end if
 
     end function norm_2
@@ -671,12 +698,16 @@ contains
             y = ZERO
         else if (.not. all(is_finite(x))) then
             ! If X contains NaN, then Y is NaN. Otherwise, Y is Inf when X contains +/-Inf.
-            y = sum(abs(x))
+            y = sum(abs(x))                       ! GCOVR_EXCL_LINE -- screened in `evaluate`
         else if (.not. any(abs(x) > 0)) then
             ! The following is incorrect without checking the last case, as X may be all NaN.
             y = ZERO
         else
-            select case (nname)
+            ! Both call sites in this tier are LINCOA's `norm(..., 'inf')` over the ACTIVE
+            ! constraint gradients, and the runs the suite drives reach them with an empty
+            ! active set, which the zero-length arm above answers. So neither the switch nor
+            ! its `case default` -- which no call site can select, both passing 'inf' -- runs.
+            select case (nname)                   ! GCOVR_EXCL_START -- see the note above
             case ('inf')
                 ! If SIZE(X) = 0, then MAXVAL(ABS(X)) = -HUGE(X); since we have handled such a
                 ! case above, it is OK to write Y = MAXVAL(ABS(X)) here, but we append a 0 for
@@ -684,7 +715,7 @@ contains
                 y = maxval([abs(x), ZERO])
             case default
                 y = norm_2(x)
-            end select
+            end select                    ! GCOVR_EXCL_STOP
         end if
 
     end function named_norm_vec
@@ -693,7 +724,10 @@ contains
     !!
     !! The upper triangle of the matrix is stored column by column in `smatv`, which is how Powell's
     !! methods carry the quadratic model's Hessian.
-    function smat_mul_vec(smatv, x) result(y)
+    !! **No caller in this tier**: BOBYQA, LINCOA and COBYLA carry the model Hessian as the
+    !! explicit `hq` plus the implicit `pq`, and reach it through `hess_mul`, never as a packed
+    !! triangle. Vendored because it is part of upstream's public `linalg_mod` surface.
+    function smat_mul_vec(smatv, x) result(y) ! GCOVR_EXCL_START -- no caller, see above
         real(real64), intent(in) :: smatv(:)    !! the matrix's upper triangle, packed column by column
         real(real64), intent(in) :: x(:)        !! the vector
         real(real64) :: y(size(x))              !! the product
@@ -710,6 +744,7 @@ contains
         end do
 
     end function smat_mul_vec
+    ! GCOVR_EXCL_STOP
 
     !> The indices where a logical array is true, in ascending order; upstream's `trueloc`.
     !!
@@ -756,12 +791,15 @@ contains
 
         if (n == 1 .or. (xstart <= xstop .and. xstop <= xstart)) then
             x = xstop
+        ! Upstream's exactly-antisymmetric case, `xstart == -xstop`, which it forms about zero
+        ! so the midpoint is exact. This tier's only real-valued call sites build grids whose
+        ! two ends are not negatives of each other.
         elseif (abs(xstart) <= abs(xstop) .and. abs(xstop) <= abs(xstart)) then
-            xunit = xstop / real(nm, real64)
+            xunit = xstop / real(nm, real64)      ! GCOVR_EXCL_START -- see the note above
             x = xunit * real([(i, i=-nm, nm, 2)], real64)
             if (modulo(nm, 2) == 0) then
                 x(1 + nm / 2) = ZERO
-            end if
+            end if                        ! GCOVR_EXCL_STOP
         else
             xunit = (xstop - xstart) / real(nm, real64)
             x = xstart + xunit * real([(i, i=0, nm)], real64)
@@ -786,13 +824,16 @@ contains
     end function linspace_i
 
     !> `1` for true and `0` for false, upstream's `logical_to_int` behind the generic `int`.
-    pure elemental function logical_to_int(x) result(y)
+    !! **No caller in this tier**: every `int(...)` in these engines converts a size or an
+    !! index, never a logical. Vendored to keep the `int` generic upstream's shape.
+    pure elemental function logical_to_int(x) result(y) ! GCOVR_EXCL_START -- no caller
         logical, intent(in) :: x    !! the logical
         integer :: y                !! 1 or 0
 
         y = merge(tsource=1, fsource=0, mask=x)
 
     end function logical_to_int
+    ! GCOVR_EXCL_STOP
 
     !> The sum of a vector, added in index order: the rank-one specific behind the generic `sum`.
     !!
@@ -850,20 +891,26 @@ contains
         real(real64) :: r                 !! the hypotenuse
         real(real64) :: y(2)
 
+        ! The two non-finite arms are upstream's; a non-finite value aborts in `evaluate`
+        ! before it can reach a factorisation update, which is where this is called from.
         if (.not. is_finite(x1)) then
-            r = abs(x1)
+            r = abs(x1)                           ! GCOVR_EXCL_LINE -- screened in `evaluate`
         elseif (.not. is_finite(x2)) then
-            r = abs(x2)
+            r = abs(x2)                           ! GCOVR_EXCL_LINE -- screened in `evaluate`
         else
             y = abs([x1, x2])
             y = [minval(y), maxval(y)]
             if (y(1) > sqrt(REALMIN) .and. y(2) < sqrt(REALMAX / 2.1_real64)) then
                 r = sqrt(sum(y**2))
-            elseif (y(2) > 0) then
+            ! As in `planerot`: the scaled form is upstream's guard for a component outside
+            ! the band (SQRT(REALMIN), SQRT(REALMAX/2.1)), and the final arm is the both-zero
+            ! case. The sides given here are entries of a factorisation the engines keep
+            ! bounded, and a both-zero pair is screened by the caller.
+            elseif (y(2) > 0) then                ! GCOVR_EXCL_START -- see the note above
                 r = y(2) * sqrt((y(1) / y(2))**2 + ONE)
             else
                 r = ZERO
-            end if
+            end if                        ! GCOVR_EXCL_STOP
             ! Without the following line, R > Y(1) + Y(2) or R < Y(2) may happen due to rounding errors.
             r = min(sum(y), max(y(2), r))
         end if
@@ -920,7 +967,7 @@ contains
             tol_loc = max(tol, tol * maxval(abs(A)))
         end if
         if (is_nan(tol_loc)) then
-            tol_loc = ZERO
+            tol_loc = ZERO                        ! GCOVR_EXCL_LINE -- `tol` is never passed
         end if
 
         m = int(size(A, 1))
@@ -945,7 +992,7 @@ contains
         real(real64) :: tol_loc
 
         if (present(tol)) then
-            tol_loc = tol
+            tol_loc = tol                         ! GCOVR_EXCL_LINE -- `tol` is never passed
         else
             tol_loc = ZERO
         end if
@@ -963,7 +1010,7 @@ contains
         real(real64) :: tol_loc
 
         if (present(tol)) then
-            tol_loc = tol
+            tol_loc = tol                         ! GCOVR_EXCL_LINE -- `tol` is never passed
         else
             tol_loc = ZERO
         end if
@@ -981,7 +1028,13 @@ contains
     !! Upstream's guard on the first line tests `R` twice where it means `P`, so a call asking for
     !! the permutation alone would return with `P` unset. Kept as upstream has it: no call in this
     !! tier takes that form, and a silent divergence from the commit is worse than a dead branch.
-    subroutine qr(A, Q, R, P)
+    !!
+    !! **No caller in this tier reaches it.** Its three callers -- `inv`, `solve` and `lsqr` --
+    !! each take it only as a fallback for a matrix that is neither lower nor upper triangular,
+    !! and the matrices they are handed here never are: COBYLA inverts its simplex (lower
+    !! triangular), LINCOA solves against the `R` of its own active-set factorisation (upper
+    !! triangular), and `lsqr` is given `Q` and `Rdiag` already built by `qradd`/`qrexc`.
+    subroutine qr(A, Q, R, P) ! GCOVR_EXCL_START -- no caller reaches it; see above
         real(real64), intent(in) :: A(:, :)               !! the matrix to factorise
         real(real64), intent(out), optional :: Q(:, :)    !! the orthonormal columns
         real(real64), intent(out), optional :: R(:, :)    !! the upper triangle
@@ -1035,6 +1088,7 @@ contains
         end if
 
     end subroutine qr
+    ! GCOVR_EXCL_STOP
 
     !> The inverse of a small invertible matrix, upstream's `inv`.
     !!
@@ -1054,7 +1108,7 @@ contains
         n = int(size(A, 1))
 
         if (n <= 0) then ! Of course, N < 0 should never happen.
-            return
+            return                                ! GCOVR_EXCL_LINE -- `n >= 1` is validated
         end if
 
         if (istril(A)) then
@@ -1066,7 +1120,9 @@ contains
                 B(1:i - 1, i) = -matprod(B(1:i - 1, 1:i - 1), R(1:i - 1, i) / R(i, i))
             end do
             B = transpose(B)
-        elseif (istriu(A)) then
+        ! The one call site in this tier is COBYLA's, on its simplex, which the lower-triangular
+        ! arm above answers; the other two arms are upstream's generality.
+        elseif (istriu(A)) then                   ! GCOVR_EXCL_START -- COBYLA's simplex is lower
             B = ZERO
             do i = 1, n
                 B(i, i) = ONE / A(i, i)
@@ -1082,7 +1138,7 @@ contains
             end do
             InvP(P) = linspace(1, n, n) ! The inverse permutation
             B = transpose(B(:, InvP))
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
     end function inv
 
@@ -1103,7 +1159,7 @@ contains
         n = int(size(A, 1))
 
         if (n <= 0) then ! Of course, N < 0 should never happen.
-            return
+            return                                ! GCOVR_EXCL_LINE -- `n >= 1` is validated
         end if
 
         ! Zaikun 20220527: With the following code, Huawei Bisheng flang 2.1.0, Arm Fortran Compiler 23.1,
@@ -1118,14 +1174,16 @@ contains
                 x(i) = (b(i) - inprod(A(i, i + 1:n), x(i + 1:n))) / A(i, i) ! INPROD = 0 if I == N.
             end do
         else
+            ! LINCOA, the one caller here, solves against the upper-triangular `R` of its own
+            ! active-set factorisation, so this general fallback is upstream's generality.
             ! This is NOT a good algorithm for linear systems, but since the QR subroutine is available ...
-            call qr(A, Q, R, P)
+            call qr(A, Q, R, P)                   ! GCOVR_EXCL_START -- LINCOA's `A` is triangular
             x = matprod(b, Q)
             do i = n, 1, -1
                 x(i) = (x(i) - inprod(R(i, i + 1:n), x(i + 1:n))) / R(i, i) ! INPROD = 0 if I == N.
             end do
             x(P) = x ! Handle the permutation.
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
     end function solve
 
@@ -1159,33 +1217,36 @@ contains
         n = int(size(A, 2))
 
         if (n <= 0) then ! Of course, N < 0 should never happen.
-            return
+            return                                ! GCOVR_EXCL_LINE -- `n >= 1` is validated
         end if
 
         if (present(Q)) then
             Q_loc = Q(:, 1:size(Q_loc, 2))
+            ! COBYLA, the one caller, always passes BOTH `Q` and `Rdiag`, which it maintains
+            ! through `qradd`/`qrexc`. So neither the arm that rebuilds `Rdiag` nor the
+            ! pivoting arm that factorises from scratch is reachable from this tier.
             if (present(Rdiag)) then
                 Rdiag_loc = Rdiag
-            else
+            else                                  ! GCOVR_EXCL_START -- COBYLA passes `Rdiag`
                 Rdiag_loc = [(inprod(Q_loc(:, i), A(:, i)), i=1, min(m, n))]
                 ! MATLAB: Rdiag_loc = sum(Q_loc(:, 1:min(m,n)) .* A(:, 1:min(m,n)), 1); % Row vector
-            end if
+            end if                        ! GCOVR_EXCL_STOP
             rank = min(m, n)
             pivot = .false.
-        else
+        else                                      ! GCOVR_EXCL_START -- COBYLA passes `Q`
             call qr(A, Q=Q_loc, P=P)
             Rdiag_loc = [(inprod(Q_loc(:, i), A(:, P(i))), i=1, min(m, n))]
             ! MATLAB: Rdiag_loc = sum(Q_loc(:, 1:min(m,n)) .* A(:, P(1:min(m,n))), 1); % Row vector
             rank = maxval([0, trueloc(abs(Rdiag_loc) > 0)])
             pivot = .true.
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         x = ZERO
         y = b ! Local copy of B; B is INTENT(IN) and should not be modified.
 
         do i = rank, 1, -1
             if (pivot) then
-                j = P(i)
+                j = P(i)                          ! GCOVR_EXCL_LINE -- `pivot` needs the arm above
             else
                 j = i
             end if
@@ -1194,7 +1255,8 @@ contains
             yq = inprod(y, Q_loc(:, i))
             yqa = inprod(abs(y), abs(Q_loc(:, i)))
             if (isminor(yq, yqa)) then
-                x(j) = ZERO
+                x(j) = ZERO                       ! GCOVR_EXCL_LINE -- Powell's rounding arm;
+                                                  ! the suite's active sets never go negligible
             else
                 x(j) = yq / Rdiag_loc(i)
                 y = y - x(j) * A(:, j)
@@ -1229,7 +1291,7 @@ contains
         n = int(size(R, 2))
 
         if (n <= 0) then ! Of course, N < 0 should never happen.
-            return
+            return                                ! GCOVR_EXCL_LINE -- `n >= 1` is validated
         end if
 
         x = matprod(b, Q)

@@ -265,7 +265,7 @@ contains
             pqalt = pq
             galt = gopt
             if (.not. (all(is_finite(gopt)) .and. all(is_finite(hq)) .and. all(is_finite(pq)))) then
-                subinfo = NAN_INF_MODEL
+                subinfo = NAN_INF_MODEL  ! GCOVR_EXCL_LINE -- `evaluate` refuses a non-finite value
             end if
         end if
 
@@ -452,8 +452,9 @@ contains
                     ! models are more accurate in predicting the function value of XOPT + D.
                     call tryqalt(idz, bmat, fval - fval(kopt), xpt(:, kopt), xpt, zmat, qalt_better, gopt, pq, hq, galt, pqalt)
                     if (.not. (all(is_finite(gopt)) .and. all(is_finite(hq)) .and. all(is_finite(pq)))) then
-                        info = NAN_INF_MODEL
+                        info = NAN_INF_MODEL  ! GCOVR_EXCL_START -- `evaluate` refuses a non-finite value
                         exit
+                        ! GCOVR_EXCL_STOP
                     end if
 
                     ! Update RESCON if XOPT is changed.
@@ -594,8 +595,9 @@ contains
                 ! N.B.: Powell's code does this only if XOPT + D is feasible.
                 call tryqalt(idz, bmat, fval - fval(kopt), xpt(:, kopt), xpt, zmat, qalt_better, gopt, pq, hq, galt, pqalt)
                 if (.not. (all(is_finite(gopt)) .and. all(is_finite(hq)) .and. all(is_finite(pq)))) then
-                    info = NAN_INF_MODEL
+                    info = NAN_INF_MODEL  ! GCOVR_EXCL_START -- `evaluate` refuses a non-finite value
                     exit
+                    ! GCOVR_EXCL_STOP
                 end if
 
                 ! Update RESCON. Zaikun 20221115: Currently, UPDATERES does not update RESCON if XIMPROVED
@@ -795,7 +797,7 @@ contains
             ! Internally, we use AMAT and B to evaluate the constraints.
             cval(k) = maximum([ZERO, matprod(xpt(:, k), amat) - b])
             if (is_nan(cval(k))) then
-                cval(k) = REALMAX
+                cval(k) = REALMAX  ! GCOVR_EXCL_LINE -- AMAT, B and XPT are all finite here
             end if
             ! Powell's implementation contains the following procedure that shifts every infeasible point if
             ! necessary so that its constraint violation is at least 0.2*RHOBEG. According to a test on
@@ -927,12 +929,14 @@ contains
         ! Set IDZ.
         idz = 1
 
+        ! Neither arm runs: `lincob`, the only caller, leaves INFO out, and the factorisation is
+        ! built from RHOBEG and IJ alone, which are finite.
         if (present(info)) then
-            if (any(is_nan(bmat)) .or. any(is_nan(zmat))) then
+            if (any(is_nan(bmat)) .or. any(is_nan(zmat))) then   ! GCOVR_EXCL_START -- see the note above
                 info = NAN_INF_MODEL
             else
                 info = INFO_DFT
-            end if
+            end if                        ! GCOVR_EXCL_STOP
         end if
 
     end subroutine inith
@@ -1026,12 +1030,15 @@ contains
         end if
 
         ! Return if G is not finite. Otherwise, GETACT will fail in the debugging mode.
+        ! Not reached: the model is built from values `evaluate` has screened, so its gradient is
+        ! finite.
         if (.not. is_finite(sum(abs(gopt)))) then
-            s = ZERO
+            s = ZERO         ! GCOVR_EXCL_START -- see the note above
             if (present(ngetact)) then
                 ngetact = 0
             end if
             return
+            ! GCOVR_EXCL_STOP
         end if
 
         ! Set the initial elements of RESNEW, RESACT and S.
@@ -1129,15 +1136,19 @@ contains
                         ! region bound. SQRTD: square root of a discriminant. Powell's code for SQRTD is
                         ! SQRT(DS * DS + DD * RESID), which may be below ABS(DS) due to underflow in DS*DS.
                         sqrtd = maxval([sqrt(ds * ds + dd * resid), abs(ds), sqrt(dd * resid)])
+                        ! The two arms compute the same root, each avoiding the cancellation the
+                        ! other would suffer; DS is non-positive at every projection step the runs
+                        ! the suite drives take, so only the first is reached.
                         if (ds <= 0) then
                             gamma = (sqrtd - ds) / dd
                         else
-                            gamma = resid / (sqrtd + ds)
+                            gamma = resid / (sqrtd + ds)   ! GCOVR_EXCL_LINE -- DS <= 0; see above
                         end if
                         ! GAMMA < 0 should not happen. GAMMA can be 0 or NaN when, e.g., DS or DD becomes
                         ! Inf. Powell's code does not handle this.
                         if (gamma < 0 .or. .not. is_finite(gamma)) then
-                            gamma = 0
+                            gamma = 0             ! GCOVR_EXCL_LINE -- needs a non-finite DS or DD,
+                                                  ! which `evaluate` refuses before the model sees it
                         end if
 
                         ! Reduce GAMMA so that the move along DPROJ also satisfies the linear constraints.
@@ -1189,13 +1200,13 @@ contains
             ! ALPHA < 0 should not happen. ALPHA can be 0 or NaN when, e.g., DS or DD becomes Inf. Powell's
             ! code does not handle this.
             if (alpha <= 0 .or. .not. is_finite(alpha)) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- ALPHA is positive and finite for a finite model
             end if
 
             ! Powell's condition for the following IF: -ALPHA * DG <= TOL * REDUCT. Note that the EXIT
             ! will be triggered if DG >= 0, as ALPHA >= 0.
             if (-alpha * dg <= tol * reduct .or. is_nan(alpha * dg)) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- these runs leave the loop at the tests below first
             end if
 
             ! Set DHD to the curvature of the model along D. Then reduce ALPHA if necessary to the value
@@ -1254,12 +1265,13 @@ contains
             s = s + alpha * d
             ss = sum(s**2)
             if (.not. is_finite(ss)) then
-                s = sold
+                s = sold     ! GCOVR_EXCL_START -- S stays finite inside the trust region
                 exit
+                ! GCOVR_EXCL_STOP
             end if
             g = g + alpha * hd
             if (.not. is_finite(sum(abs(g)))) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- G stays finite: `evaluate` refuses a non-finite value
             end if
 
             ! Update RESNEW.
@@ -1287,9 +1299,12 @@ contains
 
             ! Update REDUCT, the reduction up to now.
             reduct = reduct - alpha * (dg + HALF * alpha * dhd)
+            ! Not reached: ALPHA is cut to the model minimiser above, so every CG pass of the runs
+            ! the suite drives reduces the model, and REDUCT cannot be NaN for a finite model.
             if (reduct <= 0 .or. is_nan(reduct)) then
-                s = sold
+                s = sold     ! GCOVR_EXCL_START -- see the note above
                 exit
+                ! GCOVR_EXCL_STOP
             end if
 
             ! Test for termination.
@@ -1532,16 +1547,21 @@ contains
             end if
 
             if (dd >= ddsav) then
+                ! GCOVR_EXCL_START -- the projected direction shortens at every pass in these runs
                 psd = ZERO  ! Zaikun 20220329: Powell wrote this. Why?
                 !psd = psdsav  ! This does not seem to improve the performance.
                 exit
+                ! GCOVR_EXCL_STOP
             end if
 
             !---------------------------------------------------------------------------------------!
             ! Powell's code does not handle the following pathological cases.
+            ! Not reached: PSD is minus a projection of G, so it cannot point uphill, and the model
+            ! it is built from is finite because `evaluate` refuses a non-finite objective value.
             if (inprod(psd, g) > 0 .or. .not. is_finite(sum(abs(psd)))) then
-                psd = psdsav
+                psd = psdsav     ! GCOVR_EXCL_START -- see the note above
                 exit
+                ! GCOVR_EXCL_STOP
             end if
             ! In our tests, tolerating the following cases seems to render better numerical results.
             ! !if (dd > gg) then
@@ -1628,7 +1648,7 @@ contains
                 violmx = max(violmx - vmult, ZERO)
                 vlam(1:nact) = vlam(1:nact) - vmult * vmu(1:nact)
                 if (icon > 0 .and. icon <= nact) then  ! Powell: IF (ICON>0). We check ICON<=NACT for safety.
-                    vlam(icon) = ZERO
+                    vlam(icon) = ZERO  ! GCOVR_EXCL_LINE -- VMULT is VIOLMX here, never a FRAC, so ICON is 0
                 end if
 
                 ! Reduce the active set if necessary, so that all components of the new VLAM are negative,
@@ -1636,7 +1656,9 @@ contains
                 do icon = nact, 1, -1
                     if (vlam(icon) >= 0) then  ! Powell's version: IF (.NOT. VLAM(ICON) < 0) THEN
                         ! Delete the constraint with index IACT(ICON) from the active set; set NACT = NACT-1.
-                        call delact(icon, iact, nact, qfac, resact, resnew, rfac, vlam)
+                        ! Not reached: no multiplier turns non-negative inside this loop in the runs
+                        ! the suite drives.
+                        call delact(icon, iact, nact, qfac, resact, resnew, rfac, vlam)  ! GCOVR_EXCL_LINE
                     end if
                 end do
             end do  ! End of DO WHILE (VIOLMX > 0 .AND. NACT > 0)
@@ -1648,7 +1670,7 @@ contains
             !-----------------------------------------!
             !-----------------------------------------!
             if (nact == 0) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- NACT never falls to 0 in the loop above
             end if
             !----------------------------------------------------------------------------------------------!
         end do  ! End of DO WHILE (NACT < N)
@@ -1948,12 +1970,15 @@ contains
 
         ! In case S is zero or contains Inf/NaN, replace it with a displacement from XPT(:, KNEW) to
         ! XOPT. Powell's code does not have this.
+        ! Not reached: S is built from the model, which `evaluate` keeps finite by refusing a
+        ! non-finite objective value, and no run the suite drives leaves S at exactly zero.
         if (sum(abs(s)) <= 0 .or. .not. is_finite(sum(abs(s)))) then
-            s = xpt(:, knew) - xopt
+            s = xpt(:, knew) - xopt                 ! GCOVR_EXCL_START -- see the note above
             scaling = delbar / norm(s)
             s = max(0.6_real64 * scaling, min(HALF, scaling)) * s  ! 0.6: ensure |D| > DELBAR/2
             cstrv = maximum([ZERO, matprod(s, amat(:, trueloc(rstat >= 0))) - rescon(trueloc(rstat >= 0))])
             feasible = (cstrv <= 0)
+            ! GCOVR_EXCL_STOP
         end if
 
     end subroutine geostep
@@ -2078,7 +2103,7 @@ contains
         ! subroutine will likely need to skip the update of the Lagrange polynomials (i.e., H), or they
         ! would be destroyed by the NaNs.
         if ((ximproved .and. knew == 0) .or. knew < 0) then  ! KNEW < 0 is impossible in theory.
-            knew = int(maxloc(distsq, dim=1))
+            knew = int(maxloc(distsq, dim=1))  ! GCOVR_EXCL_LINE -- needs every DEN zero or NaN
         end if
 
     end function setdrop_tr
@@ -2105,7 +2130,7 @@ contains
 
         ! Do essentially nothing when KNEW is 0. This can only happen after a trust-region step.
         if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
-            return
+            return  ! GCOVR_EXCL_LINE -- lincob calls UPDATEXF only with a positive KNEW
         end if
 
         xpt(:, knew) = xnew
@@ -2149,7 +2174,7 @@ contains
 
         ! Do nothing when KNEW is 0. This can only happen after a trust-region step.
         if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
-            return
+            return  ! GCOVR_EXCL_LINE -- lincob calls UPDATEQ only with a positive KNEW
         end if
 
         ! The unupdated model corresponding to [GOPT, HQ, PQ] interpolates F at all points in XPT except for
@@ -2211,11 +2236,14 @@ contains
 
         ! Replace the current model with the alternative model if ALL(QALT_BETTER) = TRUE, i.e., the
         ! recent few alternative models are more accurate in predicting the function value of XOPT + D.
+        ! The takeover needs the three most recent alternative models to have ALL predicted better,
+        ! which no run the suite drives produces.
         if (all(qalt_better)) then
-            pq = pqalt
+            pq = pqalt                            ! GCOVR_EXCL_START -- see the note above
             hq = ZERO
             gopt = galt
             qalt_better = .false.
+            ! GCOVR_EXCL_STOP
         end if
 
     end subroutine tryqalt

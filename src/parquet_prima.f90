@@ -361,4 +361,4 @@ module parquet_prima
 
     end interface
 
-end module parquet_prima
+end module parquet_prima ! GCOVR_EXCL_LINE

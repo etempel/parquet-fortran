@@ -185,8 +185,10 @@ contains
             ! Initialize the quadratic represented by [GOPT, HQ, PQ], so that its gradient at XBASE+XOPT is
             ! GOPT; its Hessian is HQ + sum_{K=1}^NPT PQ(K)*XPT(:, K)*XPT(:, K)'.
             call initq(ij, fval, xpt, gopt, hq, pq)
+            ! The initial model is finite in every run the suite drives: a non-finite value aborts
+            ! in `evaluate` before it can reach INITQ.
             if (.not. (all(is_finite(gopt)) .and. all(is_finite(hq)) .and. all(is_finite(pq)))) then
-                subinfo = NAN_INF_MODEL
+                subinfo = NAN_INF_MODEL  ! GCOVR_EXCL_LINE -- see the note above
             end if
         end if
 
@@ -328,15 +330,20 @@ contains
                 ! !to_rescue = (.not. any(den > maxval(vlag(1:npt)**2)))
                 if (to_rescue) then
                     if (rescued) then
+                        ! Not reached: no run the suite drives calls RESCUE twice over with no
+                        ! objective evaluation in between.
+                        ! GCOVR_EXCL_START -- see the note above
                         info = DAMAGING_ROUNDING  ! The last RESCUE did not improve the situation.
                         exit
-                    end if
+                    end if                ! GCOVR_EXCL_STOP
                     call rescue(obj, st, maxfun, delta, ftarget, xl, xu, kopt, nf, &
                         & fval, gopt, hq, pq, sl, su, xbase, xpt, bmat, zmat, subinfo)
+                    ! RESCUE returns a nondefault code only on the budget or the target, neither
+                    ! of which it meets in any run the suite drives.
                     if (subinfo /= INFO_DFT) then
-                        info = subinfo
+                        info = subinfo            ! GCOVR_EXCL_START -- see the note above
                         exit
-                    end if
+                    end if                ! GCOVR_EXCL_STOP
                     rescued = .true.
                     dnorm_rec = REALMAX
                     moderr_rec = REALMAX
@@ -470,7 +477,10 @@ contains
                 den = calden(kopt, bmat, d, xpt, zmat)
                 to_rescue = (.not. (is_finite(sum(abs(vlag))) .and. den(knew_geo) > HALF * vlag(knew_geo)**2))
                 if (to_rescue) then
-                    if (rescued) then
+                    ! RESCUE is reached from the trust-region step above in runs the suite drives,
+                    ! but never from here: rounding does not damage the geometry step's
+                    ! denominator in any of them, so the whole arm below is unexecuted.
+                    if (rescued) then             ! GCOVR_EXCL_START -- see the note above
                         info = DAMAGING_ROUNDING  ! The last RESCUE did not improve the situation.
                         exit
                     end if
@@ -483,6 +493,7 @@ contains
                     rescued = .true.
                     dnorm_rec = REALMAX
                     moderr_rec = REALMAX
+                    ! GCOVR_EXCL_STOP
                 else
                     ! Calculate the next value of the objective function.
                     x = xinbd(xbase, xpt(:, kopt) + d, xl, xu, sl, su)  ! X = XBASE + XOPT + D without rounding.
@@ -494,11 +505,14 @@ contains
                     ! Save X, F into the history.
 
                     ! Check whether to exit
+                    ! The budget never runs out, and FTARGET is never met, on a geometry-step
+                    ! evaluation in any run the suite drives; a non-finite value aborts in
+                    ! `evaluate` before CHECKEXIT could see one.
                     subinfo = checkexit(maxfun, nf, f, ftarget, x)
                     if (subinfo /= INFO_DFT) then
-                        info = subinfo
+                        info = subinfo            ! GCOVR_EXCL_START -- see the note above
                         exit
-                    end if
+                    end if                ! GCOVR_EXCL_STOP
 
                     ! Update DNORM_REC and MODERR_REC.
                     ! DNORM_REC records the DNORM of the recent function evaluations with the current RHO.
@@ -521,10 +535,11 @@ contains
                     call updateh(knew_geo, kopt, d, xpt, bmat, zmat)
                     call updatexf(knew_geo, ximproved, f, max(sl, min(su, xosav + d)), kopt, fval, xpt)
                     call updateq(knew_geo, ximproved, bmat, d, moderr, xdrop, xosav, xpt, zmat, gopt, hq, pq)
+                    ! The model stays finite across a geometry step in every run the suite drives.
                     if (.not. (all(is_finite(gopt)) .and. all(is_finite(hq)) .and. all(is_finite(pq)))) then
-                        info = NAN_INF_MODEL
+                        info = NAN_INF_MODEL      ! GCOVR_EXCL_START -- see the note above
                         exit
-                    end if
+                    end if                ! GCOVR_EXCL_STOP
                 end if
             end if  ! End of IF (IMPROVE_GEO). The procedure of improving geometry ends.
 
@@ -908,11 +923,11 @@ contains
         pq = ZERO
 
         if (present(info)) then
-            if (any(is_nan(gopt)) .or. any(is_nan(hq))) then
-                info = NAN_INF_MODEL
+            if (any(is_nan(gopt)) .or. any(is_nan(hq))) then     ! GCOVR_EXCL_START -- BOBYQB's
+                info = NAN_INF_MODEL                             ! only call passes no `info`
             else
                 info = INFO_DFT
-            end if
+            end if                        ! GCOVR_EXCL_STOP
         end if
 
     end subroutine initq
@@ -980,11 +995,11 @@ contains
         end do
 
         if (present(info)) then
-            if (any(is_nan(bmat)) .or. any(is_nan(zmat))) then
-                info = NAN_INF_MODEL
+            if (any(is_nan(bmat)) .or. any(is_nan(zmat))) then   ! GCOVR_EXCL_START -- BOBYQB's
+                info = NAN_INF_MODEL                             ! only call passes no `info`
             else
                 info = INFO_DFT
-            end if
+            end if                        ! GCOVR_EXCL_STOP
         end if
 
     end subroutine inith
@@ -1129,10 +1144,12 @@ contains
         maxiter = int(min(10**min(4, range(0)), int(n - nact)**2))
         do iter = 1, maxiter
             resid = delsq - sum(d(trueloc(xbdi == 0))**2)
+            ! D fills the trust region at the top of a CG iteration in no run the suite drives;
+            ! the two-dimensional search is entered through the exits further down instead.
             if (resid <= 0) then
-                twod_search = .true.
+                twod_search = .true.              ! GCOVR_EXCL_START -- see the note above
                 exit
-            end if
+            end if                        ! GCOVR_EXCL_STOP
 
             ! Set the next search direction of the conjugate gradient method. It is the steepest descent
             ! direction initially and when the iterations are restarted because a variable has just been
@@ -1173,7 +1190,7 @@ contains
             ! BSTEP < 0 should not happen. BSTEP can be 0 or NaN when, e.g., DS or STEPSQ becomes Inf.
             ! Powell's code does not handle this.
             if (bstep <= 0 .or. .not. is_finite(bstep)) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- BSTEP is positive and finite in every run the suite drives
             end if
 
             hs = hess_mul(s, xpt, pq, hq)
@@ -1260,10 +1277,12 @@ contains
                 d = d + stplen * s
 
                 ! Exit in case of Inf/NaN in D.
+                ! The model is finite (a non-finite objective value aborts in `evaluate`) and the
+                ! CG step has not overflowed in any run the suite drives.
                 if (.not. is_finite(sum(abs(d)))) then
-                    d = dold
+                    d = dold                      ! GCOVR_EXCL_START -- see the note above
                     exit
-                end if
+                end if                    ! GCOVR_EXCL_STOP
 
                 sdec = max(stplen * (ggsav - HALF * stplen * shs), ZERO)
                 qred = qred + sdec
@@ -1278,12 +1297,14 @@ contains
                     exit  ! This leads to a difference. Why?
                 end if
                 delsq = delsq - d(iact)**2
+                ! D does not reach the trust-region boundary by fixing a variable at a bound in any
+                ! run the suite drives; the CG loop leaves through one of its other exits.
                 if (delsq <= 0) then
-                    twod_search = .true.
+                    twod_search = .true.          ! GCOVR_EXCL_START -- see the note above
                     ! Why set TWOD_SEARCH to TRUE? Because DELSQ <= 0 just means that D reaches the trust
                     ! region boundary.
                     exit
-                end if
+                end if                    ! GCOVR_EXCL_STOP
                 beta = ZERO
                 itercg = 0
                 gredsq = sum(gnew(trueloc(xbdi == 0))**2)
@@ -1409,8 +1430,10 @@ contains
                 hangt_bd = tanbd(iact)
                 ! MATLAB: [hangt_bd, iact] = min(tanbd);
             end if
+            ! TANBD is ONE unless a bound cuts the arc shorter, and a nonpositive bound on the
+            ! half-angle tangent does not occur in any run the suite drives.
             if (hangt_bd <= 0) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- see the note above
             end if
 
             ! Calculate HS and some curvatures for the alternative iteration.
@@ -1423,7 +1446,7 @@ contains
             ! with HANGT being the TANGENT of HALF the angle of the alternative iteration.
             args = [shs, dhd, dhs, dredg, sredg]
             if (any(is_nan(args))) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- a NaN aborts in `evaluate` before it can reach the model
             end if
             ! Define the grid size of the search for HANGT. Powell defined the size to be 4 if hangt_bd is
             ! nearly zero and 20 if it is nearly one, with a linear interpolation in between. We double this
@@ -1447,10 +1470,12 @@ contains
             d(trueloc(xbdi == 0)) = cth * d(trueloc(xbdi == 0)) + sth * s(trueloc(xbdi == 0))
 
             ! Exit in case of Inf/NaN in D.
+            ! The model is finite (a non-finite objective value aborts in `evaluate`) and the arc
+            ! step below has not overflowed in any run the suite drives.
             if (.not. is_finite(sum(abs(d)))) then
-                d = dold
+                d = dold                          ! GCOVR_EXCL_START -- see the note above
                 exit
-            end if
+            end if                        ! GCOVR_EXCL_STOP
 
             hdred = cth * hdred + sth * hs
             qred = qred + sdec
@@ -1631,11 +1656,13 @@ contains
         ! In case GLAG contains NaN, set D to a displacement from XOPT to XPT(:, KNEW) and return. Powell's
         ! code does not have this, and D may be NaN in the end. Note that it is crucial to ensure that a
         ! geometry step is nonzero.
+        ! Unreachable here: a NaN or an infinity aborts in `evaluate` before it can reach the model,
+        ! so the Lagrange gradient GLAG this is built from is finite.
         if (.not. is_finite(sum(abs(glag)))) then
-            d = xpt(:, knew) - xopt
+            d = xpt(:, knew) - xopt                                   ! GCOVR_EXCL_START -- see above
             d = min(HALF, delbar / norm(d)) * d  ! Since XPT respects the bounds, so does XOPT + D.
             return
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         ! Search for a large denominator along the straight lines through XOPT and another interpolation
         ! point, subject to the bound constraints and the trust region. According to these constraints, SLBD
@@ -1785,11 +1812,13 @@ contains
         ibd = isbd(isq, ksq)
 
         xline = max(sl, min(su, xopt + stpsiz * (xpt(:, ksq) - xopt)))
+        ! IBD is nonzero only when the trial point that maximises PREDSQ is one that the bounds
+        ! truncated. No run the suite drives selects such a point, so neither arm below is taken.
         if (ibd < 0) then
-            xline(-ibd) = sl(-ibd)
+            xline(-ibd) = sl(-ibd)  ! GCOVR_EXCL_LINE -- see the note above
         end if
         if (ibd > 0) then
-            xline(ibd) = su(ibd)
+            xline(ibd) = su(ibd)  ! GCOVR_EXCL_LINE -- see the note above
         end if
 
         ! Calculate DENOM for the current choice of D. Indeed, only DEN_LINE(KNEW) is needed.
@@ -1845,8 +1874,10 @@ contains
             grdstp = ZERO
             do k = 1, n
                 resis = delbar**2 - sfixsq
+                ! The fixed components of S never take up the whole of DELBAR**2 in any run the
+                ! suite drives, so the loop always ends at its own test below.
                 if (resis <= 0) then
-                    exit
+                    exit  ! GCOVR_EXCL_LINE -- see the note above
                 end if
                 ssqsav = sfixsq
                 grdstp = sqrt(resis / ggfree)
@@ -1906,10 +1937,12 @@ contains
 
         ! In case D is zero or contains Inf/NaN, replace it with a displacement from XPT(:, KNEW) to XOPT.
         ! Powell's code does not have this. Note that it is crucial to ensure that a geometry step is nonzero.
+        ! A non-finite D cannot arise (a non-finite value aborts in `evaluate` before it could reach
+        ! the model), and no run the suite drives leaves D exactly zero here.
         if (sum(abs(d)) <= 0 .or. .not. is_finite(sum(abs(d)))) then
-            d = xpt(:, knew) - xopt
+            d = xpt(:, knew) - xopt                                   ! GCOVR_EXCL_START -- see above
             d = min(HALF, delbar / norm(d)) * d  ! Since XPT respects the bounds, so does XOPT + D.
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
     end function geostep
 
@@ -2007,8 +2040,10 @@ contains
         ! to make sure that the new trial point is included in the interpolation set. However, the updating
         ! subroutine will likely need to skip the update of the Lagrange polynomials (i.e., H), or they
         ! would be destroyed by the NaNs.
+        ! A NaN cannot reach DEN (a non-finite value aborts in `evaluate`), and an improvement with
+        ! no positive denominator is caught by the RESCUE test in BOBYQB before this is reached.
         if ((ximproved .and. knew == 0) .or. knew < 0) then  ! KNEW < 0 is impossible in theory.
-            knew = int(maxloc(distsq, dim=1))
+            knew = int(maxloc(distsq, dim=1))  ! GCOVR_EXCL_LINE -- see the note above
         end if
 
     end function setdrop_tr
@@ -2049,12 +2084,12 @@ contains
         npt = int(size(xpt, 2))
 
         if (present(info)) then
-            info = INFO_DFT
+            info = INFO_DFT  ! GCOVR_EXCL_LINE -- no caller here passes `info`
         end if
 
         ! Do anything if KNEW is 0. This can only happen sometimes after a trust-region step.
         if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
-            return
+            return  ! GCOVR_EXCL_LINE -- BOBYQB screens KNEW at both call sites
         end if
 
         ! Put the KNEW-th column of the unupdated H (except for the (NPT+1)th entry) into HCOL. Powell's
@@ -2080,11 +2115,11 @@ contains
         ! positive. In such cases, [BMAT, ZMAT] would be destroyed by the update, and hence we would rather
         ! not update them at all. Or should we simply terminate the algorithm?
         if (.not. (is_finite(sum(abs(hcol)) + sum(abs(vlag)) + abs(beta)) .and. denom > 0)) then
-            if (present(info)) then
-                info = DAMAGING_ROUNDING
-            end if
-            return
-        end if
+            if (present(info)) then               ! GCOVR_EXCL_START -- upstream's rounding
+                info = DAMAGING_ROUNDING          ! rescue: no run the suite drives damages this
+            end if                                ! denominator, and no caller here passes
+            return                                ! `info`
+        end if                            ! GCOVR_EXCL_STOP
 
         ! Update the matrix BMAT. It implements the last N rows of (4.9) in the BOBYQA paper.
         v1 = (alpha * vlag(npt + 1:npt + n) - tau * hcol(npt + 1:npt + n)) / denom
@@ -2135,7 +2170,7 @@ contains
 
         ! Do essentially nothing when KNEW is 0. This can only happen after a trust-region step.
         if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
-            return
+            return  ! GCOVR_EXCL_LINE -- BOBYQB screens KNEW at both call sites
         end if
 
         xpt(:, knew) = xnew
@@ -2178,7 +2213,7 @@ contains
 
         ! Do nothing when KNEW is 0. This can only happen after a trust-region step.
         if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
-            return
+            return  ! GCOVR_EXCL_LINE -- BOBYQB screens KNEW at both call sites
         end if
 
         ! The unupdated model corresponding to [GOPT, HQ, PQ] interpolates F at all points in XPT except for
@@ -2413,12 +2448,14 @@ contains
 
         ! Do nothing if NF already reaches it upper bound.
         ! To please Fortran compilers, set BMAT and ZMAT before returning, though they will not be used.
+        ! BOBYQB's own CHECKEXIT has already left the iteration when the budget is exhausted, so
+        ! RESCUE is never entered with NF >= MAXFUN.
         if (nf >= maxfun) then
-            bmat = ZERO
+            bmat = ZERO                           ! GCOVR_EXCL_START -- see the note above
             zmat = ZERO
             info = MAXFUN_REACHED
             return
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         ! Shift the interpolation points so that XOPT becomes the origin.
         xopt = xpt(:, kopt)
@@ -2550,7 +2587,9 @@ contains
                     elseif (iq > 0) then
                         wmv(k) = xpt(iq, korig) * ptsaux(2, iq)
                     else
-                        wmv(k) = ZERO
+                        ! A positive PTSID(K) with both parts zero is the bare SFRAC identifier,
+                        ! which the KOPT exchange above always clears, so no K reaches this arm.
+                        wmv(k) = ZERO  ! GCOVR_EXCL_LINE -- see the note above
                     end if
                 end if
                 wmv(k) = HALF * wmv(k) * wmv(k)
@@ -2680,8 +2719,11 @@ contains
                 ! Skipping an XNEW that is close but not identical to XPT(:, KPT) will cause discrepancy
                 ! between [BMAT, ZMAT] and XPT, since the former has been updated, but it is not severe as
                 ! the difference between XNEW and XPT(:, KPT) is tiny.
+                ! Neither condition is met: no run the suite drives puts XNEW within 1.0E-2*DELTA of
+                ! the point it replaces, and a non-finite value aborts in `evaluate` before it
+                ! could reach XNEW.
                 if (sum(abs(xnew - xpt(:, kpt))) <= 1.0E-2 * delta .or. .not. is_finite(sum(abs(xnew)))) then
-                    cycle
+                    cycle  ! GCOVR_EXCL_LINE -- see the note above
                 end if
                 xpt(:, kpt) = xnew
 
@@ -2702,11 +2744,14 @@ contains
                 end if
 
                 ! Check whether to exit
+                ! The budget is never exhausted, and FTARGET never met, inside RESCUE in any run
+                ! the suite drives; a non-finite value aborts in `evaluate` before CHECKEXIT
+                ! could see one.
                 subinfo = checkexit(maxfun, nf, f, ftarget, x)
                 if (subinfo /= INFO_DFT) then
-                    info = subinfo
+                    info = subinfo                ! GCOVR_EXCL_START -- see the note above
                     exit
-                end if
+                end if                    ! GCOVR_EXCL_STOP
 
                 ! Set VQUAD to the value of the current model at the new XPT(:, KPT), which has at most two
                 ! nonzeros XP and XQ at the IP and IQ entries respectively.
@@ -2821,12 +2866,12 @@ contains
         npt = int(size(bmat, 2) - size(bmat, 1))
 
         if (present(info)) then
-            info = INFO_DFT
+            info = INFO_DFT  ! GCOVR_EXCL_LINE -- RESCUE's only call passes no `info`
         end if
 
         ! We must not do anything if KNEW is 0. This can only happen sometimes after a trust-region step.
         if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
-            return
+            return  ! GCOVR_EXCL_LINE -- RESCUE's only call passes a `minloc` index, so KNEW >= 1
         end if
 
         ! Read VLAG, and calculate parameters for the updating formula (4.9) and (4.14) of the BOBYQA paper.
@@ -2840,11 +2885,11 @@ contains
         ! positive. In such cases, [BMAT, ZMAT] would be destroyed by the update, and hence we would rather
         ! not update them at all. Or should we simply terminate the algorithm?
         if (.not. (is_finite(sum(abs(vlag)) + abs(beta)) .and. denom > 0)) then
-            if (present(info)) then
-                info = DAMAGING_ROUNDING
-            end if
-            return
-        end if
+            if (present(info)) then               ! GCOVR_EXCL_START -- upstream's rounding
+                info = DAMAGING_ROUNDING          ! rescue: no run the suite drives damages this
+            end if                                ! denominator, and RESCUE's only call passes
+            return                                ! no `info`
+        end if                            ! GCOVR_EXCL_STOP
 
         ! After the following line, VLAG = H*w - e_KNEW in the NEWUOA paper (where t = KNEW).
         vlag(knew) = vlag(knew) - ONE

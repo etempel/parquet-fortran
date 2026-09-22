@@ -3170,6 +3170,12 @@ contains
                 test_optimize_de_max_gen_zero_aborts), &
             new_unittest("DE refuses a constrained objective", &
                 test_optimize_de_constraints_not_honoured_aborts), &
+            new_unittest("ftol and atol both zero are refused as a pair", &
+                test_optimize_de_no_tolerance_aborts), &
+            new_unittest("a parquet_optimize refusal carries the caller's context", &
+                test_optimize_context_is_reported_aborts), &
+            new_unittest("a parquet_optimize context longer than the cap is truncated", &
+                test_optimize_context_is_capped_aborts), &
             new_unittest("zero starts are refused", &
                 test_optimize_multistart_nstart_zero_aborts), &
             new_unittest("a negative xtol is refused", &
@@ -3227,7 +3233,17 @@ contains
             new_unittest("a negative n_constraints is refused", &
                 test_prima_cobyla_negative_count_aborts), &
             new_unittest("a non-finite constraint value is refused rather than moderated", &
-                test_prima_constraint_nonfinite_aborts) &
+                test_prima_constraint_nonfinite_aborts), &
+            new_unittest("a non-finite objective value from a constrained objective is refused", &
+                test_prima_cobyla_nonfinite_value_aborts), &
+            new_unittest("a non-finite ctol is refused", &
+                test_prima_ctol_nonfinite_aborts), &
+            new_unittest("a refusal carries the caller's context", &
+                test_prima_context_is_reported_aborts), &
+            new_unittest("a context longer than the cap is truncated", &
+                test_prima_context_is_capped_aborts), &
+            new_unittest("LINCOA's feasibility refusal carries the caller's context", &
+                test_prima_lincoa_infeasible_start_context_aborts) &
             ]
         ! ---- parquet_interpolate: both interpolants' abort paths ----
         p32 = [ &
@@ -19885,6 +19901,27 @@ contains
             required_stderr="pf_minimize_de: this engine does not honour nonlinear constraints")
     end subroutine test_optimize_de_constraints_not_honoured_aborts
     !
+    subroutine test_optimize_de_no_tolerance_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_de_no_tolerance", expect_abort=.true., &
+            failure_message="ftol and atol both zero were expected to error stop", &
+            required_stderr="at least one of ftol and atol must be positive")
+    end subroutine test_optimize_de_no_tolerance_aborts
+    !
+    subroutine test_optimize_context_is_reported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_context_is_reported", expect_abort=.true., &
+            failure_message="a degenerate box with a context was expected to error stop", &
+            required_stderr="(context: sweeping the grid)")
+    end subroutine test_optimize_context_is_reported_aborts
+    !
+    subroutine test_optimize_context_is_capped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_context_is_capped", expect_abort=.true., &
+            failure_message="a 150-character context was expected to abort with a capped message", &
+            required_stderr="abcdefghij...")
+    end subroutine test_optimize_context_is_capped_aborts
+    !
     subroutine test_optimize_multistart_nstart_zero_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "optimize_multistart_nstart_zero", expect_abort=.true., &
@@ -20071,6 +20108,42 @@ contains
             failure_message="a NaN constraint value was expected to error stop", &
             required_stderr="a constraint returned a non-finite value")
     end subroutine test_prima_constraint_nonfinite_aborts
+    !
+    subroutine test_prima_cobyla_nonfinite_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_cobyla_nonfinite_value", expect_abort=.true., &
+            failure_message="a NaN objective value in COBYLA was expected to error stop", &
+            required_stderr="the objective returned a non-finite value (context: fitting the disc model)")
+    end subroutine test_prima_cobyla_nonfinite_value_aborts
+    !
+    subroutine test_prima_ctol_nonfinite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_ctol_nonfinite", expect_abort=.true., &
+            failure_message="a non-finite ctol was expected to error stop", &
+            required_stderr="ctol must be a finite, non-negative number")
+    end subroutine test_prima_ctol_nonfinite_aborts
+    !
+    subroutine test_prima_context_is_reported_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_context_is_reported", expect_abort=.true., &
+            failure_message="a too-wide rhobeg with a context was expected to error stop", &
+            required_stderr="(context: calibrating the response curve)")
+    end subroutine test_prima_context_is_reported_aborts
+    !
+    subroutine test_prima_context_is_capped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_context_is_capped", expect_abort=.true., &
+            failure_message="a 150-character context was expected to abort with a capped message", &
+            required_stderr="abcdefghij...")
+    end subroutine test_prima_context_is_capped_aborts
+    !
+    subroutine test_prima_lincoa_infeasible_start_context_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_lincoa_infeasible_start_context", &
+            expect_abort=.true., &
+            failure_message="an infeasible LINCOA start with a context was expected to error stop", &
+            required_stderr="(context: projecting onto the budget plane)")
+    end subroutine test_prima_lincoa_infeasible_start_context_aborts
     !
     subroutine test_integrate_context_capped_aborts(error)
         type(error_type), allocatable, intent(out) :: error

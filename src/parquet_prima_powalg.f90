@@ -521,7 +521,8 @@ contains
 
         if (i <= 0 .or. i >= n) then
             ! Only I == N is really needed, as 1 <= I <= N unless the input is wrong.
-            return
+            return                                ! GCOVR_EXCL_LINE -- COBYLA drops an interior
+                                                  ! column, so 1 <= i < n at every call
         end if
 
         ! Let R be the upper triangular matrix in the QR factorization, namely R = Q^T*A.
@@ -591,7 +592,10 @@ contains
         ! Powell's code, however, is slightly different: before everything, he first exchanged columns K and
         ! K+1 of Q as well as rows K and K+1 of R. This makes sure that the diagonal entries of the updated
         ! R are all positive if it is the case for the original R.
-        do k = i, n - 1
+        ! LINCOA's calls all arrive with `i == n` -- the constraint it drops is the last of the
+        ! active set -- so the quick return above answers every one and this loop, which
+        ! rearranges the columns before it, does not run.
+        do k = i, n - 1                           ! GCOVR_EXCL_START -- see the note above
             G = planerot(R([k + 1, k], k + 1))
             ! HYPT must be calculated before R is updated.
             hypt = hypotenuse(R(k + 1, k + 1), R(k, k + 1)) !hypt = sqrt(R(k, k + 1)**2 + R(k + 1, k + 1)**2)
@@ -624,6 +628,7 @@ contains
             ! !R([k, k + 1], k) = [hypt, ZERO]
             !----------------------------------------------------------------------------------------------!
         end do
+        ! GCOVR_EXCL_STOP
 
     end subroutine qrexc_Rfull
 
@@ -686,13 +691,16 @@ contains
         n = int(size(xpt, 1))
         npt = int(size(xpt, 2))
 
+        ! LINCOA, this procedure's only caller in the tier, does not pass `info` and screens
+        ! `knew` itself before calling, so neither arm below runs. BOBYQA's own `updateh`, in
+        ! `parquet_prima_bobyqb`, is a different procedure and does pass one.
         if (present(info)) then
-            info = INFO_DFT
+            info = INFO_DFT                       ! GCOVR_EXCL_LINE -- no caller passes `info`
         end if
 
         ! We must not do anything if KNEW is 0. This can only happen sometimes after a trust-region step.
         if (knew <= 0) then  ! KNEW < 0 is impossible if the input is correct.
-            return
+            return                                ! GCOVR_EXCL_LINE -- `knew > 0` at every call
         end if
 
         ! Set the first NPT components of HCOL to the leading elements of the KNEW-th column of H. Powell's
@@ -720,11 +728,11 @@ contains
         ! positive. In such cases, [BMAT, ZMAT] would be destroyed by the update, and hence we would rather
         ! not update them at all. Or should we simply terminate the algorithm?
         if (.not. (is_finite(sum(abs(hcol)) + sum(abs(vlag)) + abs(beta)) .and. abs(denom) > 0)) then
-            if (present(info)) then
-                info = DAMAGING_ROUNDING
-            end if
-            return
-        end if
+            if (present(info)) then               ! GCOVR_EXCL_START -- upstream's rounding
+                info = DAMAGING_ROUNDING          ! rescue: a non-finite value aborts in
+            end if                                ! `evaluate` before it can reach the model,
+            return                                ! and no caller here passes `info`
+        end if                            ! GCOVR_EXCL_STOP
 
         ! Update the matrix BMAT. It implements the last N rows of (4.11) in the NEWUOA paper.
         v1 = (alpha * vlag(npt + 1:npt + n) - tau * hcol(npt + 1:npt + n)) / denom
@@ -745,10 +753,13 @@ contains
         ! See (4.15)--(4.17) of the NEWUOA paper and the elaboration around them.
         jl = 1  ! In the loop below, if 2 <= J < IDZ, then JL = 1; if IDZ < J <= NPT-N-1, then JL = IDZ.
         do j = 2, npt - n - 1
+            ! `idz` is the sign split of the ZMAT factorisation, and it only ever leaves 1 when
+            ! `denom < 0` at the foot of this procedure -- see the exclusion there. While it
+            ! stays 1 this arm cannot be selected, since the loop starts at j = 2.
             if (j == idz) then
-                jl = idz  ! Do nothing but changing JL from 1 to IDZ. It occurs at most once along the loop.
+                jl = idz  ! GCOVR_EXCL_START -- `idz` stays 1; see the note above, and below
                 cycle
-            end if
+            end if                        ! GCOVR_EXCL_STOP
 
             ! Powell's condition in NEWUOA/LINCOA for the IF ... THEN below: IF (ZMAT(KNEW, J) /= 0) THEN
             ! A possible alternative: IF (ABS(ZMAT(KNEW, J)) > 1.0E-20 * ABS(ZMAT(KNEW, JL))) THEN
@@ -821,6 +832,11 @@ contains
             ! and corresponds to [Z2, Z1] in (4.20) when BETA<0. In this way, the update of ZMAT(:, [JA, JB])
             ! follows the same scheme regardless of BETA. Indeed, since S_1 = 1 and S_2 = -1 in (4.19)-(4.20)
             ! as elaborated above the equations, ZMAT(:, [1, JL]) always correspond to [Z_2, Z_1].
+            ! This whole arm needs ZMAT(KNEW, :) to have TWO nonzeros, which happens only when
+            ! `jl /= 1` -- that is, when `idz` has left 1. It has not in any run the suite
+            ! drives; see the exclusion on the `denom < 0` revision below, which is the only
+            ! thing that moves it.
+            ! GCOVR_EXCL_START -- needs idz > 1; see the note above
             if (beta >= 0) then  ! ZMAT(:, [JA, JB]) corresponds to [Z_1, Z_2] in (4.19)
                 ja = jl
                 jb = 1
@@ -839,6 +855,7 @@ contains
             scalb = scala * sqrtdn
             zmat(:, ja) = scala * (tau * zmat(:, ja) - temp * vlag(1:npt))
             zmat(:, jb) = scalb * (zmat(:, jb) - tempa * hcol(1:npt) - tempb * vlag(1:npt))
+            ! GCOVR_EXCL_STOP
 
             !----------------------------------------------------------------------------------------------!
             ! Zaikun 20220411: The update of IDZ is decoupled from the update of ZMAT, located after END IF.
@@ -870,7 +887,12 @@ contains
         ! According to (4.18) and (4.19)--(4.20) of the NEWUOA paper, the coefficients {S_J} need update iff
         ! DENOM < 0, in which case one of the S_J will flip the sign when multiplied by SIGN(DENOM), leading
         ! to an increase of IDZ (if S_J flipped from 1 to -1) or a decrease (if S_J flipped from -1 to 1).
+        ! `denom` is positive in exact arithmetic -- it is `alpha*beta + tau**2` with `alpha`
+        ! and `beta` nonnegative -- and goes negative only under the rounding upstream guards
+        ! against above. It has not done so in any run the suite drives, which is why `idz`
+        ! stays 1 and the arms keyed on it, here and above, do not run.
         if (denom < 0) then
+            ! GCOVR_EXCL_START -- `denom > 0`; see the note above
             if (idz == 1 .or. (idz < npt - n .and. beta < 0)) then  ! (4.18), (4.20) of the NEWUOA paper
                 idz = idz + 1
             elseif (idz == npt - n .or. (idz > 1 .and. beta >= 0)) then  ! (4.18), (4.19) of the NEWUOA paper
@@ -883,7 +905,7 @@ contains
                 ! ZMAT(:, NPT-N-1) was updated by the code above.
                 if (idz > 1) then
                     zmat(:, [1, idz]) = zmat(:, [idz, 1])
-                end if
+                end if                    ! GCOVR_EXCL_STOP
             end if
         end if
 

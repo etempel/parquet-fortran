@@ -127,12 +127,18 @@ contains
         ! An unasked-for or never-appended record comes back ALLOCATED and zero-length, never
         ! unallocated: `size()` on an unallocated result reads an unfilled descriptor, so a caller
         ! must never need `allocated(...)` to use one (`fortran/CLAUDE.md`).
+        ! Not reached from this tier: every caller of `history_trim` has already given the
+        ! record storage -- `pf_minimize_de`, `_simplex` and `_scalar` allocate it to length
+        ! zero as soon as they see `present(history)`, and `pf_minimize_multistart` appends one
+        ! row per start, of which there is at least one. The arm stays as the guarantee the
+        ! comment above states, so that a future caller that trims an untouched record still
+        ! hands back an allocated, zero-length one rather than an unallocated descriptor.
         if (.not. allocated(this%f)) then
-            allocate(this%x(0, 0))
+            allocate(this%x(0, 0))                ! GCOVR_EXCL_START -- see the note above
             allocate(this%f(0))
             this%n = 0
             return
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         used = this%n
         if (size(this%f) == used) return

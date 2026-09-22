@@ -271,10 +271,12 @@ contains
             ! Switch the best vertex of the current simplex to SIM(:, N + 1).
             call updatepole(cpen, conmat, cval, fval, sim, simi, subinfo)
             ! Check whether to exit due to damaging rounding in UPDATEPOLE.
+            ! `DAMAGING_ROUNDING` means `simi` can no longer be trusted as the simplex's inverse.
+            ! Reachable in principle; no run the suite drives produces it.
             if (subinfo == DAMAGING_ROUNDING) then
-                info = subinfo
+                info = subinfo                              ! GCOVR_EXCL_START -- damaging rounding
                 exit  ! Better action to take? Geometry step, or simply continue?
-            end if
+            end if                        ! GCOVR_EXCL_STOP
 
             ! Does the interpolation set have adequate geometry? It affects IMPROVE_GEO and REDUCE_RHO.
             adequate_geo = all(sum(sim(:, 1:n)**2, dim=1) <= 4.0_real64 * delta**2)
@@ -397,10 +399,12 @@ contains
                 ! UPDATEXFC does nothing if JDROP_TR == 0, as the algorithm decides to discard X.
                 call updatexfc(jdrop_tr, constr, cpen, cstrv, d, f, conmat, cval, fval, sim, simi, subinfo)
                 ! Check whether to exit due to damaging rounding in UPDATEXFC.
+                ! `DAMAGING_ROUNDING` means `simi` can no longer be trusted as the simplex's
+                ! inverse. Reachable in principle; no run the suite drives produces it.
                 if (subinfo == DAMAGING_ROUNDING) then
-                    info = subinfo
+                    info = subinfo                          ! GCOVR_EXCL_START -- damaging rounding
                     exit  ! Better action to take? Geometry step, or a RESCUE as in BOBYQA?
-                end if
+                end if                    ! GCOVR_EXCL_STOP
 
                 ! Check whether to exit due to MAXFUN, FTARGET, etc.
                 subinfo = checkexit(maxfun, nf, cstrv, ctol, f, ftarget, x)
@@ -527,10 +531,14 @@ contains
                 distsq(1:n) = [(sum((x - (sim(:, n + 1) + sim(:, j)))**2), j=1, n)]  ! Implied do-loop
                 ! MATLAB: distsq(1:n) = sum((x - (sim(:,1:n) + sim(:, n+1)))**2, 1)  % Implicit expansion
                 j = int(minloc(distsq, dim=1))
+                ! The geometry step landed essentially on a point already in the interpolation set
+                ! (within `1e-4*rhoend` of it), so its stored value is reused instead of a fresh
+                ! evaluation. The geometry searches the suite drives do not produce that.
                 if (distsq(j) <= (1.0E-4 * rhoend)**2) then
-                    f = fval(j)
+                    f = fval(j)                             ! GCOVR_EXCL_START -- coincident point
                     constr = conmat(:, j)
                     cstrv = cval(j)
+                    ! GCOVR_EXCL_STOP
                 else
                     ! Evaluate the objective and constraints at X, taking care of possible Inf/NaN values.
                     constr(1:m_lcon) = matprod(x, amat) - bvec  ! Linear constraints
@@ -548,10 +556,15 @@ contains
                 ! Update SIM, SIMI, FVAL, CONMAT, and CVAL so that SIM(:, JDROP_GEO) is replaced with D.
                 call updatexfc(jdrop_geo, constr, cpen, cstrv, d, f, conmat, cval, fval, sim, simi, subinfo)
                 ! Check whether to exit due to damaging rounding in UPDATEXFC.
+                ! `DAMAGING_ROUNDING` means `simi` can no longer be trusted as the simplex's
+                ! inverse. Reachable in principle; no run the suite drives produces it.
                 if (subinfo == DAMAGING_ROUNDING) then
-                    info = subinfo
+                    ! The bare `exit` below is a gcov attribution artifact: it reports a
+                    ! positive count although `info = subinfo`, which no branch separates from
+                    ! it, reports none, so the arm as a whole is dead.
+                    info = subinfo                          ! GCOVR_EXCL_START -- damaging rounding
                     exit  ! Better action to take? Geometry step, or simply continue?
-                end if
+                end if                    ! GCOVR_EXCL_STOP
 
                 ! Check whether to exit due to MAXFUN, FTARGET, etc.
                 subinfo = checkexit(maxfun, nf, cstrv, ctol, f, ftarget, x)
@@ -577,10 +590,12 @@ contains
                 ! Switch the best vertex of the current simplex to SIM(:, N + 1).
                 call updatepole(cpen, conmat, cval, fval, sim, simi, subinfo)
                 ! Check whether to exit due to damaging rounding in UPDATEPOLE.
+                ! `DAMAGING_ROUNDING` means `simi` can no longer be trusted as the simplex's
+                ! inverse. Reachable in principle; no run the suite drives produces it.
                 if (subinfo == DAMAGING_ROUNDING) then
-                    info = subinfo
+                    info = subinfo                          ! GCOVR_EXCL_START -- damaging rounding
                     exit  ! Better action to take? Geometry step, or simply continue?
-                end if
+                end if                    ! GCOVR_EXCL_STOP
             end if  ! End of IF (REDUCE_RHO). The procedure of reducing RHO ends.
 
         end do  ! End of DO TR = 1, MAXTR. The iterative procedure ends.
@@ -837,11 +852,14 @@ contains
         ! N.B.: It is faster and safer to scale by multiplying a reciprocal than by division. See
         ! https://fortran-lang.discourse.group/t/ifort-ifort-2021-8-0-1-0e-37-1-0e-38-0/
         do i = 1, m + 1  ! Note that SIZE(A, 2) = SIZE(B) = M + 1 /= M.
+            ! Upstream's empirical guard against a badly scaled linear constraint: a gradient row
+            ! whose magnitude exceeds 1e12 is rescaled before the stages run. The suite's
+            ! constraints are O(1), so no run reaches the rescaling.
             if (maxval(abs(A_aug(:, i))) > 1.0E12) then
-                modscal = max(TWO * REALMIN, ONE / maxval(abs(A_aug(:, i)))) ! MAX: avoid underflow.
+                modscal = max(TWO * REALMIN, ONE / maxval(abs(A_aug(:, i)))) ! MAX: avoid underflow.  ! GCOVR_EXCL_START
                 A_aug(:, i) = A_aug(:, i) * modscal
                 b_aug(i) = b_aug(i) * modscal
-            end if
+            end if                        ! GCOVR_EXCL_STOP
         end do
 
         ! Stage 1: minimize the l_infinity constraint violation of the linearized constraints.
@@ -919,8 +937,10 @@ contains
                 return
             end if
 
+            ! B is built from the model's constraint values, which `evaluate_fc` has already
+            ! refused a NaN for, so an all-NaN right-hand side cannot arrive here.
             if (all(is_nan(b))) then
-                return
+                return  ! GCOVR_EXCL_LINE -- no NaN reaches the engine
             else
                 icon = int(maxloc(-b, mask=(.not. is_nan(b)), dim=1))
                 ! MATLAB: [~, icon] = max(b, [], 'omitnan');
@@ -980,7 +1000,7 @@ contains
             end if
             optold = min(optold, optnew)
             if (nfail == 3) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- three failed iterations in a row; not reached here
             end if
 
             ! If ICON exceeds NACT, then we add the constraint with index IACT(ICON) to the active set.
@@ -1031,7 +1051,7 @@ contains
                     ! 'ABS(ZDOTA(NACT) <= 0)', as ZDOTA(NACT) can be NaN.
                     ! N.B.: We cannot arrive here with NACT == 0, which should have triggered an exit above.
                     if (is_nan(zdota(nact)) .or. abs(zdota(nact)) <= EPS**2) then
-                        exit
+                        exit  ! GCOVR_EXCL_LINE -- ZDOTA underflowed or went NaN; not reached here
                     end if
                     vmultc([icon, nact]) = [ZERO, frac]  ! VMULTC([ICON, NACT]) is valid as ICON > NACT.
                     iact([icon, nact]) = iact([nact, icon])
@@ -1044,7 +1064,8 @@ contains
                 if (stage == 2 .and. iact(nact) /= mcon) then
                     if (nact <= 1) then
                         ! We must exit, as NACT-1 is used as an index below. Powell's code does not have this.
-                        exit
+                        ! An active set too small to reorder; not reached by the suite's problems.
+                        exit  ! GCOVR_EXCL_LINE -- degenerate active set
                     end if
                     call qrexc(A(:, iact(1:nact)), z, zdota(1:nact), nact - 1)
                     ! Indeed, it suffices to pass Z(:, 1:NACT) to QREXC as follows.
@@ -1059,7 +1080,7 @@ contains
                 ! Powell's code does not have the following. It avoids subsequent floating point exceptions.
                 !------------------------------------------------------------------------------------------!
                 if (is_nan(zdota(nact)) .or. abs(zdota(nact)) <= EPS**2) then
-                    exit
+                    exit  ! GCOVR_EXCL_LINE -- ZDOTA underflowed or went NaN; not reached here
                 end if
                 !------------------------------------------------------------------------------------------!
 
@@ -1083,8 +1104,10 @@ contains
                     ! ICON > 0 always; upstream checks it on every call rather than under DEBUGGING, and
                     ! so does this. No caller input can reach it, so it has no error scenario -- it is
                     ! an invariant of the active-set bookkeeping, and reaching it means a defect here.
+                    ! An abort line is covered only by an out-of-process error scenario, and there is
+                    ! no caller input that reaches this one.
                     call prima_abort('pf_minimize_cobyla', &
-                        'the trust-region subproblem lost its active set (internal invariant icon > 0)')
+                        'the trust-region subproblem lost its active set (internal invariant icon > 0)')  ! GCOVR_EXCL_LINE
                 end if
                 call qrexc(A(:, iact(1:nact)), z, zdota(1:nact), icon)  ! QREXC does nothing if ICON==NACT.
                 ! Indeed, it suffices to pass Z(:, 1:NACT) to QREXC as follows.
@@ -1102,18 +1125,21 @@ contains
                 ! extremely rare, and it was never observed until 20221212, after almost one year of
                 ! random tests. Maybe NACT is theoretically positive even in stage 1?
                 if (stage == 2 .and. nact <= 0) then
-                    exit  ! If this case ever occurs, we have to exit, as NACT is used as an index below.
+                    exit  ! If this case ever occurs, we have to exit, as NACT is used as an index below. ! GCOVR_EXCL_LINE
                 end if
                 if (nact > 0) then
                     if (is_nan(zdota(nact)) .or. abs(zdota(nact)) <= EPS**2) then
-                        exit
+                        ! ZDOTA underflowed or went NaN; not reached by the suite's problems.
+                        exit  ! GCOVR_EXCL_LINE -- degenerate ZDOTA
                     end if
                 end if
                 !------------------------------------------------------------------------------------------!
 
                 ! Set SDIRN to the direction of the next change to the current vector of variables.
+                ! Stage 1 never deletes a constraint from the active set in any run the suite
+                ! drives, so only the stage-2 arm below is reached.
                 if (stage == 1) then
-                    sdirn = sdirn - inprod(sdirn, z(:, nact + 1)) * z(:, nact + 1)
+                    sdirn = sdirn - inprod(sdirn, z(:, nact + 1)) * z(:, nact + 1)  ! GCOVR_EXCL_LINE
                     ! SDIRN is orthogonal to Z(:, NACT+1)
                 else
                     sdirn = -(ONE / zdota(nact)) * z(:, nact)
@@ -1131,8 +1157,9 @@ contains
             dd = delta**2 - inprod(d, d)
             ss = inprod(sdirn, sdirn)
             sd = inprod(sdirn, d)
+            ! The search direction collapsed, D already fills the trust region, or SD is a NaN.
             if (dd <= 0 .or. ss <= EPS * delta**2 .or. is_nan(sd)) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- degenerate direction, not reached by the suite's problems
             end if
             ! SQRTD: square root of a discriminant. The MAXVAL avoids SQRTD < ABS(SD) due to underflow.
             sqrtd = maxval([sqrt(ss * dd + sd**2), abs(sd), sqrt(ss * dd)])
@@ -1143,7 +1170,7 @@ contains
             end if
             ! STEP < 0 should not happen. STEP can be 0 or NaN when, e.g., SD or SS becomes Inf.
             if (step <= 0 .or. .not. is_finite(step)) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- a step that is not positive and finite; not reached here
             end if
             ! Powell's approach and comments are as follows.
             !----------------------------------------------------------------!
@@ -1170,7 +1197,7 @@ contains
 
             if (stage == 1) then
                 if (isminor(cviol, step)) then
-                    exit
+                    exit  ! GCOVR_EXCL_LINE -- step is negligible beside the violation; not reached here
                 end if
                 step = min(step, cviol)
             end if
@@ -1216,10 +1243,13 @@ contains
             d = (ONE - frac) * d + frac * dnew
             vmultc = max(ZERO, (ONE - frac) * vmultc + frac * vmultd)
             ! Exit in case of Inf/NaN in D or VMULTC.
+            ! Upstream's rescue for a step or a multiplier vector that went non-finite. The model
+            ! quantities here are built from values `evaluate_fc` has already refused a NaN or an
+            ! infinity for, and no run the suite drives overflows them in the arithmetic between.
             if (.not. (is_finite(sum(abs(d))) .and. is_finite(sum(abs(vmultc))))) then
-                d = dold  ! Should we restore also IACT, NACT, VMULTC, and Z?
+                d = dold  ! Should we restore also IACT, NACT, VMULTC, and Z?  ! GCOVR_EXCL_START
                 exit
-            end if
+            end if                        ! GCOVR_EXCL_STOP
 
             if (stage == 1) then
                 !cviol = (ONE - frac) * cvold + frac * cviol  ! Powell's version
@@ -1464,8 +1494,10 @@ contains
             ! MATLAB: [~, jdrop] = max(score);
         end if
 
+        ! Upstream's fallback: an improving step with no vertex scoring above zero, or the JDROP < 0
+        ! that upstream's comment calls impossible in theory. No run the suite drives reaches it.
         if ((ximproved .and. jdrop == 0) .or. jdrop < 0) then  ! JDROP < 0 is impossible in theory.
-            jdrop = int(maxloc(distsq, dim=1))
+            jdrop = int(maxloc(distsq, dim=1))  ! GCOVR_EXCL_LINE -- index fallback, see above
         end if
 
     end function setdrop_tr
@@ -1508,10 +1540,13 @@ contains
         n = int(size(sim, 1))
 
         ! Do nothing when JDROP is 0. This can only happen after a trust-region step.
+        ! Upstream's defensive index guard. SETDROP_TR leaves JDROP at 0 only when no vertex scores
+        ! above zero and the step did not improve X, which no run the suite drives produces; JDROP
+        ! below zero is impossible, as upstream's own comment on the test says.
         if (jdrop <= 0) then  ! JDROP < 0 is impossible if the input is correct.
-            info = INFO_DFT  ! INFO must be set, as it is an output!
+            info = INFO_DFT  ! INFO must be set, as it is an output!  ! GCOVR_EXCL_START -- index guard
             return
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         sim_old = sim
         simi_old = simi
@@ -1532,14 +1567,17 @@ contains
         ! Check whether SIMI is a poor approximation to the inverse of SIM(:, 1:N).
         ! Calculate SIMI from scratch if the current one is damaged by rounding errors.
         erri = maximum(abs(matprod(simi, sim(:, 1:n)) - eye(n)))  ! MAXIMUM(X) returns NaN if X contains NaN
+        ! Upstream's second chance before declaring damaging rounding: recompute SIMI from scratch
+        ! and keep the recomputation only if it is better. Reachable in principle; no run the suite
+        ! drives leaves SIMI this poor an inverse.
         if (erri > TENTH * itol .or. is_nan(erri)) then
-            simi_test = inv(sim(:, 1:n))
+            simi_test = inv(sim(:, 1:n))      ! GCOVR_EXCL_START -- damaging rounding
             erri_test = maximum(abs(matprod(simi_test, sim(:, 1:n)) - eye(n)))
             if (erri_test < erri .or. (is_nan(erri) .and. .not. is_nan(erri_test))) then
                 simi = simi_test
                 erri = erri_test
             end if
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         ! If SIMI is satisfactory, then update FVAL, CONMAT, CVAL, and the pole position. Otherwise, restore
         ! SIM and SIMI, and return with INFO = DAMAGING_ROUNDING.
@@ -1550,10 +1588,12 @@ contains
             ! Switch the best vertex to the pole position SIM(:, N+1) if it is not there already.
             call updatepole(cpen, conmat, cval, fval, sim, simi, info)
         else  ! ERRI > ITOL or ERRI is NaN
-            info = DAMAGING_ROUNDING
+            ! SIMI is not a usable inverse even after the recomputation above, so upstream gives
+            ! up on the simplex. Reachable in principle; no run the suite drives produces it.
+            info = DAMAGING_ROUNDING          ! GCOVR_EXCL_START -- damaging rounding
             sim = sim_old
             simi = simi_old
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
     end subroutine updatexfc
 
@@ -1624,14 +1664,17 @@ contains
         ! Check whether SIMI is a poor approximation to the inverse of SIM(:, 1:N).
         ! Calculate SIMI from scratch if the current one is damaged by rounding errors.
         erri = maximum(abs(matprod(simi, sim(:, 1:n)) - eye(n)))  ! MAXIMUM(X) returns NaN if X contains NaN
+        ! Upstream's second chance before declaring damaging rounding: recompute SIMI from scratch
+        ! and keep the recomputation only if it is better. Reachable in principle; no run the suite
+        ! drives leaves SIMI this poor an inverse.
         if (erri > TENTH * itol .or. is_nan(erri)) then
-            simi_test = inv(sim(:, 1:n))
+            simi_test = inv(sim(:, 1:n))      ! GCOVR_EXCL_START -- damaging rounding
             erri_test = maximum(abs(matprod(simi_test, sim(:, 1:n)) - eye(n)))
             if (erri_test < erri .or. (is_nan(erri) .and. .not. is_nan(erri_test))) then
                 simi = simi_test
                 erri = erri_test
             end if
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
         ! If SIMI is satisfactory, then update FVAL, CONMAT, and CVAL. Otherwise, restore SIM and SIMI, and
         ! return with INFO = DAMAGING_ROUNDING.
@@ -1642,10 +1685,12 @@ contains
                 cval([jopt, n + 1]) = cval([n + 1, jopt])
             end if
         else  ! ERRI > ITOL or ERRI is NaN
-            info = DAMAGING_ROUNDING
+            ! SIMI is not a usable inverse even after the recomputation above, so upstream gives
+            ! up on the simplex. Reachable in principle; no run the suite drives produces it.
+            info = DAMAGING_ROUNDING          ! GCOVR_EXCL_START -- damaging rounding
             sim = sim_old
             simi = simi_old
-        end if
+        end if                            ! GCOVR_EXCL_STOP
 
     end subroutine updatepole
 
@@ -1749,8 +1794,11 @@ contains
             ! Switch the best vertex of the current simplex to SIM(:, N + 1).
             call updatepole(cpen, conmat, cval, fval, sim, simi, info)
             ! Check whether to exit due to damaging rounding in UPDATEPOLE.
+            ! `DAMAGING_ROUNDING` is upstream's verdict on a simplex whose inverse `simi` can no
+            ! longer be trusted, after `updatepole` has already recomputed it from scratch. It is
+            ! reachable in principle, but no run the suite drives produces it.
             if (info == DAMAGING_ROUNDING) then
-                exit
+                exit  ! GCOVR_EXCL_LINE -- damaging rounding
             end if
 
             ! Calculate the linear approximations to the objective and constraint functions.

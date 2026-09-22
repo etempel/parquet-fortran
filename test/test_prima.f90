@@ -27,7 +27,8 @@ module test_prima
     use test_optimize_support
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     use iso_fortran_env, only : real64, int64
-    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_usual, ieee_underflow
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_usual, ieee_underflow, &
+                                             ieee_is_nan
 #ifndef __flang__
     ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
     ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
@@ -97,7 +98,29 @@ contains
             new_unittest("info%cstrv is measured in the caller's units, feasible or not", &
                          test_cstrv_is_in_the_callers_units), &
             new_unittest("the six calls of the guide's worked example reproduce their answers", &
-                         test_guide_examples)]
+                         test_guide_examples), &
+            new_unittest("a start with coordinates on both bounds keeps them and still converges", &
+                         test_bobyqa_start_on_bounds), &
+            new_unittest("pf_bobyqa_solver without scale_from_box scales the radius by the box", &
+                         test_bobyqa_solver_unscaled), &
+            new_unittest("COBYLA's default rhobeg is pulled up by an explicit rhoend", &
+                         test_cobyla_rhoend_pulls_rhobeg_up), &
+            new_unittest("COBYLA stops on ftarget, and on its budget, through checkexit_con", &
+                         test_cobyla_target_and_budget), &
+            new_unittest("LINCOA builds the fuller model an npt above 2n+1 asks for", &
+                         test_lincoa_larger_npt), &
+            new_unittest("a budget too small to finish the initial model stops inside it", &
+                         test_budget_below_the_initial_model), &
+            new_unittest("LINCOA with no constraints at all minimises over the whole space", &
+                         test_lincoa_without_constraints), &
+            new_unittest("LINCOA stops on ftarget and on a budget spent in the main loop", &
+                         test_lincoa_target_and_budget), &
+            new_unittest("LINCOA rescales a model gradient too large to step on directly", &
+                         test_lincoa_huge_gradient), &
+            new_unittest("COBYLA honours every budget it is given, whatever the search was doing", &
+                         test_cobyla_honours_every_budget), &
+            new_unittest("LINCOA minimises a strongly non-quadratic objective under a constraint", &
+                         test_lincoa_non_quadratic)]
 
     end subroutine collect_tests_prima
 
@@ -1223,5 +1246,500 @@ contains
                    "call 6 must report PF_OPT_INFEASIBLE with a positive violation")
 
     end subroutine test_guide_examples
+
+    !> A start whose coordinates sit exactly ON their bounds is kept there and still converges.
+    !!
+    !! `pf_minimize_bobyqa` fixes PRIMA's `honour_x0` at `.true.`, so a coordinate already at a
+    !! bound stays there and `rhobeg` shrinks instead of the start moving. The engine's
+    !! `initxf` then meets `sl(k) == 0` (start at the lower bound) and `su(k) == 0` (start at the
+    !! upper bound) and builds that coordinate's two interpolation points on the one side it has
+    !! room on -- the arms this test exists to reach. Both are set up here at once: the odd
+    !! coordinates start on their lower bound and the even ones on their upper bound.
+    !!
+    !! The minimiser of `sphere` is 1 in every coordinate, and the box below has it strictly
+    !! inside, so the run must leave every bound it started on and reach it.
+    subroutine test_bobyqa_start_on_bounds(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(4), fmin, lo(4), hi(4)
+        type(pf_optimize_info) :: info
+        type(pf_optimize_history) :: record
+
+        lo = [-1.0_real64, -1.0_real64, -1.0_real64, -1.0_real64]
+        hi = [3.0_real64, 3.0_real64, 3.0_real64, 3.0_real64]
+        x = [lo(1), hi(2), lo(3), hi(4)]
+
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi, rhobeg=0.5_real64, &
+                                rhoend=1.0e-8_real64, info=info, history=record)
+
+        ! The start is the caller's own, unmoved: `honour_x0` shrinks the radius instead.
+        call check(error, record%n > 0, "the record must hold the evaluations")
+        if (allocated(error)) return
+        call check(error, maxval(abs(record%x(:, 1) - [lo(1), hi(2), lo(3), hi(4)])) == 0.0_real64, &
+                   "the first point evaluated must be the start, on its bounds, unmoved")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-6_real64, &
+                   "the sphere's minimiser is 1 in every coordinate, strictly inside this box")
+        if (allocated(error)) return
+        call check(error, fmin < 1.0e-12_real64, "the sphere's minimum is 0")
+        if (allocated(error)) return
+        call check(error, all(x >= lo) .and. all(x <= hi), "and every bound still holds")
+        if (allocated(error)) return
+        call check(error, info%status == PF_OPT_OK, "a radius-driven stop is PF_OPT_OK")
+
+    end subroutine test_bobyqa_start_on_bounds
+
+    !> `scale_from_box = .false.` leaves the units alone and scales the radius by the box instead.
+    !!
+    !! The two arms of `pf_bobyqa_solver` differ in where the box width goes: with
+    !! `scale_from_box` the width becomes `scale` and `rhobeg_fraction` is the radius outright;
+    !! without it the units stay the caller's and the radius becomes the fraction TIMES the
+    !! narrowest width. On a box this test makes deliberately lopsided the two are different
+    !! numbers, and the negative control is the same solver with the flag left at its default:
+    !! both must find the same well, which is what makes the flag a scaling choice rather than a
+    !! different search.
+    subroutine test_bobyqa_solver_unscaled(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        type(pf_bobyqa_solver) :: solver
+        real(real64) :: x(2), fmin, x_scaled(2), fmin_scaled, lo(2), hi(2)
+        type(pf_optimize_info) :: info, info_scaled
+
+        ! Lopsided on purpose: `minval(hi - lo)` is 0.5 while the other side spans 20.
+        lo = [-10.0_real64, 0.75_real64]
+        hi = [10.0_real64, 1.25_real64]
+
+        solver%scale_from_box = .false.
+        solver%rhobeg_fraction = 0.2_real64
+        solver%rhoend = 1.0e-8_real64
+        call pf_minimize_multistart(sphere, lo, hi, 20260921_int64, x, fmin, nstart=4, &
+                                    solver=solver, info=info)
+
+        call check(error, info%status == PF_OPT_OK, "the unscaled solver must report a clean stop")
+        if (allocated(error)) return
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-5_real64, &
+                   "the sphere's minimiser is 1 in both coordinates, inside this box")
+        if (allocated(error)) return
+
+        ! The negative control: the default arm reaches the same well from the same starts.
+        solver%scale_from_box = .true.
+        call pf_minimize_multistart(sphere, lo, hi, 20260921_int64, x_scaled, fmin_scaled, &
+                                    nstart=4, solver=solver, info=info_scaled)
+        call check(error, maxval(abs(x_scaled - 1.0_real64)) < 1.0e-5_real64, &
+                   "and so must the box-scaled arm, from the same starts")
+        if (allocated(error)) return
+        call check(error, abs(fmin - fmin_scaled) < 1.0e-8_real64, &
+                   "the two arms differ in units, not in the well they find")
+
+    end subroutine test_bobyqa_solver_unscaled
+
+    !> An explicit `rhoend` with no `rhobeg` pulls COBYLA's default `rhobeg` up to `10*rhoend`.
+    !!
+    !! Upstream's rule, which `pf_minimize_cobyla` keeps: the default `rhobeg` is
+    !! `max(10*rhoend, RHOBEG_DFT)`, so an `rhoend` above a tenth of the default raises it rather
+    !! than leaving a final radius larger than the initial one. The observable is `info%rho`,
+    !! which cannot have reached a value below the `rhoend` asked for; the negative control is the
+    !! same call with a tiny `rhoend`, where the default `rhobeg` governs instead.
+    subroutine test_cobyla_rhoend_pulls_rhobeg_up(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        type(unit_disc) :: disc
+        real(real64) :: x(2), fmin
+        type(pf_optimize_info) :: info, info_small
+
+        ! `rhoend` well above a tenth of RHOBEG_DFT (which is one), so `10*rhoend` wins.
+        x = 0.0_real64
+        call pf_minimize_cobyla(disc, x, fmin, rhoend=0.5_real64, info=info)
+        call check(error, info%neval > 0, "the run must have evaluated the objective")
+        if (allocated(error)) return
+        call check(error, info%rho >= 0.5_real64, &
+                   "a run whose rhoend is 0.5 cannot report a final radius below it")
+        if (allocated(error)) return
+
+        ! The negative control: a tiny rhoend leaves the default rhobeg in charge and the run
+        ! reaches a far smaller radius.
+        x = 0.0_real64
+        call pf_minimize_cobyla(disc, x, fmin, rhoend=1.0e-8_real64, info=info_small)
+        call check(error, info_small%rho < info%rho, &
+                   "and a tiny rhoend must reach a smaller radius than a coarse one")
+
+    end subroutine test_cobyla_rhoend_pulls_rhobeg_up
+
+    !> COBYLA's own exit tests: `ftarget` stops it early, and `max_neval` stops it on budget.
+    !!
+    !! These are `checkexit_con`'s two reachable arms -- the constrained twin of the test BOBYQA
+    !! already has. `unit_disc` is the squared distance from `(1, 1)` on the unit ball, whose
+    !! minimum is at the projection of `(1, 1)` onto the circle and so is
+    !! `2*(1 - 1/sqrt(2))**2`, about `0.172`. A target comfortably above that is met partway
+    !! through the search, and a budget of a handful of evaluations runs out before the radius
+    !! rule fires.
+    subroutine test_cobyla_target_and_budget(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        type(unit_disc) :: disc
+        real(real64) :: x(2), fmin
+        type(pf_optimize_info) :: info
+
+        ! A target above the constrained minimum of about 0.172, so the search meets it well
+        ! before it converges.
+        x = 0.0_real64
+        call pf_minimize_cobyla(disc, x, fmin, ftarget=0.5_real64, rhobeg=0.5_real64, &
+                                rhoend=1.0e-8_real64, info=info)
+        call check(error, info%status == PF_OPT_TARGET, &
+                   "a met ftarget is PF_OPT_TARGET, not a radius-driven stop")
+        if (allocated(error)) return
+        call check(error, fmin <= 0.5_real64, "and the value returned must meet the target")
+        if (allocated(error)) return
+        call check(error, info%converged, "a target stop counts as converged")
+        if (allocated(error)) return
+
+        ! A budget too small for the radius rule to fire.
+        x = 0.0_real64
+        call pf_minimize_cobyla(disc, x, fmin, max_neval=8, rhobeg=0.5_real64, &
+                                rhoend=1.0e-10_real64, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, "an exhausted budget is PF_OPT_LIMIT")
+        if (allocated(error)) return
+        call check(error, info%neval <= 8, "and the budget must not be overrun")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, "a budget stop is not convergence")
+
+    end subroutine test_cobyla_target_and_budget
+
+    !> An `npt` above `2n+1` makes LINCOA build the fuller model, and it still converges.
+    !!
+    !! LINCOA's `inith` has one arm for the `2n+1` points a default run interpolates and another
+    !! for the extra points beyond them, which only an explicit `npt` reaches. With `n = 2` the
+    !! range is `[n+2, (n+1)(n+2)/2] = [4, 6]`, so `npt = 6` is the fullest model available and
+    !! exercises the second arm; the negative control is the same problem at the default `npt`,
+    !! which must reach the same KKT point.
+    subroutine test_lincoa_larger_npt(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, x_dft(2), fmin_dft
+        real(real64) :: a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: info
+
+        ! `sphere` is the sum of squares about 1; the half-plane x1 + x2 <= 1 cuts the minimiser
+        ! (1, 1) off, so the constrained minimiser is its projection onto the line, (0.5, 0.5).
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+
+        x = [0.0_real64, 0.0_real64]
+        call pf_minimize_lincoa(sphere, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, npt=6, &
+                                rhobeg=0.2_real64, rhoend=1.0e-8_real64, info=info)
+        call check(error, maxval(abs(x - 0.5_real64)) < 1.0e-6_real64, &
+                   "the constrained minimiser is the projection of (1, 1) onto x1 + x2 = 1")
+        if (allocated(error)) return
+        ! The value is flat to first order in `x` only at an unconstrained minimum; here the
+        ! gradient along the active line is nonzero, so the tolerance on `f` is the tolerance on
+        ! `x` times that slope rather than the square of it.
+        call check(error, abs(fmin - 0.5_real64) < 1.0e-5_real64, &
+                   "and the value there is 2*(0.5 - 1)^2 = 0.5")
+        if (allocated(error)) return
+        call check(error, info%status == PF_OPT_OK, "a radius-driven stop is PF_OPT_OK")
+        if (allocated(error)) return
+
+        ! The negative control: the default model reaches the same point.
+        x_dft = [0.0_real64, 0.0_real64]
+        call pf_minimize_lincoa(sphere, x_dft, fmin_dft, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.2_real64, rhoend=1.0e-8_real64)
+        call check(error, maxval(abs(x_dft - 0.5_real64)) < 1.0e-6_real64, &
+                   "the default model must reach the same KKT point")
+
+    end subroutine test_lincoa_larger_npt
+
+    !> A budget smaller than the initial model needs stops each engine INSIDE its initialisation.
+    !!
+    !! `pf_minimize_bobyqa` uses `max_neval` as given rather than raising it to the `n + 3` that
+    !! upstream would, so a budget below the interpolation set's size is honoured and the run
+    !! ends before the model is complete. That is a different exit path from the one
+    !! `a budget stops at PF_OPT_LIMIT with the best point so far` takes, which spends its
+    !! budget in the main loop with a finished model: this one leaves the initialisation
+    !! routine, which has its own return and its own best-point selection.
+    !!
+    !! All three engines are driven here because each has its own initialisation and its own
+    !! copy of that exit. BOBYQA and LINCOA interpolate `2n+1 = 5` points by default and COBYLA
+    !! builds a simplex of `n+1 = 3`, so the budgets below are under each.
+    !!
+    !! The negative control in every case is `neval`: a run that stopped early must report
+    !! FEWER evaluations than the model needed, which is what distinguishes stopping inside the
+    !! initialisation from completing it and stopping straight after.
+    subroutine test_budget_below_the_initial_model(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        type(unit_disc) :: disc
+        real(real64) :: x(2), fmin, lo(2), hi(2), a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: info
+
+        ! BOBYQA: three evaluations against the five its default model interpolates.
+        lo = -5.0_real64
+        hi = 5.0_real64
+        x = [0.5_real64, -0.5_real64]
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi, rhobeg=0.5_real64, &
+                                rhoend=1.0e-10_real64, max_neval=3, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, &
+                   "BOBYQA must report PF_OPT_LIMIT when the budget runs out in the model")
+        if (allocated(error)) return
+        call check(error, info%neval <= 3, "and must not overrun the budget it was given")
+        if (allocated(error)) return
+        call check(error, fmin == sphere(x), "fmin must be the value at the returned point")
+        if (allocated(error)) return
+        call check(error, .not. info%converged, "an unfinished model is not convergence")
+        if (allocated(error)) return
+
+        ! BOBYQA again with an explicit npt above 2n+1, so the budget runs out in the SECOND
+        ! of the two loops that fill the initial set -- the one that adds the points beyond
+        ! the first 2n+1, which the default-npt run above does not enter.
+        x = [0.5_real64, -0.5_real64]
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi, rhobeg=0.5_real64, &
+                                rhoend=1.0e-10_real64, npt=6, max_neval=5, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, &
+                   "BOBYQA must report PF_OPT_LIMIT with npt = 6 and a budget of five")
+        if (allocated(error)) return
+        call check(error, info%neval <= 5, "and must not overrun that budget either")
+        if (allocated(error)) return
+
+        ! And one evaluation further on, so the budget runs out on the SIXTH point rather than
+        ! the fifth. The first 2n+1 = 5 points exhaust the first loop exactly, so this is the
+        ! only budget that stops in the second one -- which is a separate exit from the first.
+        x = [0.5_real64, -0.5_real64]
+        call pf_minimize_bobyqa(sphere, x, fmin, lower=lo, upper=hi, rhobeg=0.5_real64, &
+                                rhoend=1.0e-10_real64, npt=6, max_neval=6, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, &
+                   "a budget of exactly npt stops on the last point of the initial set")
+        if (allocated(error)) return
+        call check(error, info%neval <= 6, "and must not overrun it")
+        if (allocated(error)) return
+
+        ! LINCOA: the same, with a constraint so the linear machinery is set up first.
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+        x = [0.0_real64, 0.0_real64]
+        call pf_minimize_lincoa(sphere, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.2_real64, rhoend=1.0e-10_real64, max_neval=3, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, &
+                   "LINCOA must report PF_OPT_LIMIT when the budget runs out in the model")
+        if (allocated(error)) return
+        call check(error, info%neval <= 3, "and must not overrun the budget it was given")
+        if (allocated(error)) return
+
+        ! COBYLA: two evaluations against the three vertices of its initial simplex.
+        x = [0.0_real64, 0.0_real64]
+        call pf_minimize_cobyla(disc, x, fmin, rhobeg=0.5_real64, rhoend=1.0e-10_real64, &
+                                max_neval=2, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, &
+                   "COBYLA must report PF_OPT_LIMIT when the budget runs out in the simplex")
+        if (allocated(error)) return
+        call check(error, info%neval <= 2, "and must not overrun the budget it was given")
+
+    end subroutine test_budget_below_the_initial_model
+
+    !> LINCOA with every constraint argument absent is a plain unconstrained minimisation.
+    !!
+    !! Each of `a_ineq`, `b_ineq`, `a_eq`, `b_eq`, `lower` and `upper` is optional, and nothing
+    !! refuses a call that passes none: the engine then works with an EMPTY active set, which is
+    !! its own path through the active-set machinery rather than a special case bolted on.
+    !! `sphere`'s minimiser is 1 in every coordinate and there is nothing to keep it away, so
+    !! the answer is the unconstrained one.
+    !!
+    !! The negative control is the constrained run below it: the same objective with the
+    !! half-plane that cuts the minimiser off must stop somewhere else, which is what shows the
+    !! constraint-free run was not simply ignoring a constraint it had been given.
+    subroutine test_lincoa_without_constraints(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: info
+
+        x = [-0.5_real64, 0.4_real64]
+        call pf_minimize_lincoa(sphere, x, fmin, rhobeg=0.5_real64, rhoend=1.0e-8_real64, &
+                                info=info)
+        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-6_real64, &
+                   "with no constraints the minimiser is the sphere's own, 1 in each coordinate")
+        if (allocated(error)) return
+        call check(error, fmin < 1.0e-12_real64, "and the unconstrained minimum is 0")
+        if (allocated(error)) return
+        call check(error, info%status == PF_OPT_OK, "a radius-driven stop is PF_OPT_OK")
+        if (allocated(error)) return
+        call check(error, info%cstrv <= 0.0_real64, &
+                   "a run with no constraints cannot report a positive violation")
+        if (allocated(error)) return
+
+        ! The control: the same objective with a constraint that excludes (1, 1) must stop on it.
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+        x = [-0.5_real64, 0.4_real64]
+        call pf_minimize_lincoa(sphere, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.5_real64, rhoend=1.0e-8_real64)
+        call check(error, maxval(abs(x - 0.5_real64)) < 1.0e-6_real64, &
+                   "and with the half-plane it must stop at its projection, (0.5, 0.5)")
+
+    end subroutine test_lincoa_without_constraints
+
+    !> LINCOA's own exit tests: `ftarget` met, and a budget spent after the model is built.
+    !!
+    !! The twin of the BOBYQA and COBYLA cases, on the third engine.
+    !! `a budget too small to finish the initial model` covers the exit INSIDE the
+    !! initialisation; these two are the exits from the main loop, which is a different site.
+    !! `sphere` under `x1 + x2 <= 1` has its constrained minimum `0.5` at `(0.5, 0.5)`, so a
+    !! target above that is met partway and a budget above the five-point model but below
+    !! convergence runs out in a trust-region step.
+    subroutine test_lincoa_target_and_budget(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: info
+
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+
+        x = [0.0_real64, 0.0_real64]
+        call pf_minimize_lincoa(sphere, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                ftarget=0.8_real64, rhobeg=0.2_real64, rhoend=1.0e-10_real64, &
+                                info=info)
+        call check(error, info%status == PF_OPT_TARGET, &
+                   "a met ftarget is PF_OPT_TARGET, not a radius-driven stop")
+        if (allocated(error)) return
+        call check(error, fmin <= 0.8_real64, "and the value returned must meet the target")
+        if (allocated(error)) return
+
+        ! A budget above the 5-point model but far below convergence.
+        x = [0.0_real64, 0.0_real64]
+        call pf_minimize_lincoa(sphere, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, max_neval=9, &
+                                rhobeg=0.2_real64, rhoend=1.0e-12_real64, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, "an exhausted budget is PF_OPT_LIMIT")
+        if (allocated(error)) return
+        call check(error, info%neval > 5 .and. info%neval <= 9 + 1, &
+                   "the run must get past the five-point model and stop on its budget")
+
+    end subroutine test_lincoa_target_and_budget
+
+    !> A model gradient above `1e12` is rescaled before the trust-region step is taken.
+    !!
+    !! The engine's step is computed from a rescaled copy of the model when
+    !! `maxval(abs(gopt)) > 1e12`, an empirical guard so that the step direction is not lost to
+    !! the magnitude of the gradient. `bad_scaling` makes the COORDINATES badly scaled, which is
+    !! a different thing and does not reach this; `sphere_1e13` makes the VALUE large, so the
+    !! gradient near the start is of order `1e13`.
+    !!
+    !! Scaling an objective by a positive constant cannot move its minimiser, so the answer must
+    !! be the same `(0.5, 0.5)` the unscaled run reaches -- that invariance is the assertion, and
+    !! it is what a lost or mis-scaled step would break.
+    subroutine test_lincoa_huge_gradient(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: info
+
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+
+        x = [0.0_real64, 0.0_real64]
+        call pf_minimize_lincoa(sphere_1e13, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.2_real64, rhoend=1.0e-8_real64, max_neval=500, &
+                                info=info)
+        call check(error, maxval(abs(x - 0.5_real64)) < 1.0e-5_real64, &
+                   "scaling the objective by 1e13 cannot move its constrained minimiser")
+        if (allocated(error)) return
+        call check(error, fmin < 0.5_real64 * 1.0e13_real64 * (1.0_real64 + 1.0e-4_real64), &
+                   "and the value there is 1e13 times the unscaled minimum, 0.5")
+        if (allocated(error)) return
+        call check(error, info%neval > 0, "the run must have evaluated the objective")
+
+    end subroutine test_lincoa_huge_gradient
+
+    !> Every budget is honoured, whichever kind of step the search was taking when it ran out.
+    !!
+    !! A budget can expire on any of three evaluation sites -- filling the initial simplex,
+    !! taking a trust-region step, or taking a geometry step -- and each leaves the engine
+    !! through its own exit. Which one a given budget lands on depends on the search path, so
+    !! rather than aim at one, this sweeps every budget from three to forty and requires the
+    !! same contract of all of them: the count is honoured, the point returned is usable, and
+    !! it is no worse than the start.
+    !!
+    !! That is a stronger statement than any single budget makes, and it is the honest way to
+    !! reach a path-dependent exit: the assertion does not depend on WHICH site a particular
+    !! budget stops at, so it cannot rot when the arithmetic moves the search by an ulp.
+    subroutine test_cobyla_honours_every_budget(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        type(unit_disc) :: disc
+        real(real64) :: x(2), fmin, f_start
+        type(pf_optimize_info) :: info
+        integer :: b
+        character(len=64) :: which
+
+        ! `unit_disc` is the squared distance from (1, 1); at the origin, where every run below
+        ! starts, that is 2.
+        f_start = 2.0_real64
+
+        do b = 3, 40
+            write (which, '(a, i0)') "budget ", b
+            x = 0.0_real64
+            call pf_minimize_cobyla(disc, x, fmin, rhobeg=0.5_real64, rhoend=1.0e-10_real64, &
+                                    max_neval=b, info=info)
+
+            call check(error, info%neval <= b + 1, &
+                       trim(which)//": the budget must be honoured, soft by at most one step")
+            if (allocated(error)) return
+            call check(error, .not. ieee_is_nan(fmin), &
+                       trim(which)//": the value returned must be a number")
+            if (allocated(error)) return
+            call check(error, fmin <= f_start, &
+                       trim(which)//": the best point found cannot be worse than the start")
+            if (allocated(error)) return
+            call check(error, info%status == PF_OPT_LIMIT .or. info%status == PF_OPT_OK, &
+                       trim(which)//": a run that ends must either converge or hit its limit")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_cobyla_honours_every_budget
+
+    !> LINCOA on Rosenbrock under a linear constraint, where the model is a poor local fit.
+    !!
+    !! Every other LINCOA test here minimises a quadratic, which its quadratic model reproduces
+    !! exactly, so the trust-region ratio is essentially always excellent and the radius rule
+    !! only ever takes its outer arms. Rosenbrock's curved valley is the opposite case: the
+    !! model is a poor fit over the trust region, the ratio lands in the middling band, and the
+    !! radius update takes its intermediate arm.
+    !!
+    !! The minimum of Rosenbrock is `(1, 1)`, where `x1 + x2 = 2`, so the constraint
+    !! `x1 + x2 <= 1.5` is active and the answer lies on that line. The assertions are the ones
+    !! a curved problem supports -- the constraint holds, the run improves on its start, and it
+    !! lands on the active line -- never a digit of a search path.
+    subroutine test_lincoa_non_quadratic(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, f_start, a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: info
+
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.5_real64
+
+        x = [-1.2_real64, 1.0_real64]
+        f_start = rosenbrock(x)
+        call pf_minimize_lincoa(rosenbrock, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.5_real64, rhoend=1.0e-8_real64, max_neval=2000, &
+                                info=info)
+
+        call check(error, fmin < f_start, "the run must improve on its own start")
+        if (allocated(error)) return
+        ! The answer is accurate to about `rhoend` in the engine's units, so a constraint the
+        ! solution sits ON is met to that order rather than exactly; the run reports the
+        ! residue it left in `info%cstrv`, and `PF_OPT_OK` is what says it is within `ctol`.
+        call check(error, x(1) + x(2) <= 1.5_real64 + 1.0e-6_real64, &
+                   "the linear constraint must hold at the point returned, to about rhoend")
+        if (allocated(error)) return
+        call check(error, info%status == PF_OPT_OK, &
+                   "and the run must call that point feasible, not PF_OPT_INFEASIBLE")
+        if (allocated(error)) return
+        call check(error, abs(x(1) + x(2) - 1.5_real64) < 1.0e-5_real64, &
+                   "and it must be ACTIVE: Rosenbrock's minimiser lies beyond it")
+        if (allocated(error)) return
+        call check(error, fmin == rosenbrock(x), "fmin must be the value at the returned point")
+        if (allocated(error)) return
+        call check(error, info%neval > 0, "the run must have evaluated the objective")
+
+    end subroutine test_lincoa_non_quadratic
 
 end module test_prima

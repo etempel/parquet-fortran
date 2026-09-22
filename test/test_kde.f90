@@ -180,6 +180,8 @@ contains
             new_unittest("single precision input widens", test_real32_widens), &
             new_unittest("the array forms equal the scalar forms", test_array_forms_match_scalar), &
             new_unittest("the tokens and the accessors report the fit", test_tokens_and_accessors), &
+            new_unittest("a fit given no kernel takes the B-spline, on both types", &
+                test_default_kernel_is_the_bspline), &
             new_unittest("a refit replaces everything and %clear unfits", test_refit_and_clear), &
             new_unittest("%print writes the summary and says when there is none", test_print_writes), &
             new_unittest("the linear correction reproduces the golden vectors", test_linear_golden_vectors), &
@@ -519,15 +521,15 @@ contains
         call kde_weights_mod5(n, w)
         select case (name)
         case ("SILVERMAN")
-            call k%fit(x, rule="silverman", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", ok=ok)
         case ("SCOTT")
-            call k%fit(x, rule="scott", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="scott", ok=ok)
         case ("ADJUST")
-            call k%fit(x, rule="silverman", adjust=1.5_real64, ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", adjust=1.5_real64, ok=ok)
         case ("N1000")
-            call k%fit(x, rule="silverman", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", ok=ok)
         case ("GAUSS")
-            call k%fit(x, bandwidth=60.0_real64, ok=ok)
+            call k%fit(x, kernel="gaussian", bandwidth=60.0_real64, ok=ok)
         case ("EPAN")
             call k%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", ok=ok)
         case ("BSPL")
@@ -535,11 +537,11 @@ contains
         case ("BOX")
             call k%fit(x, bandwidth=60.0_real64, kernel="box", ok=ok)
         case ("WREL")
-            call k%fit(x, rule="silverman", weights=w, ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", weights=w, ok=ok)
         case ("WFREQ")
-            call k%fit(x, rule="silverman", weights=w, weight_type="frequency", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", weights=w, weight_type="frequency", ok=ok)
         case ("REN_LO")
-            call k%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, boundary="renormalise", ok=ok)
+            call k%fit(x, kernel="gaussian", bandwidth=60.0_real64, lower=-470.0_real64, boundary="renormalise", ok=ok)
         case ("REN_BOTH")
             call k%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", lower=-470.0_real64, &
                 upper=460.0_real64, boundary="renormalise", ok=ok)
@@ -550,19 +552,19 @@ contains
             call k%fit(x, bandwidth=60.0_real64, kernel="box", upper=460.0_real64, &
                 boundary="reflect", ok=ok)
         case ("REF_WIDE")
-            call k%fit(x, bandwidth=400.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+            call k%fit(x, kernel="gaussian", bandwidth=400.0_real64, lower=-470.0_real64, upper=460.0_real64, &
                 boundary="reflect", ok=ok)
         case ("REN_WIDE")
             call k%fit(x, bandwidth=600.0_real64, kernel="box", lower=-470.0_real64, &
                 upper=460.0_real64, boundary="renormalise", ok=ok)
         case ("RULE_BOUNDED")
-            call k%fit(x, rule="silverman", lower=-400.0_real64, upper=400.0_real64, ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", lower=-400.0_real64, upper=400.0_real64, ok=ok)
         case ("ONE_H")
-            call k%fit(x, bandwidth=10.0_real64, ok=ok)
+            call k%fit(x, kernel="gaussian", bandwidth=10.0_real64, ok=ok)
         case ("ONE_RULE")
-            call k%fit(x, rule="silverman", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", ok=ok)
         case ("ADAPT")
-            call k%fit(x, rule="silverman", adaptive=.true., ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", adaptive=.true., ok=ok)
         case ("ADAPT_CAP")
             call k%fit(x, bandwidth=80.0_real64, kernel="bspline", adaptive=.true., alpha=1.0_real64, &
                 bandwidth_max=120.0_real64, lower=-340.0_real64, boundary="renormalise", ok=ok)
@@ -570,22 +572,22 @@ contains
             call k%fit(x, bandwidth=60.0_real64, kernel="epanechnikov", adaptive=.true., lower=-340.0_real64, &
                 upper=470.0_real64, boundary="reflect", ok=ok)
         case ("ADAPT_W")
-            call k%fit(x, rule="silverman", adaptive=.true., weights=w, ok=ok)
+            call k%fit(x, kernel="gaussian", rule="silverman", adaptive=.true., weights=w, ok=ok)
         case ("ISJ")
-            call k%fit(x, rule="isj", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="isj", ok=ok)
         case ("ISJ_WREL")
-            call k%fit(x, rule="isj", weights=w, ok=ok)
+            call k%fit(x, kernel="gaussian", rule="isj", weights=w, ok=ok)
         case ("ISJ_WFREQ")
-            call k%fit(x, rule="isj", weights=w, weight_type="frequency", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="isj", weights=w, weight_type="frequency", ok=ok)
         case ("ISJ_BOUNDED")
-            call k%fit(x, rule="isj", lower=-331.625_real64, upper=470.0_real64, ok=ok)
+            call k%fit(x, kernel="gaussian", rule="isj", lower=-331.625_real64, upper=470.0_real64, ok=ok)
         case ("ISJ_ROUNDED")
             call kde_rounded(8.0_real64, x)
-            call k%fit(x, rule="isj", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="isj", ok=ok)
         case ("ISJ_NO_ROOT")
-            call k%fit(x, rule="isj", ok=ok)
+            call k%fit(x, kernel="gaussian", rule="isj", ok=ok)
         case ("LIN_LO")
-            call k%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, boundary="linear", ok=ok)
+            call k%fit(x, kernel="gaussian", bandwidth=60.0_real64, lower=-470.0_real64, boundary="linear", ok=ok)
         case ("LIN_HI_BOX")
             call k%fit(x, bandwidth=60.0_real64, kernel="box", upper=460.0_real64, boundary="linear", ok=ok)
         case ("LIN_BOTH")
@@ -595,17 +597,17 @@ contains
             call k%fit(x, bandwidth=60.0_real64, kernel="bspline", lower=-470.0_real64, &
                 boundary="linear", ok=ok)
         case ("LIN_WIDE")
-            call k%fit(x, bandwidth=400.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+            call k%fit(x, kernel="gaussian", bandwidth=400.0_real64, lower=-470.0_real64, upper=460.0_real64, &
                 boundary="linear", ok=ok)
         case ("LIN_W")
-            call k%fit(x, bandwidth=60.0_real64, weights=w, lower=-470.0_real64, boundary="linear", ok=ok)
+            call k%fit(x, kernel="gaussian", bandwidth=60.0_real64, weights=w, lower=-470.0_real64, boundary="linear", ok=ok)
         case ("LIN_ZERO")
-            call k%fit(x, bandwidth=60.0_real64, lower=-470.0_real64, boundary="linear", ok=ok)
+            call k%fit(x, kernel="gaussian", bandwidth=60.0_real64, lower=-470.0_real64, boundary="linear", ok=ok)
         case ("ADAPT_LIN")
-            call k%fit(x, bandwidth=60.0_real64, adaptive=.true., lower=-470.0_real64, &
+            call k%fit(x, kernel="gaussian", bandwidth=60.0_real64, adaptive=.true., lower=-470.0_real64, &
                 boundary="linear", ok=ok)
         case ("LIN_NARROW3")
-            call k%fit(x, bandwidth=930000.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+            call k%fit(x, kernel="gaussian", bandwidth=930000.0_real64, lower=-470.0_real64, upper=460.0_real64, &
                 boundary="linear", ok=ok)
         case ("LIN_NARROW6")
             call k%fit(x, bandwidth=930000000.0_real64, kernel="epanechnikov", lower=-470.0_real64, &
@@ -1621,7 +1623,7 @@ contains
         call check(error, all(ieee_is_nan(fg)) .and. xg(1) == 0.0_real64 .and. xg(5) == 4.0_real64, &
             "an undefined estimate's curve keeps the points it was given and answers NaN")
         if (allocated(error)) return
-        call k%fit([3.0_real64, 3.0_real64, 3.0_real64], bandwidth=0.5_real64, ok=ok)
+        call k%fit([3.0_real64, 3.0_real64, 3.0_real64], kernel="gaussian", bandwidth=0.5_real64, ok=ok)
         call k%pdf(3.0_real64, f)
         call check(error, ok .and. abs(f - 2.0_real64*0.3989422804014327_real64/(1.0_real64 - &
             5.7330314375838782e-7_real64)) <= 1.0e-15_real64, &
@@ -1842,7 +1844,7 @@ contains
         ! discriminating fails it rather than passing. The ends are re-derived from `%bandwidths`,
         ! to a few ulp for the reason the unbounded arm above gives.
         call kde_two_component(60_int64, x)
-        call k%fit(x, rule="silverman", adaptive=.true.)
+        call k%fit(x, kernel="gaussian", rule="silverman", adaptive=.true.)
         allocate(hb(60), xs(60))
         call k%bandwidths(hb, xs)
         call check(error, hb(1) < maxval(hb), &
@@ -2004,7 +2006,7 @@ contains
         ! And `%print` names it, which is where a caller reads what they got.
         call a%fit(x, bandwidth=60.0_real64, lower=-470.0_real64)
         call a%kernel(token)
-        call check(error, token == "gaussian", "the kernel default must not have moved")
+        call check(error, token == "bspline", "the kernel default must not have moved")
 
     end subroutine test_default_boundary_is_reflect
 
@@ -2333,6 +2335,67 @@ contains
 
     end subroutine test_tokens_and_accessors
 
+    !> A fit given no `kernel=` takes the cubic B-spline, on both types.
+    !!
+    !! **Asserted computationally, not by name.** `%kernel` reporting `"bspline"` while the
+    !! estimate was summed with another kernel is exactly the defect a name assertion cannot see,
+    !! so the default fit is compared against one that NAMES the B-spline and must agree bit for
+    !! bit -- the same arithmetic on the same points, so anything but equality is a different
+    !! kernel. The Gaussian arm is the negative control: without it the equality would also hold
+    !! of a default that ignored `kernel=` altogether.
+    !!
+    !! `pf_kde_grid` is checked too, because it carries its own default and a fit and a grid that
+    !! disagreed about it would make `pilot=` mean two things.
+    subroutine test_default_kernel_is_the_bspline(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kd, kb, kg
+        type(pf_kde_grid) :: gd, gb
+        real(real64), allocatable :: x(:)
+        real(real64) :: t(40), fd(40), fb(40), fgauss(40), cd(40), cb(40)
+        character(len=:), allocatable :: kname
+        integer :: i
+
+        call kde_fixture(200_int64, x)
+        call spread_points(-300.0_real64, 300.0_real64, t)
+
+        call kd%fit(x, bandwidth=60.0_real64)
+        call kd%kernel(kname)
+        call check(error, kname == "bspline", &
+            "a fit given no kernel= must report the B-spline as the kernel in force")
+        if (allocated(error)) return
+
+        call kb%fit(x, bandwidth=60.0_real64, kernel="bspline")
+        call kd%pdf(t, fd)
+        call kb%pdf(t, fb)
+        call kd%cdf(t, cd)
+        call kb%cdf(t, cb)
+        call check(error, all(fd == fb) .and. all(cd == cb), &
+            "the default fit must be the same estimate as one naming the B-spline, bit for bit")
+        if (allocated(error)) return
+
+        ! ---- the negative control: a named kernel must still change the answer ----
+        call kg%fit(x, bandwidth=60.0_real64, kernel="gaussian")
+        call kg%pdf(t, fgauss)
+        call check(error, maxval(abs(fd - fgauss)) > 0.0_real64, &
+            "a named kernel must change the estimate, or the default is not being read at all")
+        if (allocated(error)) return
+
+        ! ---- the grid carries the same default ----
+        call gd%init(64, -600.0_real64, 600.0_real64, 60.0_real64)
+        call gd%kernel(kname)
+        call check(error, kname == "bspline", &
+            "pf_kde_grid given no kernel= must take the B-spline too, or pilot= means two things")
+        if (allocated(error)) return
+        call gb%init(64, -600.0_real64, 600.0_real64, 60.0_real64, kernel="bspline")
+        call gd%add(x, finish=.true.)
+        call gb%add(x, finish=.true.)
+        call gd%pdf(t, fd)
+        call gb%pdf(t, fb)
+        call check(error, all(fd == fb), &
+            "the default grid must hold the same density as one naming the B-spline")
+
+    end subroutine test_default_kernel_is_the_bspline
+
     !> A refit forgets the previous fit's settings, and `%clear` leaves the object unfitted.
     subroutine test_refit_and_clear(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
@@ -2629,7 +2692,7 @@ contains
         do i = 1, 60
             x(i) = 0.05_real64*(real(i, real64) - 0.5_real64)/60.0_real64
         end do
-        call k%fit(x, bandwidth=0.1_real64, adaptive=.true., lower=0.0_real64, boundary="linear")
+        call k%fit(x, kernel="gaussian", bandwidth=0.1_real64, adaptive=.true., lower=0.0_real64, boundary="linear")
         call k%pilot(p)
         call check(error, p%is_initialised() .and. p%ncells() <= 4096, "the pilot must be built")
         if (allocated(error)) return
@@ -2948,19 +3011,19 @@ contains
         do i = 1, 200
             x(i) = sqrt((real(i, real64) - 0.5_real64)/200.0_real64)
         end do
-        call k%fit(x, rule="silverman")
+        call k%fit(x, kernel="gaussian", rule="silverman")
         call check(error, abs(k%bandwidth() - 0.0737_real64) <= 5.0e-5_real64, &
             "the page prints h = 0.0737")
         if (allocated(error)) return
         call k%pdf(AT, got)
         call check(error, all(abs(got - NONE) <= 5.0e-4_real64), "the page's unbounded column")
         if (allocated(error)) return
-        call k%fit(x, rule="silverman", lower=0.0_real64, boundary="renormalise")
+        call k%fit(x, kernel="gaussian", rule="silverman", lower=0.0_real64, boundary="renormalise")
         call k%pdf(AT, got)
         call check(error, all(abs(got - REN) <= 5.0e-4_real64), "the page's renormalise column")
         if (allocated(error)) return
         at_bound = got(1)
-        call k%fit(x, rule="silverman", lower=0.0_real64, boundary="reflect")
+        call k%fit(x, kernel="gaussian", rule="silverman", lower=0.0_real64, boundary="reflect")
         call k%pdf(AT, got)
         call check(error, all(abs(got - REF) <= 5.0e-4_real64), "the page's reflect column")
         if (allocated(error)) return
@@ -2970,7 +3033,7 @@ contains
             "bound; they are ", at_bound, " and ", got(1)
         call check(error, abs(at_bound - got(1)) <= 1.0e-3_real64, trim(what))
         if (allocated(error)) return
-        call k%fit(x, rule="silverman", lower=0.0_real64, boundary="linear")
+        call k%fit(x, kernel="gaussian", rule="silverman", lower=0.0_real64, boundary="linear")
         call k%pdf(AT, got)
         call check(error, all(abs(got - LIN) <= 5.0e-4_real64), "the page's linear column")
 
@@ -3065,8 +3128,8 @@ contains
 
         ! At its own centres the Gaussian grid is the exact estimate to the residual of the
         ! discrete normalisation, which is far below the interpolation error.
-        call k%fit(x, bandwidth=h)
-        call g%init(100, lo, hi, h)
+        call k%fit(x, kernel="gaussian", bandwidth=h)
+        call g%init(100, lo, hi, h, kernel="gaussian")
         call g%add(x)
         allocate(c(100), f(100), fe(100))
         call g%finish()
@@ -4080,7 +4143,7 @@ contains
         character(len=200) :: msg
 
         call kde_two_component(60_int64, x)
-        call k%fit(x, rule="silverman", adaptive=.true.)
+        call k%fit(x, kernel="gaussian", rule="silverman", adaptive=.true.)
         h = k%bandwidth()
         allocate(hb(k%n_valid()), xs(k%n_valid()))
         call k%bandwidths(hb, xs)
@@ -5280,7 +5343,7 @@ contains
         call check(error, abs(e) > 5.0_real64 .and. abs(want) <= 5.0_real64, &
             "the fixture: a stream whose first normal lies beyond the cut and whose second does not")
         if (allocated(error)) return
-        call k%fit([0.0_real64], bandwidth=1.0_real64)
+        call k%fit([0.0_real64], kernel="gaussian", bandwidth=1.0_real64)
         call k%sample(r(1:1), SEED, st)
         call check(error, r(1) == want, &
             "a variate beyond the Gaussian's cut must be redrawn from the same stream's next normal")
@@ -6308,7 +6371,7 @@ contains
         call kde_fixture(32_int64, x)
         select case (name)
         case ("BIN_GAUSS")
-            call g%init(nc, xmin, xmax, 60.0_real64, method="binned")
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="gaussian", method="binned")
         case ("BIN_EPAN")
             call g%init(nc, xmin, xmax, 60.0_real64, kernel="epanechnikov", method="binned")
         case ("BIN_BOX")
@@ -6316,16 +6379,16 @@ contains
         case ("BIN_BSPL")
             call g%init(nc, xmin, xmax, 60.0_real64, kernel="bspline", method="binned")
         case ("BIN_REF")
-            call g%init(nc, xmin, xmax, 60.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="gaussian", lower=-470.0_real64, upper=460.0_real64, &
                 boundary="reflect", method="binned")
         case ("BIN_REF_IN")
             call g%init(nc, xmin, xmax, 60.0_real64, kernel="epanechnikov", lower=-470.0_real64, &
                 upper=460.0_real64, boundary="reflect", method="binned")
         case ("BIN_REN")
-            call g%init(nc, xmin, xmax, 60.0_real64, lower=-470.0_real64, boundary="renormalise", &
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="gaussian", lower=-470.0_real64, boundary="renormalise", &
                 method="binned")
         case ("BIN_LIN")
-            call g%init(nc, xmin, xmax, 60.0_real64, lower=-470.0_real64, upper=460.0_real64, &
+            call g%init(nc, xmin, xmax, 60.0_real64, kernel="gaussian", lower=-470.0_real64, upper=460.0_real64, &
                 boundary="linear", method="binned")
         case default
             error stop "check_binned_case: unknown case " // name

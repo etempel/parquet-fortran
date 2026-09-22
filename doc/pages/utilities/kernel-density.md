@@ -22,7 +22,7 @@ use iso_fortran_env, only : real64
 type(pf_kde) :: k
 real(real64) :: xg(200), fg(200)
 
-call k%fit(mag)                    ! the ISJ rule, Gaussian kernel: the defaults
+call k%fit(mag)                    ! the ISJ rule, cubic B-spline kernel: the defaults
 call k%curve(xg, fg)               ! the density on 200 points across the data
 print '(a, f8.4)', 'bandwidth = ', k%bandwidth()
 ```
@@ -129,20 +129,22 @@ without a per-kernel constant.
 
 | `kernel=` | `K(u)` in its own units | variance of that form | support, in standard deviations |
 |---|---|---|---|
-| `"gaussian"` (default) | `exp(-u**2/2)/sqrt(2*pi)`, cut at `abs(u) = 5` and renormalised | 1 | `+-5` |
+| `"gaussian"` | `exp(-u**2/2)/sqrt(2*pi)`, cut at `abs(u) = 5` and renormalised | 1 | `+-5` |
 | `"epanechnikov"` | `3/4 (1 - u**2)` for `abs(u) < 1` | 1/5 | `+-sqrt(5)` |
-| `"bspline"` | the cubic B-spline: `2/3 - u**2 + abs(u)**3/2` for `abs(u) < 1`, `(2 - abs(u))**3/6` for `1 <= abs(u) < 2` | 1/3 | `+-2 sqrt(3)` |
+| `"bspline"` (default) | the cubic B-spline: `2/3 - u**2 + abs(u)**3/2` for `abs(u) < 1`, `(2 - abs(u))**3/6` for `1 <= abs(u) < 2` | 1/3 | `+-2 sqrt(3)` |
 | `"box"` | `1/2` for `abs(u) <= 1` | 1/3 | `+-sqrt(3)` |
 
 Each is rescaled to unit variance before the bandwidth is applied. What each is for:
 
-- **Gaussian**: the smooth default. It is cut at five standard deviations and renormalised, which
+- **Gaussian**: the smooth classic. It is cut at five standard deviations and renormalised, which
   removes a mass of `5.7e-7` from its tails and gives it compact support like the others; its
   variance is then `1 - 1.5e-5` rather than exactly one.
 - **Epanechnikov**: the kernel that minimises the mean integrated squared error; smooth inside its
   support, with a kink at its edge.
-- **Cubic B-spline**: twice continuously differentiable, compact, and close in shape to the
-  Gaussian.
+- **Cubic B-spline**: the default. Twice continuously differentiable, compact, and close in shape
+  to the Gaussian -- so it smooths much as the Gaussian does, while its support ends at
+  `2 sqrt(3)` standard deviations rather than five. The shorter reach is what makes a bounded,
+  adaptive fit cheaper: every corrected zone is `KDE_RADIUS*h_max` wide.
 - **Box**: the moving count; the estimate is a step function.
 
 **Two other conventions for the word "bandwidth" are in common use, and converting from either is
@@ -362,7 +364,7 @@ quadrature near a bound.
 The two local-constant corrections -- `"reflect"` and `"renormalise"` -- are biased near a bound by
 an amount proportional to `h` unless the true density is flat there, and each is the right choice
 for a different shape. Two hundred points drawn from the rising density `f(x) = 2x` on `[0, 1]`,
-fitted with Silverman's rule (`h = 0.0737`) and `lower=0`:
+fitted with Silverman's rule (`h = 0.0737`), the Gaussian kernel and `lower=0`:
 
 ```
    x     true    unbounded    "renormalise"   "reflect"    "linear"

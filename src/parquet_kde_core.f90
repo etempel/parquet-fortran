@@ -162,7 +162,7 @@ contains
 
     module procedure kde_resolve_setup
 
-        kernel_code = KDE_GAUSSIAN
+        kernel_code = KDE_BSPLINE
         if (present(kernel)) call kde_resolve_kernel(entry, kernel, kernel_code)
         has_lower = present(lower)
         has_upper = present(upper)

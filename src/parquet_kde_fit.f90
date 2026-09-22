@@ -1029,7 +1029,7 @@ contains
         self%hstride = 0_int64
         self%fitted = .false.
         self%defined = .false.
-        self%kernel_code = KDE_GAUSSIAN
+        self%kernel_code = KDE_BSPLINE
         self%rule_code = KDE_RULE_ISJ
         self%boundary_code = KDE_BOUNDARY_NONE
         self%method_code = KDE_METHOD_EXACT

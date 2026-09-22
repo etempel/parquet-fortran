@@ -414,7 +414,7 @@ contains
         end if
 #endif
         call team_fixture(50000_int64, x, w)
-        call k%fit(x, bandwidth=H, weights=w, lower=LO)
+        call k%fit(x, kernel="gaussian", bandwidth=H, weights=w, lower=LO)
         allocate(t(NQ), f1(NQ), f4(NQ), c1(NQ), c4(NQ), s1(NS), s4(NS))
         do i = 1, NQ
             t(i) = LO + 950.0_real64*modulo(real(i, real64)*0.6180339887498949_real64, 1.0_real64)

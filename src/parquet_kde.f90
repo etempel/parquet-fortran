@@ -743,7 +743,7 @@ module parquet_kde
         real(real64) :: x1 = 0.0_real64              !! `xmax`, the last cell's right edge
         real(real64) :: dx = 0.0_real64              !! the cell width
         real(real64) :: h = 0.0_real64               !! the bandwidth; the global one when adaptive
-        integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
+        integer :: kernel_code = KDE_BSPLINE         !! the kernel
         integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
         integer :: method_code = KDE_METHOD_EXACT    !! how the cells are filled: the deposit or the
                                                      !! binning and the transform
@@ -840,7 +840,7 @@ module parquet_kde
         private
         logical :: fitted = .false.                  !! `%fit` has run since the last `%clear`
         logical :: defined = .false.                 !! the estimate is defined (`ok` of `%fit`)
-        integer :: kernel_code = KDE_GAUSSIAN        !! the kernel
+        integer :: kernel_code = KDE_BSPLINE         !! the kernel
         integer :: rule_code = KDE_RULE_ISJ          !! how the bandwidth was chosen
         integer :: boundary_code = KDE_BOUNDARY_NONE !! the boundary correction
         integer :: method_code = KDE_METHOD_EXACT    !! how the queries are answered: the exact sum over
@@ -994,7 +994,7 @@ module parquet_kde
         !! finds no bandwidth at its grid's resolution, Silverman's rule gives it instead, and
         !! `%rule` says so; when `rule = "isj"` is named, the estimate is then undefined.
         !! `adjust` multiplies the bandwidth however it was chosen (default 1). `kernel` is
-        !! `"gaussian"` (the default), `"epanechnikov"`, `"bspline"` or `"box"`. `adaptive =
+        !! `"bspline"` (the default), `"gaussian"`, `"epanechnikov"` or `"box"`. `adaptive =
         !! .true.` gives each point its own bandwidth, `h * (p(x_j)/g)**(-alpha)`, from a pilot
         !! estimate at the global bandwidth `h`: `alpha` in `[0, 1]` (default 0.5) sets how far
         !! the bandwidths follow the pilot, `0` being the fixed estimate, and `bandwidth_max` caps

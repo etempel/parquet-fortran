@@ -883,7 +883,7 @@ def estimate(case):
         values = gsv.fixture(n)
     weights = gsv.weights_mod5(n) if case.get("weights") == "mod5" else None
     weight_type = case.get("weight_type", "reliability")
-    kernel = case.get("kernel", "gaussian")
+    kernel = case.get("kernel", "bspline")
     lower = case.get("lower")
     upper = case.get("upper")
     lo = mpf(lower) if lower is not None else None
@@ -995,22 +995,22 @@ def estimate(case):
 #: so that no expectation depends on the default. `test/test_kde.f90`'s `fit_golden_case` makes the
 #: same call for each name; the `ISJ` cases run at `ISJ_CELLS`, in the serial suite.
 CASES = [
-    ("SILVERMAN", "Silverman's rule, the Gaussian kernel, unbounded", {"rule": "silverman"}),
-    ("SCOTT", "Scott's rule", {"rule": "scott"}),
-    ("ADJUST", "Silverman's rule times adjust = 1.5", {"rule": "silverman", "adjust": 1.5}),
-    ("N1000", "the recipe at n = 1000, Silverman's rule", {"n": 1000, "rule": "silverman"}),
-    ("GAUSS", "the Gaussian kernel at an explicit bandwidth of 60", {"bandwidth": 60.0}),
+    ("SILVERMAN", "Silverman's rule, the Gaussian kernel, unbounded", {"kernel": "gaussian", "rule": "silverman"}),
+    ("SCOTT", "Scott's rule", {"kernel": "gaussian", "rule": "scott"}),
+    ("ADJUST", "Silverman's rule times adjust = 1.5", {"kernel": "gaussian", "rule": "silverman", "adjust": 1.5}),
+    ("N1000", "the recipe at n = 1000, Silverman's rule", {"kernel": "gaussian", "n": 1000, "rule": "silverman"}),
+    ("GAUSS", "the Gaussian kernel at an explicit bandwidth of 60", {"kernel": "gaussian", "bandwidth": 60.0}),
     ("EPAN", "the Epanechnikov kernel at an explicit bandwidth of 60",
      {"bandwidth": 60.0, "kernel": "epanechnikov"}),
     ("BSPL", "the cubic B-spline at an explicit bandwidth of 60",
      {"bandwidth": 60.0, "kernel": "bspline"}),
     ("BOX", "the box kernel at an explicit bandwidth of 60", {"bandwidth": 60.0, "kernel": "box"}),
     ("WREL", "weights mod 5, reliability: Kish's n_eff in the rule",
-     {"rule": "silverman", "weights": "mod5"}),
+     {"kernel": "gaussian", "rule": "silverman", "weights": "mod5"}),
     ("WFREQ", "weights mod 5, frequency: sum(w) in the rule, the inverted-CDF quartiles",
-     {"rule": "silverman", "weights": "mod5", "weight_type": "frequency"}),
+     {"kernel": "gaussian", "rule": "silverman", "weights": "mod5", "weight_type": "frequency"}),
     ("REN_LO", "renormalised at a lower bound, Gaussian, h = 60",
-     {"bandwidth": 60.0, "lower": -470.0, "boundary": "renormalise"}),
+     {"kernel": "gaussian", "bandwidth": 60.0, "lower": -470.0, "boundary": "renormalise"}),
     ("REN_BOTH", "renormalised at both bounds, Epanechnikov, h = 60",
      {"bandwidth": 60.0, "kernel": "epanechnikov", "lower": -470.0, "upper": 460.0,
       "boundary": "renormalise"}),
@@ -1020,18 +1020,18 @@ CASES = [
      {"bandwidth": 60.0, "kernel": "box", "upper": 460.0, "boundary": "reflect"}),
     ("REF_WIDE", "reflected at both bounds with the kernel wider than the range: the mass "
      "normalisation carries the doubly reflected terms",
-     {"bandwidth": 400.0, "lower": -470.0, "upper": 460.0, "boundary": "reflect"}),
+     {"kernel": "gaussian", "bandwidth": 400.0, "lower": -470.0, "upper": 460.0, "boundary": "reflect"}),
     ("REN_WIDE", "renormalised at both bounds with the kernel wider than the range, box",
      {"bandwidth": 600.0, "kernel": "box", "lower": -470.0, "upper": 460.0,
       "boundary": "renormalise"}),
     ("RULE_BOUNDED", "Silverman's rule over the population inside the support: two points are "
      "outside [-400, 400] and leave the rule's sample too",
-     {"rule": "silverman", "lower": -400.0, "upper": 400.0}),
-    ("ONE_H", "one point with an explicit bandwidth: a single bump", {"n": 1, "bandwidth": 10.0}),
+     {"kernel": "gaussian", "rule": "silverman", "lower": -400.0, "upper": 400.0}),
+    ("ONE_H", "one point with an explicit bandwidth: a single bump", {"kernel": "gaussian", "n": 1, "bandwidth": 10.0}),
     ("ONE_RULE", "one point under a rule: no scale, so the estimate is undefined",
-     {"n": 1, "rule": "silverman"}),
+     {"kernel": "gaussian", "n": 1, "rule": "silverman"}),
     ("ADAPT", "the adaptive kernel over the two-component recipe: Silverman's rule, the Gaussian, "
-     "alpha = 0.5", {"fixture": "two", "n": 60, "adaptive": True, "rule": "silverman"}),
+     "alpha = 0.5", {"kernel": "gaussian", "fixture": "two", "n": 60, "adaptive": True, "rule": "silverman"}),
     ("ADAPT_CAP", "the adaptive kernel at alpha = 1 with every bandwidth capped at 120, the "
      "B-spline at an explicit bandwidth of 80, renormalised at a lower bound",
      {"fixture": "two", "n": 60, "adaptive": True, "alpha": 1.0, "bandwidth_max": 120.0,
@@ -1040,24 +1040,24 @@ CASES = [
      {"fixture": "two", "n": 60, "adaptive": True, "bandwidth": 60.0, "kernel": "epanechnikov",
       "lower": -340.0, "upper": 470.0, "boundary": "reflect"}),
     ("ADAPT_W", "the adaptive kernel under weights mod 5, reliability: the pilot is weighted too",
-     {"fixture": "two", "n": 60, "adaptive": True, "weights": "mod5", "rule": "silverman"}),
+     {"kernel": "gaussian", "fixture": "two", "n": 60, "adaptive": True, "weights": "mod5", "rule": "silverman"}),
     ("ISJ", "the ISJ rule over the two-component recipe, 1024 cells: the Gaussian, unbounded",
-     {"fixture": "two", "n": 60, "rule": "isj"}),
+     {"kernel": "gaussian", "fixture": "two", "n": 60, "rule": "isj"}),
     ("ISJ_WREL", "the ISJ rule under weights mod 5, reliability: Kish's n_eff, the binned mass weighted",
-     {"fixture": "two", "n": 60, "rule": "isj", "weights": "mod5"}),
+     {"kernel": "gaussian", "fixture": "two", "n": 60, "rule": "isj", "weights": "mod5"}),
     ("ISJ_WFREQ", "the ISJ rule under weights mod 5, frequency: the replicated sample of 120 points "
      "at 48 values, whose repeated values the rule resolves -- its root lies at about 1.2 cells",
-     {"fixture": "two", "n": 60, "rule": "isj", "weights": "mod5", "weight_type": "frequency"}),
+     {"kernel": "gaussian", "fixture": "two", "n": 60, "rule": "isj", "weights": "mod5", "weight_type": "frequency"}),
     ("ISJ_BOUNDED", "the ISJ rule on a grid clipped to [-331.625, 470]: the lowest point sits on the "
      "lower bound, in the half cell below the first centre, and lands whole on it",
-     {"fixture": "two", "n": 60, "rule": "isj", "lower": -331.625, "upper": 470.0}),
+     {"kernel": "gaussian", "fixture": "two", "n": 60, "rule": "isj", "lower": -331.625, "upper": 470.0}),
     ("ISJ_ROUNDED", "the ISJ rule over the recipe rounded to multiples of 8: the fixed point is not "
      "negative at one cell, so the rule finds no bandwidth and the estimate is undefined",
-     {"fixture": "two_rounded8", "n": 60, "rule": "isj"}),
+     {"kernel": "gaussian", "fixture": "two_rounded8", "n": 60, "rule": "isj"}),
     ("ISJ_NO_ROOT", "the ISJ rule over the recipe at n = 32: the fixed point is negative up to t = 1, "
-     "so the rule finds no bandwidth and the estimate is undefined", {"rule": "isj"}),
+     "so the rule finds no bandwidth and the estimate is undefined", {"kernel": "gaussian", "rule": "isj"}),
     ("LIN_LO", "the linear boundary kernel at a lower bound, Gaussian, h = 60",
-     {"bandwidth": 60.0, "lower": -470.0, "boundary": "linear"}),
+     {"kernel": "gaussian", "bandwidth": 60.0, "lower": -470.0, "boundary": "linear"}),
     ("LIN_HI_BOX", "the linear kernel at an upper bound, box, h = 60: a kernel whose value jumps at "
      "its own edges and whose moments kink at the correction edge",
      {"bandwidth": 60.0, "kernel": "box", "upper": 460.0, "boundary": "linear"}),
@@ -1068,22 +1068,22 @@ CASES = [
      {"bandwidth": 60.0, "kernel": "bspline", "lower": -470.0, "boundary": "linear"}),
     ("LIN_WIDE", "the linear kernel at h = 400 on [-470, 460]: the two zones meet, so every moment is "
      "two-sided and no part of the support is the plain sum",
-     {"bandwidth": 400.0, "lower": -470.0, "upper": 460.0, "boundary": "linear"}),
+     {"kernel": "gaussian", "bandwidth": 400.0, "lower": -470.0, "upper": 460.0, "boundary": "linear"}),
     ("LIN_W", "the linear kernel under weights mod 5, reliability, at a lower bound",
-     {"bandwidth": 60.0, "weights": "mod5", "lower": -470.0, "boundary": "linear"}),
+     {"kernel": "gaussian", "bandwidth": 60.0, "weights": "mod5", "lower": -470.0, "boundary": "linear"}),
     ("LIN_ZERO", "the linear kernel where the clip acts at a probe: the two-component recipe under a "
      "lower bound at -470, more than two bandwidths below its nearest point, so the raw estimate is "
      "negative at the probe -466 and the clipped one is exactly zero there",
-     {"fixture": "two", "n": 60, "bandwidth": 60.0, "lower": -470.0, "boundary": "linear",
+     {"kernel": "gaussian", "fixture": "two", "n": 60, "bandwidth": 60.0, "lower": -470.0, "boundary": "linear",
       "negative_at": -466.0}),
     ("LIN_NARROW3", "both bounds a thousandth of a bandwidth apart (h = 9.3e5 on [-470, 460]), "
      "Gaussian: where the library forms the moments centred on the interval's midpoint and this "
      "oracle takes the plain differences at fifty digits",
-     {"bandwidth": 930000.0, "lower": -470.0, "upper": 460.0, "boundary": "linear"}),
+     {"kernel": "gaussian", "bandwidth": 930000.0, "lower": -470.0, "upper": 460.0, "boundary": "linear"}),
     ("ADAPT_LIN", "the adaptive kernel under the linear correction: the two-component recipe at a "
      "lower bound, alpha = 0.5, each point corrected at ITS OWN bandwidth and the pilot the clipped "
      "linear estimate",
-     {"fixture": "two", "n": 60, "adaptive": True, "bandwidth": 60.0, "lower": -470.0,
+     {"kernel": "gaussian", "fixture": "two", "n": 60, "adaptive": True, "bandwidth": 60.0, "lower": -470.0,
       "boundary": "linear"}),
     ("LIN_NARROW6", "both bounds a millionth of a bandwidth apart (h = 9.3e8), Epanechnikov: the "
      "estimate is the uniform density on the support to twelve digits",
@@ -1133,7 +1133,7 @@ module test_kde_golden
 
 BINNED_CASES = [
     ("BIN_GAUSS", "binned, the Gaussian kernel at h = 60, unbounded, 32 cells over [-600, 600]",
-     {"bandwidth": 60.0, "cells": 32, "xmin": -600.0, "xmax": 600.0}),
+     {"kernel": "gaussian", "bandwidth": 60.0, "cells": 32, "xmin": -600.0, "xmax": 600.0}),
     ("BIN_EPAN", "binned, the Epanechnikov kernel at h = 60, unbounded: a compact kernel, whose "
      "sampled filter differs from the kernel's own transform by far more than rounding",
      {"bandwidth": 60.0, "kernel": "epanechnikov", "cells": 32, "xmin": -600.0, "xmax": 600.0}),
@@ -1143,7 +1143,7 @@ BINNED_CASES = [
      {"bandwidth": 60.0, "kernel": "bspline", "cells": 32, "xmin": -600.0, "xmax": 600.0}),
     ("BIN_REF", "binned and reflected at both bounds with the range EQUAL to the support and a "
      "power-of-two cell count: the unpadded path, where the cosine basis is the correction",
-     {"bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
+     {"kernel": "gaussian", "bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
       "upper": 460.0, "boundary": "reflect"}),
     ("BIN_REF_IN", "binned and reflected with the range INSIDE the support: the padded path, "
      "where the images are gathered in explicitly",
@@ -1151,11 +1151,11 @@ BINNED_CASES = [
       "lower": -470.0, "upper": 460.0, "boundary": "reflect"}),
     ("BIN_REN", "binned and renormalised at a lower bound: the per-cell division by the mass a "
      "kernel centred there keeps inside the support",
-     {"bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
+     {"kernel": "gaussian", "bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
       "boundary": "renormalise"}),
     ("BIN_LIN", "binned under the local linear correction at both bounds: the second convolution, "
      "against the odd kernel, read back through the inverse sine transform",
-     {"bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
+     {"kernel": "gaussian", "bandwidth": 60.0, "cells": 32, "xmin": -470.0, "xmax": 460.0, "lower": -470.0,
       "upper": 460.0, "boundary": "linear"}),
 ]
 
@@ -1180,7 +1180,7 @@ def binned_cells(case):
     n = case.get("n", 32)
     values = two_component(n) if case.get("fixture") == "two" else gsv.fixture(n)
     weights = gsv.weights_mod5(n) if case.get("weights") == "mod5" else None
-    kernel = case.get("kernel", "gaussian")
+    kernel = case.get("kernel", "bspline")
     lower, upper = case.get("lower"), case.get("upper")
     lo = mpf(lower) if lower is not None else None
     hi = mpf(upper) if upper is not None else None

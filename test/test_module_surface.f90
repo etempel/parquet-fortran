@@ -2230,7 +2230,7 @@ contains
         character(len=:), allocatable :: saved, now
 
         what = ""
-        call k%fit([-1.0_real64, 0.0_real64, 1.0_real64], bandwidth=1.0_real64, ok=ok)
+        call k%fit([-1.0_real64, 0.0_real64, 1.0_real64], kernel="gaussian", bandwidth=1.0_real64, ok=ok)
         call k%pdf(0.0_real64, f)
         ! Three unit Gaussians at -1, 0 and 1, read at 0: (phi(1) + phi(0) + phi(1))/3, over the
         ! mass the five-sd cut keeps.

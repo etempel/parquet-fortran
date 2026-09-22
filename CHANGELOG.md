@@ -106,7 +106,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `%cdf` and `%quantile` exactly anywhere, `%curve` on equally spaced points and `%sample` from
   the estimate; `pf_kde_grid` streams points into a fixed grid and forgets them, with `%merge` for
   per-thread accumulation and `%density`, `%pdf`, `%cdf`, `%quantile` and `%sample` read from the
-  grid. Four kernels (`gaussian`, `epanechnikov`, `bspline`, `box`), with the bandwidth the
+  grid. Four kernels (`bspline` the default, `gaussian`, `epanechnikov`, `box`), with the bandwidth the
   kernel's standard deviation; the Improved Sheather-Jones rule (the default), least-squares
   cross-validation (`rule="lscv"`, which scores whichever estimator is in force and so can measure
   the adaptive kernel's own bandwidth, and which for a fixed bandwidth reads its criterion off one

@@ -505,6 +505,13 @@ a spread of a few -- and is there for the pathological case alone.
 - **The fit says when the DEFAULT cap binds**, as advice naming how many points took it. It stays
   silent when the caller passed `spread_max` or `bandwidth_max` themselves: an explicit request
   needs no advice. Advice goes quiet at `verbosity = "silent"`.
+- **The fit also says when a corrected boundary's zones cover the whole support**, which is the
+  other way a wide kernel makes such a fit dear: the scan then runs over the entire domain rather
+  than a boundary. That advice names the bandwidth the zones stay inside the support at, and the
+  `spread_max` that says the same thing, so a caller who has capped already and is advised again
+  can read how much further to go. A fit with a fixed bandwidth is told to narrow `bandwidth=`
+  instead, both caps needing `adaptive=.true.`. It is said whether or not the caller capped,
+  because a cap that is in force and still too wide is exactly the case worth reporting.
 - `%print` names the spread cap on every adaptive fit, given or not, since it is always what
   produced the bandwidths.
 - **The pilot** is a `pf_kde_grid` that `%fit` builds at the global bandwidth over the population,

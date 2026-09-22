@@ -121,7 +121,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   by the estimate's own integral, `"linear"` additionally setting negative values to zero.
   Under a corrected boundary the fit's scan for the stretches the clip removes reads a binned grid
   of the same estimate wherever that grid is safely away from zero and the exact sum elsewhere,
-  with every crossing still bisected on the exact estimate.
+  with every crossing still bisected on the exact estimate. The fit says when such a boundary's
+  zones cover the whole support, naming the bandwidth -- and the spread -- they stay inside it at.
   `adaptive=.true.` selects the sample-point adaptive kernel (each
   point's bandwidth from a pilot density, sensitivity `alpha=`, capped by `bandwidth_max=` in the
   data's units and by `spread_max=` as a multiple of the narrowest bandwidth the rule can give --

@@ -3769,6 +3769,10 @@ contains
                 test_kde_spread_max_below_one_aborts), &
             new_unittest("the default spread cap says when it binds, and the caller's own does not", &
                 test_kde_spread_cap_advice), &
+            new_unittest("the zone advice names a bandwidth_max and a spread_max that silence it", &
+                test_kde_zone_advice_values), &
+            new_unittest("the zone advice names bandwidth= where no cap can be passed", &
+                test_kde_zone_advice_fixed), &
             new_unittest("pf_kde%fit refuses alpha above one", &
                 test_kde_alpha_above_one_aborts), &
             new_unittest("pf_kde%fit refuses a NaN alpha", &
@@ -22012,6 +22016,58 @@ contains
             failure_message="the explicit spread cap scenario was not expected to abort", &
             forbidden_text="the default spread cap bound at")
     end subroutine test_kde_spread_cap_advice
+    !
+    !> The zone advice names the value that silences it, and the value works.
+    !>
+    !> Four arms, because the claim is not that a number is printed but that THAT number is a
+    !> remedy: the first reads both bounds out of the message, and the next two run the same fit at
+    !> each of them and must say nothing. A rendering that rounded either bound up, or a formula
+    !> that named the wrong unit, prints a plausible number and fails here rather than in a user's
+    !> log. "still" is asserted too -- the caller of the first arm passed `bandwidth_max=`, and
+    !> advice that reads as though they had not is what this change was made to remove.
+    subroutine test_kde_zone_advice_values(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "kde_zone_advice_capped", &
+            expect_abort=.false., &
+            failure_message="the zone advice scenario was not expected to abort", &
+            required_stderr="the zones still span about")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "kde_zone_advice_capped", &
+            expect_abort=.false., &
+            failure_message="the zone advice scenario was not expected to abort", &
+            required_stderr="at bandwidth_max=0.286 or below")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "kde_zone_advice_capped", &
+            expect_abort=.false., &
+            failure_message="the zone advice scenario was not expected to abort", &
+            required_stderr="spread_max=2.58 or below")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "kde_zone_advice_at_bound", &
+            expect_abort=.false., &
+            failure_message="the bounded zone scenario was not expected to abort", &
+            forbidden_text="times the whole support")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_no_output(error, "kde_zone_advice_at_spread", &
+            expect_abort=.false., &
+            failure_message="the bounded-spread zone scenario was not expected to abort", &
+            forbidden_text="times the whole support")
+    end subroutine test_kde_zone_advice_values
+    !
+    !> A fixed-bandwidth fit is told to narrow `bandwidth=`, never a cap it cannot pass.
+    subroutine test_kde_zone_advice_fixed(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "kde_zone_advice_fixed", &
+            expect_abort=.false., &
+            failure_message="the fixed zone advice scenario was not expected to abort", &
+            required_stderr="at bandwidth=0.286 or below")
+        if (allocated(error)) return
+        ! `%fit` refuses either cap without `adaptive=.true.`, so naming one here would be a
+        ! remedy that aborts the call it is offered for.
+        call check_scenario_exit_status_and_no_output(error, "kde_zone_advice_fixed", &
+            expect_abort=.false., &
+            failure_message="the fixed zone advice scenario was not expected to abort", &
+            forbidden_text="spread_max=")
+    end subroutine test_kde_zone_advice_fixed
     !
     subroutine test_kde_alpha_above_one_aborts(error)
         type(error_type), allocatable, intent(out) :: error

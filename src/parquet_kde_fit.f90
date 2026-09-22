@@ -83,7 +83,7 @@ contains
         real(real64), allocatable :: keep_x(:), keep_w(:)
         integer(int64), allocatable :: perm(:)
         integer(int64) :: nv, nnull, nnan, nout, m, i, c0, c1, rate
-        real(real64) :: v, hh, adj, a_alpha, a_bmax, a_smax, one(1), infl, h_start, hcap
+        real(real64) :: v, hh, adj, a_alpha, a_bmax, a_smax, one(1), infl, h_start, hcap, hmin
         integer(int64) :: ncap
         logical :: saw_nan, freq, want_adaptive, built, found, usable
 
@@ -351,6 +351,12 @@ contains
             end do
             self%hmax = self%hb(1)
             ncap = 0_int64
+            ! The narrowest bandwidth the rule can give, which is the unit `spread_max` counts in:
+            ! `kde_adapt_set` forms `capf` as `smax` times it in units of `hh`, so dividing `smax`
+            ! back out names that unit. `smax` is at least one and `capf` at most `smax`, so this
+            ! is at most `hh` and cannot overflow. Read by the zone advice below, which turns a
+            ! bandwidth the caller must stay under into the `spread_max` that means the same thing.
+            hmin = hh*self%adapt%capf/a_smax
             ! The cap `rule_bandwidth` applied, re-formed here so that the fit can say whether it
             ! bound: a capped bandwidth IS the cap, exactly, so counting them needs no tolerance.
             hcap = hh*self%adapt%capf
@@ -388,6 +394,10 @@ contains
             self%hr(1) = reciprocal(hh)
             self%hmax = hh
             self%hstride = 0_int64
+            ! No adaptive rule, so no narrowest bandwidth for a spread to be counted in -- and no
+            ! `spread_max=` or `bandwidth_max=` either, which `%fit` refuses without `adaptive=`.
+            ! Zero is what tells the zone advice to name the fixed bandwidth instead.
+            hmin = 0.0_real64
         end if
         self%hinv = reciprocal(hh)
         ! How far any query reaches, formed once: every window search and every scan reads it.
@@ -420,7 +430,9 @@ contains
                 ! the call they are waiting on is taking so long.
                 if (self%has_lower .and. self%has_upper) then
                     if (2.0_real64*self%reach > self%hi - self%lo) &
-                        call advise_zone_covers_support(self%reach, self%hi - self%lo)
+                        call advise_zone_covers_support(self%reach, self%hi - self%lo, &
+                            KDE_RADIUS(self%kernel_code), hmin, &
+                            present(bandwidth_max) .or. present(spread_max))
                 end if
                 call build_corrected(self)
                 ! The clipped estimate holding no mass leaves nothing to normalise by: a data
@@ -1075,22 +1087,114 @@ contains
     !! suggest, and nothing else says so. Only where BOTH bounds are given: with one bound there is
     !! no support width to compare against.
     !!
+    !! **The remedy carries the NUMBER that meets it**, because the argument's name alone is advice
+    !! a caller may already have taken: one who passed `bandwidth_max=` and is still told to "narrow
+    !! the widest kernel with bandwidth_max=" learns neither that their value is too wide nor what
+    !! would be narrow enough. `width/(2 R)` is the widest bandwidth whose two zones still fit
+    !! inside the support, and `spread_max` says the same thing in units of the narrowest bandwidth
+    !! the rule can give, so both arguments are named with a value that silences this.
+    !!
+    !! Which pair is named follows what the fit can accept: `spread_max=` and `bandwidth_max=` need
+    !! `adaptive=.true.` and a fixed-bandwidth fit is told to narrow `bandwidth=` instead, and
+    !! `spread_max` is dropped where the bound is below the narrowest bandwidth, which is a spread
+    !! under one that `%fit` refuses. Advising an argument the named call would abort on is worse
+    !! than naming none.
+    !!
     !! ADVICE, and not a warning, on the same reasoning as the cap's: it is a remark about the
     !! configuration, not a finding about the data.
-    subroutine advise_zone_covers_support(reach, width)
+    subroutine advise_zone_covers_support(reach, width, rad, hmin, capped)
         real(real64), intent(in) :: reach !! one zone's width, `KDE_RADIUS*h_max`
         real(real64), intent(in) :: width !! the support's width
+        real(real64), intent(in) :: rad   !! the kernel's radius in bandwidths, `KDE_RADIUS`
+        real(real64), intent(in) :: hmin  !! the narrowest bandwidth the adaptive rule can give, or
+                                          !! zero where the fit is not adaptive
+        logical, intent(in) :: capped     !! the caller named `bandwidth_max=` or `spread_max=`
 
         character(len=32) :: ratio_text
+        character(len=:), allocatable :: h_text, s_text, remedy, span
+        real(real64) :: hneed, hden
+        logical :: spread_fits
 
         write (ratio_text, "(i0)") int(min(2.0_real64*reach/width, 1.0e18_real64), int64)
-        call parquet_emit_advice('pf_kde%fit: under boundary="linear" the corrected zones span ' // &
-            'about ' // trim(ratio_text) // ' times the whole support, so the fit scans the entire ' // &
-            'domain at the narrowest kernel''s resolution rather than correcting a boundary. Narrow ' // &
-            'the widest kernel with spread_max= or bandwidth_max=, or refit with method="binned", ' // &
-            'which carries the correction in its cells and builds no scan at all.')
+        ! The widest bandwidth whose two zones still fit inside the support. `rad` is at least
+        ! `sqrt(3)` and `width` is finite and positive, so the quotient cannot overflow.
+        hneed = 0.5_real64*width/rad
+        call bound_text(hneed, h_text)
+        ! `spread_max` can express the bound only while it comes out at one or above: below that it
+        ! would ask the widest kernel to be narrower than the narrowest, which `%fit` refuses.
+        ! The exponents settle that in integer arithmetic, before any quotient is formed.
+        spread_fits = .false.
+        if (hmin > 0.0_real64) spread_fits = exponent(hneed) - exponent(hmin) < 1000
+        ! Clamped so that the quotient is finite whichever order the guard and the division are
+        ! evaluated in (`.claude/rules/fortran-gotchas.md`: a guard does not keep an optimiser from
+        ! forming what it guards). A denominator the clamp moves is one `spread_fits` has already
+        ! rejected, so the clamped answer is never the one printed.
+        hden = hmin
+        if (.not. spread_fits) hden = scale(hneed, -1000)
+        if (hmin > 0.0_real64) then
+            remedy = 'The zones stay inside it at bandwidth_max=' // h_text // ' or below'
+            if (spread_fits .and. hneed >= hmin) then
+                call bound_text(hneed/hden, s_text)
+                remedy = remedy // ', or equivalently spread_max=' // s_text // ' or below'
+            end if
+        else
+            remedy = 'The zones stay inside it at bandwidth=' // h_text // ' or below'
+        end if
+        ! "still" is the whole difference a caller who already passed a cap needs to read: their
+        ! value is in force and is not narrow enough, rather than unset.
+        span = 'span'
+        if (capped) span = 'still span'
+        call parquet_emit_advice('pf_kde%fit: under a corrected boundary the zones ' // span // &
+            ' about ' // trim(ratio_text) // &
+            ' times the whole support, so the fit scans the entire domain at the narrowest ' // &
+            'kernel''s resolution rather than correcting a boundary. ' // remedy // &
+            '; refitting with method="binned" carries the correction in its cells and builds no ' // &
+            'scan at all.')
 
     end subroutine advise_zone_covers_support
+
+    !> Renders a bound for a message: three significant digits, and never ABOVE the value it stands
+    !! for. A number a caller is told to stay under must not be overshot by its own rendering --
+    !! `0.289` for a bound of `0.28867` would name a call that still emits the advice -- so the
+    !! value is shaved by a percent first, twenty times the most a three-digit rendering can round
+    !! it up by.
+    !!
+    !! `G0.d` cannot render it: whether it writes the leading zero below one is processor-dependent
+    !! (`.claude/rules/fortran-gotchas.md`), and most of these bounds are below one. `F0.d` drops
+    !! that zero under every compiler, which is one behaviour rather than two, so the fixed arm
+    !! writes `F0.d` and puts the zero back. Outside the range a fixed rendering reads in, the
+    !! exponent form is written with three exponent digits, whose spelling is the same everywhere.
+    subroutine bound_text(v, res)
+        real(real64), intent(in) :: v                     !! the bound, finite and positive
+        character(len=:), allocatable, intent(out) :: res !! its rendering
+
+        character(len=32) :: buf, fmt
+        real(real64) :: t
+        integer :: e, nd
+
+        t = 0.99_real64*v
+        if (t >= 1.0e-4_real64 .and. t < 1.0e9_real64) then
+            ! `e` is the last integer power of ten at or below `t`, so `2 - e` is the number of
+            ! decimals that leaves three significant digits. Never fewer than one: `F0.0` writes
+            ! the point with no digit after it, and a bound reads no better for ending in
+            ! punctuation. The range guard above keeps this under seven, so the buffer holds it.
+            e = floor(log10(t))
+            nd = 2 - e
+            if (nd < 1) nd = 1
+            write (fmt, '(a,i0,a)') "(f0.", nd, ")"
+            write (buf, fmt) t
+            buf = adjustl(buf)
+            if (buf(1:1) == ".") then
+                res = "0" // trim(buf)
+            else
+                res = trim(buf)
+            end if
+        else
+            write (buf, '(es11.3e3)') t
+            res = trim(adjustl(buf))
+        end if
+
+    end subroutine bound_text
 
     !> Says when a `method = "binned"` fit had to take fewer cells than the narrowest kernel asks
     !! for, so that its grid resolves that kernel more coarsely than `KDE_CURVE_BINNED_PER_H`.

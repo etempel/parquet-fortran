@@ -4279,6 +4279,14 @@ program error_scenarios
         call scenario_kde_spread_cap_advice_default()
     case ("kde_spread_cap_advice_explicit")
         call scenario_kde_spread_cap_advice_explicit()
+    case ("kde_zone_advice_capped")
+        call scenario_kde_zone_advice_capped()
+    case ("kde_zone_advice_at_bound")
+        call scenario_kde_zone_advice_at_bound()
+    case ("kde_zone_advice_at_spread")
+        call scenario_kde_zone_advice_at_spread()
+    case ("kde_zone_advice_fixed")
+        call scenario_kde_zone_advice_fixed()
     case ("kde_bandwidths_size")
         call scenario_kde_bandwidths_size()
     case ("kde_bandwidths_x_size")
@@ -35920,6 +35928,70 @@ contains
             spread_max=100.0_real64)
         print '(a, l1)', "kde explicit-cap fit: ", k%is_adaptive()
     end subroutine scenario_kde_spread_cap_advice_explicit
+
+    !> The zone advice names the bandwidth and the spread a caller must stay under, and this arm
+    !> emits it: an adaptive fit whose corrected zones cover the whole support, with a
+    !> `bandwidth_max=` that the caller chose and that is not narrow enough.
+    !>
+    !> The two numbers are fixed by the fixture rather than by arithmetic a compiler could move.
+    !> `bandwidth_max` is `width/(2 R)` less a percent -- `2/(4 sqrt(3))` for this support and
+    !> kernel, which is `0.2887` -- and the spread is that over the narrowest bandwidth the rule
+    !> gives this sample. Both sit a fifth of a percent from the nearest rounding boundary, which
+    !> is a thousand times any difference a library's `exp` and `log` could introduce.
+    subroutine scenario_kde_zone_advice_capped()
+        type(pf_kde) :: k
+
+        call k%fit(zone_advice_sample(), bandwidth=0.2_real64, adaptive=.true., &
+            bandwidth_max=0.5_real64, lower=0.0_real64, upper=2.0_real64, boundary="linear", &
+            kernel="bspline")
+        print '(a, l1)', "kde zone-advice fit: ", k%is_adaptive()
+    end subroutine scenario_kde_zone_advice_capped
+
+    !> The silent arm for the bandwidth the advice names: the same fit at `bandwidth_max=0.286`
+    !> says nothing, which is what makes that number a remedy rather than a decoration. A rendering
+    !> that rounded the bound UP would name a value this arm still emits at.
+    subroutine scenario_kde_zone_advice_at_bound()
+        type(pf_kde) :: k
+
+        call k%fit(zone_advice_sample(), bandwidth=0.2_real64, adaptive=.true., &
+            bandwidth_max=0.286_real64, lower=0.0_real64, upper=2.0_real64, boundary="linear", &
+            kernel="bspline")
+        print '(a, l1)', "kde zone-advice bounded fit: ", k%is_adaptive()
+    end subroutine scenario_kde_zone_advice_at_bound
+
+    !> The silent arm for the spread the advice names, which is the same claim about the other
+    !> argument: the two are one bound expressed in two units and both have to hold.
+    subroutine scenario_kde_zone_advice_at_spread()
+        type(pf_kde) :: k
+
+        call k%fit(zone_advice_sample(), bandwidth=0.2_real64, adaptive=.true., &
+            spread_max=2.58_real64, lower=0.0_real64, upper=2.0_real64, boundary="linear", &
+            kernel="bspline")
+        print '(a, l1)', "kde zone-advice spread fit: ", k%is_adaptive()
+    end subroutine scenario_kde_zone_advice_at_spread
+
+    !> The same zones over a FIXED bandwidth, where `spread_max=` and `bandwidth_max=` are not
+    !> arguments `%fit` accepts at all -- it refuses both without `adaptive=.true.`. The advice
+    !> must name `bandwidth=` here and must not name a cap, because advice whose remedy aborts the
+    !> call is worse than advice that names no argument.
+    subroutine scenario_kde_zone_advice_fixed()
+        type(pf_kde) :: k
+
+        call k%fit(zone_advice_sample(), bandwidth=0.5_real64, lower=0.0_real64, upper=2.0_real64, &
+            boundary="linear", kernel="bspline")
+        print '(a, l1)', "kde zone-advice fixed fit: ", k%is_adaptive()
+    end subroutine scenario_kde_zone_advice_fixed
+
+    !> A sample over `[0, 2]` crowded towards the lower bound, so that the adaptive rule spreads
+    !> the bandwidths widely enough for the corrected zones to meet across the support.
+    function zone_advice_sample() result(x)
+        real(real64) :: x(400) !! the sample
+        integer :: i
+
+        do i = 1, 400
+            x(i) = 2.0_real64*((real(i, real64) - 0.5_real64)/400.0_real64)**2
+        end do
+    end function zone_advice_sample
 
     !> A pilot measured over `[0, 1]` alone, which the sample below reaches well beyond.
     subroutine spread_cap_pilot(pilot)

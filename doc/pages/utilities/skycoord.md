@@ -6,9 +6,10 @@ title: Celestial coordinate systems with parquet_skycoord
 kept in — ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 — by a named procedure, by two
 selectors read at run time, or by a rotation prepared once, and carries the RA/Dec geometry that
 needs no coordinate system at all: the angular separation of two positions, the position a
-separation away at a position angle, that position angle back, and a position moved by its proper
-motion. It also writes positions as sexagesimal text and reads them back, and takes a heliocentric
-redshift into the rest frame of the cosmic microwave background. Everything works in `real64`
+separation away at a position angle, that position angle back, a position moved by its proper
+motion, a position as a unit vector, and a field projected onto the plane tangent at its centre. It
+also writes positions as sexagesimal text and reads them back, and takes a heliocentric redshift
+into the rest frame of the cosmic microwave background and back. Everything works in `real64`
 degrees, and every conversion is `pure elemental`, so a whole column converts in one call.
 
 ```fortran
@@ -168,9 +169,10 @@ in, provided both positions are in the same one.
 **`pf_angdist_deg`** is the angle between two positions, computed in the frame where only the
 difference of the right ascensions survives, as `atan2` of the cross and dot products rather than
 `acos` of the dot product — so it keeps its accuracy near 0 and near 180 degrees. It is within
-7.8e-15 degrees of a 60-digit evaluation across the seam at right ascension 0, both poles, and
-coincident and antipodal pairs, and a right ascension may be any value: it is folded into one turn
-first. **A position is exactly zero degrees from itself**, including when the two right ascensions
+7.8e-15 degrees of a 60-digit evaluation on the edge cases it is pinned to -- the seam at right
+ascension 0, both poles, and coincident and antipodal pairs -- and within 2.8e-14 degrees over a
+sweep of separations from a billionth of a degree to 180, and a right ascension may be any value:
+it is folded into one turn first. **A position is exactly zero degrees from itself**, including when the two right ascensions
 differ by whole turns and when both positions are one pole named by different right ascensions, so
 `dist > 0` excludes self-matches safely. It is appreciably cheaper than converting both positions to
 vectors and calling `parquet_healpix`'s `pf_angdist`, because the frame it works in removes one of
@@ -185,9 +187,62 @@ right ascension `ra0 + 180 - pa`, and one from the south pole at `ra0 + pa`. A s
 continues along the same great circle. **A coincident pair has position angle 0**, including two
 labels of one pole.
 
-For positions as unit vectors, [`parquet_sphere`](sphere.html#positions-vectors-and-where-the-frame-enters)'s
-`pf_radec2vec` and `pf_vec2radec` convert between the two, naming the declination frame at that
-interface.
+**The position angle of a very close pair carries few digits.** The formula's two terms cancel as
+the separation falls, so about one digit goes per decade below a degree: a pair a milliarcsecond
+apart carries a handful of digits of position angle and a pair a microarcsecond apart almost none.
+That is the quantity, not this implementation — astropy's `position_angle` behaves the same way —
+and the separation of the same pair is unaffected.
+
+### Positions as unit vectors
+
+```fortran
+call pf_radec2unit(lon, lat, v)     ! v(3) = (cos(lat)cos(lon), cos(lat)sin(lon), sin(lat))
+call pf_unit2radec(v, lon, lat)     ! back again, from a vector of any length
+```
+
+A position and its unit vector, frame-free like everything else here. `v` need not have unit length
+coming back: it is scaled by its largest component first, so a direction of any magnitude reads. A
+latitude of exactly ±90 is the pole `(0, 0, ±1)` whatever the longitude says, and a pole reads back
+with longitude 0.
+
+These are the same two conversions
+[`parquet_sphere`](sphere.html#positions-vectors-and-where-the-frame-enters) publishes as
+`pf_radec2vec` and `pf_vec2radec` under `PF_HP_DEC_NORTH`, **to the bit**, and the pair here takes
+no frame argument: a declination held in the mirrored convention is negated before it is used, the
+rule this module states for its rotations. Use these when you are already in this module — they
+cost nothing beyond the six files it compiles — and `parquet_sphere`'s when you want to name the
+declination frame at that interface, or are using the rest of that module anyway.
+
+### The tangent plane
+
+```fortran
+call pf_radec2tan(ra, dec, ra0, dec0, x, y, [pa_deg])   ! degrees -> standard coordinates
+call pf_tan2radec(x, y, ra0, dec0, ra, dec, [pa_deg])   ! and back
+```
+
+The gnomonic projection — FITS's `TAN` — of a position onto the plane tangent at a field centre
+`(ra0, dec0)`: **`x` east, `y` north, both in degrees**, with a point `sep` degrees from the centre
+landing at radius `tan(sep)` in radians written in degrees. A great circle is a straight line on
+this plane, which is what makes it the projection a tiling or fibre-positioning pipeline works in.
+Both are `pure elemental`, so one call projects a whole target list about one centre.
+
+**`pa_deg` turns the axes**: given, `+y` points along position angle `pa_deg` — north through east,
+`pf_offset_radec`'s convention — and `+x` 90 degrees east of it, so a point at position angle
+`pa_deg` from the centre lands on `+y` exactly. Omitted, `+y` is north. At a pole the local frame
+follows the `ra0` you gave, as `pf_offset_radec` does.
+
+**A position in the far hemisphere has no image**: `x` and `y` are NaN, raising no flag, so screen
+with `x /= x`. The boundary is the 90 degrees where the projection's own denominator changes sign;
+just inside it the image is correct and enormous, so cut a field of view with `pf_angdist_deg`
+rather than with a radius on the plane. A `dec0` outside `[-90, 90]` stops the program, as
+`pf_offset_radec`'s centre does.
+
+```fortran
+real(real64) :: x(n), y(n)
+
+call pf_radec2tan(ra, dec, field_ra, field_dec, x, y)       ! the whole target list at once
+where (x /= x) ...                                          ! anything in the far hemisphere
+```
 
 ## Proper motion
 
@@ -201,12 +256,13 @@ astropy's `pm_ra_cosdec`. `pm_dec` is the proper motion in declination, also in 
 written without it moves a position near a pole several times too far in right ascension, and near
 the equator, where the cosine is about 1, nothing shows it.
 
-The two rates are resolved into a position angle, east through `pm_ra` and north through `pm_dec`,
-and the position moves `hypot(pm_ra, pm_dec) * |dt_years|` along the great circle leaving it at that
-angle, as `pf_offset_radec` moves it. At a pole the motion is read in the local frame of the `ra`
-given, as `pf_offset_radec` reads a position angle. No time, or no motion, gives the position back,
-its right ascension wrapped into `[0, 360)`. `pf_apply_pm` is `pure elemental`: one call moves a
-whole catalogue to another epoch.
+The two rates are the step's components on the tangent plane, east through `pm_ra` and north
+through `pm_dec`, and the position moves `hypot(pm_ra, pm_dec) * |dt_years|` along the great circle
+leaving it in that direction — the circle `pf_offset_radec` would move it along at the same
+position angle. At a pole the motion is read in the local frame of the `ra` given, as
+`pf_offset_radec` reads a position angle. No time, or no motion, gives the position back, its right
+ascension wrapped into `[0, 360)`, and gives it back whatever the other rate says. `pf_apply_pm` is
+`pure elemental`: one call moves a whole catalogue to another epoch.
 
 **It is a step along a great circle, not rigorous space motion.** Parallax, radial velocity and
 light travel time do not enter it, and the motion is the one at the starting position, held fixed.
@@ -265,7 +321,13 @@ closing `s`, in either case, with a blank allowed after each letter). Hours have
 and degrees one to three; minutes and whole seconds have one or two, each below 60; the seconds
 take any number of decimals. Only a declination takes a sign, `+` or `-`, which applies to the whole
 angle, so `-00:30:00` is -0.5. Blanks around the text are ignored, and a pair is the two angles
-separated by blanks, one comma, or both. Nothing is wrapped: `24:00:00` reads as 360.
+separated by blanks, one comma, or both.
+
+**The leading field is bounded too, and may reach its bound only exactly**: hours at most 24 and
+degrees at most 90, each with zero minutes and zero seconds there. So `24:00:00` reads as 360 —
+nothing is wrapped — while `24:00:00.001` and `25:00:00` do not, and `+90:00:00` reads as the pole,
+which is what `pf_dec2str` writes for it, while `+90:00:00.01` and `+91:00:00` do not. A writer
+takes a declination beyond a pole and writes it as given; a reader does not take it back.
 
 **Text a reader cannot read sets `ok` to `.false.`** — a bare decimal number, two fields, a signed
 right ascension, a field of 60, separators of two styles, a trailing letter too many — and never
@@ -294,7 +356,10 @@ dec = pf_dms2deg(sgn, d, m, s)         ! d + m/60 + s/3600, negated for a negati
 **The sign is its own argument**, because a declination between -1 and 0 has no degrees to carry
 it: `-0.5` is `sgn = -1, d = 0, m = 30, s = 0`. `sgn` is -1 below zero and +1 otherwise, for both
 zeros alike. **Nothing is rounded**: `s` carries the angle's whole precision, and rounding for
-display is the writers' work. `pf_deg2hms` wraps its angle into `[0, 360)` first; `pf_deg2dms` splits
+display is the writers' work. The split itself is exact to a rounding of the seconds — an angle
+whose whole seconds sit within one rounding of a boundary can split as the next second with a zero
+fraction rather than the previous one with a fraction of `0.99999999999997` — and either way the
+fields rejoin to the same angle. `pf_deg2hms` wraps its angle into `[0, 360)` first; `pf_deg2dms` splits
 a declination beyond 90 as given, up to `huge(d)` degrees, past which no default `integer` holds its
 degrees. The two joiners validate and wrap nothing, so `pf_hms2deg(24, 0, 0.0_real64)` is 360.
 
@@ -302,29 +367,35 @@ degrees. The two joiners validate and wrap nothing, so `pf_hms2deg(24, 0, 0.0_re
 
 ```fortran
 z_cmb = pf_zhel2zcmb(lon, lat, z_hel, [system], [apex_lon], [apex_lat], [apex_v])
+z_hel = pf_zcmb2zhel(lon, lat, z_cmb, [system], [apex_lon], [apex_lat], [apex_v])
 ```
 
-`pf_zhel2zcmb` takes a heliocentric redshift into the rest frame of the cosmic microwave background:
+`pf_zhel2zcmb` takes a heliocentric redshift into the rest frame of the cosmic microwave
+background, and `pf_zcmb2zhel` brings one back:
 
 ```
-1 + z_cmb = (1 + z_hel) * gamma * (1 + (v/c) * cos(theta))
+1 + z_cmb = (1 + z_hel) / (gamma * (1 - (v/c) * cos(theta)))
 ```
 
-where `theta` is the angle between the position and the dipole apex, `v` the Sun's speed toward the
-apex and `gamma` the Lorentz factor of the whole of `v`. Looking toward the apex the CMB-frame
-redshift is the larger, since the Sun's approach blueshifts what it observes. `system` names the
-system of `(lon, lat)`, a `PF_COORD_*` selector defaulting to `PF_COORD_ICRS`, so a catalogue in
-Galactic coordinates passes them as they are. **The apex is always Galactic**, whatever `system`
-says, because that is how every dipole is published.
+where `theta` is the angle between the position and the dipole apex **as observed** — the direction
+a catalogue holds — `v` the Sun's speed toward the apex and `gamma` the Lorentz factor of the whole
+of `v`. Looking toward the apex the CMB-frame redshift is the larger, since the Sun's approach
+blueshifts what it observes, and at 90 degrees from the apex the shift is the transverse Doppler
+effect alone, `1 + z_cmb = (1 + z_hel) / gamma`. The two procedures are inverses: a redshift through
+both comes back to rounding. `system` names the system of `(lon, lat)`, a `PF_COORD_*` selector
+defaulting to `PF_COORD_ICRS`, so a catalogue in Galactic coordinates passes them as they are.
+**The apex is always Galactic**, whatever `system` says, because that is how every dipole is
+published.
 
 **The dipole defaults to Planck 2018 results I** (Aghanim et al. 2020, A&A 641, A1): the apex at
 Galactic `(264.021, 48.253)` and `v = 369.82` km/s, with the speed of light 299 792.458 km/s. A
 measured dipole changes between papers, so each of the three may be given, alone or together, in
-degrees and km/s. `pf_zhel2zcmb` is `pure elemental` in the position and the redshift alike.
+degrees and km/s. Both are `pure elemental` in the position and the redshift alike.
 
-It is total in its coordinates and its redshift: a NaN argument gives a NaN; a redshift at or below
--1 is computed as the formula says rather than refused; an infinite one comes back itself; and an
-`apex_v` of the speed of light or more, which has no Lorentz factor, gives a NaN.
+They are total in their coordinates and their redshift: a NaN argument gives a NaN; a redshift at or
+below -1 is computed as the formula says rather than refused, and -1 exactly comes back as -1 in
+either direction, a zero ratio of wavelengths being zero in every frame; an infinite one comes back
+itself; and an `apex_v` of the speed of light or more, which has no Lorentz factor, gives a NaN.
 
 ## What is validated and what is not
 
@@ -339,7 +410,14 @@ nulls and a conversion that stopped the program on one would be of no use on the
 - a latitude outside `[-90, 90]` is read as the direction it names: `(lon, 100)` is
   `(lon + 180, 80)`;
 - a latitude of exactly ±90 is the pole, whatever the longitude, and a result at a pole has
-  longitude 0.
+  longitude 0;
+- a position in the far hemisphere has no tangent-plane image: `pf_radec2tan` answers NaN there,
+  raising no flag.
+
+**An output argument must not be an input argument.** `call pf_icrs2gal(ra, dec, ra, dec)`, to
+convert a column in place, is undefined behaviour — an `intent(out)` dummy aliased with an
+`intent(in)` one — however plausible its answer looks today. Convert into separate arrays, or into
+the same array through a temporary you own.
 
 What stops the program is a caller mistake that has no sensible reading:
 
@@ -351,10 +429,13 @@ What stops the program is a caller mistake that has no sensible reading:
 - a text writer with a `sep` other than `":"`, `" "` or `"hms"`, or a `precision` outside `[0, 9]`;
 - `pf_offset_radec` with a `dec0` outside `[-90, 90]` — a centre beyond a pole turns the local north
   and east around and gives a plausible wrong point — or a negative `sep_deg`, and `pf_apply_pm`
-  with a `dec` outside `[-90, 90]`. A NaN argument to either gives NaN results.
+  with a `dec` outside `[-90, 90]`, and `pf_radec2tan` and `pf_tan2radec` with a `dec0` outside it.
+  A NaN argument to any of them gives NaN results.
 
 `pf_coord_system_from_name` and the text readers never stop the program: text is user data, so an
-unknown token answers `PF_COORD_UNKNOWN`, and text a reader cannot read sets `ok` to `.false.`.
+unknown token answers `PF_COORD_UNKNOWN`, and text a reader cannot read sets `ok` to `.false.`. The
+readers are the one validating layer here — everything else reads what it is given as the direction
+it names.
 
 ## Thread safety
 
@@ -374,6 +455,10 @@ thread. Nothing on this page prints, and nothing reads a setting.
   forms, and no degree, minute or second symbols.
 - The CMB rest frame is a boost by the dipole and nothing more, and Planck 2018's is the one dipole
   built in.
+- The tangent plane is the gnomonic projection only: no other projection, no distortion terms, no
+  WCS header.
+- A proper motion cannot be rotated between coordinate systems: `pf_sky_convert` rotates a position,
+  not a `(pmra, pmdec)` pair.
 - `real64` only. A `real32` column converts through `real(x, real64)` at the call.
 
 ## See also

@@ -20,7 +20,7 @@
 !! hands a NaN back, or writes `nan`, before anything converts it.
 submodule (parquet_skycoord) parquet_skycoord_text
     use parquet_utils, only: pf_wrap_deg, pf_from_str, pf_to_str
-    use, intrinsic :: iso_fortran_env, only: int64
+    use, intrinsic :: iso_fortran_env, only: int64, real128
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     implicit none
 
@@ -40,7 +40,7 @@ submodule (parquet_skycoord) parquet_skycoord_text
     !> The magnitude, in degrees, from which a declination's whole degrees no default `integer` holds.
     real(real64), parameter :: DMS_LIMIT = real(huge(1), real64)
     !> Room for the longest pair a writer produces: a right ascension of 20 characters, a declination
-    !! of at most 27 and the blank between them.
+    !! of at most 28 (`+2147483000d00m00.000000000s`) and the blank between them.
     integer, parameter :: TEXT_MAX = 64
 
 contains
@@ -338,15 +338,22 @@ contains
     !! ties to even, the carry into the next degree taken.
     !!
     !! The one rounding a writer does: `frac * per_deg` is formed once, and the rest is integer
-    !! arithmetic. `per_deg` stays below `2**53`, so it is exact as a double, and the product's
-    !! integer and fractional parts are exact too.
+    !! arithmetic. `per_deg` stays below `2**53`, so it is exact as a double.
+    !!
+    !! **The rounding is decided from the EXACT product**, which the double `x` is not. Every whole
+    !! and half unit in range is a representable double, so `x` can differ from the exact product
+    !! across one of them only by landing exactly ON it -- the nearest double to a value within
+    !! half an ulp of a representable number is that number -- and a tie is therefore the one place
+    !! where `x` does not say which way to go. There the residual of a two-product does:
+    !! `two_product_residual` gives `frac*per_deg - x` exactly, so its sign is the side the exact
+    !! product falls on, and only a zero residual is a true tie for the ties-to-even rule.
     pure subroutine skc_round_split(whole, frac, per_deg, deg, units)
         real(real64), intent(in) :: whole !! whole degrees; an integer value below `2**53`.
         real(real64), intent(in) :: frac !! the fraction of a degree, in `[0, 1)`.
         integer(int64), intent(in) :: per_deg !! output units a degree: seconds a degree times `10**q`.
         integer(int64), intent(out) :: deg !! whole degrees, one more when the fraction rounds up to it.
         integer(int64), intent(out) :: units !! the rest, in `[0, per_deg)`.
-        real(real64) :: x, t
+        real(real64) :: x, t, e
 
         x = frac * real(per_deg, real64)
         t = aint(x)
@@ -354,7 +361,12 @@ contains
         if (x - t > 0.5_real64) then
             units = units + 1_int64
         else if (x - t == 0.5_real64) then
-            units = units + mod(units, 2_int64)
+            e = two_product_residual(frac, real(per_deg, real64), x)
+            if (e > 0.0_real64) then
+                units = units + 1_int64
+            else if (e == 0.0_real64) then
+                units = units + mod(units, 2_int64)
+            end if
         end if
         deg = int(whole, int64)
         if (units >= per_deg) then
@@ -362,6 +374,31 @@ contains
             units = units - per_deg
         end if
     end subroutine skc_round_split
+
+    !> `a*b - p`, where `p` is the rounded `a*b`: the bits that one rounding dropped.
+    !!
+    !! **In `real128`, and NOT by a Dekker two-product**, which is the usual way to write this and
+    !! is unsafe here. A two-product recovers each factor's halves through `c - (c - a)`, an
+    !! identity whose value is algebraically `a`: ifx's default `-fp-model=fast` folds it out, and
+    !! the function then returns zero for every argument -- silently sending every tie to the
+    !! ties-to-even rule and leaving the writers exactly as wrong as they were (measured: seven
+    !! golden text rows one unit out under ifx, none under gfortran). `volatile` is this
+    !! repository's usual answer to that class of rewrite and is not available in a `pure`
+    !! procedure.
+    !!
+    !! The product of two doubles needs 106 significant bits and `real128` holds 113, so one
+    !! multiplication and one subtraction give the residual under any fp model, with no identity
+    !! for an optimiser to fold. The conversion back to `real64` rounds it, which changes neither
+    !! its sign nor whether it is zero -- all the caller reads. This is reached only on a tie,
+    !! which is 0.03% of renderings.
+    pure function two_product_residual(a, b, p) result(e)
+        real(real64), intent(in) :: a !! the first factor.
+        real(real64), intent(in) :: b !! the second factor.
+        real(real64), intent(in) :: p !! their product as a double, `a*b` rounded once.
+        real(real64) :: e !! `a*b - p`: zero only where the tie is a true one.
+
+        e = real(real(a, real128) * real(b, real128) - real(p, real128), real64)
+    end function two_product_residual
 
     !> Appends `s` to `buf` after `pos`, and advances `pos`.
     pure subroutine put_text(buf, pos, s)
@@ -428,7 +465,9 @@ contains
         integer :: f2
         logical :: neg
 
-        call skc_read_fields(text, i, hi, .false., "h", 2, neg, f1, f2, f3, ok)
+        ! Hours at most 24, and 24 only as the exact turn: `24:00:00` is the documented 360 degrees,
+        ! while `25:00:00` and `24:00:00.001` are not readings of anything.
+        call skc_read_fields(text, i, hi, .false., "h", 2, 24, neg, f1, f2, f3, ok)
         deg = 0.0_real64
         if (ok) deg = (f1 * 15.0_real64 + real(f2, real64) * 0.25_real64) + f3 / 240.0_real64
     end subroutine skc_read_ra
@@ -444,7 +483,10 @@ contains
         integer :: f2
         logical :: neg
 
-        call skc_read_fields(text, i, hi, .true., "d", 3, neg, f1, f2, f3, ok)
+        ! Degrees at most 90, and 90 only as the pole exactly: `+90:00:00` is what `pf_dec2str`
+        ! writes for the north pole and reads back, while `+90:00:00.01` and `+91:00:00` name no
+        ! direction on the sky.
+        call skc_read_fields(text, i, hi, .true., "d", 3, 90, neg, f1, f2, f3, ok)
         deg = 0.0_real64
         if (ok) then
             deg = f1 + (real(f2, real64) * 60.0_real64 + f3) / 3600.0_real64
@@ -457,21 +499,24 @@ contains
     !! The separator after the leading field decides the style, and the second must match it: a
     !! colon, one or more blanks, or the unit letter -- `lead`, then `m`, and an `s` closing the
     !! seconds -- in either case with blanks allowed after it. The leading field has one to
-    !! `max_lead` digits; the minutes one or two digits below 60; the seconds one or two digits below
-    !! 60, then an optional point and any number of decimals.
-    pure subroutine skc_read_fields(text, i, hi, signed, lead, max_lead, neg, f1, f2, f3, ok)
+    !! `max_lead` digits and a value of at most `max_value`, which it may reach only with zero
+    !! minutes and zero seconds; the minutes one or two digits below 60; the seconds one or two
+    !! digits below 60, then an optional point and any number of decimals. **Every range is decided
+    !! from the digits**, so no rounding decides an acceptance.
+    pure subroutine skc_read_fields(text, i, hi, signed, lead, max_lead, max_value, neg, f1, f2, f3, ok)
         character(len=*), intent(in) :: text !! the text.
         integer, intent(inout) :: i !! where the angle starts; just past it when `ok`.
         integer, intent(in) :: hi !! the last position the angle may use.
         logical, intent(in) :: signed !! whether one leading `+` or `-` is allowed.
         character(len=1), intent(in) :: lead !! the leading field's letter, lowercase: `h` or `d`.
         integer, intent(in) :: max_lead !! the most digits the leading field may have.
+        integer, intent(in) :: max_value !! the largest value it may take, reached only exactly.
         logical, intent(out) :: neg !! whether the angle carried a `-`.
         real(real64), intent(out) :: f1 !! the leading field: hours or degrees.
         integer, intent(out) :: f2 !! the minutes.
         real(real64), intent(out) :: f3 !! the seconds.
         logical, intent(out) :: ok !! whether three well-formed fields were read.
-        integer :: j, k, style
+        integer :: j, k, n1, style
         logical :: good
 
         ok = .false.
@@ -491,7 +536,9 @@ contains
         k = j
         call skip_digits(text, j, hi)
         if (j - k < 1 .or. j - k > max_lead) return
-        f1 = real(digits_int(text(k:j - 1)), real64)
+        n1 = digits_int(text(k:j - 1))
+        if (n1 > max_value) return
+        f1 = real(n1, real64)
         ! The first separator decides the style.
         if (j > hi) return
         if (text(j:j) == ":") then
@@ -538,6 +585,12 @@ contains
                 call skip_digits(text, j, hi)
             end if
         end if
+        ! The bound is reached only exactly: a leading field AT `max_value` carries no minutes and
+        ! no seconds, so the pole and the whole turn read and nothing past either does.
+        if (n1 == max_value) then
+            if (f2 /= 0) return
+            if (.not. zero_field(text(k:j - 1))) return
+        end if
         call seconds_value(text(k:j - 1), f3, good)
         if (.not. good) return
         if (style == STYLE_LETTERS) then
@@ -582,6 +635,18 @@ contains
             call pf_from_str(s, value, ok)
         end if
     end subroutine seconds_value
+
+    !> Whether a seconds field is zero, from its characters alone: every digit in it is `0`.
+    pure function zero_field(s) result(yes)
+        character(len=*), intent(in) :: s !! the field, already checked for shape.
+        logical :: yes !! whether the field is zero.
+        integer :: k
+
+        yes = .true.
+        do k = 1, len(s)
+            if (s(k:k) /= "0" .and. s(k:k) /= ".") yes = .false.
+        end do
+    end function zero_field
 
     !> The value of a run of at most three decimal digits.
     pure function digits_int(s) result(n)

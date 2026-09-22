@@ -474,6 +474,16 @@ done | sort | uniq -c | sort -rn
   right shape (`cov_f64` hands a diagonal pair to `variance_f64`), but it does not by itself buy a
   bit-for-bit promise: the general group, "Calling one procedure from another does not pin its last
   bit".
+- **An error-free transformation written in `real64` is folded out by `-fp-model=fast`, so it
+  cannot be used to recover a rounding.** A Dekker two-product splits each factor with
+  `c - (c - a)`, whose value is algebraically `a`: ifx folds it, and the residual function returns
+  zero for every argument while gfortran returns the right answer. The failure is silent -- the
+  caller's tie-breaking simply stops working -- and `volatile`, this file's usual answer, is
+  unavailable when the procedure is `pure`. Compute such a residual in `real128` instead (a double
+  product needs 106 significant bits and `real128` holds 113, so one multiply and one subtract are
+  exact under any fp model, with no identity to fold); `two_product_residual`,
+  `src/parquet_skycoord_text.f90`. Verify any exactness claim of this kind by running it under ifx
+  with NO `--profile`, which is where `-fp-model=fast` applies.
 - **ifx turns flush-to-zero AND denormals-are-zero on at `-O1` and above**; gfortran and nagfor
   leave gradual underflow in force. It is a process-wide MXCSR setting made by the main program, so
   a library procedure receives a subnormal argument already collapsed to zero and cannot recover

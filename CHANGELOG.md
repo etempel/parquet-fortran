@@ -240,14 +240,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   construction, and the inverse is the transpose rather than a second matrix. The module also holds
   the RA/Dec geometry that needs no coordinate system: `pf_angdist_deg`, `pf_offset_radec` and
   `pf_position_angle_deg`, which offset a position by a separation at a position angle and recover
-  the angle, and `pf_apply_pm`, which moves a position by its proper motion along a great circle,
-  `pm_ra` being Gaia's `pmra`, the rate in right ascension times `cos(dec)`. `pf_ra2str`,
-  `pf_dec2str` and `pf_radec2str` write positions as sexagesimal text, `10:21:30.550 +41:16:09.00`
+  the angle, `pf_apply_pm`, which moves a position by its proper motion along a great circle,
+  `pm_ra` being Gaia's `pmra`, the rate in right ascension times `cos(dec)`, `pf_radec2unit` and
+  `pf_unit2radec` between a position and its unit vector, and `pf_radec2tan` and `pf_tan2radec`,
+  the gnomonic (FITS `TAN`) projection onto the plane tangent at a field centre and its inverse,
+  with an optional position angle for the `+y` axis and NaN coordinates for a position in the far
+  hemisphere. `pf_ra2str`, `pf_dec2str` and `pf_radec2str` write positions as sexagesimal text,
+  `10:21:30.550 +41:16:09.00`
   or blank- or letter-separated, and `pf_str2ra`, `pf_str2dec` and `pf_str2radec` read three-field
-  text back strictly, reporting what they cannot read through an `ok` flag; `pf_deg2hms`,
+  text back strictly, reporting what they cannot read through an `ok` flag and taking hours of at
+  most 24 and degrees of at most 90, each reached only with zero minutes and seconds; `pf_deg2hms`,
   `pf_deg2dms`, `pf_hms2deg` and `pf_dms2deg` split an angle into its fields and join them, a
   declination's sign apart from its degrees. `pf_zhel2zcmb` takes a heliocentric redshift into the
-  rest frame of the cosmic microwave background, with Planck 2018's dipole unless another is given.
+  rest frame of the cosmic microwave background and `pf_zcmb2zhel` brings one back, with Planck
+  2018's dipole unless another is given, the angle to the apex being the observed one.
   Total, like the rest of the sky tier: a NaN argument comes back as a NaN, or as the text `nan`,
   raising no floating-point flag, and a declination outside `[-90, 90]` is read as the direction it
   names, except as `pf_offset_radec`'s centre or `pf_apply_pm`'s starting position, where it stops

@@ -3517,6 +3517,12 @@ contains
                 test_skycoord_rotation_init_unknown_system_aborts), &
             new_unittest("pf_apply_pm refuses a declination past a pole", &
                 test_skycoord_apply_pm_dec_out_of_range_aborts), &
+            new_unittest("skycoord: a tangent point beyond a pole aborts", &
+                test_skycoord_radec2tan_dec0_out_of_range_aborts), &
+            new_unittest("skycoord: the tangent plane's inverse refuses the same centre", &
+                test_skycoord_tan2radec_dec0_out_of_range_aborts), &
+            new_unittest("skycoord: pf_zcmb2zhel with a selector that is not a system aborts", &
+                test_skycoord_zcmb2zhel_unknown_system_aborts), &
             new_unittest("a Fibonacci grid refuses n below 1", &
                 test_sphere_fibonacci_n_not_positive_aborts), &
             new_unittest("a Fibonacci grid refuses an array not shaped (3, n)", &
@@ -21409,6 +21415,31 @@ contains
             "PF_COORD_ECLIPTIC (3), PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got 0)")
     end subroutine test_skycoord_zcmb_unknown_system_aborts
     !
+    !> See scenario_skycoord_radec2tan_dec0_out_of_range.
+    subroutine test_skycoord_radec2tan_dec0_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_radec2tan_dec0_out_of_range", expect_abort=.true., &
+            failure_message="a tangent point beyond a pole was expected to abort", &
+            required_stderr="pf_radec2tan: dec0 must be in [-90, 90] (got")
+    end subroutine test_skycoord_radec2tan_dec0_out_of_range_aborts
+
+    !> See scenario_skycoord_tan2radec_dec0_out_of_range.
+    subroutine test_skycoord_tan2radec_dec0_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_tan2radec_dec0_out_of_range", expect_abort=.true., &
+            failure_message="a tangent point beyond a pole was expected to abort the inverse", &
+            required_stderr="pf_tan2radec: dec0 must be in [-90, 90] (got")
+    end subroutine test_skycoord_tan2radec_dec0_out_of_range_aborts
+
+    !> See scenario_skycoord_zcmb2zhel_unknown_system.
+    subroutine test_skycoord_zcmb2zhel_unknown_system_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_zcmb2zhel_unknown_system", expect_abort=.true., &
+            failure_message="a heliocentric redshift in PF_COORD_UNKNOWN was expected to abort", &
+            required_stderr="pf_zcmb2zhel: system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), " // &
+            "PF_COORD_ECLIPTIC (3), PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got 0)")
+    end subroutine test_skycoord_zcmb2zhel_unknown_system_aborts
+
     !> See scenario_skycoord_rotation_apply_before_init.
     subroutine test_skycoord_rotation_apply_before_init_aborts(error)
         type(error_type), allocatable, intent(out) :: error

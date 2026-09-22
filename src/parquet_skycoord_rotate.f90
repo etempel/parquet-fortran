@@ -257,15 +257,75 @@ contains
     ! ---- The CMB rest frame ----
 
     module procedure pf_zhel2zcmb
+        real(real64) :: dd, ed, bad
+        logical :: ok
+
+        call skc_cmb_boost("pf_zhel2zcmb", lon, lat, z_hel, dd, ed, bad, ok, system, apex_lon, apex_lat, apex_v)
+        if (.not. ok) then
+            z_cmb = bad
+            return
+        end if
+        ! `(1 + z_hel) / D - 1` written `z_hel + (1 + z_hel) (1 - D) / D`, so nothing near 1 is
+        ! subtracted from 1 and a small redshift keeps its digits -- `ed` is that `1 - D`, formed
+        ! without the cancellation the written-out difference would carry. Keeping `1 + z_hel` as a
+        ! factor also keeps the one exact value the boost has: a `z_hel` of -1 is a zero ratio of
+        ! wavelengths, which is zero in every frame, and here the factor is exactly zero.
+        z_cmb = z_hel + (1.0_real64 + z_hel) * (ed / dd)
+    end procedure pf_zhel2zcmb
+
+    module procedure pf_zcmb2zhel
+        real(real64) :: dd, ed, bad
+        logical :: ok
+
+        call skc_cmb_boost("pf_zcmb2zhel", lon, lat, z_cmb, dd, ed, bad, ok, system, apex_lon, apex_lat, apex_v)
+        if (.not. ok) then
+            z_hel = bad
+            return
+        end if
+        ! `(1 + z_cmb) D - 1`, the same factor the other way, written `z_cmb - (1 + z_cmb)(1 - D)`
+        ! for the same reason. The factor enters as `ed` alone, so `dd` is not read here.
+        z_hel = z_cmb - (1.0_real64 + z_cmb) * ed
+    end procedure pf_zcmb2zhel
+
+    !> The Doppler factor `D = g (1 - beta cos(theta))` of a position against the dipole, and
+    !! `1 - D` formed without cancellation: what both redshift boosts are made of.
+    !!
+    !! **`theta` is the angle between the apex and the position as the caller gives it**, which is
+    !! the OBSERVED direction, and `D` is the factor exact for that direction:
+    !! `1 + z_cmb = (1 + z_hel) / D`. `1 - D` is `1 - g + g beta cth`, formed as
+    !! `g beta cth - g**2 beta**2 / (g + 1)` so that nothing near 1 is subtracted from 1 and a
+    !! small speed keeps its digits. `ok` is false where there is nothing to compute -- a NaN
+    !! argument, an infinite redshift, or a speed at or beyond light's -- and `bad` is then the
+    !! value the caller returns: the NaN argument itself, never one composed from several, since
+    !! `Inf + (-Inf)` on a mixed infinite/NaN input would raise the flag the screen exists to
+    !! avoid. **Stops the program** on a `system` that is not one of the five, naming the procedure
+    !! the caller called.
+    pure subroutine skc_cmb_boost(who, lon, lat, z, dd, ed, bad, ok, system, apex_lon, apex_lat, apex_v)
+        character(len=*), intent(in) :: who !! the procedure the caller called, for the message.
+        real(real64), intent(in) :: lon !! the position's longitude in `system`, degrees; any value.
+        real(real64), intent(in) :: lat !! the position's latitude in `system`, degrees.
+        real(real64), intent(in) :: z !! the caller's redshift: screened here, never part of the factor.
+        real(real64), intent(out) :: dd !! the Doppler factor `D`.
+        real(real64), intent(out) :: ed !! `1 - D`.
+        real(real64), intent(out) :: bad !! what the caller returns when `ok` is false; 0 otherwise.
+        logical, intent(out) :: ok !! whether `dd` and `ed` were computed.
+        integer, intent(in), optional :: system !! the system of `(lon, lat)`, a `PF_COORD_*` selector; default ICRS.
+        real(real64), intent(in), optional :: apex_lon !! the apex's Galactic longitude, degrees.
+        real(real64), intent(in), optional :: apex_lat !! the apex's Galactic latitude, degrees.
+        real(real64), intent(in), optional :: apex_v !! the Sun's speed toward the apex, km/s.
         real(real64) :: v(3), w(3), a(3), alon, alat, av, beta, g, cth
         integer :: sys
         character(len=:), allocatable :: t
 
+        ok = .false.
+        bad = 0.0_real64
+        dd = 1.0_real64
+        ed = 0.0_real64
         sys = PF_COORD_ICRS
         if (present(system)) sys = system
         if (.not. skc_is_system(sys)) then
             call pf_to_str(sys, t)
-            error stop "pf_zhel2zcmb: system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), PF_COORD_ECLIPTIC (3), " // &
+            error stop who // ": system must be PF_COORD_ICRS (1), PF_COORD_GALACTIC (2), PF_COORD_ECLIPTIC (3), " // &
                 "PF_COORD_SUPERGALACTIC (4) or PF_COORD_FK5 (5) (got " // t // ")"
         end if
         alon = skc_cmb_apex_lon
@@ -276,39 +336,39 @@ contains
         if (present(apex_v)) av = apex_v
         ! A NaN is handed back itself, before any comparison or transcendental can raise a flag on it.
         if (lon /= lon) then
-            z_cmb = lon
+            bad = lon
             return
         end if
         if (lat /= lat) then
-            z_cmb = lat
+            bad = lat
             return
         end if
-        if (z_hel /= z_hel) then
-            z_cmb = z_hel
+        if (z /= z) then
+            bad = z
             return
         end if
         if (alon /= alon) then
-            z_cmb = alon
+            bad = alon
             return
         end if
         if (alat /= alat) then
-            z_cmb = alat
+            bad = alat
             return
         end if
         if (av /= av) then
-            z_cmb = av
+            bad = av
             return
         end if
         ! The boost is a finite positive factor, so an infinite redshift is itself; and a speed at or
         ! beyond light's has no Lorentz factor. The speeds are compared, not their quotient with 1:
         ! ifx's default model divides by a constant as a multiplication by its rounded reciprocal,
         ! which put `c / c` one ulp below 1.
-        if (abs(z_hel) > huge(z_hel)) then
-            z_cmb = z_hel
+        if (abs(z) > huge(z)) then
+            bad = z
             return
         end if
         if (abs(av) >= skc_c_kms) then
-            z_cmb = ieee_value(0.0_real64, ieee_quiet_nan)
+            bad = ieee_value(0.0_real64, ieee_quiet_nan)
             return
         end if
         beta = av / skc_c_kms
@@ -333,13 +393,14 @@ contains
             a = skc_cmb_apex_gal
         end if
         cth = w(1) * a(1) + w(2) * a(2) + w(3) * a(3)
-        ! `(1 + z) g (1 + beta cth) - 1` with nothing near 1 subtracted from 1, so a small redshift
-        ! keeps its digits: `g - 1 = g**2 beta**2 / (g + 1)`. And `g` from the speeds, whose
-        ! `(c - |v|)(c + |v|)` is positive for every speed below light's, where `1 - beta**2` of a
-        ! quotient rounded up could reach 0.
+        ! `g` from the speeds, whose `(c - |v|)(c + |v|)` is positive for every speed below light's,
+        ! where `1 - beta**2` of a quotient rounded up could reach 0. `D` is bounded away from zero
+        ! for every one of them: `g (1 - beta) = sqrt((1 - beta) / (1 + beta))`.
         g = skc_c_kms / sqrt((skc_c_kms - abs(av)) * (skc_c_kms + abs(av)))
-        z_cmb = z_hel + (1.0_real64 + z_hel) * (g * g * beta * beta / (g + 1.0_real64) + g * beta * cth)
-    end procedure pf_zhel2zcmb
+        dd = g * (1.0_real64 - beta * cth)
+        ed = g * beta * cth - g * g * beta * beta / (g + 1.0_real64)
+        ok = .true.
+    end subroutine skc_cmb_boost
 
     !> `w = m v`, one of the module's compile-time matrices applied to a unit vector.
     pure subroutine skc_apply(m, v, w)

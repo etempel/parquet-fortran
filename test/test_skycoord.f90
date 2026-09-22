@@ -138,6 +138,16 @@ contains
                          test_pm_reverses), &
             new_unittest("pf_apply_pm gives NaN results for a NaN argument and raises no flag", &
                          test_pm_nan_propagates_quietly), &
+            new_unittest("golden rows: pf_radec2unit and pf_unit2radec against the 60-digit model", &
+                         test_unit_vectors_golden), &
+            new_unittest("the unit-vector pair round-trips, takes a vector of any length and is total", &
+                         test_unit_vectors_contract), &
+            new_unittest("golden rows: pf_radec2tan and pf_tan2radec against the 60-digit model", &
+                         test_tangent_golden), &
+            new_unittest("a point at position angle pa_deg lands on +y at tan(sep), and the pair inverts", &
+                         test_tangent_is_the_gnomonic_projection), &
+            new_unittest("the tangent plane refuses the far hemisphere and is total in its flags", &
+                         test_tangent_far_hemisphere_and_nan), &
             new_unittest("angdist_deg reproduces a 60-digit evaluation on every edge case", &
                          test_angdist_deg_reference), &
             new_unittest("angdist_deg agrees with angdist, and keeps its four symmetries", &
@@ -159,6 +169,8 @@ contains
                          test_text_carries_at_sixty), &
             new_unittest("the readers refuse two fields, a bare number, a signed right ascension and a field of 60", &
                          test_str2ra_rejects_the_wrong_shape), &
+            new_unittest("the readers bound the leading field: a pole and a whole turn read, nothing past them", &
+                         test_readers_bound_the_leading_field), &
             new_unittest("a NaN never reaches int(): zero fields, NaN seconds, the text nan, no flag", &
                          test_deg2hms_nan_never_reaches_int), &
             new_unittest("an infinity, and a declination past huge(1) degrees, give NaN fields and the text nan", &
@@ -174,7 +186,11 @@ contains
             new_unittest("pf_zhel2zcmb's built-in dipole is the documented Planck 2018 one", &
                          test_zcmb_defaults_are_the_documented_dipole), &
             new_unittest("pf_zhel2zcmb gives NaN for a NaN argument or a speed of light, raising no flag", &
-                         test_zcmb_nan_propagates_quietly) &
+                         test_zcmb_nan_propagates_quietly), &
+            new_unittest("ninety degrees from the apex the boost is the transverse Doppler shift alone", &
+                         test_zcmb_is_the_observed_frame_factor), &
+            new_unittest("pf_zcmb2zhel inverts pf_zhel2zcmb, and is total in the same way", &
+                         test_zcmb2zhel_inverts) &
             ]
     end subroutine collect_tests_skycoord
 
@@ -1131,15 +1147,21 @@ contains
     end subroutine test_pm_includes_cos_dec
 
     !> No time moves nothing, and neither does no motion: the position comes back within `SAME`, its
-    !! right ascension wrapped into `[0, 360)`. It travels the offset's path -- `sin`, `cos` and
-    !! `atan2` -- so rounding is all it may gain, where an accumulating path would gain more. At a pole
-    !! it comes back as the pole, right ascension 0 by the module's rule.
+    !! right ascension wrapped into `[0, 360)`. At a pole it comes back as the pole, right ascension
+    !! 0 by the module's rule.
+    !!
+    !! **And it moves nothing EXACTLY**: with a step of zero length the limit of `sin(s)/s` is 1 and
+    !! the step's two components are multiplied by zero, so the answer does not depend on the
+    !! motion at all -- a huge proper motion over no time, a zero motion over an age, and a small
+    !! motion over no time give the same two doubles, bit for bit. That identity is what the
+    !! `s == 0` branch is for; a branch that instead divided a zero by a zero would answer NaN
+    !! here, and one that took `sin(s)/s` as anything but 1 would answer three different positions.
     subroutine test_pm_zero_dt_is_identity(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         real(real64), parameter :: RA0(5) = [-10.0_real64, 725.5_real64, 359.9999_real64, 123.4_real64, 0.0_real64]
         real(real64), parameter :: DEC0(5) = [20.0_real64, -30.0_real64, 89.9_real64, -45.0_real64, 0.0_real64]
         real(real64), parameter :: WANT_RA(5) = [350.0_real64, 5.5_real64, 359.9999_real64, 123.4_real64, 0.0_real64]
-        real(real64) :: ra, dec, zero, negz, worst
+        real(real64) :: ra, dec, zero, negz, worst, want_ra2, want_dec2
         integer :: k
 
         zero = 0.0_real64
@@ -1160,6 +1182,20 @@ contains
         call pf_apply_pm(123.4_real64, 90.0_real64, 5.0_real64, -3.0_real64, 0.0_real64, ra, dec)
         call check(error, ra == 0.0_real64 .and. abs(dec - 90.0_real64) <= SAME * 90.0_real64, &
             "no time at the north pole did not give the pole, right ascension 0")
+        if (allocated(error)) return
+        do k = 1, size(RA0)
+            call pf_apply_pm(RA0(k), DEC0(k), 5.0_real64, -3.0_real64, 0.0_real64, want_ra2, want_dec2)
+            call pf_apply_pm(RA0(k), DEC0(k), 0.0_real64, 0.0_real64, 50.0_real64, ra, dec)
+            call check(error, ra == want_ra2 .and. dec == want_dec2, &
+                "no motion and no time did not give the same position, bit for bit")
+            if (allocated(error)) return
+            call pf_apply_pm(RA0(k), DEC0(k), -3.6e8_real64, 2.4e8_real64, 0.0_real64, ra, dec)
+            call check(error, ra == want_ra2 .and. dec == want_dec2, &
+                "a huge proper motion over no time moved the position")
+            if (allocated(error)) return
+            call check(error, ra == ra .and. dec == dec, "a zero-length step gave a NaN")
+            if (allocated(error)) return
+        end do
     end subroutine test_pm_zero_dt_is_identity
 
     !> A motion over `+dt` and back over `-dt` returns to the start, to rounding, once the motion is
@@ -1280,6 +1316,269 @@ contains
         if (allocated(error)) return
         call check(error, ok_inf, "an infinite argument to pf_apply_pm did not give NaN results")
     end subroutine test_pm_nan_propagates_quietly
+
+    ! ================================================================================
+    ! Unit vectors and the tangent plane
+    ! ================================================================================
+
+    !> Every unit-vector row of `test/test_skycoord_vectors.f90`, both ways. A pole is the exact
+    !! `(0, 0, +/-1)` and reads back with right ascension 0; a latitude past 90 is the direction it
+    !! names; and every vector has unit length. A wrong axis order, or a longitude taken for a
+    !! latitude, misses by whole degrees.
+    subroutine test_unit_vectors_golden(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: lon, lat, v(3), want(3), back_lon, back_lat, got_lon, got_lat, worst, worst_back
+        integer :: k
+        character(len=140) :: msg
+
+        worst = 0.0_real64
+        worst_back = 0.0_real64
+        do k = 1, n_svec
+            lon = transfer(svec_in_bits(2 * k - 1), 0.0_real64)
+            lat = transfer(svec_in_bits(2 * k), 0.0_real64)
+            want = [transfer(svec_out_bits(3 * k - 2), 0.0_real64), transfer(svec_out_bits(3 * k - 1), 0.0_real64), &
+                    transfer(svec_out_bits(3 * k), 0.0_real64)]
+            back_lon = transfer(svec_back_bits(2 * k - 1), 0.0_real64)
+            back_lat = transfer(svec_back_bits(2 * k), 0.0_real64)
+            call pf_radec2unit(lon, lat, v)
+            worst = max(worst, maxval(abs(v - want)))
+            worst = max(worst, abs(sqrt(v(1) * v(1) + v(2) * v(2) + v(3) * v(3)) - 1.0_real64))
+            call pf_unit2radec(v, got_lon, got_lat)
+            ! The vector's components are one rounding from the model's; the position read back out
+            ! of them is an `atan2` and a scaling away, which is a few times 1e-15 degrees.
+            worst_back = max(worst_back, sky_gap(got_lon, got_lat, back_lon, back_lat))
+            if (abs(lat) == 90.0_real64) then
+                call check(error, v(1) == 0.0_real64 .and. v(2) == 0.0_real64 .and. abs(v(3)) == 1.0_real64 .and. &
+                    got_lon == 0.0_real64, "a pole is not exactly (0, 0, +/-1) with longitude 0")
+                if (allocated(error)) return
+            end if
+        end do
+        call check(error, n_svec > 0, "the unit-vector table lost its rows")
+        if (allocated(error)) return
+        write (msg, '(a,es10.3,a,es10.3,a)') "pf_radec2unit misses the 60-digit model by ", worst, &
+            " and pf_unit2radec by ", worst_back, " degrees"
+        call check(error, worst <= 1.0e-15_real64 .and. worst_back <= 1.0e-13_real64, trim(msg))
+    end subroutine test_unit_vectors_golden
+
+    !> The pair's contract: a dense round trip, a vector of any length (scaled by its largest
+    !! component, so a tiny one is still a direction), the zero vector, an infinite component read
+    !! as the direction of the infinite components alone, and a NaN through both without a flag.
+    subroutine test_unit_vectors_contract(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        !> Directions a caller can legitimately hand the pair: a subnormal-scale vector, a huge one,
+        !! the zero vector, and one with an infinite component. Named rather than written as array
+        !! constructors at the calls: an explicit-shape dummy takes a temporary of a constructor,
+        !! which ifx reports as `warning (406)` on every call (`check_no_array_temporary_argument`).
+        real(real64), parameter :: TINY_V(3) = [1.0e-300_real64, 0.0_real64, 1.0e-300_real64]
+        real(real64), parameter :: HUGE_V(3) = [0.0_real64, 3.0e300_real64, 0.0_real64]
+        real(real64), parameter :: ZERO_V(3) = [0.0_real64, 0.0_real64, 0.0_real64]
+        real(real64) :: lon, lat, v(3), nan_v(3), inf_v(3), a, b, worst, nan, pinf
+        integer :: i, j
+        logical :: saved, raised, can
+
+        worst = 0.0_real64
+        do i = 0, 36
+            do j = 0, 18
+                lon = 10.0_real64 * real(i, real64)
+                lat = -90.0_real64 + 10.0_real64 * real(j, real64)
+                call pf_radec2unit(lon, lat, v)
+                call pf_unit2radec(v, a, b)
+                if (abs(lat) /= 90.0_real64) worst = max(worst, sky_gap(a, b, modulo(lon, 360.0_real64), lat))
+            end do
+        end do
+        call check(error, worst <= 1.0e-13_real64, "the unit-vector round trip does not return the position")
+        if (allocated(error)) return
+        ! Any length, both extremes, and the zero vector.
+        call pf_unit2radec(TINY_V, a, b)
+        call check(error, a == 0.0_real64 .and. abs(b - 45.0_real64) <= 1.0e-13_real64, &
+            "a subnormal-scale vector is not a direction")
+        if (allocated(error)) return
+        call pf_unit2radec(HUGE_V, a, b)
+        call check(error, abs(a - 90.0_real64) <= 1.0e-13_real64 .and. b == 0.0_real64, &
+            "a huge vector is not a direction")
+        if (allocated(error)) return
+        call pf_unit2radec(ZERO_V, a, b)
+        call check(error, a == 0.0_real64 .and. b == 0.0_real64, "the zero vector is not (0, 0)")
+        if (allocated(error)) return
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        pinf = ieee_value(0.0_real64, ieee_positive_inf)
+        can = ieee_support_flag(ieee_invalid, nan)
+        saved = .false.
+        raised = .false.
+        if (can) then
+            call ieee_get_flag(ieee_invalid, saved)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+        nan_v = [1.0_real64, nan, 0.5_real64]
+        inf_v = [pinf, 0.0_real64, 1.0_real64]
+        call pf_radec2unit(nan, 20.0_real64, v)
+        call pf_unit2radec(nan_v, a, b)
+        if (can) call ieee_get_flag(ieee_invalid, raised)
+        if (can) call ieee_set_flag(ieee_invalid, saved .or. raised)
+        call check(error, .not. raised, "a NaN through the unit-vector pair raised IEEE_INVALID")
+        if (allocated(error)) return
+        call check(error, all(v /= v) .and. a /= a .and. b /= b, "a NaN did not propagate through the pair")
+        if (allocated(error)) return
+        call pf_unit2radec(inf_v, a, b)
+        call check(error, a == 0.0_real64 .and. b == 0.0_real64, &
+            "an infinite component is not read as the direction of the infinite components alone")
+    end subroutine test_unit_vectors_contract
+
+    !> Every tangent-plane row, both ways, against the 60-digit model: a mid-latitude field at four
+    !! rotations of its axes, a pole-centred field, a field on the seam and one at the equator, with
+    !! the tangent point itself, the four cardinal directions, a millionth of a degree, 80 degrees,
+    !! and a position past 90 degrees, which has no image.
+    subroutine test_tangent_golden(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: ra, dec, ra0, dec0, pa, x, y, want_x, want_y, a, b, worst, worst_back, scale
+        integer :: k, n_none
+        character(len=160) :: msg
+
+        worst = 0.0_real64
+        worst_back = 0.0_real64
+        n_none = 0
+        do k = 1, n_stan
+            ra = transfer(stan_in_bits(5 * k - 4), 0.0_real64)
+            dec = transfer(stan_in_bits(5 * k - 3), 0.0_real64)
+            ra0 = transfer(stan_in_bits(5 * k - 2), 0.0_real64)
+            dec0 = transfer(stan_in_bits(5 * k - 1), 0.0_real64)
+            pa = transfer(stan_in_bits(5 * k), 0.0_real64)
+            call pf_radec2tan(ra, dec, ra0, dec0, x, y, pa)
+            if (.not. stan_has_image(k)) then
+                n_none = n_none + 1
+                call check(error, x /= x .and. y /= y, "a position past 90 degrees from the tangent point has an image")
+                if (allocated(error)) return
+                cycle
+            end if
+            want_x = transfer(stan_out_bits(2 * k - 1), 0.0_real64)
+            want_y = transfer(stan_out_bits(2 * k), 0.0_real64)
+            scale = max(1.0_real64, abs(want_x), abs(want_y))
+            worst = max(worst, max(abs(x - want_x), abs(y - want_y)) / scale)
+            ! The inverse of the MODEL'S standard coordinates, not of the library's: a pair of
+            ! matching errors would survive a round trip through the library alone.
+            call pf_tan2radec(want_x, want_y, ra0, dec0, a, b, pa)
+            worst_back = max(worst_back, sky_gap(a, b, transfer(stan_back_bits(2 * k - 1), 0.0_real64), &
+                                                 transfer(stan_back_bits(2 * k), 0.0_real64)))
+        end do
+        call check(error, n_stan > 0 .and. n_none > 0, "the tangent-plane table lost its rows, or its far hemisphere")
+        if (allocated(error)) return
+        write (msg, '(a,es10.3,a,es10.3)') "pf_radec2tan misses the model by ", worst, " relative, pf_tan2radec by ", &
+            worst_back
+        call check(error, worst <= 1.0e-13_real64 .and. worst_back <= 1.0e-12_real64, trim(msg))
+    end subroutine test_tangent_golden
+
+    !> **The definition**: a point `sep` degrees away at position angle `pa` lands at `(0, tan(sep))`
+    !! when the axes are turned to `pa_deg = pa`, and at `(tan(sep) sin(pa), tan(sep) cos(pa))` when
+    !! they are not -- which pins the sign of `x`, the sign of `y`, the direction `pa_deg` turns the
+    !! axes and the radius all at once. A projection with east and north swapped, or a rotation the
+    !! wrong way, fails at the first row. The pair then inverts over the same ladder.
+    subroutine test_tangent_is_the_gnomonic_projection(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64), parameter :: PAS(5) = [0.0_real64, 37.5_real64, 90.0_real64, 180.0_real64, -90.0_real64]
+        real(real64), parameter :: SEPS(5) = [1.0e-6_real64, 0.01_real64, 0.5_real64, 10.0_real64, 80.0_real64]
+        real(real64) :: ra, dec, x, y, a, b, t, tol, worst
+        integer :: i, j
+        character(len=160) :: msg
+
+        worst = 0.0_real64
+        do i = 1, size(PAS)
+            do j = 1, size(SEPS)
+                t = tan(SEPS(j) * DEG) / DEG
+                ! **The tolerance is the POSITION's own resolution, not the projection's.** The
+                ! offset is handed over as two doubles near 33 and 21 degrees, whose ulp is 3.6e-15
+                ! degrees, so a separation of `sep` is carried with a relative error of about
+                ! `8e-15 / sep` however exactly the projection then works: at a millionth of a
+                ! degree that is 8e-9, and at half a degree 1e-12.
+                tol = max(1.0e-12_real64, 8.0e-15_real64 / SEPS(j))
+                call pf_offset_radec(33.0_real64, 21.0_real64, PAS(i), SEPS(j), ra, dec)
+                ! Turned to the point's own position angle: it lands on +y, at tan(sep).
+                call pf_radec2tan(ra, dec, 33.0_real64, 21.0_real64, x, y, PAS(i))
+                worst = max(worst, abs(x) / (t * tol), abs(y - t) / (t * tol))
+                ! Unturned: the components of the same radius, east through sin and north through cos.
+                call pf_radec2tan(ra, dec, 33.0_real64, 21.0_real64, x, y)
+                worst = max(worst, abs(x - t * sin(PAS(i) * DEG)) / (t * tol), &
+                            abs(y - t * cos(PAS(i) * DEG)) / (t * tol))
+                ! And back: the position returns to where the offset put it.
+                call pf_tan2radec(x, y, 33.0_real64, 21.0_real64, a, b)
+                worst = max(worst, sky_gap(a, b, ra, dec) / 1.0e-12_real64)
+            end do
+        end do
+        write (msg, '(a,es10.3,a)') "the projection is not (tan(sep) sin(pa), tan(sep) cos(pa)): worst ", worst, &
+            " times the tolerance the position's own resolution sets"
+        call check(error, worst <= 1.0_real64, trim(msg))
+        if (allocated(error)) return
+        ! The tangent point is the origin, from a pole too, where the local frame follows `ra0`.
+        call pf_radec2tan(250.0_real64, 90.0_real64, 250.0_real64, 90.0_real64, x, y)
+        call check(error, abs(x) <= 1.0e-14_real64 .and. abs(y) <= 1.0e-14_real64, "the tangent point is not the origin")
+        if (allocated(error)) return
+        call pf_tan2radec(0.0_real64, 0.0_real64, 123.4_real64, -90.0_real64, a, b)
+        call check(error, b == -90.0_real64 .and. a == 0.0_real64, "the origin is not the tangent point, at a pole")
+        if (allocated(error)) return
+        ! A pole-centred field follows the `ra0` given, as `pf_offset_radec` does.
+        call pf_offset_radec(250.0_real64, 90.0_real64, 30.0_real64, 1.0_real64, ra, dec)
+        call pf_radec2tan(ra, dec, 250.0_real64, 90.0_real64, x, y, 30.0_real64)
+        t = tan(1.0_real64 * DEG) / DEG
+        call check(error, abs(x) <= 1.0e-12_real64 .and. abs(y - t) <= 1.0e-12_real64, &
+            "a pole-centred field does not follow the ra0 given")
+        if (allocated(error)) return
+        ! `pa_deg` absent is `pa_deg = 0`, and a whole turn of it changes nothing.
+        call pf_radec2tan(34.0_real64, 21.5_real64, 33.0_real64, 21.0_real64, x, y)
+        call pf_radec2tan(34.0_real64, 21.5_real64, 33.0_real64, 21.0_real64, a, b, 360.0_real64)
+        call check(error, abs(a - x) <= 1.0e-14_real64 .and. abs(b - y) <= 1.0e-14_real64, &
+            "an absent pa_deg is not 0, or a whole turn of it moved the chart")
+    end subroutine test_tangent_is_the_gnomonic_projection
+
+    !> The far hemisphere has no image -- NaN coordinates, raising no flag, and `x /= x` is the
+    !! screen a caller uses -- while just inside the boundary the image is finite and enormous. A
+    !! NaN argument gives NaN results through both procedures without raising, and a `dec0` outside
+    !! `[-90, 90]` stops the program, tested out of process (`skycoord_radec2tan_dec0_out_of_range`,
+    !! `skycoord_tan2radec_dec0_out_of_range`). Elemental over a column, a row answers for itself.
+    subroutine test_tangent_far_hemisphere_and_nan(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: ra(4), dec(4), x(4), y(4), a, b, nan, xs, ys
+        logical :: saved, raised, can
+        integer :: k
+
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        ! Just inside the boundary the radius is finite and huge; past it there is no image.
+        call pf_offset_radec(10.0_real64, 5.0_real64, 30.0_real64, 89.999999_real64, a, b)
+        call pf_radec2tan(a, b, 10.0_real64, 5.0_real64, xs, ys)
+        call check(error, xs == xs .and. abs(hypot(xs, ys) - tan(89.999999_real64 * DEG) / DEG) <= &
+            1.0e-3_real64 * hypot(xs, ys), "a position a millionth of a degree inside the boundary has no finite image")
+        if (allocated(error)) return
+        do k = 1, 4
+            call pf_offset_radec(10.0_real64, 5.0_real64, 30.0_real64, 90.0_real64 + real(k, real64), ra(k), dec(k))
+        end do
+        can = ieee_support_flag(ieee_invalid, nan)
+        saved = .false.
+        raised = .false.
+        if (can) then
+            call ieee_get_flag(ieee_invalid, saved)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+        call pf_radec2tan(ra, dec, 10.0_real64, 5.0_real64, x, y)
+        if (can) call ieee_get_flag(ieee_invalid, raised)
+        if (can) call ieee_set_flag(ieee_invalid, saved .or. raised)
+        call check(error, .not. raised, "the far hemisphere raised IEEE_INVALID rather than answering NaN quietly")
+        if (allocated(error)) return
+        call check(error, all(x /= x) .and. all(y /= y), "a position in the far hemisphere has an image")
+        if (allocated(error)) return
+        ! A NaN in any argument, both ways, raising nothing; and one row's NaN is its own.
+        raised = .false.
+        if (can) call ieee_set_flag(ieee_invalid, .false.)
+        call pf_radec2tan([33.0_real64, nan, 33.5_real64, 33.0_real64], [21.0_real64, 21.0_real64, nan, 21.0_real64], &
+                          33.0_real64, 21.0_real64, x, y)
+        call pf_tan2radec(nan, 0.5_real64, 33.0_real64, 21.0_real64, a, b)
+        if (can) call ieee_get_flag(ieee_invalid, raised)
+        if (can) call ieee_set_flag(ieee_invalid, saved .or. raised)
+        call check(error, .not. raised, "a NaN through the tangent plane raised IEEE_INVALID")
+        if (allocated(error)) return
+        call check(error, x(1) == x(1) .and. x(2) /= x(2) .and. x(3) /= x(3) .and. x(4) == x(4) .and. &
+            a /= a .and. b /= b, "a NaN did not propagate through the tangent plane, or touched another row")
+        if (allocated(error)) return
+        call pf_radec2tan(33.0_real64, 21.0_real64, 33.0_real64, 21.0_real64, xs, ys, nan)
+        call check(error, xs /= xs .and. ys /= ys, "a NaN pa_deg did not give NaN results")
+    end subroutine test_tangent_far_hemisphere_and_nan
 
     ! ================================================================================
     ! Angular separation
@@ -1980,6 +2279,71 @@ contains
             "over a column, a row that read was read wrong")
     end subroutine test_str2ra_rejects_the_wrong_shape
 
+    !> **The leading field is bounded**, and reached only exactly: a declination of at most 90 and
+    !! an hour of at most 24, each with zero minutes and zero seconds at the bound. So `+90:00:00`
+    !! reads -- it is what `pf_dec2str` writes for the north pole, and a reader that could not read
+    !! its own writer's output would be a trap of its own -- while `+90:00:00.01` and `+91:00:00`
+    !! do not, and `24:00:00` keeps its documented 360 degrees while `24:00:00.001` and `25:00:00`
+    !! do not. Every refusal is decided from the digits, so no rounding decides an acceptance.
+    subroutine test_readers_bound_the_leading_field(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        character(len=16), parameter :: BAD_DEC(8) = [character(len=16) :: "+91:00:00", "-91:30:00", &
+            "+90:00:00.01", "+90:00:01", "+90:01:00", "-90:00:00.001", "+100:00:00", "+90d00m00.5s"]
+        character(len=16), parameter :: BAD_RA(6) = [character(len=16) :: "25:00:00", "24:00:00.001", &
+            "24:00:01", "24:01:00", "99:00:00", "24h00m00.5s"]
+        character(len=16), parameter :: GOOD_DEC(5) = [character(len=16) :: "+90:00:00", "-90:00:00", &
+            "+90d00m00.000s", "89:59:59.999999", "-89:59:59.999"]
+        real(real64) :: v, w, text_value
+        character(len=:), allocatable :: text
+        logical :: ok
+        integer :: k
+
+        do k = 1, size(BAD_DEC)
+            call pf_str2dec(BAD_DEC(k), v, ok)
+            call check(error, .not. ok, "pf_str2dec read '" // trim(BAD_DEC(k)) // "'")
+            if (allocated(error)) return
+        end do
+        do k = 1, size(BAD_RA)
+            call pf_str2ra(BAD_RA(k), v, ok)
+            call check(error, .not. ok, "pf_str2ra read '" // trim(BAD_RA(k)) // "'")
+            if (allocated(error)) return
+        end do
+        do k = 1, size(GOOD_DEC)
+            call pf_str2dec(GOOD_DEC(k), v, ok)
+            call check(error, ok, "pf_str2dec refused the well-formed '" // trim(GOOD_DEC(k)) // "'")
+            if (allocated(error)) return
+        end do
+        call pf_str2dec("+90:00:00", v, ok)
+        call check(error, ok .and. v == 90.0_real64, "'+90:00:00' is not exactly 90")
+        if (allocated(error)) return
+        call pf_str2dec("-90:00:00", v, ok)
+        call check(error, ok .and. v == -90.0_real64, "'-90:00:00' is not exactly -90")
+        if (allocated(error)) return
+        call pf_str2ra("24:00:00", v, ok)
+        call check(error, ok .and. v == 360.0_real64, "'24:00:00' is not the documented 360 degrees")
+        if (allocated(error)) return
+        call pf_str2ra("23:59:59.999", v, ok)
+        call check(error, ok, "pf_str2ra refused the well-formed '23:59:59.999'")
+        if (allocated(error)) return
+        ! A pair with either half past its bound is refused whole.
+        call pf_str2radec("10:21:30.55 +91:00:00", v, w, ok)
+        call check(error, .not. ok, "pf_str2radec read a declination past the pole")
+        if (allocated(error)) return
+        call pf_str2radec("25:00:00 +41:16:09", v, w, ok)
+        call check(error, .not. ok, "pf_str2radec read an hour past the turn")
+        if (allocated(error)) return
+        ! **The writer/reader loop closes**: what `pf_dec2str` writes for a declination in
+        ! `[-90, 90]` reads back, the poles included.
+        do k = -90, 90
+            text_value = real(k, real64)
+            call pf_dec2str(text_value, text)
+            call pf_str2dec(text, v, ok)
+            call check(error, ok .and. abs(v - text_value) <= READ_TOL * 90.0_real64, &
+                "pf_dec2str wrote '" // text // "', which pf_str2dec does not read back")
+            if (allocated(error)) return
+        end do
+    end subroutine test_readers_bound_the_leading_field
+
     !> A NaN never reaches `int()`, which traps under nagfor's default `-ieee=stop`: `pf_deg2hms` gives
     !! zero fields and a NaN `s`, `pf_deg2dms` a positive sign as well, the writers the text `nan`
     !! in its own half, and the joiners a NaN -- raising no flag, read around the calls in this
@@ -2301,6 +2665,128 @@ contains
         call check(error, ok, "a NaN or a speed of light did not give a NaN, a speed just below it gave no finite " // &
             "redshift, an infinite redshift did not come back, or a NaN touched another row")
     end subroutine test_zcmb_nan_propagates_quietly
+
+    !> **Ninety degrees from the apex the boost is the transverse Doppler shift and nothing else**:
+    !! `1 + z_cmb = (1 + z_hel) / gamma`, with no first-order term at all. That follows from the
+    !! angle being the OBSERVED one, and it is what tells the two ways of writing the factor apart:
+    !! `gamma (1 + beta cos(theta))`, which is exact for the angle measured in the CMB frame, gives
+    !! `(1 + z_hel) * gamma` here instead -- larger by `2 (gamma - 1)`, 1.5e-6 in `1 + z`, and on
+    !! the wrong side. Tested at four position angles around the apex, so no single direction can
+    !! carry it, and with a dipole ten times the real one, where the difference is a hundred times
+    !! larger.
+    subroutine test_zcmb_is_the_observed_frame_factor(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64), parameter :: PAS(4) = [0.0_real64, 90.0_real64, 180.0_real64, 215.0_real64]
+        real(real64) :: alon, alat, av, beta, gam, lon, lat, z, want, worst
+        integer :: i, k
+        character(len=160) :: msg
+
+        alon = transfer(szcmb_default_bits(1), 0.0_real64)
+        alat = transfer(szcmb_default_bits(2), 0.0_real64)
+        worst = 0.0_real64
+        do k = 1, 2
+            av = transfer(szcmb_default_bits(3), 0.0_real64) * real(k * k * k, real64)
+            beta = av / 299792.458_real64
+            gam = 1.0_real64 / sqrt((1.0_real64 - beta) * (1.0_real64 + beta))
+            do i = 1, size(PAS)
+                call pf_offset_radec(alon, alat, PAS(i), 90.0_real64, lon, lat)
+                z = pf_zhel2zcmb(lon, lat, 0.1_real64, PF_COORD_GALACTIC, alon, alat, av)
+                want = 1.1_real64 / gam - 1.0_real64
+                worst = max(worst, abs(z - want) / max(1.0_real64, abs(want)))
+            end do
+        end do
+        write (msg, '(a,es10.3)') "90 degrees from the apex the boost is not (1 + z_hel) / gamma: worst ", worst
+        call check(error, worst <= 1.0e-13_real64, trim(msg))
+        if (allocated(error)) return
+        ! The negative control: the other reading of the factor is larger by 2*(gamma - 1) in
+        ! `1 + z`, which is 1.5e-6 -- far above the tolerance above, so the assertion can fail.
+        beta = transfer(szcmb_default_bits(3), 0.0_real64) / 299792.458_real64
+        gam = 1.0_real64 / sqrt((1.0_real64 - beta) * (1.0_real64 + beta))
+        call pf_offset_radec(alon, alat, 0.0_real64, 90.0_real64, lon, lat)
+        z = pf_zhel2zcmb(lon, lat, 0.1_real64, PF_COORD_GALACTIC)
+        call check(error, abs((1.1_real64 * gam - 1.0_real64) - z) > 1.0e-7_real64, &
+            "the CMB-frame factor cannot be told from the one written for the CMB-frame angle")
+    end subroutine test_zcmb_is_the_observed_frame_factor
+
+    !> `pf_zcmb2zhel` against its own golden rows -- the same positions and dipoles read the other
+    !! way -- and as the inverse: a redshift through both comes back to rounding, in every system,
+    !! at the apex, at the antapex and under a given dipole. Its totality is `pf_zhel2zcmb`'s: a NaN
+    !! argument gives a NaN without a flag, an infinite `z_cmb` comes back itself, a speed at or
+    !! beyond light's gives a NaN, and an unknown system stops the program, which
+    !! `skycoord_zcmb2zhel_unknown_system` covers out of process.
+    subroutine test_zcmb2zhel_inverts(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64) :: lon, lat, z, got, want, worst, round, nan, pinf, zs(6)
+        integer :: k, i
+        logical :: saved, raised, can
+        character(len=140) :: msg
+
+        worst = 0.0_real64
+        round = 0.0_real64
+        do k = 1, n_szcmb
+            lon = transfer(szcmb_in_bits(3 * k - 2), 0.0_real64)
+            lat = transfer(szcmb_in_bits(3 * k - 1), 0.0_real64)
+            z = transfer(szcmb_in_bits(3 * k), 0.0_real64)
+            want = transfer(szhel_out_bits(k), 0.0_real64)
+            if (szcmb_apex_given(k)) then
+                got = pf_zcmb2zhel(lon, lat, z, szcmb_system(k), transfer(szcmb_apex_bits(3 * k - 2), 0.0_real64), &
+                                   transfer(szcmb_apex_bits(3 * k - 1), 0.0_real64), &
+                                   transfer(szcmb_apex_bits(3 * k), 0.0_real64))
+                round = max(round, abs(pf_zcmb2zhel(lon, lat, pf_zhel2zcmb(lon, lat, z, szcmb_system(k), &
+                    transfer(szcmb_apex_bits(3 * k - 2), 0.0_real64), transfer(szcmb_apex_bits(3 * k - 1), 0.0_real64), &
+                    transfer(szcmb_apex_bits(3 * k), 0.0_real64)), szcmb_system(k), &
+                    transfer(szcmb_apex_bits(3 * k - 2), 0.0_real64), transfer(szcmb_apex_bits(3 * k - 1), 0.0_real64), &
+                    transfer(szcmb_apex_bits(3 * k), 0.0_real64)) - z) / max(1.0_real64, abs(z)))
+            else
+                got = pf_zcmb2zhel(lon, lat, z, szcmb_system(k))
+                round = max(round, abs(pf_zcmb2zhel(lon, lat, pf_zhel2zcmb(lon, lat, z, szcmb_system(k)), &
+                    szcmb_system(k)) - z) / max(1.0_real64, abs(z)))
+            end if
+            worst = max(worst, abs(got - want) / max(1.0_real64, abs(want)))
+        end do
+        write (msg, '(a,es10.3)') "pf_zcmb2zhel misses the model by ", worst
+        call check(error, worst <= ZCMB_TOL, trim(msg))
+        if (allocated(error)) return
+        write (msg, '(a,es10.3)') "a redshift through both does not come back: worst ", round
+        call check(error, round <= 8.0_real64 * SAME, trim(msg))
+        if (allocated(error)) return
+        ! Totality, read around the calls in this test's own body.
+        nan = ieee_value(0.0_real64, ieee_quiet_nan)
+        pinf = ieee_value(0.0_real64, ieee_positive_inf)
+        can = ieee_support_flag(ieee_invalid, nan)
+        saved = .false.
+        raised = .false.
+        if (can) then
+            call ieee_get_flag(ieee_invalid, saved)
+            call ieee_set_flag(ieee_invalid, .false.)
+        end if
+        zs(1) = pf_zcmb2zhel(nan, 20.0_real64, 0.1_real64)
+        zs(2) = pf_zcmb2zhel(10.0_real64, nan, 0.1_real64)
+        zs(3) = pf_zcmb2zhel(10.0_real64, 20.0_real64, nan)
+        zs(4) = pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64, apex_lon=nan)
+        zs(5) = pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64, apex_v=nan)
+        zs(6) = pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64, apex_v=299792.458_real64)
+        if (can) call ieee_get_flag(ieee_invalid, raised)
+        if (can) call ieee_set_flag(ieee_invalid, saved .or. raised)
+        call check(error, .not. raised, "pf_zcmb2zhel raised a flag on a NaN or a speed of light")
+        if (allocated(error)) return
+        call check(error, all(zs /= zs), "a NaN or a speed of light did not give a NaN")
+        if (allocated(error)) return
+        call check(error, pf_zcmb2zhel(10.0_real64, 20.0_real64, pinf) == pinf, "an infinite z_cmb did not come back")
+        if (allocated(error)) return
+        call check(error, pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.37_real64, apex_v=0.0_real64) == 0.37_real64, &
+            "no motion changed the redshift")
+        if (allocated(error)) return
+        ! Every system is accepted, and the default is ICRS.
+        do i = 1, NSYS
+            round = max(round, abs(pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64, SYSTEMS(i)) - 0.1_real64))
+        end do
+        call check(error, round < 0.01_real64, "a valid system did not give a redshift near its CMB-frame one")
+        if (allocated(error)) return
+        call check(error, abs(pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64) - &
+            pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64, PF_COORD_ICRS)) <= SAME, &
+            "pf_zcmb2zhel's default system is not ICRS")
+    end subroutine test_zcmb2zhel_inverts
 
     ! ================================================================================
     ! Helpers

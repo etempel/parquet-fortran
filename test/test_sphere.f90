@@ -23,6 +23,8 @@ module test_sphere
     use parquet_random, only: pf_random_at, pf_random_key, pf_random_int_at, pf_random_direction_at, &
         pf_random_radec_at, pf_random_disc_at, pf_random_disc_radec_at, pf_random_pair_spare_at
     use parquet_healpix, only: pf_vec2pix_nest, pf_ring2nest, pf_angdist
+    ! The sky tier's own pair, which this one's must equal bit for bit under PF_HP_DEC_NORTH.
+    use parquet_skycoord, only: pf_radec2unit, pf_unit2radec
     use test_sphere_vectors
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf, &
         ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_invalid
@@ -64,6 +66,8 @@ contains
                          test_sphere_golden), &
             new_unittest("pf_radec2vec and pf_vec2radec round-trip, name their frame, and agree with the grid's", &
                          test_radec2vec_round_trip), &
+            new_unittest("parquet_skycoord's pf_radec2unit and pf_unit2radec are this pair under PF_HP_DEC_NORTH", &
+                         test_skycoord_vector_pair_is_this_one), &
             new_unittest("pf_vec2radec reads parquet_random's directions and discs as its own RA/Dec twin does", &
                          test_radec_agrees_with_stage_one), &
             new_unittest("a polygon's accessors before, after and between %init and %clear", &
@@ -253,6 +257,49 @@ contains
     ! ================================================================================
     ! Conversions
     ! ================================================================================
+
+    !> **`parquet_skycoord`'s `pf_radec2unit`/`pf_unit2radec` are this module's pair under
+    !! `PF_HP_DEC_NORTH`, bit for bit**, which is the promise that lets a caller needing vectors
+    !! stay in the sky tier instead of compiling this one. The two are separate bodies in separate
+    !! modules; nothing but this test keeps them from drifting apart, and a difference of an ulp in
+    !! the last bit is exactly the kind nobody can explain later. Both directions, over the poles,
+    !! a signed zero, the seam and a dense pseudorandom sweep.
+    subroutine test_skycoord_vector_pair_is_this_one(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64), parameter :: HARD_RA(6) = [0.0_real64, 123.4_real64, 359.999_real64, 0.0_real64, &
+                                                 180.0_real64, 45.0_real64]
+        real(real64), parameter :: HARD_DEC(6) = [90.0_real64, -90.0_real64, 0.0_real64, -0.0_real64, &
+                                                  89.9999999_real64, -12.5_real64]
+        real(real64) :: ra, dec, v(3), w(3), a1, b1, a2, b2
+        integer :: k, n_same
+        character(len=140) :: msg
+
+        n_same = 0
+        do k = 1, 20000
+            if (k <= size(HARD_RA)) then
+                ra = HARD_RA(k)
+                dec = HARD_DEC(k)
+            else
+                ra = 360.0_real64 * pf_random_at(SKY_SEED + 7_int64, k, 1_int64)
+                dec = 180.0_real64 * pf_random_at(SKY_SEED + 7_int64, k, 2_int64) - 90.0_real64
+            end if
+            call pf_radec2unit(ra, dec, v)
+            call pf_radec2vec(ra, dec, w, PF_HP_DEC_NORTH)
+            call pf_unit2radec(w, a1, b1)
+            call pf_vec2radec(w, a2, b2, PF_HP_DEC_NORTH)
+            if (all(v == w) .and. a1 == a2 .and. b1 == b2) n_same = n_same + 1
+        end do
+        write (msg, '(a,i0,a)') "parquet_skycoord's vector pair agrees with this module's on only ", n_same, &
+            " of 20000 positions, not all of them"
+        call check(error, n_same == 20000, trim(msg))
+        if (allocated(error)) return
+        ! The mirrored frame is the documented negation and nothing else, so the two conventions
+        ! cannot be confused for one another.
+        call pf_radec2unit(33.0_real64, 44.0_real64, v)
+        call pf_radec2vec(33.0_real64, 44.0_real64, w, PF_HP_DEC_SOUTH)
+        call check(error, v(1) == w(1) .and. v(2) == w(2) .and. v(3) == -w(3), &
+            "PF_HP_DEC_SOUTH differs from the sky tier's vector by something other than the sign of z")
+    end subroutine test_skycoord_vector_pair_is_this_one
 
     !> `pf_radec2vec` and `pf_vec2radec`: a round trip, the frame, the grid's own layer, scale, the
     !! poles, the zero vector, infinities, and a quiet NaN.

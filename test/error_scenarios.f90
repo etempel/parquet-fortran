@@ -1565,6 +1565,12 @@ program error_scenarios
         call scenario_skycoord_rotation_init_unknown_system()
     case ("skycoord_apply_pm_dec_out_of_range")
         call scenario_skycoord_apply_pm_dec_out_of_range()
+    case ("skycoord_radec2tan_dec0_out_of_range")
+        call scenario_skycoord_radec2tan_dec0_out_of_range()
+    case ("skycoord_tan2radec_dec0_out_of_range")
+        call scenario_skycoord_tan2radec_dec0_out_of_range()
+    case ("skycoord_zcmb2zhel_unknown_system")
+        call scenario_skycoord_zcmb2zhel_unknown_system()
     case ("sphere_fibonacci_n_not_positive")
         call scenario_sphere_fibonacci_n_not_positive()
     case ("sphere_fibonacci_bad_shape")
@@ -24523,6 +24529,36 @@ contains
         call pf_apply_pm(10.0_real64, 90.5_real64, 100.0_real64, 0.0_real64, 10.0_real64, ra, dec)   ! -> aborts
         print '(a,2f14.8)', "unexpectedly moved from beyond the pole: ", ra, dec
     end subroutine scenario_skycoord_apply_pm_dec_out_of_range
+
+    !> A tangent point beyond a pole: `pf_radec2tan` refuses it, as `pf_offset_radec`'s centre is
+    !! refused, because a centre past a pole mirrors the local north and east and charts a
+    !! plausible wrong field.
+    subroutine scenario_skycoord_radec2tan_dec0_out_of_range()
+        real(real64) :: x, y
+        call pf_radec2tan(11.0_real64, 21.0_real64, 10.0_real64, 90.0_real64, x, y)
+        print '(a,2f14.8)', "projected about the pole: ", x, y
+        call pf_radec2tan(11.0_real64, 21.0_real64, 10.0_real64, 90.5_real64, x, y)   ! -> aborts
+        print '(a,2f14.8)', "unexpectedly projected about a centre beyond the pole: ", x, y
+    end subroutine scenario_skycoord_radec2tan_dec0_out_of_range
+
+    !> The same centre, refused by the inverse in its own name.
+    subroutine scenario_skycoord_tan2radec_dec0_out_of_range()
+        real(real64) :: ra, dec
+        call pf_tan2radec(0.5_real64, 0.25_real64, 10.0_real64, -90.0_real64, ra, dec)
+        print '(a,2f14.8)', "unprojected about the south pole: ", ra, dec
+        call pf_tan2radec(0.5_real64, 0.25_real64, 10.0_real64, -90.5_real64, ra, dec)   ! -> aborts
+        print '(a,2f14.8)', "unexpectedly unprojected about a centre beyond the pole: ", ra, dec
+    end subroutine scenario_skycoord_tan2radec_dec0_out_of_range
+
+    !> `pf_zcmb2zhel` refuses a selector that is not a system, in its own name, as `pf_zhel2zcmb`
+    !! does: the message says which procedure the caller called.
+    subroutine scenario_skycoord_zcmb2zhel_unknown_system()
+        real(real64) :: z
+        z = pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64, PF_COORD_GALACTIC)
+        print '(a,es24.16)', "the heliocentric redshift of a Galactic position: ", z
+        z = pf_zcmb2zhel(10.0_real64, 20.0_real64, 0.1_real64, PF_COORD_UNKNOWN)   ! -> aborts
+        print '(a,es24.16)', "unexpectedly gave a redshift in the unknown system: ", z
+    end subroutine scenario_skycoord_zcmb2zhel_unknown_system
 
     !> A grid of no points has no answer. The control is a grid of one.
     subroutine scenario_sphere_fibonacci_n_not_positive()

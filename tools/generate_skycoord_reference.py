@@ -12,8 +12,10 @@ Emitted (COMMITTED to the repository, like every other generator's output):
 
   test/test_skycoord_vectors.f90  module `test_skycoord_vectors`: the coordinate-system selectors;
                                   rotations between every ordered pair of distinct systems;
-                                  offsets and position angles; proper motions; sexagesimal
-                                  fields, text written and text read; and CMB-frame redshifts.
+                                  offsets and position angles; proper motions; unit vectors;
+                                  tangent-plane projections and their inverses; sexagesimal
+                                  fields, text written and text read; and CMB-frame redshifts,
+                                  both ways.
 
 Usage:  tools/generate_skycoord_reference.py [--check] [--self-test] [--verify-oracle]
 
@@ -91,12 +93,14 @@ THE TEXT IS EXACT, AND ITS FIXTURES ARE CHOSEN SO THAT IT CAN BE
 
 The sexagesimal model works on the input double's exact value as a `Fraction`: the fraction of a
 degree times the output units in a degree, rounded to nearest with ties to even, then integer
-fields. The library forms that product once in double precision before it rounds, so a fixture
-whose exact product lies within that one rounding of a half-unit -- or, for the unrounded field
-splits, of a whole second -- could legitimately print otherwise; `stable_*` refuses such a
-fixture rather than freezing a coin toss. The emitted text is then asserted character for
-character. Text read back is modelled by a separate grammar written as regular expressions, so
-the reader is checked against a second transcription of its own rules, not against itself.
+fields. The WRITERS round from that exact product -- the library resolves a tie with a two-product
+residual -- so a fixture on a knife edge is a fixture worth having, and several are in the lists
+below. The unrounded FIELD SPLITS are different: they take the whole part of a double product, and
+a value whose exact product lies within that one rounding of a whole second could legitimately
+split either way, so `stable_split` refuses such a fixture rather than freezing a coin toss. The
+emitted text is then asserted character for character. Text read back is modelled by a separate
+grammar written as regular expressions, so the reader is checked against a second transcription of
+its own rules, not against itself.
 """
 
 import argparse
@@ -377,6 +381,93 @@ def pa_rows(offsets):
 
 
 # ---------------------------------------------------------------------------------------------
+# Unit vectors and the tangent plane at 60 digits
+# ---------------------------------------------------------------------------------------------
+
+#: `(lon, lat)` for the unit-vector pair: both poles, whose vectors are exact; a signed zero
+#: longitude; the seam; a latitude past 90, read as the direction it names; and an ordinary
+#: position.
+VEC_INPUTS = [(0.0, 90.0), (123.4, -90.0), (0.0, 0.0), (359.999, 12.5), (45.0, 100.0),
+              (266.40499, -28.93617)]
+
+
+def vec_rows():
+    """(lon, lat, v(3), lon_back, lat_back): the vector, and the position it reads back as."""
+    rows = []
+    for lon, lat in VEC_INPUTS:
+        v = radec_unit(lon, lat)
+        back = unit_radec(v)
+        rows.append((lon, lat, v, back[0], back[1]))
+    return rows
+
+
+def tangent_frame(ra0, dec0):
+    """The tangent point's unit vector and its local north and east, `pf_offset_radec`'s frame."""
+    with dctx():
+        sd0, cd0 = dec_sin_cos(dec0)
+        sa, ca = dsin_cos(deg2rad(ra0))
+        return ([cd0 * ca, cd0 * sa, sd0], [-(sd0 * ca), -(sd0 * sa), cd0], [-sa, ca, D(0)])
+
+
+def radec2tan(ra, dec, ra0, dec0, pa):
+    """`pf_radec2tan`: the gnomonic projection about `(ra0, dec0)`, `x` east and `y` north in
+    degrees, the axes turned so `+y` lies along position angle `pa`. None where the position is in
+    the far hemisphere and has no image."""
+    with dctx():
+        c, north, east = tangent_frame(ra0, dec0)
+        w = radec_unit(ra, dec)
+        denom = c[0] * w[0] + c[1] * w[1] + c[2] * w[2]
+        if denom <= 0:
+            return None
+        xi = (east[0] * w[0] + east[1] * w[1] + east[2] * w[2]) / denom
+        eta = (north[0] * w[0] + north[1] * w[1] + north[2] * w[2]) / denom
+        sp, cp = dsin_cos(deg2rad(pa))
+        return rad2deg(xi * cp - eta * sp), rad2deg(xi * sp + eta * cp)
+
+
+def tan2radec(x, y, ra0, dec0, pa):
+    """`pf_tan2radec`: the direction of the point `(x, y)` on the plane tangent at `(ra0, dec0)`."""
+    with dctx():
+        c, north, east = tangent_frame(ra0, dec0)
+        sp, cp = dsin_cos(deg2rad(pa))
+        xi = deg2rad(D(x) * cp + D(y) * sp)
+        eta = deg2rad(-(D(x) * sp) + D(y) * cp)
+        return unit_radec([c[j] + xi * east[j] + eta * north[j] for j in range(3)])
+
+
+#: Tangent points `(ra0, dec0, pa_deg)`: a mid-latitude field unrotated and at three rotations, a
+#: pole-centred field, whose local frame follows `ra0`, a field on the seam and one at the equator.
+TAN_CENTRES = [(33.0, 21.0, 0.0), (33.0, 21.0, 37.5), (33.0, 21.0, -90.0), (33.0, 21.0, 180.0),
+               (250.0, 90.0, 0.0), (120.0, -90.0, 15.0), (359.9, 0.0, 45.0), (0.0, -12.0, 180.0)]
+#: Where the projected positions sit, as `(position angle, separation)` from the tangent point: the
+#: centre itself, the four cardinal directions, a very small offset, a wide one, and one past 90
+#: degrees, which has no image.
+TAN_OFFSETS = [(0.0, 0.0), (0.0, 1.0), (90.0, 1.0), (180.0, 0.5), (270.0, 2.5), (33.3, 1.0e-6),
+               (120.0, 80.0), (45.0, 95.0)]
+
+
+def tan_rows():
+    """(ra, dec, ra0, dec0, pa, has_image, x, y, ra_back, dec_back).
+
+    The position is the DOUBLE the offset rounds to, so the model projects what the library is
+    handed; the inverse is taken from the emitted `(x, y)` doubles for the same reason, which makes
+    it a statement about the inverse rather than a round trip through the forward."""
+    rows = []
+    for ra0, dec0, pa in TAN_CENTRES:
+        for opa, sep in TAN_OFFSETS:
+            ra, dec = offset_radec(D(ra0), dec0, D(opa), D(sep))
+            ra, dec = float(ra), float(dec)
+            xy = radec2tan(ra, dec, ra0, dec0, pa)
+            if xy is None:
+                rows.append((ra, dec, ra0, dec0, pa, False, 0.0, 0.0, 0.0, 0.0))
+            else:
+                x, y = float(xy[0]), float(xy[1])
+                back = tan2radec(x, y, ra0, dec0, pa)
+                rows.append((ra, dec, ra0, dec0, pa, True, x, y, back[0], back[1]))
+    return rows
+
+
+# ---------------------------------------------------------------------------------------------
 # Proper motion at 60 digits
 # ---------------------------------------------------------------------------------------------
 
@@ -404,8 +495,9 @@ def apply_pm(ra, dec, pm_ra, pm_dec, dt):
 #: declination 80, where the `cos(dec)` factor is 5.8; Barnard's star over a century; a negative
 #: interval near the south pole; the seam at `ra = 0` crossed eastward and westward; both poles, read
 #: in the frame of the `ra` given; no motion, and no time; a right ascension outside `[0, 360)`; a
-#: step of 1.5 degrees; and one of 20, which a great circle carries where a straight line in space
-#: would not.
+#: step of 1.5 degrees; one of 20, which a great circle carries where a straight line in space
+#: would not; and three at a pole -- a motion landing exactly ON one, a start a nanodegree off one,
+#: and a motionless source at one, where the step's length is zero and `sin(s)/s` is its limit.
 PM_INPUTS = [
     (10.0, 20.0, 5.0, -3.0, 10.0),
     (100.0, 80.0, 1000.0, 0.0, 10.0),
@@ -421,6 +513,9 @@ PM_INPUTS = [
     (-30.0, 15.0, 20.0, 10.0, 5.0),
     (80.0, -70.0, -2500.0, -1000.0, 2000.0),
     (150.0, 60.0, 3.0e5, 4.0e5, 144.0),
+    (10.0, 89.0, 0.0, 3.6e6, 1.0),
+    (200.0, 89.999999999, 1.0, -1.0, 1.0),
+    (77.0, 90.0, 0.0, 0.0, 5.0),
 ]
 
 
@@ -474,16 +569,6 @@ def round_units(frac, per_deg):
     return n
 
 
-def stable_round(frac, per_deg):
-    """Whether the library, forming `frac * per_deg` in one double product before rounding it, lands
-    on the unit the exact product rounds to. `frac` is an exact double wherever it is used."""
-    xd = float(frac) * float(per_deg)
-    t = math.trunc(xd)
-    r = xd - t
-    n = t + 1 if (r > 0.5 or (r == 0.5 and t % 2 == 1)) else t
-    return n == round_units(frac, per_deg)
-
-
 def stable_split(frac, per_deg):
     """Whether the library's double `frac * per_deg` has the exact product's whole part."""
     return math.trunc(float(frac) * float(per_deg)) == ffloor(frac * per_deg)
@@ -529,8 +614,6 @@ def ra_text(x, style, precision):
     w = fwrap(x)
     whole = ffloor(w)
     per_deg = 240 * 10 ** q
-    if not stable_round(w - whole, per_deg):
-        raise SystemExit("pf_ra2str(%r, precision=%d) rounds on a knife edge; choose another input" % (x, precision))
     units = round_units(w - whole, per_deg)
     if units >= per_deg:
         whole += 1
@@ -549,8 +632,6 @@ def dec_text(x, style, precision):
     if whole >= DMS_LIMIT:
         return "nan"
     per_deg = 3600 * 10 ** precision
-    if not stable_round(mag - whole, per_deg):
-        raise SystemExit("pf_dec2str(%r, precision=%d) rounds on a knife edge; choose another input" % (x, precision))
     units = round_units(mag - whole, per_deg)
     if units >= per_deg:
         whole += 1
@@ -575,7 +656,10 @@ _DEC_FORMS = [r"([+-]?)(\d{1,3}):(\d{1,2}):" + _SECONDS,
 
 
 def read_ra(text):
-    """`pf_str2ra(text)`: the exact right ascension in degrees, or None where `ok` is false."""
+    """`pf_str2ra(text)`: the exact right ascension in degrees, or None where `ok` is false.
+
+    The hours are at most 24, and 24 only with zero minutes and zero seconds: the documented exact
+    turn reads as 360 degrees and nothing past it reads at all."""
     t = text.strip(" ")
     for form in _RA_FORMS:
         mt = re.fullmatch(form, t)
@@ -583,12 +667,18 @@ def read_ra(text):
             h, m, s, frac = mt.groups()
             if int(m) >= 60 or int(s) >= 60:
                 return None
-            return 15 * int(h) + Fraction(int(m), 4) + Fraction(s + (frac or "").rstrip(".") or "0") / 240
+            secs = Fraction(s + (frac or "").rstrip(".") or "0")
+            if int(h) > 24 or (int(h) == 24 and (int(m) != 0 or secs != 0)):
+                return None
+            return 15 * int(h) + Fraction(int(m), 4) + secs / 240
     return None
 
 
 def read_dec(text):
-    """`pf_str2dec(text)`: the exact declination in degrees, or None where `ok` is false."""
+    """`pf_str2dec(text)`: the exact declination in degrees, or None where `ok` is false.
+
+    The degrees are at most 90, and 90 only with zero minutes and zero seconds: a pole reads back
+    from what `pf_dec2str` writes for it, and nothing beyond a pole reads."""
     t = text.strip(" ")
     for form in _DEC_FORMS:
         mt = re.fullmatch(form, t)
@@ -596,7 +686,10 @@ def read_dec(text):
             sign, d, m, s, frac = mt.groups()
             if int(m) >= 60 or int(s) >= 60:
                 return None
-            value = int(d) + Fraction(int(m), 60) + Fraction(s + (frac or "").rstrip(".") or "0") / 3600
+            secs = Fraction(s + (frac or "").rstrip(".") or "0")
+            if int(d) > 90 or (int(d) == 90 and (int(m) != 0 or secs != 0)):
+                return None
+            value = int(d) + Fraction(int(m), 60) + secs / 3600
             return -value if sign == "-" else value
     return None
 
@@ -623,9 +716,12 @@ def read_pair(text):
 # ---------------------------------------------------------------------------------------------
 
 
-def zcmb(lon, lat, z, system, apex=None):
-    """`(1 + z) gamma (1 + beta cos(theta)) - 1`, the position taken into Galactic by the definitions'
-    own 60-digit matrices; `apex` is `(lon, lat, v)`, Galactic, or the Planck 2018 defaults."""
+def cmb_factor(lon, lat, system, apex=None):
+    """`D = gamma (1 - beta cos(theta))`, the Doppler factor exact for the OBSERVED direction.
+
+    `theta` is the angle between the apex and the position as the caller gives it, so
+    `1 + z_cmb = (1 + z_hel) / D`. The position is taken into Galactic by the definitions' own
+    60-digit matrices; `apex` is `(lon, lat, v)`, Galactic, or the Planck 2018 defaults."""
     alon, alat, av = apex if apex is not None else (CMB_APEX_LON, CMB_APEX_LAT, CMB_APEX_V)
     with dctx():
         w = mv(pair_matrix(system, GAL), radec_unit(lon, lat))
@@ -633,11 +729,26 @@ def zcmb(lon, lat, z, system, apex=None):
         cth = w[0] * a[0] + w[1] * a[1] + w[2] * a[2]
         beta = D(av) / C_KMS
         g = 1 / (1 - beta * beta).sqrt()
-        return (1 + D(z)) * g * (1 + beta * cth) - 1
+        return g * (1 - beta * cth)
+
+
+def zcmb(lon, lat, z, system, apex=None):
+    """`pf_zhel2zcmb`: `(1 + z) / D - 1`."""
+    with dctx():
+        return (1 + D(z)) / cmb_factor(lon, lat, system, apex) - 1
+
+
+def zhel(lon, lat, z, system, apex=None):
+    """`pf_zcmb2zhel`: `(1 + z) D - 1`, the same factor the other way."""
+    with dctx():
+        return (1 + D(z)) * cmb_factor(lon, lat, system, apex) - 1
 
 
 def default_boost():
-    """`gamma (1 + v/c) - 1`: the redshift a source at the apex with `z_hel = 0` has in the CMB frame."""
+    """`gamma (1 + v/c) - 1`: the redshift a source at the apex with `z_hel = 0` has in the CMB frame.
+
+    At the apex `cos(theta)` is 1 and the two ways of writing the factor agree exactly:
+    `1 / (gamma (1 - beta)) = gamma (1 + beta) = sqrt((1 + beta) / (1 - beta))`."""
     with dctx():
         beta = CMB_APEX_V / C_KMS
         return (1 + beta) / (1 - beta * beta).sqrt() - 1
@@ -647,6 +758,14 @@ def default_boost():
 # Text and redshift rows
 # ---------------------------------------------------------------------------------------------
 
+#: Angles whose DOUBLE product with the output units a degree lands on a half unit while the exact
+#: product does not, so the tie is not one: the rounding must be decided from the exact product,
+#: and a writer resolving such a tie by parity alone prints every one of these ONE UNIT OUT in the
+#: last digit. The first two are declinations at `precision = 0` and the next two at
+#: `precision = 2`; the right ascensions are at `precision = 0`, 2 and 3 in turn, and are inside
+#: `[0, 360)` so that their wrap is exact on every compiler.
+KNIFE_EDGE_DEC = [-3.3495833333333334, -3.4231944444444444, 12.281945833333333, 1.472501388888889]
+KNIFE_EDGE_RA = [0.23854166666666668, 252.68295208333333, 28.259508125]
 #: Right ascensions: the seam and both sides of it, a longitude below 0 and one past two turns,
 #: a tie at three decimals (0.9375 s), and seconds of 59.9996 that carry into the hour, and into
 #: 24 hours, which wrap to 0.
@@ -654,7 +773,7 @@ TEXT_RA_INPUTS = [
     0.0, 155.37729166666667, 359.99999999999994, 359.9999, -15.0, 725.5, 1.0e-9, 180.0,
     90.123456789, 266.40499, 0.00390625, (3600 + 59 * 60 + 59.9996) / 240.0,
     (23 * 3600 + 59 * 60 + 59.9996) / 240.0, (7 * 3600 + 5 * 60 + 3.25) / 240.0, 299.868,
-]
+] + KNIFE_EDGE_RA
 #: Declinations: a sign between -1 and 0, both poles and one beyond, both zeros, a tie at two
 #: decimals (28.125"), 59.9996" carrying into the minute and on into the degree, 59.9994", which
 #: carries at two decimals and not at three (where astropy carries it anyway), a value that rounds
@@ -663,7 +782,7 @@ TEXT_DEC_INPUTS = [
     41.26916666666667, -0.5, -28.93617, 90.0, -90.0, 100.0, -1.0e-10, 0.0, -0.0, 0.0078125,
     (59 * 60 + 59.9996) / 3600.0, -(59.9996 / 3600.0), (59 * 60 + 59.9994) / 3600.0, 12.3456789,
     -45.000000001, 89.99999999999, 1234.5,
-]
+] + KNIFE_EDGE_DEC
 #: (precision, style): the default, the coarsest and finest precisions, and every style.
 TEXT_CASES = [(2, STYLE_COLON), (0, STYLE_BLANK), (3, STYLE_LETTERS), (9, STYLE_COLON)]
 
@@ -680,13 +799,17 @@ READ_RA_TEXTS = [
     "10:21", "155.3772", "+10:21:30", "-10:21:30", "5 6", "10:60:00", "10:21:60", "10:21 30", "10h21m30",
     "10d21m30s", "10:21:30x", "", "nan", "10:21:30:40", "10:021:30", "100:00:00", "10:21:.5", "1e1:00:00",
     "10::30", "10 : 21 : 30", "10h21m30.5s s",
+    "25:00:00", "24:00:00.001", "24:00:01", "24:01:00", "99:00:00", "24h00m00.5s",
 ]
 #: Texts for `pf_str2dec`.
 READ_DEC_TEXTS = [
     "+41:16:09.00", "-00:30:00", "41 16 09", "+41d16m09s", "-41D16M09.5S", "+100:00:00", "-89:59:59.999",
-    "+05:04:03", "0:0:0", "-0:0:0", "+41d 16m 09.25s",
+    "+05:04:03", "0:0:0", "-0:0:0", "+41d 16m 09.25s", "+90:00:00", "-90:00:00", "+90d00m00.000s",
+    "89:59:59.999999",
     "+-41:16:09", "++41:16:09", "+1000:00:00", "41:16", "+41:16:60", "- 41:16:09", "41h16m09s",
     "41:16:09.5.5", "+41:16:09 ", "-", "41:16:09s",
+    "+91:00:00", "-91:30:00", "+90:00:00.01", "+90:00:01", "+90:01:00", "-90:00:00.001", "+100:30:00",
+    "+90d00m00.5s",
 ]
 #: Texts for `pf_str2radec`.
 READ_PAIR_TEXTS = [
@@ -724,11 +847,16 @@ def read_rows():
 
 
 def zcmb_rows():
-    """(system, lon, lat, z, apex or None, z_cmb)."""
-    rows = [(s, lon, lat, z, None, zcmb(lon, lat, z, s)) for s, lon, lat in ZCMB_POSITIONS for z in ZCMB_Z]
+    """(system, lon, lat, z, apex or None, z_cmb, z_hel).
+
+    The last two are the same input read both ways: `z_cmb` is `pf_zhel2zcmb` of the row's `z`, and
+    `z_hel` is `pf_zcmb2zhel` of that same `z` -- the inverse pinned in its own right rather than
+    through a round trip, which a pair of matching errors would survive."""
+    rows = [(s, lon, lat, z, None, zcmb(lon, lat, z, s), zhel(lon, lat, z, s))
+            for s, lon, lat in ZCMB_POSITIONS for z in ZCMB_Z]
     for apex in ZCMB_APEXES:
         for s, lon, lat in ((ICRS, 155.0, 41.0), (GAL, apex[0], apex[1])):
-            rows.append((s, lon, lat, 0.05, apex, zcmb(lon, lat, 0.05, s, apex)))
+            rows.append((s, lon, lat, 0.05, apex, zcmb(lon, lat, 0.05, s, apex), zhel(lon, lat, 0.05, s, apex)))
     return rows
 
 
@@ -807,6 +935,8 @@ def gen_module():
     txt_ra, txt_dec = text_rows()
     rd_ra, rd_dec, rd_pair = read_rows()
     zrows = zcmb_rows()
+    vecs = vec_rows()
+    tans = tan_rows()
 
     L = [BANNER]
     L.append("!> Golden rows for `parquet_skycoord`, derived from a 60-digit model of each system's definition.")
@@ -851,6 +981,22 @@ def gen_module():
     L.append("    integer, parameter :: n_spm = %d" % len(pms))
     L += array("integer(int64)", "spm_in_bits", "5 * n_spm", [bits64(x) for r in pms for x in r[:5]])
     L += array("integer(int64)", "spm_out_bits", "2 * n_spm", [bits64(x) for r in pms for x in r[5:]])
+    L.append("")
+
+    L.append("    ! ---- pf_radec2unit and pf_unit2radec: (lon, lat) -> v(3) -> (lon, lat) ----")
+    L.append("    integer, parameter :: n_svec = %d" % len(vecs))
+    L += array("integer(int64)", "svec_in_bits", "2 * n_svec", [bits64(x) for r in vecs for x in r[:2]])
+    L += array("integer(int64)", "svec_out_bits", "3 * n_svec", [bits64(x) for r in vecs for x in r[2]])
+    L += array("integer(int64)", "svec_back_bits", "2 * n_svec", [bits64(x) for r in vecs for x in r[3:]])
+    L.append("")
+
+    L.append("    ! ---- pf_radec2tan: (ra, dec, ra0, dec0, pa) -> (x, y), and pf_tan2radec back from")
+    L.append("    ! ---- the emitted (x, y); a row without an image has NaN coordinates and zero rows ----")
+    L.append("    integer, parameter :: n_stan = %d" % len(tans))
+    L += array("integer(int64)", "stan_in_bits", "5 * n_stan", [bits64(x) for r in tans for x in r[:5]])
+    L += logical_array("stan_has_image", "n_stan", [r[5] for r in tans])
+    L += array("integer(int64)", "stan_out_bits", "2 * n_stan", [bits64(x) for r in tans for x in r[6:8]])
+    L += array("integer(int64)", "stan_back_bits", "2 * n_stan", [bits64(x) for r in tans for x in r[8:]])
     L.append("")
 
     L.append("    ! ---- pf_deg2hms: deg -> (h, m, s), exactly split ----")
@@ -898,7 +1044,7 @@ def gen_module():
                [bits64(v) for r in rd_pair for v in (r[1] if r[1] is not None else (0, 0))])
     L.append("")
 
-    L.append("    ! ---- pf_zhel2zcmb: (lon, lat, z_hel) in a system, the dipole default or given -> z_cmb ----")
+    L.append("    ! ---- pf_zhel2zcmb and pf_zcmb2zhel: (lon, lat, z) in a system, the dipole default or given ----")
     L.append("    !> The default dipole as documented -- apex longitude and latitude, degrees Galactic, and speed,")
     L.append("    !! km/s -- and the redshift it gives a source at the apex with `z_hel = 0`, `gamma*(1 + v/c) - 1`.")
     L += array("integer(int64)", "szcmb_default_bits", "3", [bits64(CMB_APEX_LON), bits64(CMB_APEX_LAT), bits64(CMB_APEX_V)])
@@ -910,6 +1056,8 @@ def gen_module():
     L += array("integer(int64)", "szcmb_apex_bits", "3 * n_szcmb",
                [bits64(v) for r in zrows for v in (r[4] if r[4] is not None else (0.0, 0.0, 0.0))])
     L += array("integer(int64)", "szcmb_out_bits", "n_szcmb", [bits64(r[5]) for r in zrows])
+    L.append("    !> `pf_zcmb2zhel` of the SAME three inputs: the row's `z` read as a CMB-frame redshift.")
+    L += array("integer(int64)", "szhel_out_bits", "n_szcmb", [bits64(r[6]) for r in zrows])
     L.append("")
     L.append("    ! gcov attribution artifact: an `end module` line is not a statement and reports 0 hits.")
     L.append("end module test_skycoord_vectors ! GCOVR_EXCL_LINE")
@@ -1085,6 +1233,14 @@ def self_test():
     check(all(read_ra(t) is None for t in ("5 6", "155.3772", "+10:21:30", "10:21", "10:60:00", "10:21:60")),
           "a documented refusal was read")
     check(read_dec("-00:30:00") == Fraction(-1, 2), "-00:30:00 is not -0.5")
+    # The leading field's bound, reached only exactly: the pole and the whole turn read, and the
+    # first text past either does not.
+    check(read_dec("+90:00:00") == 90 and read_dec("-90:00:00") == -90, "a pole does not read")
+    check(read_ra("24:00:00") == 360, "24:00:00 is not 360 degrees")
+    check(all(read_dec(t) is None for t in ("+90:00:00.01", "+90:00:01", "+90:01:00", "+91:00:00", "-91:00:00")),
+          "a declination past a pole was read")
+    check(all(read_ra(t) is None for t in ("24:00:00.001", "24:00:01", "24:01:00", "25:00:00", "99:00:00")),
+          "an hour past a whole turn was read")
     check(read_pair("10:21:30.55, +41:16:09") == (one, read_dec("+41:16:09")), "a pair split at a comma")
 
     # Every golden input, written and read back by the model, lands within half a unit of the last
@@ -1095,8 +1251,8 @@ def self_test():
             gap = abs((back - fwrap(x) + 180) % 360 - 180) * 240
             check(back is not None and gap <= HALF / 10 ** (p + 1), "ra %r at precision %d does not round-trip" % (x, p))
     for x in TEXT_DEC_INPUTS:
-        if abs(x) >= 1000:
-            continue                                   # four digits of degrees: written, never read
+        if abs(x) > 90.0:
+            continue                    # beyond a pole: a writer writes it, a reader refuses it
         for p, st in TEXT_CASES:
             back = read_dec(dec_text(x, st, p))
             check(back is not None and abs(back - Fraction(x)) * 3600 <= HALF / 10 ** p,
@@ -1112,6 +1268,70 @@ def self_test():
         check(tiny(up - default_boost()), "the apex does not give gamma*(1 + v/c) - 1")
         check(tiny((1 + up) * (1 + down) - 1), "the apex's and the antapex's factors do not multiply to one")
         check(up > 0 > down, "the CMB-frame redshift is not the larger toward the apex")
+        # NINETY DEGREES FROM THE APEX THE BOOST IS THE TRANSVERSE DOPPLER EFFECT AND NOTHING ELSE:
+        # `1 + z_cmb = (1 + z_hel) / gamma`, with no first-order term at all. That is the one place
+        # the two ways of writing the factor differ most -- the other reading, with `theta` in the
+        # CMB frame, answers `(1 + z_hel) * gamma` -- and it holds for the observed direction
+        # whatever the speed is, so it is a statement about the physics rather than about this code.
+        beta = CMB_APEX_V / C_KMS
+        g = 1 / (1 - beta * beta).sqrt()
+        for pa in (D(0), D(90), D(215)):
+            # The position is kept exact rather than rounded to a double, so what is tested is the
+            # formula and not the 1e-16 of a rounded direction -- and the offset leaves the apex
+            # the redshift is measured from, the exact one, not the double nearest it.
+            lon, lat = offset_radec(CMB_APEX_LON, CMB_APEX_LAT, pa, D(90))
+            check(abs((1 + zcmb(lon, lat, D("0.1"), GAL)) - D("1.1") / g) < D(10) ** -40,
+                  "90 degrees from the apex at position angle %s is not the transverse Doppler shift" % pa)
+        # The inverse undoes the boost, in every system and for a given dipole too; the tolerance
+        # is the working precision's, since the pair is a division followed by its multiplication.
+        for system, lon, lat in ZCMB_POSITIONS:
+            for z in ZCMB_Z:
+                back = zhel(lon, lat, zcmb(lon, lat, z, system), system)
+                check(abs(back - D(z)) < D(10) ** -40,
+                      "pf_zcmb2zhel does not invert pf_zhel2zcmb at (%r, %r) in system %d" % (lon, lat, system))
+        back = zhel(155.0, 41.0, zcmb(155.0, 41.0, D("0.3"), ICRS, ZCMB_APEXES[0]), ICRS, ZCMB_APEXES[0])
+        check(abs(back - D("0.3")) < D(10) ** -40, "pf_zcmb2zhel does not invert pf_zhel2zcmb under a given dipole")
+
+    # The unit-vector pair: the poles exact, the round trip, and the direction a latitude past 90 names.
+    for lon, lat, v, back_lon, back_lat in vec_rows():
+        with dctx():
+            check(tiny(v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - 1), "the unit vector of (%r, %r) is not one" % (lon, lat))
+        if abs(lat) == 90.0:
+            check(v[0] == 0 and v[1] == 0 and abs(v[2]) == 1, "a pole's vector is not exactly (0, 0, +/-1)")
+            check(back_lon == 0, "a pole's longitude does not read back as 0")
+        elif abs(lat) < 90.0:
+            with dctx():
+                check(tiny(D(back_lon) - sph.dwrap360(D(lon))) and tiny(D(back_lat) - D(lat)),
+                      "the vector of (%r, %r) does not read back as itself" % (lon, lat))
+    with dctx():
+        lon, lat = unit_radec(radec_unit(45.0, 100.0))
+        check(tiny(lon - 225) and tiny(lat - 80), "a latitude of 100 is not the direction (225, 80)")
+
+    # The tangent plane: the definition, the inverse, and the hemisphere that has no image.
+    with dctx():
+        for pa in (D(0), D("37.5"), D(-90)):
+            for sep in (D("1e-6"), D("0.5"), D(10), D(80)):
+                # Exact positions throughout, as above: a double would put 1e-16 of the centre's
+                # own rounding into `x`, which is the quantity being asserted to be zero.
+                ra, dec = offset_radec(D(33), 21.0, pa, sep)
+                x, y = radec2tan(ra, dec, D(33), D(21), pa)
+                # A point at position angle `pa` lands on `+y` at `tan(sep)`, which is the whole
+                # definition of the projection and of what `pa_deg` does to the axes.
+                st, ct = dsin_cos(deg2rad(sep))
+                check(abs(x) < D(10) ** -40 and abs(y - rad2deg(st / ct)) < D(10) ** -40,
+                      "a point at position angle %s and separation %s is not (0, tan(sep))" % (pa, sep))
+                a, b = tan2radec(x, y, D(33), D(21), pa)
+                check(abs(a - ra) < D(10) ** -40 and abs(b - dec) < D(10) ** -40,
+                      "pf_tan2radec does not invert pf_radec2tan at position angle %s" % pa)
+    # Beyond 90 degrees there is no image. AT 90 degrees the cosine is zero, which 60 digits of a
+    # rounded direction resolve no better than a double does: the boundary is a limit, not a row.
+    for sep in (90.001, 120.0, 180.0):
+        ra, dec = offset_radec(D(10), 5.0, D(30), D(sep))
+        check(radec2tan(float(ra), float(dec), 10.0, 5.0, 0.0) is None,
+              "a position %r degrees away has an image" % sep)
+    with dctx():
+        x, y = radec2tan(D(250), D(90), D(250), D(90), D(0))
+        check(abs(x) < D(10) ** -40 and abs(y) < D(10) ** -40, "the tangent point is not the origin")
     return bad
 
 
@@ -1187,6 +1407,7 @@ def verify_oracle():
               % (ra1, dec1, ra2, dec2, got, float(pa)))
 
     verify_proper_motion(check, counts)
+    verify_vectors_and_tangent_plane(check, counts)
     verify_text_and_redshift(check, counts, frames)
 
     if bad:
@@ -1256,6 +1477,70 @@ def verify_proper_motion(check, counts):
               % ((ra, dec, pm_ra, pm_dec, dt), moved.ra.deg, moved.dec.deg, along.ra.deg, along.dec.deg))
 
 
+def verify_vectors_and_tangent_plane(check, counts):
+    """The unit vectors against astropy's own Cartesian representation, and the tangent-plane rows
+    against `astropy.wcs`, which is wcslib rather than a second copy of this model.
+
+    The projection is written as a FITS `RA---TAN`/`DEC--TAN` header whose reference point is the
+    tangent point, one degree per unit (`CDELT = 1`) and `CRPIX = 1`, so a pixel coordinate IS the
+    intermediate world coordinate in degrees; `PC` carries the axis rotation, `R(-pa_deg)`, which
+    makes a pixel coordinate `(x, y)` as this module defines it. **`LONPOLE` is 180 at every
+    tangent point, the FITS default everywhere except exactly at a pole**, where the standard's
+    own default of 0 turns the chart half a turn; 180 is the convention this module states, the
+    local frame following the `ra0` given, and it is what `pf_offset_radec` uses.
+    """
+    import numpy as np
+    import astropy.units as u
+    from astropy.coordinates import SkyCoord
+    from astropy.wcs import WCS
+
+    counts["unit vectors"] = 0
+    counts["tangent-plane projections"] = 0
+    counts["positions outside the projection"] = 0
+
+    for lon, lat, v, back_lon, back_lat in vec_rows():
+        # astropy refuses a latitude beyond 90, so such an input is handed over as the direction it
+        # names -- which is what the library reads it as.
+        lon_a, lat_a = lon, lat
+        if abs(lat) > 90.0:
+            lon_a, lat_a = lon + 180.0, math.copysign(180.0, lat) - lat
+        c = SkyCoord(lon_a * u.deg, lat_a * u.deg).cartesian
+        got = (c.x.value, c.y.value, c.z.value)
+        counts["unit vectors"] += 1
+        check(max(abs(got[j] - float(v[j])) for j in range(3)) < 1e-15,
+              "the unit vector of (%r, %r): astropy %r, model %r" % (lon, lat, got, [float(q) for q in v]))
+
+    for ra, dec, ra0, dec0, pa, has_image, x, y, ra_back, dec_back in tan_rows():
+        w = WCS(naxis=2)
+        w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        w.wcs.crval = [ra0, dec0]
+        w.wcs.crpix = [1.0, 1.0]
+        w.wcs.cdelt = [1.0, 1.0]
+        w.wcs.lonpole = 180.0
+        r = math.radians(pa)
+        w.wcs.pc = [[math.cos(r), math.sin(r)], [-math.sin(r), math.cos(r)]]
+        gx, gy = w.wcs_world2pix(ra, dec, 0)
+        if not has_image:
+            # wcslib reports the far hemisphere as invalid, which numpy delivers as a NaN.
+            counts["positions outside the projection"] += 1
+            check(not np.isfinite(gx) or not np.isfinite(gy) or abs(gx) + abs(gy) > 1e12,
+                  "a position %r degrees from (%r, %r) has a finite image %r" % ((ra, dec), ra0, dec0, (gx, gy)))
+            continue
+        counts["tangent-plane projections"] += 1
+        scale = max(1.0, abs(x), abs(y))
+        check(abs(float(gx) - x) < 1e-11 * scale and abs(float(gy) - y) < 1e-11 * scale,
+              "pf_radec2tan(%r, %r) about (%r, %r) at pa %r: wcslib (%r, %r), model (%r, %r)"
+              % (ra, dec, ra0, dec0, pa, float(gx), float(gy), x, y))
+        # And back: wcslib's own inverse of the emitted standard coordinates.
+        ga, gd = w.wcs_pix2world(x, y, 0)
+        counts["tangent-plane projections"] += 1
+        back_ra, back_dec = float(ra_back), float(dec_back)
+        dra = ((float(ga) - back_ra + 180.0) % 360.0 - 180.0) * math.cos(math.radians(back_dec))
+        check(abs(dra) < 1e-11 and abs(float(gd) - back_dec) < 1e-11,
+              "pf_tan2radec(%r, %r) about (%r, %r) at pa %r: wcslib (%r, %r), model (%r, %r)"
+              % (x, y, ra0, dec0, pa, float(ga), float(gd), back_ra, back_dec))
+
+
 def verify_text_and_redshift(check, counts, frames):
     """The sexagesimal rows against astropy's `Angle`, and the redshift rows against a cosine taken
     from astropy's `separation`.
@@ -1268,7 +1553,11 @@ def verify_text_and_redshift(check, counts, frames):
     * astropy writes a right ascension that rounds up to 24 hours as `24:...`, and the library wraps
       it to `00:...`;
     * astropy signs a zero by `np.sign` (0) or, in text, `-0.0` negative, where the library's sign is
-      `pf_deg2dms`'s: -1 below zero, +1 otherwise.
+      `pf_deg2dms`'s: -1 below zero, +1 otherwise;
+    * where the DOUBLE product of the fraction and the units a degree lands on a half unit that the
+      exact product misses, astropy rounds the tie it was handed by parity, and the library rounds
+      the exact product -- so the two differ by one unit in the last digit. Those inputs are in the
+      lists above on purpose (`KNIFE_EDGE_RA`, `KNIFE_EDGE_DEC`) and are counted here, not compared.
 
     A field split is compared as the time it adds up to, modulo a day: astropy converts degrees to
     hours by multiplying by a rounded 1/15, which can carry a value a hair below a field boundary
@@ -1278,13 +1567,20 @@ def verify_text_and_redshift(check, counts, frames):
     from astropy.coordinates import Angle, Longitude, SkyCoord
 
     for key in ("field splits", "texts written", "texts read", "redshifts", "by design: early carries",
-                "by design: 24 h wrapped", "by design: the sign of a zero", "texts astropy refuses"):
+                "by design: 24 h wrapped", "by design: the sign of a zero", "texts astropy refuses",
+                "by design: a tie the double product invents"):
         counts[key] = 0
     ra_sep = {STYLE_COLON: ":", STYLE_BLANK: " ", STYLE_LETTERS: "hms"}
     dec_sep = {STYLE_COLON: ":", STYLE_BLANK: " ", STYLE_LETTERS: "dms"}
 
     def carries_early(seconds, q):
         return 60 - Fraction(1, 10 ** q) <= seconds < 60 - Fraction(1, 2 * 10 ** q)
+
+    def invented_tie(frac, per_deg):
+        """Whether the double product lands on a half unit the exact product misses."""
+        xd = float(frac) * float(per_deg)
+        t = math.trunc(xd)
+        return xd - t == 0.5 and frac * per_deg != Fraction(2 * t + 1, 2)
 
     for x in HMS_INPUTS:
         h, m, s = hms_fields(x)
@@ -1308,6 +1604,9 @@ def verify_text_and_redshift(check, counts, frames):
         if carries_early(secs - 60 * ffloor(secs / 60), p + 1):
             counts["by design: early carries"] += 1
             continue
+        if invented_tie(fwrap(x) - ffloor(fwrap(x)), 240 * 10 ** (p + 1)):
+            counts["by design: a tie the double product invents"] += 1
+            continue
         got = Longitude(x * u.deg).to_string(unit=u.hourangle, sep=ra_sep[st], precision=p + 1, pad=True)
         if got.startswith("24") and text.startswith("00"):
             counts["by design: 24 h wrapped"] += 1
@@ -1318,6 +1617,9 @@ def verify_text_and_redshift(check, counts, frames):
         arcsec = abs(Fraction(x)) * 3600
         if carries_early(arcsec - 60 * ffloor(arcsec / 60), p):
             counts["by design: early carries"] += 1
+            continue
+        if invented_tie(abs(Fraction(x)) - ffloor(abs(Fraction(x))), 3600 * 10 ** p):
+            counts["by design: a tie the double product invents"] += 1
             continue
         if x == 0 and math.copysign(1.0, x) < 0:
             counts["by design: the sign of a zero"] += 1
@@ -1352,16 +1654,20 @@ def verify_text_and_redshift(check, counts, frames):
               % (text, c.ra.deg, c.dec.deg, float(want[0]), float(want[1])))
 
     c_kms = float(C_KMS)
-    for system, lon, lat, z, apex, want in zcmb_rows():
+    for system, lon, lat, z, apex, want, want_hel in zcmb_rows():
         alon, alat, av = apex if apex is not None else (float(CMB_APEX_LON), float(CMB_APEX_LAT), float(CMB_APEX_V))
         sep = SkyCoord(lon * u.deg, lat * u.deg, frame=frames[system]).separation(
             SkyCoord(l=alon * u.deg, b=alat * u.deg, frame="galactic"))
         beta = av / c_kms
-        got = (1 + z) / math.sqrt(1 - beta * beta) * (1 + beta * math.cos(sep.radian)) - 1
-        counts["redshifts"] += 1
-        check(abs(got - float(want)) < 1e-13 * max(1.0, abs(float(want))),
+        # `D = gamma (1 - beta cos(theta))` with `theta` astropy's own separation from the apex.
+        d_fac = (1 - beta * math.cos(sep.radian)) / math.sqrt(1 - beta * beta)
+        counts["redshifts"] += 2
+        check(abs((1 + z) / d_fac - 1 - float(want)) < 1e-13 * max(1.0, abs(float(want))),
               "pf_zhel2zcmb(%r, %r, %r, system %d, apex %r): astropy's angle gives %r, model %r"
-              % (lon, lat, z, system, apex, got, float(want)))
+              % (lon, lat, z, system, apex, (1 + z) / d_fac - 1, float(want)))
+        check(abs((1 + z) * d_fac - 1 - float(want_hel)) < 1e-13 * max(1.0, abs(float(want_hel))),
+              "pf_zcmb2zhel(%r, %r, %r, system %d, apex %r): astropy's angle gives %r, model %r"
+              % (lon, lat, z, system, apex, (1 + z) * d_fac - 1, float(want_hel)))
 
 
 def main():

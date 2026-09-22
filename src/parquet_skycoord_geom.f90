@@ -1,6 +1,6 @@
 !> `parquet_skycoord`'s frame-free RA/Dec geometry: the separation of two positions, the offset by a
-!! separation at a position angle, the position angle itself, and the proper motion, which is an
-!! offset.
+!! separation at a position angle, the position angle itself, the proper motion, the public unit
+!! vector of a position, and the tangent-plane projection about a field centre.
 !!
 !! None of them takes a frame, because each is invariant under the reflection that separates the
 !! two declination conventions in live use: a separation is an angle between two directions, and an
@@ -11,6 +11,7 @@
 !! pole, and a quiet NaN is handed back before anything can raise a flag on it.
 submodule (parquet_skycoord) parquet_skycoord_geom
     use parquet_utils, only: pf_to_str
+    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     implicit none
 
 contains
@@ -181,7 +182,7 @@ contains
     end procedure pf_offset_radec
 
     module procedure pf_apply_pm
-        real(real64) :: pa, sep
+        real(real64) :: u, w, s, f, sd, cd, a0, sa, ca, c(3), north(3), east(3), v(3)
         character(len=:), allocatable :: t_dec
 
         ! A NaN argument gives NaN results, handed back itself before any comparison could raise on
@@ -202,21 +203,35 @@ contains
             call pf_to_str(dec, t_dec, fmt='(es14.7)')
             error stop "pf_apply_pm: dec must be in [-90, 90] (got " // trim(adjustl(t_dec)) // ")"
         end if
-        ! `pm_ra` is already the rate along the local east, `cos(dec)` included, so the two rates are
-        ! the components of one vector on the tangent plane: its angle from north through east is the
-        ! step's position angle, and its length the rate along the great circle. No motion at all has
-        ! angle 0 by rule: `atan2(0, 0)` is prohibited, and nagfor answers it with a NaN and
-        ! IEEE_INVALID.
-        if (pm_ra == 0.0_real64 .and. pm_dec == 0.0_real64) then
-            pa = 0.0_real64
+        ! `pm_ra` is already the rate along the local east, `cos(dec)` included, so the two rates ARE
+        ! the step's components on the tangent plane and no position angle is formed. That is the
+        ! same great-circle step `pf_offset_radec` takes, written in the components the caller
+        ! brought: `cos(s)*c + (sin(s)/s)*(w*north + u*east)`, whose length is `s` and whose
+        ! direction is the one the components name. Three special cases disappear with the angle --
+        ! `atan2(0, 0)` for a motionless source, which is prohibited and which nagfor answers with a
+        ! NaN and IEEE_INVALID; the half turn a negative interval needed, the signs now riding on
+        ! the components; and the separation `pf_offset_radec` refuses below zero. 3.6e6
+        ! milliarcseconds make a degree.
+        u = pm_ra * dt_years / 3.6e6_real64 * skc_deg2rad
+        w = pm_dec * dt_years / 3.6e6_real64 * skc_deg2rad
+        s = hypot(u, w)
+        if (s == 0.0_real64) then
+            f = 1.0_real64        ! the limit of sin(s)/s: no motion gives the position back exactly
         else
-            pa = atan2(pm_ra, pm_dec) * skc_rad2deg
+            f = sin(s) / s
         end if
-        ! pf_offset_radec refuses a negative separation, so a negative interval turns the angle half
-        ! a turn instead. 3.6e6 milliarcseconds make a degree.
-        sep = hypot(pm_ra, pm_dec) * abs(dt_years) / 3.6e6_real64
-        if (dt_years < 0.0_real64) pa = pa + 180.0_real64
-        call pf_offset_radec(ra, dec, pa, sep, ra_out, dec_out)
+        ! The centre and its local north and east, built from `ra` even at a pole, where `north`
+        ! still points along the meridian `ra` names -- `pf_offset_radec`'s pole convention, reached
+        ! here by the same construction rather than by a second rule.
+        call skc_dec_sin_cos(dec, sd, cd)
+        a0 = ra * skc_deg2rad
+        sa = sin(a0)
+        ca = cos(a0)
+        c = [cd * ca, cd * sa, sd]
+        north = [-(sd * ca), -(sd * sa), cd]
+        east = [-sa, ca, 0.0_real64]
+        v = cos(s) * c + f * (w * north + u * east)
+        call skc_unit_radec(v, ra_out, dec_out)
     end procedure pf_apply_pm
 
     module procedure pf_position_angle_deg
@@ -254,5 +269,163 @@ contains
             if (pa >= 360.0_real64) pa = 0.0_real64
         end if
     end procedure pf_position_angle_deg
+
+    ! ---- Positions as vectors ----
+
+    module procedure pf_radec2unit
+        ! The NaN screen the private kernel does not carry -- its callers screen before they reach
+        ! it -- so that this public pair behaves as `parquet_sphere`'s does. The NaN argument itself
+        ! is handed back: composing one (`lon + lat`) would reach `Inf - Inf` on a mixed
+        ! infinite/NaN input and raise the flag the screen exists to avoid.
+        if (lon /= lon) then
+            v = lon
+            return
+        end if
+        if (lat /= lat) then
+            v = lat
+            return
+        end if
+        call skc_radec_unit(lon, lat, v)
+    end procedure pf_radec2unit
+
+    module procedure pf_unit2radec
+        real(real64) :: scale, w(3)
+        integer :: k
+
+        do k = 1, 3
+            if (v(k) /= v(k)) then
+                lon = v(k)
+                lat = v(k)
+                return
+            end if
+        end do
+        ! Scaled by the largest component BEFORE anything is squared, `pf_vec2radec`'s rule and
+        ! what makes the two bit-identical: each quotient is then in `[-1, 1]`, so the square root
+        ! below neither overflows nor loses a tiny vector. The private kernel does not do this --
+        ! every rotation hands it a unit vector by construction -- and putting it there would cost
+        ! a `max` and a division in the hot path for nothing.
+        scale = max(abs(v(1)), abs(v(2)), abs(v(3)))
+        if (scale <= 0.0_real64) then
+            lon = 0.0_real64
+            lat = 0.0_real64
+            return
+        end if
+        if (scale > huge(scale)) then
+            ! Dividing by an infinite scale would make `Inf/Inf` a NaN with `IEEE_INVALID`; the
+            ! direction of a vector with infinite components is that of those components alone.
+            do k = 1, 3
+                if (abs(v(k)) > huge(scale)) then
+                    w(k) = sign(1.0_real64, v(k))
+                else
+                    w(k) = 0.0_real64
+                end if
+            end do
+        else
+            w = v / scale
+        end if
+        call skc_unit_radec(w, lon, lat)
+    end procedure pf_unit2radec
+
+    ! ---- The tangent plane ----
+
+    module procedure pf_radec2tan
+        real(real64) :: p, sp, cp, denom, xi, eta, c(3), north(3), east(3), w(3)
+        character(len=:), allocatable :: t_dec
+
+        p = 0.0_real64
+        if (present(pa_deg)) p = pa_deg
+        ! A NaN argument gives NaN results, handed back itself before the ordered comparisons below
+        ! could raise on it.
+        if (ra /= ra .or. dec /= dec .or. ra0 /= ra0 .or. dec0 /= dec0 .or. p /= p) then
+            x = ra
+            if (dec /= dec) x = dec
+            if (ra0 /= ra0) x = ra0
+            if (dec0 /= dec0) x = dec0
+            if (p /= p) x = p
+            y = x
+            return
+        end if
+        ! The centre `pf_offset_radec` refuses, refused here for the same reason: a tangent point
+        ! beyond a pole mirrors the local north and east and gives a plausible wrong chart.
+        if (.not. (dec0 >= -90.0_real64 .and. dec0 <= 90.0_real64)) then
+            call pf_to_str(dec0, t_dec, fmt='(es14.7)')
+            error stop "pf_radec2tan: dec0 must be in [-90, 90] (got " // trim(adjustl(t_dec)) // ")"
+        end if
+        call skc_tangent_frame(ra0, dec0, c, north, east)
+        call skc_radec_unit(ra, dec, w)
+        ! The gnomonic projection: the point where the ray through `w` meets the plane tangent at
+        ! `c`. `denom` is `cos` of the separation, so it is the far hemisphere that has no image --
+        ! at exactly 90 degrees the ray is parallel to the plane. The NaN is made, not computed: a
+        ! division by a zero `denom` would raise, and this procedure is total in its flags.
+        denom = c(1) * w(1) + c(2) * w(2) + c(3) * w(3)
+        if (.not. (denom > 0.0_real64)) then
+            x = ieee_value(0.0_real64, ieee_quiet_nan)
+            y = x
+            return
+        end if
+        xi = (east(1) * w(1) + east(2) * w(2) + east(3) * w(3)) / denom
+        eta = (north(1) * w(1) + north(2) * w(2) + north(3) * w(3)) / denom
+        ! The axes turned so `+y` lies along position angle `p`, and radians to degrees. Written
+        ! out rather than through a rotation matrix: two products and a subtraction each.
+        sp = sin(p * skc_deg2rad)
+        cp = cos(p * skc_deg2rad)
+        x = (xi * cp - eta * sp) * skc_rad2deg
+        y = (xi * sp + eta * cp) * skc_rad2deg
+    end procedure pf_radec2tan
+
+    module procedure pf_tan2radec
+        real(real64) :: p, sp, cp, xi, eta, c(3), north(3), east(3), v(3)
+        character(len=:), allocatable :: t_dec
+
+        p = 0.0_real64
+        if (present(pa_deg)) p = pa_deg
+        if (x /= x .or. y /= y .or. ra0 /= ra0 .or. dec0 /= dec0 .or. p /= p) then
+            ra = x
+            if (y /= y) ra = y
+            if (ra0 /= ra0) ra = ra0
+            if (dec0 /= dec0) ra = dec0
+            if (p /= p) ra = p
+            dec = ra
+            return
+        end if
+        if (.not. (dec0 >= -90.0_real64 .and. dec0 <= 90.0_real64)) then
+            call pf_to_str(dec0, t_dec, fmt='(es14.7)')
+            error stop "pf_tan2radec: dec0 must be in [-90, 90] (got " // trim(adjustl(t_dec)) // ")"
+        end if
+        call skc_tangent_frame(ra0, dec0, c, north, east)
+        ! The axes turned back, then degrees to radians.
+        sp = sin(p * skc_deg2rad)
+        cp = cos(p * skc_deg2rad)
+        xi = (x * cp + y * sp) * skc_deg2rad
+        eta = (-(x * sp) + y * cp) * skc_deg2rad
+        ! The inverse is the DIRECTION of the point on the tangent plane, so there is no `asin` and
+        ! no special case at the centre: `skc_unit_radec` takes a vector of any length.
+        v = c + xi * east + eta * north
+        call skc_unit_radec(v, ra, dec)
+    end procedure pf_tan2radec
+
+    !> The unit vector of a tangent point and its local north and east.
+    !!
+    !! Built from `ra0` even at a pole, where `north` still points along the meridian `ra0` names
+    !! -- `pf_offset_radec`'s pole convention, reached by construction rather than by a rule.
+    !! `pf_offset_radec` and `pf_apply_pm` build the same three vectors inline and keep doing so:
+    !! they are the elemental hot path, and gfortran cannot inline across a module procedure under
+    !! the `-fPIC` fpm passes. Keep the four in step.
+    pure subroutine skc_tangent_frame(ra0, dec0, c, north, east)
+        real(real64), intent(in) :: ra0 !! the tangent point's longitude, degrees; not a NaN.
+        real(real64), intent(in) :: dec0 !! the tangent point's latitude, degrees, in `[-90, 90]`.
+        real(real64), intent(out) :: c(3) !! the tangent point.
+        real(real64), intent(out) :: north(3) !! the local north.
+        real(real64), intent(out) :: east(3) !! the local east.
+        real(real64) :: sd0, cd0, a0, sa, ca
+
+        call skc_dec_sin_cos(dec0, sd0, cd0)
+        a0 = ra0 * skc_deg2rad
+        sa = sin(a0)
+        ca = cos(a0)
+        c = [cd0 * ca, cd0 * sa, sd0]
+        north = [-(sd0 * ca), -(sd0 * sa), cd0]
+        east = [-sa, ca, 0.0_real64]
+    end subroutine skc_tangent_frame
 
 end submodule parquet_skycoord_geom

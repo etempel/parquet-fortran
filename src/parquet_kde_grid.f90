@@ -2050,13 +2050,26 @@ contains
 
         reach = KDE_RADIUS(self%kernel_code)*hj
         ! Wholly beyond an end of the range: counted there, not located.
-        if (xj + reach < self%x0) then
-            below = below + wj
-            return
-        end if
-        if (xj - reach > self%x1) then
-            above = above + wj
-            return
+        !
+        ! **Only where the term's mass IS its weight.** Under a local-polynomial correction it is
+        ! not: the term is divided by the kernel's truncated mass at the query point, so a point
+        ! lying within one reach of a bound carries a mass of its own that `deposit_corrected`
+        ! integrates. Taking this short cut there counts `wj` instead, and the two differ by
+        ! whatever the correction is doing where the point sits. The case is reachable only when
+        ! the grid's range starts more than one reach inside the support -- `x0 > lo + reach`, so
+        ! that a point can be past the range's end and still inside the corrected zone -- which is
+        ! why a grid whose range reaches nearer the bound than its kernels do never showed it.
+        ! `"reflect"` keeps the short cut: its images conserve the point's mass, and a point below
+        ! `x0` has its image further below still, so neither reaches back into the range.
+        if (.not. kde_is_corrected(self%boundary_code)) then
+            if (xj + reach < self%x0) then
+                below = below + wj
+                return
+            end if
+            if (xj - reach > self%x1) then
+                above = above + wj
+                return
+            end if
         end if
 
         ! ---- under `"linear"`, a corrected point deposits its boundary weights as they are ----
@@ -2256,6 +2269,11 @@ contains
             end do
             return
         end if
+        ! Reaching no centre because it lies beyond the range altogether: its whole mass is already
+        ! in the two counters and no cell may take a share of it. Without this the fallback below
+        ! would put `1 - s_below - s_above` into the nearest cell, which is the point's mass INSIDE
+        ! a range it does not reach.
+        if (xj + reach < self%x0 .or. xj - reach > self%x1) return
         ! Narrower than a cell and between two centres: its in-range share goes whole into the cell
         ! holding it, as the plain deposit does.
         ic = 1

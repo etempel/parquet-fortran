@@ -3486,11 +3486,11 @@ contains
 
         call kde_fixture(101_int64, x)
         call kde_weights_mod5(101_int64, w)
-        call g_all%init(30, -700.0_real64, 700.0_real64, 50.0_real64)
+        call g_all%init(30, -700.0_real64, 700.0_real64, 80.0_real64)
         call g_all%add(x)
-        call g1%init(30, -700.0_real64, 700.0_real64, 50.0_real64)
+        call g1%init(30, -700.0_real64, 700.0_real64, 80.0_real64)
         call g1%add(x(1:100))
-        call g2%init(30, -700.0_real64, 700.0_real64, 50.0_real64)
+        call g2%init(30, -700.0_real64, 700.0_real64, 80.0_real64)
         call g2%add(x(101:101))
         call g1%merge(g2)
         call g_all%finish()
@@ -3509,7 +3509,7 @@ contains
         call check(error, ends_all(1) > 0.0_real64 .and. ends_all(2) < 1.0_real64 .and. all(ends == ends_all), &
             "the weight counted beyond each end must merge, to the bit")
         if (allocated(error)) return
-        call ge%init(30, -700.0_real64, 700.0_real64, 50.0_real64)
+        call ge%init(30, -700.0_real64, 700.0_real64, 80.0_real64)
         call ge%merge(g_all)
         call ge%finish()
         call raw_cells(ge, r)

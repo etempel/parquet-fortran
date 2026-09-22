@@ -1588,8 +1588,17 @@ contains
             ! `1 + z` is formed with full relative accuracy once `|z|` is this large -- and by
             ! Sterbenz's lemma it is EXACT for every `z` in `[-0.5, -1)`, which is why the
             ! blueshift end takes this branch too -- so `log(1 + z)` is correct to rounding.
-            ! An infinite `z` takes this branch and answers `+Infinity`.
-            zeta = log(1.0_real64 + z)
+            !
+            ! **An infinite `z` answers `+Infinity`, and `log` is kept off it.** nagfor's `log`
+            ! raises `IEEE_INVALID` on `+Infinity` although it answers `+Infinity` correctly
+            ! (`fortran-gotchas.md`, the nagfor group); `log(huge)` is quiet, so only the infinity
+            ! bites. The clamp is on the ARGUMENT rather than a guard around the call because a
+            ! guard does not keep an optimiser from forming what it guards: `min` makes the operand
+            ! harmless whichever arm is evaluated, and the assignment afterwards selects. `z` is
+            ! not a NaN here -- that is screened above, as its own statement -- so `min` cannot
+            ! raise on one.
+            zeta = log(1.0_real64 + min(z, huge(z)))
+            if (z > huge(z)) zeta = z
         else
             ! Below that, `1 + z` rounds away the digits `log` would need (`log(1 + 1e-8)` is
             ! `6e-9` out), and the `log1p` identity `parquet_random` already carries is exact.

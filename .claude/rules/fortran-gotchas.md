@@ -674,7 +674,18 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   silently, as a value in range: a survival function written straight onto `erfc` answers
   "probability 0" for an unknown quantile. **Screen the NaN with `x /= x` before the call** in any
   procedure over these three, as `pf_norm_cdf`/`pf_norm_sf` (`src/parquet_utils.f90`) do; `exp`,
-  `log` and ordinary arithmetic propagate correctly and need no screen.
+  `log` and ordinary arithmetic propagate a NaN correctly and need no screen -- `log` has a
+  separate defect at an INFINITE argument, below.
+- **`LOG` raises `IEEE_INVALID` on `+Infinity`**, although it answers `+Infinity`, which IEEE 754
+  requires to be exact and quiet (7.2/arm64). `log(huge)` is quiet, so only the infinity bites, and
+  the answer being right is what makes it silent: nothing is wrong except a flag, which surfaces as
+  an unattributed "Floating invalid operation occurred" line at program exit, or as a trap under
+  the default `-ieee=stop` in a caller that unmasked them. Clamp the ARGUMENT rather than guarding
+  the call -- `log(1 + min(z, huge(z)))` with the infinite case assigned afterwards
+  (`pf_z2zeta`, `src/parquet_cosmology_eval.f90`) -- because a guard does not keep an optimiser
+  from forming what it guards (the general group). **A standalone reproducer built with
+  `-ieee=full` reads the flag back CLEAR and still reports the invalid at exit**, so measure this
+  one through `ieee_get_flag` in an ordinary build, never in a `-ieee=full` probe.
 - **`SPACING` returns exactly 0 for some values near the bottom of the exponent range**, which
   F2018 16.9.180 forbids — it may never return less than `TINY`. Measured: `spacing(1e-292)` is
   `0` while `spacing(1e-291)` and `spacing(1e-293)` are ordinary subnormals; gfortran and flang

@@ -117,8 +117,20 @@ int_literal = rgv.int_literal
 
 
 def bits64(x):
-    """The `transfer` bit pattern of a double (or an mpf rounded to one), as an `int64` literal."""
-    return int_literal(struct.unpack("<q", struct.pack("<d", float(x)))[0], "int64")
+    """The `transfer` bit pattern of a double (or an mpf rounded to one), as an `int64` literal.
+
+    **A NaN is emitted as the canonical quiet NaN**, `0x7FF8000000000000`, rather than as whatever
+    `float(mp.nan)` happens to hand over. IEEE 754 does not specify a NaN's sign, and the two are
+    not the same literal: this file has been written on a platform where that sign came out SET
+    (`0xFFF8000000000000`) and regenerated on one where it came out clear, which makes `--check`
+    fail on whichever machine did not write it, over a difference that pins nothing. The Fortran
+    side reads every pattern back through `transfer` and compares VALUES -- a NaN through
+    `ieee_is_nan` -- so the stored sign is never part of what is certified.
+    """
+    v = float(x)
+    if v != v:
+        return int_literal(0x7FF8000000000000, "int64")
+    return int_literal(struct.unpack("<q", struct.pack("<d", v))[0], "int64")
 
 
 # ---------------------------------------------------------------------------------------------

@@ -3244,6 +3244,9 @@ contains
         real(real64), allocatable :: x(:), z(:)
         real(real64) :: p0, p1, e0, e1, pb, fb, q, gap, fine
         character(len=11), parameter :: METHODS(2) = [character(len=11) :: "renormalise", "reflect"]
+        !> The two kernels whose binned estimate converges as the square of the cell width; the
+        !! other two have kinks or jumps and converge more slowly, as the arm above says.
+        character(len=8), parameter :: SMOOTH(2) = [character(len=8) :: "gaussian", "bspline"]
         character(len=160) :: what
         integer :: mm
 
@@ -3312,6 +3315,41 @@ contains
             write(what, '(3a,es10.3,a,es10.3)') trim(METHODS(mm)), ": the share counted beyond an end ", &
                 "misses the exact estimate by ", gap, " at 60 cells and ", fine
             call check(error, gap <= 1.0e-5_real64 .and. fine <= 0.125_real64*gap, trim(what))
+            if (allocated(error)) return
+        end do
+
+        ! ---- and the regime where the range starts further from the bound than a kernel reaches ----
+        ! **`x0 - lower > KDE_RADIUS*h` is its own case, and every kernel can be put in it.** The
+        ! zone below the range is then partly corrected and partly not, and two short cuts used to
+        ! answer as if it were neither: a point wholly past the range's end counted its WEIGHT
+        ! rather than its corrected mass, and a point reaching no cell centre put `1 - s_below -
+        ! s_above` into the first cell, which is that same assumption written the other way round.
+        ! Both are fixed masses, so refining the cells could not reveal them -- the gap simply
+        ! stopped falling. The arm above cannot see either, because at `h = 0.05` the Gaussian
+        ! reaches `0.25` and the range starts at `0.2`: it is the NARROWER kernels that leave the
+        ! strip, and the Gaussian only escaped by reaching across it.
+        !
+        ! Asserted as convergence rather than as a value: what a fixed error breaks is the falling,
+        ! so `fine` is held to a quarter of `gap` and both to a share of the estimate they miss.
+        call bounded_fixture(400_int64, z)
+        do mm = 1, 2
+            call k%fit(z, kernel=trim(SMOOTH(mm)), bandwidth=0.05_real64, lower=0.0_real64, &
+                upper=1.0_real64, boundary="renormalise")
+            call k%cdf(0.35_real64, e0)
+            call g%init(60, 0.35_real64, 0.65_real64, 0.05_real64, kernel=trim(SMOOTH(mm)), &
+                lower=0.0_real64, upper=1.0_real64, boundary="renormalise")
+            call g%add(z, finish=.true.)
+            call g%cdf(0.35_real64, p0)
+            gap = abs(p0 - e0)
+            call g%init(240, 0.35_real64, 0.65_real64, 0.05_real64, kernel=trim(SMOOTH(mm)), &
+                lower=0.0_real64, upper=1.0_real64, boundary="renormalise")
+            call g%add(z, finish=.true.)
+            call g%cdf(0.35_real64, p0)
+            fine = abs(p0 - e0)
+            write(what, '(2a,es10.3,a,es10.3)') trim(SMOOTH(mm)), &
+                ": with the range starting past the kernel's reach the share counted below it " // &
+                "misses the exact estimate by ", gap, " at 60 cells and ", fine
+            call check(error, gap <= 1.0e-3_real64 .and. fine <= 0.25_real64*gap, trim(what))
             if (allocated(error)) return
         end do
 

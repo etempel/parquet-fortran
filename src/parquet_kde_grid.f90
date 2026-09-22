@@ -2044,7 +2044,7 @@ contains
         real(real64), intent(inout)    :: below  !! the weight below `xmin`
         real(real64), intent(inout)    :: above  !! the weight above `xmax`
 
-        real(real64) :: reach, tl, th, mass, s_below, s_above, inside, sumk, f, img
+        real(real64) :: reach, tl, th, mass, s_below, s_above, inside, sumk, f, img, pv
         integer :: ilo, ihi, n, i, ic
         logical :: need_mass
 
@@ -2149,8 +2149,18 @@ contains
         ! ---- the deposit: the in-range share, spread over the centres in proportion ----
         if (sumk > 0.0_real64) then
             f = wj*(inside/mass)/(self%dx*sumk)
+            ! **The product is rounded into `pv` before the cell reads it, and that is what makes
+            ! `%merge` exact.** Written `acc(...) = acc(...) + f*k(i)` the multiply and the add
+            ! contract into one FMA on a target that has one (arm64 does; `fortran-gotchas.md`,
+            ! "One target contracts to an FMA and another cannot"), so the product reaches the sum
+            ! UNROUNDED. A grid accumulating the point directly then holds `round(acc + f*k)` while
+            ! a grid built for the merge holds `round(f*k)` and is added afterwards -- two roundings
+            ! against one, and the two routes part company in the last bit. `%merge` exists so that
+            ! per-thread grids add up to the single-pass grid, and `test_adaptive_grid` asserts
+            ! exactly that, so the rounding has to happen before the cell either way. Keep the local.
             do i = 1, n
-                acc(ilo + i - 1) = acc(ilo + i - 1) + f*k(i)
+                pv = f*k(i)
+                acc(ilo + i - 1) = acc(ilo + i - 1) + pv
             end do
         else
             ! Narrower than a cell and between two centres: whole into the cell holding it.
@@ -2203,7 +2213,7 @@ contains
 
         type(kde_corr_kernel) :: cf
         type(kde_point_fn) :: fn
-        real(real64) :: tl, th, s_below, s_above, rj, c, v, a, b
+        real(real64) :: tl, th, s_below, s_above, rj, c, v, a, b, pv
         integer :: ilo, ihi, n, i, ic
 
         rj = 1.0_real64/hj
@@ -2265,21 +2275,32 @@ contains
                         self%lo, self%has_upper, self%hi, c, rj)
                     v = kde_corr_value(cf, z(i), k(i))
                 end if
-                acc(ilo + i - 1) = acc(ilo + i - 1) + wj*v*rj
+                ! Rounded into `pv` first, for the reason the plain deposit gives: an FMA here
+                ! would make a merged grid and a single-pass grid differ in the last bit.
+                pv = wj*v*rj
+                acc(ilo + i - 1) = acc(ilo + i - 1) + pv
             end do
             return
         end if
         ! Reaching no centre because it lies beyond the range altogether: its whole mass is already
-        ! in the two counters and no cell may take a share of it. Without this the fallback below
-        ! would put `1 - s_below - s_above` into the nearest cell, which is the point's mass INSIDE
-        ! a range it does not reach.
+        ! in the two counters and no cell may take a share of it.
         if (xj + reach < self%x0 .or. xj - reach > self%x1) return
-        ! Narrower than a cell and between two centres: its in-range share goes whole into the cell
-        ! holding it, as the plain deposit does.
+        ! Reaching no centre although it does reach the range: its in-range share goes whole into
+        ! the cell holding it, as the plain deposit does.
+        !
+        ! **The share is the term's own integral over the range, not `1 - s_below - s_above`.**
+        ! That form reads "everything the point did not put outside", which is its in-range mass
+        ! only where the term's total IS its weight -- true of the plain kernel and false under a
+        ! local-polynomial correction, where the term is divided by the kernel's truncated mass and
+        ! carries a total of its own. The gap is the whole of what the correction is doing where
+        ! the point sits, and it goes into ONE cell whatever the cell width, so it is a fixed error
+        ! that refining the grid cannot reduce. Reachable where a kernel ends within half a cell of
+        ! the range's start: rare, and worth a quadrature the ordinary path never pays for.
         ic = 1
         if (xj > self%x0) ic = int(min(real(self%nc, real64), (xj - self%x0)/self%dx + 1.0_real64))
         ic = max(1, min(self%nc, ic))
-        acc(ic) = acc(ic) + wj*(1.0_real64 - s_below - s_above)/self%dx
+        acc(ic) = acc(ic) + wj*kde_term_integral(fn, max(self%x0, xj - reach), &
+            min(self%x1, xj + reach), 0.0_real64, .false.)/self%dx
 
     end subroutine deposit_corrected
 

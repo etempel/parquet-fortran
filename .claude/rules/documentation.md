@@ -155,14 +155,17 @@ After editing headings or `#anchor` links in any root-level `*.md` or `doc/pages
   `Undocumented moduleprocedure` (abbreviated form), `Could not extract source code`, and
   `Undocumented interface`/`Undocumented proc` (false positives). **`Unknown entity` is the one
   load-bearing category**; it rises by one for each use-associated name a module re-exports or
-  hides. Compare it per module, never as a total, and never quote a stored figure:
+  hides. Compare it per module, never as a total, and never quote a stored figure. **Count it with
+  `--config="graph=false" --no-search`**, which skips the call graphs and the search index — the
+  slow half of a run, and no warning depends on either:
 
 ```bash
-ford --warn docs.md 2>&1 | tr '\n' ' ' | tr -s ' ' | sed 's/Warning: Unknown entity/\n&/g' \
+ford --warn docs.md --config="graph=false" --no-search 2>&1 | tr '\n' ' ' | tr -s ' ' \
+  | sed 's/Warning: Unknown entity/\n&/g' \
   | grep -o "attribute '[^']*' in module '[^']*'" | sort | uniq -c
 ```
 
-- After a pure refactor (file split/relocation) diff `ford --warn docs.md` totals before and after
+- After a pure refactor (file split/relocation) diff those totals before and after
   (`git stash` / `git stash pop`); they must match. A stage that adds procedures compares the
   per-category breakdown instead. A relocated private helper vanishing from its old module's page
   is expected.

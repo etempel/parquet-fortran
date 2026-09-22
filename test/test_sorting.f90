@@ -4576,13 +4576,17 @@ contains
     !
     !> Decimal text for a small integer, so a sweep's failure message can name the size and thread
     !! count that actually failed -- without one, a dense sweep reports a line number and nothing else.
-    function itoa(k) result(s)
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine itoa(k, s)
         integer, intent(in) :: k           !! value to render.
-        character(len=:), allocatable :: s !! decimal text.
+        character(len=:), allocatable, intent(out) :: s !! decimal text.
         character(len=16) :: buf
         write(buf, '(i0)') k
         s = trim(buf)
-    end function itoa
+    end subroutine itoa
     !
     !> `pf_permute` over a `parquet_column` HONOURS `assume_valid`, routing to `%reindex_trusted`.
     !!
@@ -6280,6 +6284,7 @@ contains
         real(real64), allocatable :: v(:)
         integer(int32), allocatable :: ser(:), par(:)
         integer :: n, t, k
+        character(len=:), allocatable :: tag, tag2
 
         ! **Precondition, declared rather than assumed.** Without a team this test's
         ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
@@ -6310,13 +6315,17 @@ contains
             call force_fortran_bucket_split(2_int64)            ! below the size -> decomposed
             do t = 2, 8
                 call pf_argsort(v, par, threads=t)
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, threaded_split_ran(), &
-                    "the threaded radix must actually decompose at n="//itoa(n)// &
-                    " threads="//itoa(t)//"; a serial fallback would satisfy the oracle below")
+                    "the threaded radix must actually decompose at n="//tag// &
+                    " threads="//tag2//"; a serial fallback would satisfy the oracle below")
                 if (allocated(error)) exit
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, size(par) == n .and. all(par == ser), &
-                    "a threaded decomposition must equal the serial permutation at n="//itoa(n)// &
-                    " threads="//itoa(t))
+                    "a threaded decomposition must equal the serial permutation at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
             end do
             deallocate(v)
@@ -6334,13 +6343,17 @@ contains
             call force_fortran_bucket_split(2_int64)
             do t = 2, 8
                 call pf_argsort(v, par, threads=t)
+                call itoa(big(k), tag)
+                call itoa(t, tag2)
                 call check(error, threaded_split_ran(), &
-                    "the threaded radix must actually decompose at n="//itoa(big(k))// &
-                    " threads="//itoa(t))
+                    "the threaded radix must actually decompose at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
+                call itoa(big(k), tag)
+                call itoa(t, tag2)
                 call check(error, size(par) == big(k) .and. all(par == ser), &
-                    "a threaded decomposition must equal the serial permutation at n="//itoa(big(k))// &
-                    " threads="//itoa(t))
+                    "a threaded decomposition must equal the serial permutation at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
             end do
             deallocate(v)
@@ -6371,6 +6384,7 @@ contains
         integer(int32), allocatable :: perm(:)
         logical, allocatable :: seen(:)
         integer :: n, t, k
+        character(len=:), allocatable :: tag, tag2
 
         ! **Precondition, declared rather than assumed.** Without a team this test's
         ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
@@ -6399,9 +6413,11 @@ contains
             call ties_fixture(v)
             do t = 2, 8
                 call pf_argsort(v, perm, threads=t)
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, threaded_split_ran(), &
-                    "the threaded radix must actually decompose at n="//itoa(n)// &
-                    " threads="//itoa(t)//"; a serial fallback is a permutation too")
+                    "the threaded radix must actually decompose at n="//tag// &
+                    " threads="//tag2//"; a serial fallback is a permutation too")
                 if (allocated(error)) exit
                 seen = .false.
                 do k = 1, n
@@ -6409,9 +6425,11 @@ contains
                     if (seen(perm(k))) exit
                     seen(perm(k)) = .true.
                 end do
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, all(seen), &
-                    "a threaded decomposition must return each index exactly once at n="//itoa(n)// &
-                    " threads="//itoa(t))
+                    "a threaded decomposition must return each index exactly once at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
             end do
             deallocate(v, seen)
@@ -6438,6 +6456,7 @@ contains
         real(real64) :: v(n)
         integer(int32), allocatable :: ser(:), par(:)
         integer :: shape_id, k, t
+        character(len=:), allocatable :: tag, tag2
 
         ! **Precondition, declared rather than assumed.** Without a team this test's
         ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
@@ -6482,13 +6501,17 @@ contains
             call force_fortran_bucket_split(2_int64)
             do t = 2, 8
                 call pf_argsort(v, par, threads=t)
+                call itoa(shape_id, tag)
+                call itoa(t, tag2)
                 call check(error, threaded_split_ran(), &
                     "the threaded radix must actually decompose on extreme shape "// &
-                    itoa(shape_id)//" at threads="//itoa(t))
+                    tag//" at threads="//tag2)
                 if (allocated(error)) exit
+                call itoa(shape_id, tag)
+                call itoa(t, tag2)
                 call check(error, all(par == ser), &
                     "the threaded split must equal the serial permutation on extreme shape "// &
-                    itoa(shape_id)//" at threads="//itoa(t))
+                    tag//" at threads="//tag2)
                 if (allocated(error)) exit
             end do
             if (allocated(error)) exit
@@ -6513,6 +6536,7 @@ contains
         type(pf_sort_keys) :: keys
         integer(int32), allocatable :: ser(:), par(:)
         integer :: k, t
+        character(len=:), allocatable :: tag
 
         ! **Precondition, declared rather than assumed.** Without a team this test's
         ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
@@ -6545,12 +6569,14 @@ contains
         call force_fortran_bucket_split(2_int64)
         do t = 2, 8
             call pf_argsort(s, par, threads=t)
+            call itoa(t, tag)
             call check(error, threaded_design_was(1_int64), &
-                "a character key must reach the THREADED LSD CHAIN (design 1) at threads="//itoa(t)// &
+                "a character key must reach the THREADED LSD CHAIN (design 1) at threads="//tag// &
                 "; this test is design 1's only threaded coverage")
             if (allocated(error)) exit
+            call itoa(t, tag)
             call check(error, all(par == ser), &
-                "a threaded split over a character key must equal the serial one at threads="//itoa(t))
+                "a threaded split over a character key must equal the serial one at threads="//tag)
             if (allocated(error)) exit
         end do
         if (allocated(error)) then
@@ -6564,12 +6590,14 @@ contains
         call force_fortran_bucket_split(2_int64)
         do t = 2, 8
             call pf_argsort(keys, par, threads=t)
+            call itoa(t, tag)
             call check(error, threaded_design_was(1_int64), &
-                "a two-key set must reach the THREADED LSD CHAIN (design 1) at threads="//itoa(t)// &
+                "a two-key set must reach the THREADED LSD CHAIN (design 1) at threads="//tag// &
                 "; this test is design 1's only threaded coverage")
             if (allocated(error)) exit
+            call itoa(t, tag)
             call check(error, all(par == ser), &
-                "a threaded split over two keys must equal the serial one at threads="//itoa(t))
+                "a threaded split over two keys must equal the serial one at threads="//tag)
             if (allocated(error)) exit
         end do
         call force_fortran_bucket_split(0_int64)
@@ -6595,6 +6623,7 @@ contains
         integer(int32), allocatable :: ser(:), par(:)
         logical, allocatable :: seen(:)
         integer :: n, t, k
+        character(len=:), allocatable :: tag, tag2
 
         ! **Precondition, declared rather than assumed.** Without a team this test's
         ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
@@ -6629,13 +6658,17 @@ contains
             call force_fortran_bucket_split(2_int64)            ! below the size -> decomposed
             do t = 2, 8
                 call pf_argsort(s, par, threads=t)
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, threaded_design_was(1_int64), &
-                    "a character key must reach the threaded LSD chain at n="//itoa(n)// &
-                    " threads="//itoa(t))
+                    "a character key must reach the threaded LSD chain at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, size(par) == n .and. all(par == ser), &
-                    "the threaded LSD chain must equal the serial permutation at n="//itoa(n)// &
-                    " threads="//itoa(t))
+                    "the threaded LSD chain must equal the serial permutation at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
                 seen = .false.
                 do k = 1, n
@@ -6643,9 +6676,11 @@ contains
                     if (seen(par(k))) exit
                     seen(par(k)) = .true.
                 end do
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, all(seen), &
-                    "the threaded LSD chain must return each index exactly once at n="//itoa(n)// &
-                    " threads="//itoa(t))
+                    "the threaded LSD chain must return each index exactly once at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
             end do
             deallocate(s, seen)
@@ -6669,6 +6704,7 @@ contains
         integer(int32), allocatable :: ser(:), par(:)
         integer :: k, t, variant
         logical :: nf
+        character(len=:), allocatable :: tag, tag2
 
         ! **Precondition, declared rather than assumed.** Without a team this test's
         ! positive control (`threaded_split_ran`/`threaded_design_was`) cannot be
@@ -6703,13 +6739,17 @@ contains
             call force_fortran_bucket_split(2_int64)
             do t = 2, 8
                 call pf_argsort(v, par, is_valid=mask, nulls_first=nf, threads=t)
+                call itoa(variant, tag)
+                call itoa(t, tag2)
                 call check(error, threaded_split_ran(), &
                     "the threaded radix must actually decompose a null/NaN-bearing key, "// &
-                    "nulls_first variant "//itoa(variant)//" at threads="//itoa(t))
+                    "nulls_first variant "//tag//" at threads="//tag2)
                 if (allocated(error)) exit
+                call itoa(variant, tag)
+                call itoa(t, tag2)
                 call check(error, all(par == ser), &
                     "a threaded split must equal the serial one across null/NaN tiers, "// &
-                    "nulls_first variant "//itoa(variant)//" at threads="//itoa(t))
+                    "nulls_first variant "//tag//" at threads="//tag2)
                 if (allocated(error)) exit
             end do
             if (allocated(error)) exit
@@ -7531,6 +7571,7 @@ contains
         integer(int64) :: runs_forced(size(str_sel))
         logical :: same_int(3:4), same_str(size(str_sel))
         integer :: k
+        character(len=:), allocatable :: tag
         ! **Preconditions, declared rather than assumed.** Every selector below guards an allocation
         ! made only when a team exists, so without one the forced arms run exactly the code the
         ! control arm runs and every equality holds for the wrong reason -- the vacuous pass this
@@ -7614,13 +7655,15 @@ contains
             "failing Design B's task arrays must fall through to Design A, not run Design B anyway")
         if (allocated(error)) return
         do k = 1, size(str_sel)
+            call itoa(str_sel(k), tag)
             call check(error, same_str(k), &
                 "a forced allocation failure changed the string permutation, selector " // &
-                itoa(str_sel(k)))
+                tag)
             if (allocated(error)) return
+            call itoa(str_sel(k), tag)
             call check(error, runs_forced(k) == 0_int64, &
                 "the forced arm still dispatched runs to the team, so the failure was not " // &
-                "engaged, selector " // itoa(str_sel(k)))
+                "engaged, selector " // tag)
             if (allocated(error)) return
         end do
     end subroutine test_radix_alloc_fallback_selectors

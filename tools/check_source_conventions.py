@@ -5547,6 +5547,107 @@ def _writable_positions(callee, count, signatures, generics, bindings):
     return writable if resolved_any else None
 
 
+#: A function statement, folded free of continuations by `_logical_lines`, with or without a type
+#: prefix and with or without `result(...)`.  Subroutines are tracked too, so that a procedure
+#: CONTAINED in a function cannot have its own locals read as the outer function's result.
+_FUNC_OPEN = re.compile(
+    r"^" + _PROC_PREFIX + _TYPE_PREFIX + r"function\s+([a-z_]\w*)\s*\(([^)]*)\)(.*)$", re.I)
+_SUB_OPEN = re.compile(r"^" + _PROC_PREFIX + r"subroutine\s+([a-z_]\w*)\b", re.I)
+_END_FUNC = re.compile(r"^end\s*function\b|^end\s*$", re.I)
+_END_SUB = re.compile(r"^end\s*subroutine\b", re.I)
+_RESULT_CLAUSE = re.compile(r"\bresult\s*\(\s*([a-z_]\w*)\s*\)", re.I)
+#: `character(len=:), allocatable` in either spelling of the length.
+_DEFERRED_CHAR = re.compile(r"^character\s*\(\s*(?:len\s*=\s*)?:\s*\)\s*,(.*?)::(.*)$", re.I)
+
+
+def check_no_deferred_length_character_result():
+    """No function anywhere may return a `character(len=:), allocatable`.
+
+    gfortran keeps such a result's hidden length in a STATIC variable rather than a thread-local
+    one (GCC PR113797, PR97977), and emits it per CALL SITE -- `slen.<n>.<m>` in the object's
+    `.bss`, not `.tbss`. The caller then reads that one global three times for a single
+    assignment: once to size the `realloc`, once to store as the target's length, and once to
+    size the `memmove`. Any other thread calling the same function in between supplies its own
+    length to all three.
+
+    What that produces is a wrong string first and a heap overflow second. `pf_cosmology%init`
+    set its label through `capped(name)`, a five-line helper of exactly this shape; two `%init`
+    calls on different threads -- which is what test-drive's `!$omp parallel do` makes of a
+    parallel suite -- left the label holding `"WMAP9"` stamped at `"Planck18"`'s length, and
+    `test_second_init_replaces_the_first` failed on `%get_name` about once in a full run. When
+    the second read is the LARGER, the `memmove` writes past what the `realloc` reserved, so the
+    same defect can land anywhere in the process.
+
+    **Nothing on this side can catch it.** It compiles clean under every compiler here, the suite
+    passes, and the shape reads as ordinary idiomatic Fortran -- the failure is a race whose
+    window is a few instructions wide, so a green run is not evidence. Only the generated code
+    shows it, which is why this is a static check on the DECLARATION rather than a test.
+
+    The remedy is a subroutine with a `character(len=:), allocatable, intent(out)` argument, as
+    `pf_to_str` (`src/parquet_utils.f90`) already is; `parquet_skycoord_object` shows the call
+    shape. For an `x = obj%get(x)` accessor use one `intent(inout)` argument instead. A result of
+    a length the caller can see -- `character(len=32)`, or `character(len=len(text))` -- needs no
+    hidden variable and is unaffected, as is any non-`character` allocatable result.
+
+    Scope is every `.f90` in src/, test/, app/ and bench/: the rule applies to test and benchmark
+    code too, and `test_cosmology`'s own `itoa` had the same shape inside the same parallel suite.
+    **Interface bodies are NOT skipped.** Every `module function` in this library is DECLARED in
+    an interface block and implemented as a bare `module procedure`, so the result declaration
+    lives in the interface and nowhere else -- skipping those would blind the check to the one
+    shape the library actually uses. Headers are read from `_logical_lines`, so a header split
+    over continuations (104 of the 1706 in the tree) is folded before it is matched rather than
+    silently missed.
+    """
+    problems = []
+    roots = [SRC, TEST, REPO_ROOT / "app", REPO_ROOT / "bench"]
+    paths = sorted(q for root in roots if root.is_dir() for q in root.glob("*.f90"))
+    if not paths:
+        return ["src/, test/, app/, bench/: no .f90 sources found -- this check has gone blind"]
+    seen_any_function = False
+    for path in paths:
+        rel = path.relative_to(REPO_ROOT)
+        stack = []  # one frame per open procedure: (result name or None, header line)
+        for lineno, code in _logical_lines(path):
+            code = code.strip()
+            if _END_FUNC.match(code) or _END_SUB.match(code):
+                if stack:
+                    stack.pop()
+                continue
+            m = _SUB_OPEN.match(code)
+            if m:
+                stack.append((None, lineno))
+                continue
+            m = _FUNC_OPEN.match(code)
+            if m:
+                seen_any_function = True
+                r = _RESULT_CLAUSE.search(m.group(3))
+                stack.append(((r.group(1) if r else m.group(1)).lower(), lineno))
+                continue
+            if not stack or stack[-1][0] is None:
+                continue
+            d = _DEFERRED_CHAR.match(code)
+            if not d:
+                continue
+            # A dummy argument, not the result: `intent(...)` is what separates them, and a
+            # function result may not carry one.
+            if re.search(r"\bintent\s*\(", d.group(1), re.I):
+                continue
+            declared = [n.strip().split("(")[0].lower() for n in d.group(2).split(",")]
+            result, header = stack[-1]
+            if result in declared:
+                problems.append(
+                    "%s:%d: the function opened at line %d returns `%s` as a "
+                    "`character(len=:), allocatable` -- make it a subroutine with a "
+                    "`character(len=:), allocatable, intent(out)` argument (gfortran shares that "
+                    "result's hidden length between threads; see this check's docstring)"
+                    % (rel, lineno, header, result)
+                )
+    if not seen_any_function:
+        return ["no function header parsed anywhere in src/, test/, app/, bench/ -- "
+                "this check has gone blind"]
+    return problems
+
+
 def check_no_aliased_output_argument():
     """One variable must never be passed to two dummies when either of them can be DEFINED.
 
@@ -8735,6 +8836,8 @@ CHECKS = (
     ("a guide page spells an optional argument one way", check_bracket_convention),
     ("no multi-line doc block opens with a FORD metadata key",
      check_no_doc_block_opens_with_a_ford_metadata_key),
+    ("no function returns a deferred-length allocatable character",
+     check_no_deferred_length_character_result),
     ("no call aliases one variable onto a writable dummy", check_no_aliased_output_argument),
     ("parquet_random takes array lengths as int64", check_fill_size_kind),
     ("allocate extents from size() use int64", check_allocate_extent_kind),

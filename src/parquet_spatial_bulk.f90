@@ -68,6 +68,7 @@ contains
     !> Rebuilds when the radii a bulk query is about to use would choose a very different cell.
     module procedure spatial_maybe_rebuild
         real(real64) :: r_cur, r_new, h_cur, h_new, s2, s3
+        character(len=:), allocatable :: t1, t2, t3
 
         ! Defensive: the one caller is `spatial_bulk_setup`, whose own first statement is this
         ! same check, so an unbuilt index has already aborted by the time this runs.
@@ -104,9 +105,12 @@ contains
                 r_cur = 2.0_real64 * asin(min(0.5_real64 * r_cur, 1.0_real64)) * spatial_rad2deg
                 r_new = 2.0_real64 * asin(min(0.5_real64 * r_new, 1.0_real64)) * spatial_rad2deg
             end if
+            call num_text(r_cur, t1)
+            call num_text(r_new, t2)
+            call num_text(self%cell_side, t3)
             call parquet_emit_advice("pf_spatial_index: rebuilt for a query radius far from the one " // &
-                "it was built for (built " // num_text(r_cur) // ", now " // num_text(r_new) // &
-                ", cell " // num_text(self%cell_side) // "). Pass a better radius= to %build, or " // &
+                "it was built for (built " // t1 // ", now " // t2 // &
+                ", cell " // t3 // "). Pass a better radius= to %build, or " // &
                 "parquet_set_verbosity('silent') to silence this and every other piece of advice.")
         end if
     end procedure spatial_maybe_rebuild
@@ -758,6 +762,7 @@ contains
         ! Each tie group's window, its least distance in row 1 and its greatest in row 2: one cache
         ! line per emitter's read rather than two.
         real(real64), allocatable :: wb(:, :)
+        character(len=:), allocatable :: t1, t2
         ! One pair buffer per thread, in a SHARED array allocated before the region; see the sweep.
         type(pair_buf), allocatable :: bufs(:)
         ! As the ball sweep: one kind is filled, the other allocated empty. See `pairs_alloc`.
@@ -828,9 +833,11 @@ contains
         ! the sweep is slow and exact, and the window can be meant.
         if (n > 1_int64) then
             if (self%lip * maxval(b_par) > self%d_hi - self%d_lo) then
+                call num_text(self%lip * maxval(b_par), t1)
+                call num_text(self%d_hi - self%d_lo, t2)
                 call parquet_emit_advice("pf_spatial_index%" // what // ": L x max(b_par) = " // &
-                    num_text(self%lip * maxval(b_par)) // " exceeds the catalogue's range in distance from " // &
-                    "the observer (" // num_text(self%d_hi - self%d_lo) // "), so the parallel window spans " // &
+                    t1 // " exceeds the catalogue's range in distance from " // &
+                    "the observer (" // t2 // "), so the parallel window spans " // &
                     "the whole catalogue along every line of sight; is b_par in los='s units?")
             end if
         end if
@@ -1908,13 +1915,17 @@ contains
     end function uf_find
 
     !> A short decimal rendering of a real, for a message.
-    function num_text(v) result(text)
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine num_text(v, text)
         real(real64), intent(in) :: v !! the value to render.
-        character(len=:), allocatable :: text !! the rendered value, trimmed.
+        character(len=:), allocatable, intent(out) :: text !! the rendered value, trimmed.
         character(len=32) :: buf
 
         write (buf, '(g0.6)') v
         text = trim(adjustl(buf))
-    end function num_text
+    end subroutine num_text
 
 end submodule parquet_spatial_bulk ! GCOVR_EXCL_LINE

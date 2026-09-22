@@ -354,6 +354,7 @@ contains
         integer :: u, ios, cstat
         character(len=256) :: line, cmdfile
         real(real64) :: kb
+        character(len=:), allocatable :: tag
 
         mib = -1.0_real64
         pid = getpid()
@@ -362,7 +363,8 @@ contains
         ! not exist on macOS, and neither does a Fortran intrinsic for this.
         ! cmdstat= is passed but never inspected: a nonzero `ps` exit would otherwise trigger
         ! ERROR TERMINATION under flang, which reads that as a cmdstat-worthy error condition.
-        call execute_command_line("ps -o rss= -p " // itoa(pid) // " > " // trim(cmdfile), &
+        call itoa(pid, tag)
+        call execute_command_line("ps -o rss= -p " // tag // " > " // trim(cmdfile), &
             wait=.true., cmdstat=cstat)
         open(newunit=u, file=trim(cmdfile), status="old", action="read", iostat=ios)
         if (ios /= 0) return
@@ -374,13 +376,18 @@ contains
         mib = kb / 1024.0_real64
     end function rss_mib
 
-    function itoa(n) result(s)
+    !> An integer as text.
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine itoa(n, s)
         integer, intent(in) :: n              !! value to render.
-        character(len=:), allocatable :: s    !! decimal text.
+        character(len=:), allocatable, intent(out) :: s !! decimal text.
         character(len=32) :: buf
         write(buf, '(i0)') n
         s = trim(buf)
-    end function itoa
+    end subroutine itoa
 
     !> Wall-clock seconds since an arbitrary origin.
     function now() result(t)
@@ -1503,6 +1510,7 @@ contains
         integer(int64) :: nrows, i, colbytes
         integer :: c, used
         real(real64) :: rss_built, rss_sorted, t0, dt, acc
+        character(len=:), allocatable :: tag
 
         nrows = int(size_gb * 1.0e9_real64 / (8.0_real64 * real(max(ncols, 1), real64)), int64)
         if (nrows < 2_int64) nrows = 2_int64
@@ -1521,7 +1529,8 @@ contains
             do i = 1_int64, nrows
                 v(i) = real(i, real64) * real(c, real64)
             end do
-            call t%add_column("c"//itoa(c), v)
+            call itoa(c, tag)
+            call t%add_column("c"//tag, v)
         end do
         deallocate(v)
         call sc%reserve(nrows, nrows * int(slen, int64))
@@ -1541,7 +1550,8 @@ contains
             if (c == 1) then
                 call t%col("key", kp)
             else
-                call t%col("c"//itoa(c), kp)
+                call itoa(c, tag)
+                call t%col("c"//tag, kp)
             end if
             acc = acc + sum(kp)
         end do
@@ -1593,6 +1603,7 @@ contains
         integer :: c, round, nvalid
         real(real64) :: t0, t_sort, t_argsort, t_val_log, t_val_bit, dt, acc
         real(real64) :: total_log, total_bit, t_all, t_one
+        character(len=:), allocatable :: tag
 
         nrows = int(size_gb * 1.0e9_real64 / (8.0_real64 * real(max(ncols, 1), real64)), int64)
         if (nrows < 2_int64) nrows = 2_int64
@@ -1607,7 +1618,8 @@ contains
             do i = 1_int64, nrows
                 v(i) = real(i, real64) * real(c, real64)
             end do
-            call t%add_column("c"//itoa(c), v)
+            call itoa(c, tag)
+            call t%add_column("c"//tag, v)
         end do
         ! Built with %append_string into a parquet_string_column and handed over whole, NOT with
         ! %add_column over a character array. The latter goes through parquet_column%set_all, which
@@ -1629,7 +1641,8 @@ contains
             if (c == 1) then
                 call t%col("key", kp)
             else
-                call t%col("c"//itoa(c), kp)
+                call itoa(c, tag)
+                call t%col("c"//tag, kp)
             end if
             acc = acc + sum(kp)
         end do
@@ -1708,7 +1721,8 @@ contains
         total_bit = real(nvalid, real64) * t_val_bit
 
         write(output_unit, '(a)') ""
-        write(output_unit, '(a,f9.4,a)') "sort_by (best of "//itoa(nround)//")     : ", t_sort, " s"
+        call itoa(nround, tag)
+        write(output_unit, '(a,f9.4,a)') "sort_by (best of "//tag//")     : ", t_sort, " s"
         write(output_unit, '(a,f9.4,a)') "  of which pf_argsort      : ", t_argsort, " s"
         write(output_unit, '(a)') ""
         write(output_unit, '(a,f9.4,a)') "reindex phase, all validate: ", t_all, " s"

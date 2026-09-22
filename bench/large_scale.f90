@@ -160,10 +160,15 @@ contains
             / (1024.0_real64**3)
     end function estimated_gb
 
-    function case_label(type_name, shape_kind, nrows, col_size) result(lbl)
+    !> A benchmark case's label.
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine case_label(type_name, shape_kind, nrows, col_size, lbl)
         character(len=*), intent(in) :: type_name, shape_kind
         integer(int64), intent(in) :: nrows, col_size
-        character(len=:), allocatable :: lbl
+        character(len=:), allocatable, intent(out) :: lbl
         character(len=32) :: nrows_s, col_size_s
 
         write(nrows_s, '(i0)') nrows
@@ -174,7 +179,7 @@ contains
         else
             lbl = trim(type_name)//" "//trim(shape_kind)//" column (nrows="//trim(nrows_s)//")"
         end if
-    end function case_label
+    end subroutine case_label
 
     subroutine print_start(test_num, total, label, start_time)
         integer, intent(in) :: test_num, total
@@ -304,9 +309,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("int32", "vector", nrows, col_size)
+        call case_label("int32", "vector", nrows, col_size, lbl)
+        label = lbl
         gb = estimated_gb(nrows, col_size, BYTES_INT32)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -376,9 +383,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("int32", "scalar", nrows, 1_int64)
+        call case_label("int32", "scalar", nrows, 1_int64, lbl)
+        label = lbl
         gb = estimated_gb(nrows, 1_int64, BYTES_INT32)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -429,9 +438,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("int64", "vector", nrows, col_size)
+        call case_label("int64", "vector", nrows, col_size, lbl)
+        label = lbl
         gb = estimated_gb(nrows, col_size, BYTES_INT64)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -501,9 +512,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("int64", "scalar", nrows, 1_int64)
+        call case_label("int64", "scalar", nrows, 1_int64, lbl)
+        label = lbl
         gb = estimated_gb(nrows, 1_int64, BYTES_INT64)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -554,9 +567,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("float32", "vector", nrows, col_size)
+        call case_label("float32", "vector", nrows, col_size, lbl)
+        label = lbl
         gb = estimated_gb(nrows, col_size, BYTES_FLOAT32)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -626,9 +641,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("float32", "scalar", nrows, 1_int64)
+        call case_label("float32", "scalar", nrows, 1_int64, lbl)
+        label = lbl
         gb = estimated_gb(nrows, 1_int64, BYTES_FLOAT32)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -679,9 +696,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("float64", "vector", nrows, col_size)
+        call case_label("float64", "vector", nrows, col_size, lbl)
+        label = lbl
         gb = estimated_gb(nrows, col_size, BYTES_FLOAT64)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -751,9 +770,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("float64", "scalar", nrows, 1_int64)
+        call case_label("float64", "scalar", nrows, 1_int64, lbl)
+        label = lbl
         gb = estimated_gb(nrows, 1_int64, BYTES_FLOAT64)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -804,9 +825,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("logical", "vector", nrows, col_size)
+        call case_label("logical", "vector", nrows, col_size, lbl)
+        label = lbl
         gb = estimated_gb(nrows, col_size, BYTES_LOGICAL)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -876,9 +899,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("logical", "scalar", nrows, 1_int64)
+        call case_label("logical", "scalar", nrows, 1_int64, lbl)
+        label = lbl
         gb = estimated_gb(nrows, 1_int64, BYTES_LOGICAL)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -930,9 +955,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("parquet_string_column", "scalar", nrows, 1_int64)
+        call case_label("parquet_string_column", "scalar", nrows, 1_int64, lbl)
+        label = lbl
         gb = estimated_gb(nrows, 1_int64, BYTES_STRING)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -988,9 +1015,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("string", "vector", nrows, col_size)
+        call case_label("string", "vector", nrows, col_size, lbl)
+        label = lbl
         gb = estimated_gb(nrows, col_size, BYTES_STRING)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)
@@ -1060,9 +1089,11 @@ contains
         real(real64) :: gb
         integer(int64) :: start_time
         character(len=:), allocatable :: label
+        character(len=:), allocatable :: lbl
 
         test_num = test_num + 1
-        label = case_label("string", "scalar", nrows, 1_int64)
+        call case_label("string", "scalar", nrows, 1_int64, lbl)
+        label = lbl
         gb = estimated_gb(nrows, 1_int64, BYTES_STRING)
         if (gb > max_gb) then
             call print_skipped(test_num, total, label, gb, max_gb)

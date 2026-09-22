@@ -3324,6 +3324,7 @@ contains
         integer(int32), allocatable :: ser(:), par(:)
         logical, allocatable :: seen(:)
         integer :: n, t, k
+        character(len=:), allocatable :: tag, tag2
 
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: without a team the co-ranked merge cannot run at "// &
@@ -3347,18 +3348,24 @@ contains
             call force_parallel_threshold(2_int64)            ! below the size -> co-ranked
             do t = 2, 8
                 call pf_argsort(v, par, threads=t)
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, merge_threads_used() > 1_int64, &
-                    "the final merge round must really be co-ranked at n="//itoa(n)// &
-                    " threads="//itoa(t)//"; a single-threaded merge satisfies the oracle below")
+                    "the final merge round must really be co-ranked at n="//tag// &
+                    " threads="//tag2//"; a single-threaded merge satisfies the oracle below")
                 if (allocated(error)) exit
                 ! Two checks, not one `.and.`: `all(par == ser)` would be evaluated over mismatched
                 ! extents when the size is wrong, since `.and.` does not short-circuit.
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, size(par) == n, &
-                    "co-ranking must return n indices at n="//itoa(n)//" threads="//itoa(t))
+                    "co-ranking must return n indices at n="//tag//" threads="//tag2)
                 if (allocated(error)) exit
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, all(par == ser), &
-                    "co-ranking must equal the serial permutation at n="//itoa(n)// &
-                    " threads="//itoa(t))
+                    "co-ranking must equal the serial permutation at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
                 seen = .false.
                 do k = 1, n
@@ -3366,9 +3373,11 @@ contains
                     if (seen(par(k))) exit
                     seen(par(k)) = .true.
                 end do
+                call itoa(n, tag)
+                call itoa(t, tag2)
                 call check(error, all(seen), &
-                    "co-ranking must return each index exactly once at n="//itoa(n)// &
-                    " threads="//itoa(t))
+                    "co-ranking must return each index exactly once at n="//tag// &
+                    " threads="//tag2)
                 if (allocated(error)) exit
             end do
             deallocate(v, seen)

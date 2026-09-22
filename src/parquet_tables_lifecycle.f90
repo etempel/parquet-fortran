@@ -104,7 +104,7 @@ contains
         table%cache%source_file = trim(filename)
         ! Validated and stored BEFORE the reader opens, so a mistyped token aborts with no live
         ! Arrow object in scope -- the same reason the read-time transform is composed first.
-        table%cache%list_columns = resolve_list_columns_token(list_columns, filename)
+        call resolve_list_columns_token(list_columns, filename, table%cache%list_columns)
         ! Retained only so %clone can reattach the SAME transform when it reopens the file. Stored
         ! as the composed, already-translated values rather than the caller's originals: a clone
         ! opens the same file, so re-deriving them would only risk the two drifting. They live on
@@ -270,10 +270,14 @@ contains
     !! A token rather than a logical because a third policy is foreseeable, and an unrecognised one
     !! aborts naming BOTH accepted values -- a caller who mistyped `"containers"` needs to be told
     !! what was expected, not merely that this was not it.
-    function resolve_list_columns_token(list_columns, filename) result(token)
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine resolve_list_columns_token(list_columns, filename, token)
         character(len=*), intent(in), optional :: list_columns !! the caller's argument, if given.
         character(len=*), intent(in) :: filename !! for the error message's file context.
-        character(len=:), allocatable :: token !! `"auto"` or `"container"`.
+        character(len=:), allocatable, intent(out) :: token !! `"auto"` or `"container"`.
         !
         token = "auto"
         if (.not. present(list_columns)) return
@@ -281,7 +285,7 @@ contains
         if (token == "auto" .or. token == "container") return
         error stop "parquet_open_table: unrecognized list_columns value '" // token // &
             "'; expected 'auto' or 'container' (file '" // trim(filename) // "')"
-    end function resolve_list_columns_token
+    end subroutine resolve_list_columns_token
     !
     !> Removes a file column that would occupy the reserved `parquet_row_index` name, with a
     !! warning.

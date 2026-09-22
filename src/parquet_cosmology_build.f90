@@ -55,14 +55,15 @@ contains
 
     end subroutine cosmology_abort
 
-    !> `value` rendered the way every message in the library renders a number.
-    function shown(value) result(text)
-        real(real64), intent(in)      :: value !! the value to render
-        character(len=:), allocatable :: text  !! the rendered value
-
-        call pf_to_str(value, text)
-
-    end function shown
+    ! Every message below renders its numbers with `pf_to_str` into a LOCAL, and `capped` is a
+    ! subroutine, because a FUNCTION returning `character(len=:), allocatable` is not thread-safe
+    ! under gfortran: the result's hidden length is kept in a STATIC slot shared by every thread,
+    ! read once to size the `realloc` and again to size the `memmove`. Two concurrent `%init`
+    ! calls then take each other's length -- a truncated or over-long string, and a copy past the
+    ! allocation. `%init` is called on several threads at once by design (`test_cosmology_omp`),
+    ! and this shape had already produced an intermittent wrong `%get_name`. See
+    ! `.claude/rules/fortran-gotchas.md`, "Never write a function returning
+    ! `character(len=:), allocatable`".
 
     ! =========================================================================================
     ! `%init`
@@ -73,6 +74,7 @@ contains
         integer :: which
         character(len=len(name)) :: folded
         integer :: i
+        character(len=:), allocatable :: shown_name
 
         folded = name
         call pf_to_lower(folded)
@@ -84,7 +86,8 @@ contains
             end if
         end do
         if (which == 0) then
-            call cosmology_abort("pf_cosmology%init: unknown cosmology """ // capped(name) // """;" // &
+            call capped(name, shown_name)
+            call cosmology_abort("pf_cosmology%init: unknown cosmology """ // shown_name // """;" // &
                                  " the named cosmologies are Planck18, Planck15, Planck13, WMAP9," // &
                                  " WMAP7, WMAP5, WMAP3 and WMAP1", context)
         end if
@@ -113,9 +116,9 @@ contains
     end function lowered
 
     !> Caller text capped for a message.
-    function capped(text) result(out)
-        character(len=*), intent(in)  :: text !! the caller's text
-        character(len=:), allocatable :: out  !! at most `PFC_CONTEXT_CAP` characters plus "..."
+    subroutine capped(text, out)
+        character(len=*), intent(in)               :: text !! the caller's text
+        character(len=:), allocatable, intent(out) :: out  !! at most `PFC_CONTEXT_CAP` characters plus "..."
 
         if (len_trim(text) > PFC_CONTEXT_CAP) then
             out = text(1:PFC_CONTEXT_CAP) // "..."
@@ -123,56 +126,66 @@ contains
             out = trim(text)
         end if
 
-    end function capped
+    end subroutine capped
 
     module procedure cosmology_init_params
 
         real(real64) :: h0_si, rho_crit0, rho_gamma0
         integer      :: i
+        character(len=:), allocatable :: num, num2
 
         ! -- the arguments, in the order section 5.4 of feature_cosmology.md tabulates them ----
 
         if (.not. ieee_is_finite(h0) .or. h0 < PFC_H0_MIN .or. h0 > PFC_H0_MAX) then
+            call pf_to_str(h0, num)
             call cosmology_abort("pf_cosmology%init: h0 must be finite and within " // &
-                                 "[1e-10, 1e10] km/s/Mpc, got " // shown(h0), context)
+                                 "[1e-10, 1e10] km/s/Mpc, got " // num, context)
         end if
         if (.not. ieee_is_finite(om0) .or. om0 < 0.0_real64) then
+            call pf_to_str(om0, num)
             call cosmology_abort("pf_cosmology%init: om0 must be finite and non-negative, got " // &
-                                 shown(om0), context)
+                                 num, context)
         end if
         if (present(ode0)) then
             if (.not. ieee_is_finite(ode0)) then
-                call cosmology_abort("pf_cosmology%init: ode0 must be finite, got " // shown(ode0), context)
+                call pf_to_str(ode0, num)
+                call cosmology_abort("pf_cosmology%init: ode0 must be finite, got " // num, context)
             end if
         end if
         this%p%tcmb0 = 0.0_real64
         if (present(tcmb0)) then
             if (.not. ieee_is_finite(tcmb0) .or. tcmb0 < 0.0_real64) then
+                call pf_to_str(tcmb0, num)
                 call cosmology_abort("pf_cosmology%init: tcmb0 must be finite and non-negative, got " // &
-                                     shown(tcmb0), context)
+                                     num, context)
             end if
             this%p%tcmb0 = tcmb0
         end if
         this%p%neff = 3.04_real64
         if (present(neff)) then
             if (.not. ieee_is_finite(neff) .or. neff < 0.0_real64) then
+                call pf_to_str(neff, num)
                 call cosmology_abort("pf_cosmology%init: neff must be finite and non-negative, got " // &
-                                     shown(neff), context)
+                                     num, context)
             end if
             this%p%neff = neff
         end if
         this%d%n_nu = int(floor(this%p%neff))
         if (present(m_nu)) then
             if (size(m_nu) /= this%d%n_nu) then
+                call pf_to_str(real(this%d%n_nu, real64), num)
+                call pf_to_str(real(size(m_nu), real64), num2)
                 call cosmology_abort("pf_cosmology%init: m_nu needs one finite, non-negative mass per " // &
-                                     "species: floor(neff) = " // shown(real(this%d%n_nu, real64)) // &
-                                     ", got " // shown(real(size(m_nu), real64)) // " entries", context)
+                                     "species: floor(neff) = " // num // &
+                                     ", got " // num2 // " entries", context)
             end if
             do i = 1, size(m_nu)
                 if (.not. ieee_is_finite(m_nu(i)) .or. m_nu(i) < 0.0_real64) then
+                    call pf_to_str(real(i, real64), num)
+                    call pf_to_str(m_nu(i), num2)
                     call cosmology_abort("pf_cosmology%init: m_nu needs one finite, non-negative mass " // &
-                                         "per species: entry " // shown(real(i, real64)) // " is " // &
-                                         shown(m_nu(i)), context)
+                                         "per species: entry " // num // " is " // &
+                                         num2, context)
                 end if
             end do
             this%p%m_nu = m_nu
@@ -184,39 +197,43 @@ contains
         this%p%ob0 = ieee_value(this%p%ob0, ieee_quiet_nan)
         if (present(ob0)) then
             if (.not. ieee_is_finite(ob0) .or. ob0 < 0.0_real64 .or. ob0 > om0) then
+                call pf_to_str(ob0, num)
                 call cosmology_abort("pf_cosmology%init: ob0 must be finite, non-negative and at most " // &
-                                     "om0, got " // shown(ob0), context)
+                                     "om0, got " // num, context)
             end if
             this%p%ob0 = ob0
         end if
         this%p%w0 = -1.0_real64
         if (present(w0)) then
             if (.not. ieee_is_finite(w0) .or. abs(w0) > PFC_W_LIMIT) then
+                call pf_to_str(w0, num)
                 call cosmology_abort("pf_cosmology%init: w0 must be finite and within [-3, 3], got " // &
-                                     shown(w0), context)
+                                     num, context)
             end if
             this%p%w0 = w0
         end if
         this%p%wa = 0.0_real64
         if (present(wa)) then
             if (.not. ieee_is_finite(wa) .or. abs(wa) > PFC_W_LIMIT) then
+                call pf_to_str(wa, num)
                 call cosmology_abort("pf_cosmology%init: wa must be finite and within [-3, 3], got " // &
-                                     shown(wa), context)
+                                     num, context)
             end if
             this%p%wa = wa
         end if
         this%p%zmax = PFC_DEFAULT_ZMAX
         if (present(zmax)) then
             if (.not. ieee_is_finite(zmax) .or. zmax <= 0.0_real64 .or. zmax > PFC_Z_CEILING) then
+                call pf_to_str(zmax, num)
                 call cosmology_abort("pf_cosmology%init: zmax must be finite, positive and at most " // &
-                                     "1e10, got " // shown(zmax), context)
+                                     "1e10, got " // num, context)
             end if
             this%p%zmax = zmax
         end if
         this%p%h0 = h0
         this%p%om0 = om0
         if (present(name)) then
-            this%label = capped(name)
+            call capped(name, this%label)
         else
             this%label = "custom"
         end if
@@ -282,9 +299,12 @@ contains
         real(real64), intent(in)               :: value   !! the derived value
         character(len=*), intent(in), optional :: context !! the caller's context
 
+        character(len=:), allocatable :: num
+
         if (.not. ieee_is_finite(value) .or. abs(value) > PFC_DENSITY_CEILING) then
+            call pf_to_str(value, num)
             call cosmology_abort("pf_cosmology%init: every density parameter must be at most 1e6 in " // &
-                                 "magnitude: " // which // " is " // shown(value), context)
+                                 "magnitude: " // which // " is " // num, context)
         end if
 
     end subroutine check_density
@@ -486,12 +506,14 @@ contains
         character(len=*), intent(in), optional :: context !! the caller's context
 
         character(len=:), allocatable :: what
+        character(len=:), allocatable :: num, num2, num3
 
         if (info%status == PF_INT_BAD_VALUE) then
             ! `non_finite_at` is in the INTEGRATION variable, so it is converted back to a
             ! redshift before anyone reads it.
+            call pf_to_str(z_of_point(which, info%non_finite_at), num)
             call cosmology_abort("pf_cosmology%init: this cosmology has no big bang: E(z)^2 is not " // &
-                                 "positive at z = " // shown(z_of_point(which, info%non_finite_at)), context)
+                                 "positive at z = " // num, context)
         end if
         if (which == PFC_INT_DISTANCE) then
             what = "distance"
@@ -500,9 +522,12 @@ contains
         else
             what = "age"
         end if
+        call pf_to_str(pf_zeta2z(a), num)
+        call pf_to_str(pf_zeta2z(b), num2)
+        call pf_to_str(real(info%status, real64), num3)
         call cosmology_abort("pf_cosmology%init: the " // what // " table did not converge on [" // &
-                             shown(pf_zeta2z(a)) // ", " // shown(pf_zeta2z(b)) // "] (pf_integrate status " // &
-                             shown(real(info%status, real64)) // ")", context)
+                             num // ", " // num2 // "] (pf_integrate status " // &
+                             num3 // ")", context)
         ! `this` is taken so that a future message may name the model; nothing reads it yet.
         if (this%ready) return
 
@@ -627,38 +652,49 @@ contains
     module procedure cosmology_describe
 
         integer :: i
+        character(len=:), allocatable :: num
 
         if (.not. this%ready) error stop "pf_cosmology%describe: the cosmology is not initialised"
         text = this%label
-        text = text // "; H0 = " // shown(this%p%h0) // " km/s/Mpc"
-        text = text // "; Om0 = " // shown(this%p%om0)
-        text = text // "; Ode0 = " // shown(this%p%ode0)
+        call pf_to_str(this%p%h0, num)
+        text = text // "; H0 = " // num // " km/s/Mpc"
+        call pf_to_str(this%p%om0, num)
+        text = text // "; Om0 = " // num
+        call pf_to_str(this%p%ode0, num)
+        text = text // "; Ode0 = " // num
         if (this%flat) then
             text = text // "; Ok0 = 0 (flat)"
         else
-            text = text // "; Ok0 = " // shown(this%d%ok0)
+            call pf_to_str(this%d%ok0, num)
+            text = text // "; Ok0 = " // num
         end if
-        text = text // "; Tcmb0 = " // shown(this%p%tcmb0) // " K"
-        text = text // "; Neff = " // shown(this%p%neff)
+        call pf_to_str(this%p%tcmb0, num)
+        text = text // "; Tcmb0 = " // num // " K"
+        call pf_to_str(this%p%neff, num)
+        text = text // "; Neff = " // num
         if (this%d%n_nu == 0) then
             text = text // "; m_nu = none"
         else
             text = text // "; m_nu = "
             do i = 1, this%d%n_nu
                 if (i > 1) text = text // ", "
-                text = text // shown(this%p%m_nu(i))
+                call pf_to_str(this%p%m_nu(i), num)
+                text = text // num
             end do
             text = text // " eV"
         end if
         if (this%has_ob0) then
-            text = text // "; Ob0 = " // shown(this%p%ob0)
+            call pf_to_str(this%p%ob0, num)
+            text = text // "; Ob0 = " // num
         else
             text = text // "; Ob0 = unknown"
         end if
         ! The pair is omitted entirely for a cosmological constant, which is every named cosmology.
         if (.not. (this%p%w0 == -1.0_real64 .and. this%p%wa == 0.0_real64)) then
-            text = text // "; w0 = " // shown(this%p%w0)
-            text = text // "; wa = " // shown(this%p%wa)
+            call pf_to_str(this%p%w0, num)
+            text = text // "; w0 = " // num
+            call pf_to_str(this%p%wa, num)
+            text = text // "; wa = " // num
         end if
 
     end procedure cosmology_describe

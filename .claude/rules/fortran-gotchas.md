@@ -24,7 +24,14 @@ in `code-style.md`.
   is not thread-local (GCC PR113797, PR97977) and corrupts memory under concurrent calls; ifx
   rejects the automatic-length variant. Applies to test code too (test-drive dispatches tests with
   `!$omp parallel do`). For `x = obj%get(x)` shapes use one `intent(inout)` argument. Plain
-  non-`character` allocatable results are unaffected.
+  non-`character` allocatable results are unaffected, and so is a result of a length the CALLER can
+  see -- `character(len=32)`, or `character(len=len(text))` -- which needs no hidden variable at all.
+  **The tell is `nm <obj> | grep ' b slen\.'`**: each hit is one caller-side static length slot, in
+  `.bss` rather than `.tbss`. The assignment reads it three times -- to size the `realloc`, to store
+  as the target's length, and to size the `memmove` -- so a thread that overwrites it between the
+  first and the last gets a wrong string, or a copy past the allocation.
+  `check_no_deferred_length_character_result` (`tools/check_source_conventions.py`) enforces the
+  rule over `src/`, `test/`, `app/` and `bench/`, interface bodies included.
 - **`x = func()` from an unallocated allocatable result leaves `x` ALLOCATED** (empty). An API
   cannot signal "absent" that way; use a flag or sentinel (`parquet_strings`' `allow_null` returns
   `""` guarded by `is_null()`).

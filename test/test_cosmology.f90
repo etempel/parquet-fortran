@@ -303,6 +303,7 @@ contains
         type(pf_cosmology) :: c
         real(real64)       :: got(n_cquantity), z
         integer            :: i, j, q, bad_i, bad_j, bad_q
+        character(len=:), allocatable :: tag, tag2
 
         bad_i = 0
         bad_j = 0
@@ -321,23 +322,29 @@ contains
                 end do
             end do
         end do
+        call itoa(bad_j, tag)
+        call itoa(bad_q, tag2)
         call check(error, bad_i == 0, "model " // trim(cmodel_label(max(bad_i, 1))) // &
-                   " disagrees with the reference at redshift index " // itoa(bad_j) // &
-                   ", quantity " // itoa(bad_q))
+                   " disagrees with the reference at redshift index " // tag // &
+                   ", quantity " // tag2)
 
     end subroutine check_rows
 
     !> An integer as text, for a failure message.
-    pure function itoa(n) result(text)
-        integer, intent(in)           :: n    !! the number
-        character(len=:), allocatable :: text !! its decimal text
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread, and test-drive
+    !! dispatches this suite's tests with `!$omp parallel do` (`.claude/rules/fortran-gotchas.md`).
+    pure subroutine itoa(n, text)
+        integer, intent(in)                        :: n    !! the number
+        character(len=:), allocatable, intent(out) :: text !! its decimal text
 
         character(len=16) :: buf
 
         write (buf, '(i0)') n
         text = trim(buf)
 
-    end function itoa
+    end subroutine itoa
 
     ! =========================================================================================
     ! The reference rows
@@ -463,6 +470,7 @@ contains
         type(pf_cosmology) :: full, tiny
         real(real64)       :: z, a, b
         integer            :: k
+        character(len=:), allocatable :: tag
 
         call full%init("Planck18")
         call tiny%init("Planck18", zmax = 1.0e-6_real64)
@@ -470,11 +478,13 @@ contains
             z = 0.04_real64 * (1100.0_real64 / 0.04_real64) ** (real(k, real64) / 400.0_real64)
             a = full%comoving_distance(z)
             b = tiny%comoving_distance(z)
-            call check(error, agrees(b, a, 2.0e-9_real64), "D_C on the fallback at z = " // itoa(int(z)))
+            call itoa(int(z), tag)
+            call check(error, agrees(b, a, 2.0e-9_real64), "D_C on the fallback at z = " // tag)
             if (allocated(error)) return
             a = full%lookback_time(z)
             b = tiny%lookback_time(z)
-            call check(error, agrees(b, a, 2.0e-9_real64), "t_L on the fallback at z = " // itoa(int(z)))
+            call itoa(int(z), tag)
+            call check(error, agrees(b, a, 2.0e-9_real64), "t_L on the fallback at z = " // tag)
             if (allocated(error)) return
         end do
 
@@ -488,19 +498,23 @@ contains
         type(pf_cosmology) :: small, big
         real(real64)       :: zs(4)
         integer            :: k
+        character(len=:), allocatable :: tag
 
         zs = [0.5_real64, 3.0_real64, 50.0_real64, 900.0_real64]
         call small%init("Planck18", zmax = 5.0_real64)
         call big%init("Planck18")
         do k = 1, size(zs)
+            call itoa(k, tag)
             call check(error, agrees(small%comoving_distance(zs(k)), big%comoving_distance(zs(k)), &
-                                     2.0e-9_real64), "D_C across zmax at z index " // itoa(k))
+                                     2.0e-9_real64), "D_C across zmax at z index " // tag)
             if (allocated(error)) return
+            call itoa(k, tag)
             call check(error, agrees(small%lookback_time(zs(k)), big%lookback_time(zs(k)), &
-                                     2.0e-9_real64), "t_L across zmax at z index " // itoa(k))
+                                     2.0e-9_real64), "t_L across zmax at z index " // tag)
             if (allocated(error)) return
+            call itoa(k, tag)
             call check(error, agrees(small%age(zs(k)), big%age(zs(k)), 2.0e-9_real64), &
-                       "the AGE across zmax at z index " // itoa(k))
+                       "the AGE across zmax at z index " // tag)
             if (allocated(error)) return
         end do
         call check(error, small%zmax() == 5.0_real64, "zmax() answers what the caller asked for")
@@ -542,6 +556,7 @@ contains
 
         real(real64) :: z, zeta, want
         integer      :: k
+        character(len=:), allocatable :: tag
 
         do k = -280, 100
             z = 10.0_real64 ** (real(k, real64) / 10.0_real64)
@@ -550,14 +565,16 @@ contains
             ! `log1p` by its series where `z` is small, and directly where it is not: an
             ! independent route, not the implementation's own.
             want = independent_log1p(z)
+            call itoa(k, tag)
             call check(error, abs(zeta - want) <= 1.0e-15_real64 * abs(want), &
-                       "pf_z2zeta at decade " // itoa(k))
+                       "pf_z2zeta at decade " // tag)
             if (allocated(error)) return
             if (z < 1.0_real64) then
                 zeta = pf_z2zeta(-z)
                 want = independent_log1p(-z)
+                call itoa(k, tag)
                 call check(error, abs(zeta - want) <= 1.0e-14_real64 * abs(want), &
-                           "pf_z2zeta at blueshift decade " // itoa(k))
+                           "pf_z2zeta at blueshift decade " // tag)
                 if (allocated(error)) return
             end if
         end do
@@ -643,12 +660,14 @@ contains
         type(pf_cosmology) :: c
         real(real64)       :: z
         integer            :: k
+        character(len=:), allocatable :: tag
 
         call c%init("Planck18")
         do k = -80, 100
             z = 10.0_real64 ** (real(k, real64) / 10.0_real64)
+            call itoa(k, tag)
             call check(error, c%comoving_distance(z) == c%comoving_distance_zeta(pf_z2zeta(z)), &
-                       "the z and zeta forms must agree to the bit at decade " // itoa(k))
+                       "the z and zeta forms must agree to the bit at decade " // tag)
             if (allocated(error)) return
         end do
 
@@ -766,6 +785,7 @@ contains
         type(pf_cosmology) :: c
         integer            :: i, j
         real(real64)       :: z, got
+        character(len=:), allocatable :: tag
 
         do i = 1, n_cmodel
             if (cmodel_age_diverges(i)) cycle
@@ -774,8 +794,9 @@ contains
                 z = rv(cz_bits(j))
                 if (z < 100.0_real64) cycle
                 got = c%age(z)
+                call itoa(j, tag)
                 call check(error, agrees(got, ref(i, j, cq_age), AGE_TAIL_TOL), &
-                           "the age of " // trim(cmodel_label(i)) // " at redshift index " // itoa(j))
+                           "the age of " // trim(cmodel_label(i)) // " at redshift index " // tag)
                 if (allocated(error)) return
             end do
         end do
@@ -789,6 +810,7 @@ contains
         type(pf_cosmology) :: c
         real(real64)       :: z, age0, total
         integer            :: k
+        character(len=:), allocatable :: tag
 
         call c%init("Planck18")
         age0 = c%age(0.0_real64)
@@ -799,8 +821,9 @@ contains
         do k = 0, 800
             z = pf_zeta2z(0.008_real64 * real(k, real64))
             total = c%age(z) + c%lookback_time(z)
+            call itoa(k, tag)
             call check(error, abs(total - age0) <= 1.0e-12_real64 * age0, &
-                       "age + lookback must close on age(0) at node " // itoa(k))
+                       "age + lookback must close on age(0) at node " // tag)
             if (allocated(error)) return
         end do
         ! BETWEEN the nodes the identity is only as good as the two interpolants, which is the
@@ -955,6 +978,7 @@ contains
         real(real64)       :: z
         integer            :: i, j, k
         character(len=8)   :: labels(2)
+        character(len=:), allocatable :: tag
 
         labels = [character(len=8) :: "open", "closed"]
         do k = 1, size(labels)
@@ -965,9 +989,10 @@ contains
             do j = 1, n_cz
                 z = rv(cz_bits(j))
                 if (z <= 0.0_real64 .or. z > 1.0e-2_real64) cycle
+                call itoa(j, tag)
                 call check(error, agrees(c%comoving_volume(z), ref(i, j, cq_vc), 1.0e-9_real64), &
                            "the curved comoving volume of " // trim(labels(k)) // &
-                           " at redshift index " // itoa(j))
+                           " at redshift index " // tag)
                 if (allocated(error)) return
             end do
             ! Continuity across the series/closed-form crossover, which sits where
@@ -1028,6 +1053,7 @@ contains
         type(pf_cosmology) :: c
         real(real64)       :: z1, z2, got
         integer            :: k, i, previous
+        character(len=:), allocatable :: tag
 
         previous = 0
         do k = 1, n_cpair
@@ -1039,8 +1065,9 @@ contains
             z1 = rv(cpair_z_bits(2 * k - 1))
             z2 = rv(cpair_z_bits(2 * k))
             got = c%angular_diameter_distance_z1z2(z1, z2)
+            call itoa(k, tag)
             call check(error, agrees(got, rv(cpair_da_bits(k)), TABLE_TOL), &
-                       "D_A(z1, z2) at pair " // itoa(k))
+                       "D_A(z1, z2) at pair " // tag)
             if (allocated(error)) return
             if (z1 == z2) then
                 call check(error, got == 0.0_real64, "D_A(z, z) must be exactly zero")
@@ -1083,6 +1110,7 @@ contains
         type(pf_cosmology) :: c
         real(real64)       :: z, d, t, back
         integer            :: k
+        character(len=:), allocatable :: tag
 
         call c%init("Planck18")
         do k = 0, 400
@@ -1090,14 +1118,16 @@ contains
             z = pf_zeta2z(-10.0_real64 + 33.0_real64 * real(k, real64) / 400.0_real64)
             d = c%comoving_distance(z)
             back = c%comoving_distance(c%z_at_comoving_distance(d))
+            call itoa(k, tag)
             call check(error, agrees(back, d, INVERSE_TOL), &
-                       "the DISTANCE round trip at step " // itoa(k))
+                       "the DISTANCE round trip at step " // tag)
             if (allocated(error)) return
             t = c%lookback_time(z)
             back = c%lookback_time(c%z_at_lookback_time(t))
+            call itoa(k, tag)
             call check(error, agrees(back, t, merge(BLUESHIFT_INVERSE_TOL, INVERSE_TOL, &
                                                     z < 0.0_real64)), &
-                       "the lookback-TIME round trip at step " // itoa(k))
+                       "the lookback-TIME round trip at step " // tag)
             if (allocated(error)) return
         end do
         ! The REDSHIFT round trip is only as well conditioned as the forward function, which
@@ -1107,8 +1137,9 @@ contains
         do k = 0, 200
             z = 1.0e-6_real64 * (1.0e3_real64 / 1.0e-6_real64) ** (real(k, real64) / 200.0_real64)
             back = c%z_at_comoving_distance(c%comoving_distance(z))
+            call itoa(k, tag)
             call check(error, agrees(back, z, INVERSE_TOL), &
-                       "the REDSHIFT round trip below z = 1e3 at step " // itoa(k))
+                       "the REDSHIFT round trip below z = 1e3 at step " // tag)
             if (allocated(error)) return
         end do
 
@@ -1756,6 +1787,7 @@ contains
         type(pf_cosmology) :: c
         real(real64)       :: z, t, back, tol
         integer            :: i, k, bad_i, bad_k
+        character(len=:), allocatable :: tag
 
         bad_i = 0
         bad_k = 0
@@ -1784,8 +1816,9 @@ contains
                 end if
             end do
         end do
+        call itoa(bad_k, tag)
         call check(error, bad_i == 0, "z_at_age must round trip; " // &
-                   trim(cmodel_label(max(bad_i, 1))) // " failed at sweep index " // itoa(bad_k))
+                   trim(cmodel_label(max(bad_i, 1))) // " failed at sweep index " // tag)
         if (allocated(error)) return
 
         call c%init("Planck18")
@@ -1876,6 +1909,7 @@ contains
         type(pf_cosmology) :: c
         real(real64)       :: z, d, mu, back
         integer            :: i, k, bad_i, bad_k
+        character(len=:), allocatable :: tag
 
         bad_i = 0
         bad_k = 0
@@ -1898,8 +1932,9 @@ contains
                 end if
             end do
         end do
+        call itoa(bad_k, tag)
         call check(error, bad_i == 0, "the luminosity-distance inverses must round trip; " // &
-                   trim(cmodel_label(max(bad_i, 1))) // " failed at sweep index " // itoa(bad_k))
+                   trim(cmodel_label(max(bad_i, 1))) // " failed at sweep index " // tag)
         if (allocated(error)) return
 
         ! The redshift itself, where the forward function is well conditioned.

@@ -507,6 +507,7 @@ contains
         real(real64), allocatable :: lg(:), dmin(:), dmax(:)
         integer(int64) :: n, m, k, v, u, vf, j, hmax, tmax, hmin, tmin
         real(real64) :: lo, hi, range, w, gg, ll, num, secant
+        character(len=:), allocatable :: t1, t2, t3
 
         self%lip = 1.0_real64
         self%tie_spread = 0.0_real64
@@ -619,11 +620,14 @@ contains
         ! is exact.
         secant = (self%d_hi - self%d_lo) / range
         if (ll > 100.0_real64 * secant) then
+            call real_text(w, t1)
+            call real_text(ll, t2)
+            call real_text(secant, t3)
             call parquet_emit_advice("pf_spatial_index%" // what // ": los= is not a function of the " // &
                 "distance from the observer, or is noisy at small separations: its steepest slope over " // &
-                "pairs at least " // real_text(w) // " apart is " // real_text(ll) // " against a " // &
-                "catalogue-wide " // real_text(secant) // ". Every line-of-sight walk will be " // &
-                real_text(ll) // " x b_par wide; the answer stays exact.")
+                "pairs at least " // t1 // " apart is " // t2 // " against a " // &
+                "catalogue-wide " // t3 // ". Every line-of-sight walk will be " // &
+                t2 // " x b_par wide; the answer stays exact.")
         end if
     end procedure spatial_los_bounds
 
@@ -784,6 +788,7 @@ contains
         logical :: docopy, coarsened, radial
         real(real64) :: h, rmax
         real(real64), pointer, contiguous :: xs(:), ys(:), zs(:)
+        character(len=:), allocatable :: t1, t2
 
         n = size(x, kind=int64)
         if (size(y, kind=int64) /= n) error stop "pf_spatial_index%build: x and y must be the same length"
@@ -946,8 +951,10 @@ contains
             ! about it would fire on essentially every small index for no action the caller can
             ! take.
             if (present(nside) .and. coarsened) then
+                call int_text(ns, t1)
+                call int_text(self%nside_v, t2)
                 call parquet_emit_advice("pf_spatial_index%build_sky: nside= was coarsened from " // &
-                    int_text(ns) // " to " // int_text(self%nside_v) // " to keep the pixel count " // &
+                    t1 // " to " // t2 // " to keep the pixel count " // &
                     "under 0.3 per point, which is what keeps the bucketing on the counting fast path")
             end if
         else
@@ -967,8 +974,10 @@ contains
             ! An explicit cell is a statement that the caller has measured something, so coarsening
             ! it must SAY so rather than happen in silence.
             if (present(cell) .and. coarsened) then
+                call real_text(cell, t1)
+                call real_text(self%cell_side, t2)
                 call parquet_emit_advice("pf_spatial_index%build: cell= was coarsened from " // &
-                    real_text(cell) // " to " // real_text(self%cell_side) // " to keep the grid under " // &
+                    t1 // " to " // t2 // " to keep the grid under " // &
                     "0.3 occupied cells and 4 cells of the bounding box per point")
             end if
         end if
@@ -1163,23 +1172,28 @@ contains
     end procedure spatial_rebuild_for_worker
 
     !> A decimal rendering of an integer, for a message.
-    function int_text(v) result(text)
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine int_text(v, text)
         integer(int64), intent(in) :: v !! the value to render.
-        character(len=:), allocatable :: text !! the rendered value, trimmed.
+        character(len=:), allocatable, intent(out) :: text !! the rendered value, trimmed.
         character(len=32) :: buf
 
         write (buf, '(i0)') v
         text = trim(adjustl(buf))
-    end function int_text
+    end subroutine int_text
 
-    !> A short decimal rendering of a real, for a message.
-    function real_text(v) result(text)
+    !> A short decimal rendering of a real, for a message. A subroutine for the reason
+    !! `int_text` states.
+    subroutine real_text(v, text)
         real(real64), intent(in) :: v !! the value to render.
-        character(len=:), allocatable :: text !! the rendered value, trimmed.
+        character(len=:), allocatable, intent(out) :: text !! the rendered value, trimmed.
         character(len=32) :: buf
 
         write (buf, '(g0.6)') v
         text = trim(adjustl(buf))
-    end function real_text
+    end subroutine real_text
 
 end submodule parquet_spatial_build ! GCOVR_EXCL_LINE

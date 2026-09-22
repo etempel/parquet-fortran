@@ -410,7 +410,7 @@ contains
     subroutine rebuild_declared_data_type(col, token)
         type(parquet_column_type), intent(in) :: col       !! source field definition.
         character(len=:), allocatable, intent(out) :: token !! the re-declarable data_type token.
-        character(len=:), allocatable :: stored, prefix, inner
+        character(len=:), allocatable :: stored, prefix, inner, sfx
         integer :: lb, rb
 
         stored = col%data_type
@@ -428,9 +428,11 @@ contains
         ! so only these two ever gain one.
         select case (inner)
         case ("time")
-            inner = inner // unit_suffix(col%time_unit, .false., col%is_utc)
+            call unit_suffix(col%time_unit, .false., col%is_utc, sfx)
+            inner = inner // sfx
         case ("timestamp")
-            inner = inner // unit_suffix(col%time_unit, .true., col%is_utc)
+            call unit_suffix(col%time_unit, .true., col%is_utc, sfx)
+            inner = inner // sfx
         end select
 
         if (len(prefix) > 0) then
@@ -448,11 +450,11 @@ contains
     !! can store a seconds-resolution TIME/TIMESTAMP, so a MAML `time[s]` token is rejected at
     !! parse time and neither value can reach a parsed column. Emitting nothing leaves the token
     !! exactly as re-declarable as it was before -- never a token that would be refused.
-    function unit_suffix(time_unit, allow_utc, is_utc) result(sfx)
+    subroutine unit_suffix(time_unit, allow_utc, is_utc, sfx)
         integer, intent(in) :: time_unit  !! the field's parquet_unit_* selector.
         logical, intent(in) :: allow_utc  !! .true. for timestamp; time carries no timezone.
         logical, intent(in) :: is_utc     !! the field's UTC-adjusted flag.
-        character(len=:), allocatable :: sfx !! "[us]", "[ns,utc]", or "".
+        character(len=:), allocatable, intent(out) :: sfx !! "[us]", "[ns,utc]", or "".
 
         select case (time_unit)
         case (parquet_unit_millis)
@@ -467,7 +469,7 @@ contains
         end select
         if (allow_utc .and. is_utc) sfx = sfx // ",utc"
         sfx = sfx // "]"
-    end function unit_suffix
+    end subroutine unit_suffix
 
     module procedure set_unavailable
         integer :: idx, i

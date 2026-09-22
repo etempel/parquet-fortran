@@ -166,11 +166,13 @@ contains
     subroutine run_argsort()
         integer :: fi, si
         character(len=:), allocatable :: fam
+        character(len=:), allocatable :: item
         !
         call section("argsort -- one key, over the size ladder (dist=rand)")
         call table_head()
         do fi = 1, list_len(families)
-            fam = list_item(families, fi)
+            call list_item(families, fi, item)
+            fam = item
             do si = 1, size(sizes)
                 call one_argsort(fam, "rand", sizes(si), 1)
                 if (thi() > 1) call one_argsort(fam, "rand", sizes(si), thi())
@@ -189,14 +191,19 @@ contains
         integer :: fi, di
         integer(int64) :: n
         character(len=:), allocatable :: fam, dst
+        character(len=:), allocatable :: item
+        character(len=:), allocatable :: num
         !
         n = sizes(size(sizes))
-        call section("dist -- input shape at n = " // i2s(n))
+        call i2s(n, num)
+        call section("dist -- input shape at n = " // num)
         call table_head()
         do fi = 1, list_len(families)
-            fam = list_item(families, fi)
+            call list_item(families, fi, item)
+            fam = item
             do di = 1, list_len(dists)
-                dst = list_item(dists, di)
+                call list_item(dists, di, item)
+                dst = item
                 if (.not. dist_applies(fam, dst)) cycle
                 call one_argsort(fam, dst, n, 1)
                 if (thi() > 1) call one_argsort(fam, dst, n, thi())
@@ -215,13 +222,17 @@ contains
         integer(int64) :: n
         integer, allocatable :: tl(:)
         character(len=:), allocatable :: fam
+        character(len=:), allocatable :: item
+        character(len=:), allocatable :: num
         !
         n = sizes(size(sizes))
         tl = thread_ladder()
-        call section("threads -- scaling at n = " // i2s(n) // " (dist=" // thread_dist // ")")
+        call i2s(n, num)
+        call section("threads -- scaling at n = " // num // " (dist=" // thread_dist // ")")
         call table_head()
         do fi = 1, list_len(families)
-            fam = list_item(families, fi)
+            call list_item(families, fi, item)
+            fam = item
             do ti = 1, size(tl)
                 call one_argsort(fam, thread_dist, n, tl(ti))
             end do
@@ -235,9 +246,11 @@ contains
     !! easily improve one while regressing the other.
     subroutine run_ops()
         integer(int64) :: n
+        character(len=:), allocatable :: num
         !
         n = sizes(size(sizes))
-        call section("ops -- the non-argsort operations at n = " // i2s(n))
+        call i2s(n, num)
+        call section("ops -- the non-argsort operations at n = " // num)
         call table_head()
         call one_op("f64",   n)
         call one_op("i64lo", n)
@@ -1109,10 +1122,14 @@ contains
     end function list_len
 
     !> Item `k` of a comma-separated list.
-    function list_item(s, k) result(item)
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine list_item(s, k, item)
         character(len=*), intent(in) :: s        !! the comma-separated list.
         integer, intent(in) :: k                 !! 1-based item wanted.
-        character(len=:), allocatable :: item    !! that item, trimmed.
+        character(len=:), allocatable, intent(out) :: item !! that item, trimmed.
         integer :: i, cur, lo
         !
         cur = 1
@@ -1128,17 +1145,21 @@ contains
             end if
         end do
         item = trim(adjustl(s(lo:len_trim(s))))
-    end function list_item
+    end subroutine list_item
 
     !> An integer as a string, for banner text.
-    function i2s(v) result(s)
+    !!
+    !! A SUBROUTINE, never a function returning `character(len=:), allocatable`: gfortran keeps
+    !! such a result's hidden length in a static slot shared by every thread
+    !! (`.claude/rules/fortran-gotchas.md`).
+    subroutine i2s(v, s)
         integer(int64), intent(in) :: v       !! the value.
-        character(len=:), allocatable :: s    !! its decimal rendering.
+        character(len=:), allocatable, intent(out) :: s !! its decimal rendering.
         character(len=32) :: buf
         !
         write(buf,'(i0)') v
         s = trim(buf)
-    end function i2s
+    end subroutine i2s
 
     ! ================================================================================
     ! Argument parsing
@@ -1152,6 +1173,7 @@ contains
         character(len=256) :: arg
         character(len=:), allocatable :: key, val
         integer(int64) :: tmp(64)
+        character(len=:), allocatable :: item
         !
         mode = "all"
         families = "i32,i64,i64lo,f32,f64,str,multi2,multi3"
@@ -1235,7 +1257,8 @@ contains
         ! item is taken into a local first. gfortran rejects the direct form outright; a compiler
         ! that accepted it would be reading from a temporary.
         do k = 1, list_len(sizes_arg)
-            val = list_item(sizes_arg, k)
+            call list_item(sizes_arg, k, item)
+            val = item
             read(val, *, iostat=ios) tmp(k)
             if (ios /= 0 .or. tmp(k) < 2_int64) then
                 write(error_unit,'(a)') "benchmark_sort_engine: bad size '"//val//"'"

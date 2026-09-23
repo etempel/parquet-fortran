@@ -259,6 +259,63 @@ contains
 
     end procedure cosmology_e2
 
+    module procedure cosmology_growth_coef
+
+        real(real64) :: e2, x
+
+        ! The NaN screen comes first and stands alone, exactly as it does in the kernel.
+        if (zeta /= zeta) then
+            q = zeta
+            src = zeta
+            return
+        end if
+        e2 = cosmology_e2(p, d, zeta)
+        if (e2 /= e2) then
+            q = e2
+            src = e2
+            return
+        end if
+        ! `E^2 <= 0` is a redshift the model does not reach, and an INFINITE `E^2` -- a big rip's
+        ! dark-energy term at a deep blueshift -- would make `dlnE^2/dzeta` an `Infinity/Infinity`
+        ! NaN a step later. Both answer the NaN that redshift deserves, here, once.
+        if (e2 <= 0.0_real64 .or. e2 > huge(e2)) then
+            q = ieee_value(q, ieee_quiet_nan)
+            src = q
+            return
+        end if
+        x = exp(zeta)
+        q = 2.0_real64 - 0.5_real64 * cosmology_de2_dzeta(p, d, zeta) / e2
+        src = 1.5_real64 * p%om0 * x ** 3 / e2
+
+    end procedure cosmology_growth_coef
+
+    module procedure cosmology_growth_step
+
+        real(real64) :: qm, sm, q1, s1, k1, k2, k3, k4, f0, f1, f2, f3, hh
+
+        hh = 0.5_real64 * h
+        call cosmology_growth_coef(p, d, zeta + hh, qm, sm)
+        call cosmology_growth_coef(p, d, zeta + h, q1, s1)
+        f0 = f
+        k1 = f0 * f0 + q0 * f0 - s0
+        f1 = f0 + hh * k1
+        k2 = f1 * f1 + qm * f1 - sm
+        f2 = f0 + hh * k2
+        k3 = f2 * f2 + qm * f2 - sm
+        f3 = f0 + h * k3
+        k4 = f3 * f3 + q1 * f3 - s1
+        ! **The weighted MEAN slope, then one multiplication by `h`.** Written as
+        ! `(h/6) * (k1 + ...)` instead, the Einstein-de Sitter case -- where every `k` is exactly
+        ! zero and the four `f` are exactly one -- loses its exactness in `h/6` alone.
+        f = f0 + h * ((k1 + 2.0_real64 * (k2 + k3) + k4) / 6.0_real64)
+        ! `du/dzeta` is `1 - f` at every stage, so the second component needs no right-hand side
+        ! of its own: its four slopes are the four `f` values the first component already formed.
+        u = u + h * (1.0_real64 - (f0 + 2.0_real64 * (f1 + f2) + f3) / 6.0_real64)
+        q0 = q1
+        s0 = s1
+
+    end procedure cosmology_growth_step
+
     module procedure cosmology_integrand_at
 
         real(real64) :: v2, zeta
@@ -539,6 +596,84 @@ contains
              + t * (4.0_real64 * c4 + t * 5.0_real64 * c5)))) / PFC_H
 
     end subroutine quintic_at
+
+    !> `ln D` and the growth rate `f` at one `zeta` inside the domain.
+    !!
+    !! The table covers the whole domain from above -- its top node is above `PFC_ZETA_CEILING`,
+    !! whatever `zmax` is -- so the only fallback is DOWNWARD, below the bottom node `zmin` put
+    !! there. That direction is the one the growing mode is an attractor in, so the fallback is
+    !! the pass itself continued: the same substeps from the same tabulated pair, which makes the
+    !! seam continuous by construction, exactly as the distance's panel walk is.
+    !!
+    !! It costs `PFC_GROWTH_SUBSTEPS` substeps per grid interval rather than one panel per unit,
+    !! so a blueshift far below `zmin` is microseconds where a table read is nanoseconds. That is
+    !! what `zmin=` is for.
+    pure subroutine growth_at(this, zeta, lnd, f)
+        class(pf_cosmology), intent(in) :: this !! the cosmology, known built
+        real(real64), intent(in)        :: zeta !! `ln(1 + z)`, known inside the domain
+        real(real64), intent(out)       :: lnd  !! `ln D(zeta)`
+        real(real64), intent(out)       :: f    !! `f(zeta) = dlnD/dlna`
+
+        real(real64) :: slope, q0, s0, z0, hs, rem, u
+        integer      :: i, k
+
+        if (zeta >= this%d%zeta_gw_m) then
+            call quintic_at(this%gwv, this%gwd, this%d%n_growth, this%d%zeta_gw_m, zeta, u, slope)
+            lnd = u - zeta
+            f = 1.0_real64 - slope
+            return
+        end if
+        u = this%gwv(1)
+        f = 1.0_real64 - this%gwd(1)
+        z0 = this%d%zeta_gw_m
+        hs = PFC_H / real(PFC_GROWTH_SUBSTEPS, real64)
+        call cosmology_growth_coef(this%p, this%d, z0, q0, s0)
+        ! Whole substeps first, then the remainder, so that the argument is landed on exactly and
+        ! `z0` is formed from the bottom node rather than accumulated a step at a time.
+        k = int((z0 - zeta) / hs)
+        do i = 1, k
+            call cosmology_growth_step(this%p, this%d, z0, -hs, q0, s0, f, u)
+            z0 = this%d%zeta_gw_m - real(i, real64) * hs
+        end do
+        rem = zeta - z0
+        if (rem < 0.0_real64) call cosmology_growth_step(this%p, this%d, z0, rem, q0, s0, f, u)
+        lnd = u - zeta
+
+    end subroutine growth_at
+
+    !> `ln D` and `f` at a REDSHIFT, screened: the whole domain contract of the two bindings.
+    !!
+    !! A quiet NaN, raising no IEEE flag, outside the domain, for a model with no matter to grow
+    !! and below the model's own floor. The floor is screened HERE rather than left to the
+    !! arithmetic so that a redshift under it costs one comparison instead of several thousand
+    !! substeps that all answer NaN.
+    pure subroutine growth_pair(this, z, lnd, f)
+        class(pf_cosmology), intent(in) :: this !! the cosmology, known built
+        real(real64), intent(in)        :: z    !! redshift, from the caller
+        real(real64), intent(out)       :: lnd  !! `ln D(z)`, or NaN
+        real(real64), intent(out)       :: f    !! `f(z)`, or NaN
+
+        real(real64) :: zeta
+
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            lnd = zeta
+            f = zeta
+            return
+        end if
+        if (.not. this%has_growth) then
+            lnd = ieee_value(lnd, ieee_quiet_nan)
+            f = lnd
+            return
+        end if
+        if (this%d%zeta_floor > -PFC_ZETA_CEILING .and. zeta <= this%d%zeta_floor) then
+            lnd = ieee_value(lnd, ieee_quiet_nan)
+            f = lnd
+            return
+        end if
+        call growth_at(this, zeta, lnd, f)
+
+    end subroutine growth_pair
 
     !> `D_C(zeta)` in Mpc: the table inside its range, the panel rule outside it.
     !!
@@ -1431,6 +1566,27 @@ contains
         end if
 
     end procedure cosmology_absorption_distance
+
+    module procedure cosmology_growth_factor
+
+        real(real64) :: lnd, f
+
+        if (.not. this%ready) error stop "pf_cosmology%growth_factor: the cosmology is not initialised"
+        call growth_pair(this, z, lnd, f)
+        ! `exp` of a quiet NaN is a quiet NaN and raises nothing, so the screens inside
+        ! `growth_pair` are the whole of the domain contract for this binding.
+        v = exp(lnd)
+
+    end procedure cosmology_growth_factor
+
+    module procedure cosmology_growth_rate
+
+        real(real64) :: lnd
+
+        if (.not. this%ready) error stop "pf_cosmology%growth_rate: the cosmology is not initialised"
+        call growth_pair(this, z, lnd, v)
+
+    end procedure cosmology_growth_rate
 
     module procedure cosmology_lookback_distance
 

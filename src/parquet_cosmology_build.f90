@@ -629,7 +629,104 @@ contains
             this%d%a_floor = this%d%age0 - this%d%t_floor
         end if
 
+        call growth_pass(this)
+
     end subroutine cosmology_tabulate
+
+    !> The linear growth pair, integrated DOWNWARD onto the same integer lattice.
+    !!
+    !! **The one table `zmax` does not move.** The growing mode is an attractor in the direction
+    !! of time and only in that direction, so the pass starts at `PFC_GROWTH_TOP_NODE` -- the
+    !! first node above the domain's ceiling -- whatever the caller asked to tabulate, and there
+    !! is no fallback above it to write. Integrated the other way the same equation amplifies its
+    !! own rounding by `2.4e-07` at `z = 1100` and by a factor of 25 at `z = 1e10`.
+    !!
+    !! **The initial condition is exact rather than approximate.** Deep in the past every model is
+    !! matter plus radiation -- dark energy and curvature are below `1e-30` of `E^2` at
+    !! `a = 1e-10` -- and there the growing mode is the Meszaros (1974) solution `D = 1 + (3/2) y`
+    !! with `y = a / a_eq`, so `f = (3/2)y / (1 + (3/2)y)`. `Or0` is the RELATIVISTIC radiation
+    !! density, `Ogamma0 (1 + 0.2271 Neff)`, because at `a = 1e-10` every species is relativistic
+    !! however massive it is today. Moving the starting redshift from `1e10` to `1e14` moves the
+    !! normalised `D` by at most `7.1e-13` anywhere in the domain; the pure-matter mode `D = a`
+    !! imposed at the same place moves it by `1.9e-04`.
+    !!
+    !! **`D(0) = 1` is an anchor, not a division.** The table carries `u = lnD + zeta` -- the
+    !! departure from matter domination, the same device as `D_C/zeta` and `ln(age)` -- accumulated
+    !! from the top with an arbitrary offset, and the node AT the origin is subtracted from every
+    !! node afterwards, which the integer lattice makes an exact node rather than something an
+    !! interpolant reconstructs. `u(0) = 0` then makes `D(0)` exactly one.
+    subroutine growth_pass(this)
+        class(pf_cosmology), intent(inout) :: this !! the cosmology being built
+
+        real(real64), allocatable :: tmp(:)
+        real(real64) :: f, u, q0, s0, hs, z0, zt, or0, y, anchor
+        integer      :: i, j, nodes, m, zero, bottom
+
+        this%has_growth = .false.
+        this%d%n_growth = 0
+        ! A universe with no matter has no matter perturbations to grow. The Riccati equation is
+        ! not singular there -- it would answer `f = 0` and `D = 1` everywhere, a number that
+        ! means nothing -- so no table is built and both bindings answer a quiet NaN. de Sitter
+        ! and Milne take this path.
+        if (this%p%om0 <= 0.0_real64) return
+
+        m = nint(-this%d%zeta_m / PFC_H)
+        nodes = PFC_GROWTH_TOP_NODE + m + 1
+        zero = m + 1
+        allocate (this%gwv(nodes), this%gwd(nodes))
+        zt = real(PFC_GROWTH_TOP_NODE, real64) * PFC_H
+
+        or0 = this%d%ogamma0 * (1.0_real64 + pfc_komatsu_a * this%p%neff)
+        if (or0 > 0.0_real64) then
+            y = 1.5_real64 * (this%p%om0 / or0) * exp(-zt)
+            f = y / (1.0_real64 + y)
+        else
+            ! No radiation at all: the same expression's limit, without the division.
+            f = 1.0_real64
+        end if
+        u = 0.0_real64
+        this%gwv(nodes) = u
+        this%gwd(nodes) = 1.0_real64 - f
+
+        hs = PFC_H / real(PFC_GROWTH_SUBSTEPS, real64)
+        call cosmology_growth_coef(this%p, this%d, zt, q0, s0)
+        bottom = nodes
+        do i = nodes - 1, 1, -1
+            ! The substeps start from the node ABOVE, formed from the lattice rather than
+            ! accumulated, so 6000 steps do not walk the grid off its own nodes.
+            z0 = real(i - m, real64) * PFC_H
+            do j = 1, PFC_GROWTH_SUBSTEPS
+                call cosmology_growth_step(this%p, this%d, z0 - real(j - 1, real64) * hs, -hs, &
+                                           q0, s0, f, u)
+            end do
+            ! A model whose `E^2` is not positive, or has overflowed, at the node below ends the
+            ! table there: the NaN would otherwise propagate up nothing and down everything.
+            if (f /= f) exit
+            this%gwv(i) = u
+            this%gwd(i) = 1.0_real64 - f
+            bottom = i
+        end do
+
+        ! Without the node at the origin there is nothing to anchor to, so there is no table.
+        if (bottom > zero) then
+            deallocate (this%gwv, this%gwd)
+            return
+        end if
+        anchor = this%gwv(zero)
+        do i = bottom, nodes
+            this%gwv(i) = this%gwv(i) - anchor
+        end do
+        if (bottom > 1) then
+            tmp = this%gwv(bottom:nodes)
+            call move_alloc(tmp, this%gwv)
+            tmp = this%gwd(bottom:nodes)
+            call move_alloc(tmp, this%gwd)
+        end if
+        this%d%n_growth = nodes - bottom + 1
+        this%d%zeta_gw_m = real(bottom - 1 - m, real64) * PFC_H
+        this%has_growth = .true.
+
+    end subroutine growth_pass
 
     !> The scaled tables' slopes at one node, and `1/E` there for the age's own slope.
     !!
@@ -1157,6 +1254,8 @@ contains
         if (allocated(this%ad)) deallocate (this%ad)
         if (allocated(this%xv)) deallocate (this%xv)
         if (allocated(this%xd)) deallocate (this%xd)
+        if (allocated(this%gwv)) deallocate (this%gwv)
+        if (allocated(this%gwd)) deallocate (this%gwd)
         call this%zd%clear()
         call this%zt%clear()
         call this%za%clear()
@@ -1167,6 +1266,7 @@ contains
         this%massive_nu = .false.
         this%has_ob0 = .false.
         this%age_diverges = .false.
+        this%has_growth = .false.
         this%ready = .false.
 
     end procedure cosmology_clear

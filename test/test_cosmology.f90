@@ -85,6 +85,25 @@ module test_cosmology
     !> What `%om + %ode + %ok + %ogamma + %onu` may differ from one by. Measured worst over all
     !! twenty models and the whole domain: `2.2e-16`, which is one ulp.
     real(real64), parameter :: DENSITY_SUM_TOL = 1.0e-14_real64
+    !> What `%growth_factor` may differ from the 30-digit ODE oracle by, RELATIVELY.
+    !!
+    !! Measured, not chosen, and set at ten times the worst, as `TABLE_TOL` is: over all 22
+    !! models and all 25 redshifts the worst is `4.4e-11` under gfortran and `4.4e-11` under ifx,
+    !! both on the recollapsing model at `z = -0.5`, which is `0.6` below its table's bottom and
+    !! `0.4` above its own floor -- the deepest the fallback walk runs anywhere in the grid. Every
+    !! other model is at `3.9e-12` or better, which is the `PFC_H/2` integrator's own `2.5e-12`.
+    real(real64), parameter :: GROWTH_TOL = 4.0e-10_real64
+    !> What `%growth_rate` may differ from the same oracle by, ABSOLUTELY.
+    !!
+    !! **`f` is a rate between 0 and 1 whose accuracy is absolute, and saying so is more honest
+    !! than a relative bound that would have to be loose enough to cover the places it is tiny.**
+    !! At `z = 1e10` it is `5e-7` -- the Meszaros mode's `(3/2)a/a_eq` -- and a relative error of
+    !! `2.6e-7` there is an absolute `1.3e-13`; at `z = -0.99` of the CPL model it is `6e-23`, the
+    !! residue of `exp(-INT q dzeta)` over an integral of about 50, where the 30-digit oracle
+    !! itself moves in the fourth digit between two macro-steps. Measured worst ABSOLUTE residual
+    !! over the whole grid: `2.0e-10` under gfortran and `2.0e-10` under ifx, again the
+    !! recollapsing model's walk; every other model is at `1.7e-11` or better.
+    real(real64), parameter :: GROWTH_RATE_TOL = 2.0e-9_real64
     !> `ln(1 + 1e10)`, the domain's edge, as the module carries it.
     real(real64), parameter :: CEILING_ZETA = 23.02585093004047_real64
 
@@ -194,7 +213,23 @@ contains
             new_unittest("z_at_luminosity_distance and z_at_distmod round trip", &
                          test_z_at_luminosity_and_distmod_round_trip), &
             new_unittest("z_at_luminosity_distance answers forward redshifts only", &
-                         test_z_at_luminosity_answers_only_forward_redshifts) &
+                         test_z_at_luminosity_answers_only_forward_redshifts), &
+            new_unittest("the Einstein-de Sitter growth is exactly 1/(1+z) and its rate exactly 1", &
+                         test_einstein_de_sitter_growth_is_exact), &
+            new_unittest("D(0) is exactly one and f(0) is the generated row", &
+                         test_growth_is_anchored_at_the_origin), &
+            new_unittest("the growth rate is the logarithmic derivative of the growth factor", &
+                         test_growth_rate_is_the_log_derivative), &
+            new_unittest("the growth pair satisfies its own equation", &
+                         test_growth_satisfies_its_own_equation), &
+            new_unittest("the growth factor falls with redshift and the rate stays in its range", &
+                         test_growth_is_monotone_and_bounded), &
+            new_unittest("zmax does not move the growth answer by a single bit", &
+                         test_zmax_does_not_move_the_growth), &
+            new_unittest("a truncated or big-rip model grows above its floor and is NaN below it", &
+                         test_growth_stops_at_the_model_floor), &
+            new_unittest("a universe with no matter has no growth to report", &
+                         test_no_matter_means_no_growth) &
             ]
 
     end subroutine collect_tests_cosmology
@@ -346,6 +381,8 @@ contains
         v(cq_tnu) = c%tnu(z)
         v(cq_absorption_distance) = c%absorption_distance(z)
         v(cq_nu_relative_density) = c%nu_relative_density(z)
+        v(cq_growth) = c%growth_factor(z)
+        v(cq_growth_rate) = c%growth_rate(z)
 
     end function answers
 
@@ -369,7 +406,7 @@ contains
                 z = rv(cz_bits(j))
                 got = answers(c, z)
                 do q = 1, n_cquantity
-                    if (.not. agrees(got(q), ref(i, j, q), TABLE_TOL)) then
+                    if (.not. row_agrees(got(q), ref(i, j, q), q)) then
                         bad_i = i
                         bad_j = j
                         bad_q = q
@@ -384,6 +421,33 @@ contains
                    ", quantity " // tag2)
 
     end subroutine check_rows
+
+    !> One quantity of one row against its reference, at the tolerance that quantity carries.
+    !!
+    !! The growth pair is the one place a row needs anything but `TABLE_TOL`: `D` is an integrated
+    !! quantity rather than a tabulated quadrature and carries the ODE's own `2.5e-12`, and `f` is
+    !! accurate ABSOLUTELY rather than relatively (`GROWTH_RATE_TOL`).
+    pure function row_agrees(got, want, q) result(ok)
+        real(real64), intent(in) :: got  !! what the library answered
+        real(real64), intent(in) :: want !! the reference value
+        integer, intent(in)      :: q    !! which quantity, a `cq_*` selector
+        logical                  :: ok   !! they agree
+
+        if (q == cq_growth) then
+            ok = agrees(got, want, GROWTH_TOL)
+        else if (q == cq_growth_rate) then
+            if (want /= want) then
+                ok = got /= got
+            else if (got /= got) then
+                ok = .false.
+            else
+                ok = abs(got - want) <= GROWTH_RATE_TOL
+            end if
+        else
+            ok = agrees(got, want, TABLE_TOL)
+        end if
+
+    end function row_agrees
 
     !> An integer as text, for a failure message.
     !!
@@ -613,7 +677,11 @@ contains
     !! The rest is the mirror of `zmax_moves_the_seam_not_the_answer`: three objects with floors
     !! two decades apart must answer the same blueshift the same way, one of them (`zmin = 0`)
     !! tabulating no blueshift at all and reaching every one of them by the panel walk the table
-    !! replaces.
+    !! replaces. Each quantity is held to its OWN tolerance (`row_agrees`), because the growth
+    !! rate's is absolute: `zmin = 0` reaches `zeta = -2.3` by 575 Runge-Kutta substeps and
+    !! `zmin = -0.9` by the quintic's derivative over the nodes those same substeps wrote, and
+    !! the two differ by that derivative's `O(h^5)`, measured `1.0e-11` -- while the growth
+    !! FACTOR, which the quintic gives to `O(h^6)`, agrees to `2.4e-14` relative.
     subroutine test_zmin_moves_the_seam_not_the_answer(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
@@ -657,7 +725,7 @@ contains
             want = answers(walked, z)
             got = answers(deep, z)
             do q = 1, n_cquantity
-                if (.not. agrees(got(q), want(q), TABLE_TOL)) then
+                if (.not. row_agrees(got(q), want(q), q)) then
                     bad_k = k
                     bad_q = q
                 end if
@@ -665,7 +733,7 @@ contains
             if (zeta > -0.4_real64) then
                 got = answers(shallow, z)
                 do q = 1, n_cquantity
-                    if (.not. agrees(got(q), want(q), TABLE_TOL)) then
+                    if (.not. row_agrees(got(q), want(q), q)) then
                         bad_k = k
                         bad_q = q
                     end if
@@ -2862,6 +2930,340 @@ contains
         call check(error, .not. any(raised), "a refused luminosity distance must raise no flag")
 
     end subroutine test_z_at_luminosity_answers_only_forward_redshifts
+
+    ! =========================================================================================
+    ! The growth of structure
+    ! =========================================================================================
+
+    !> Einstein-de Sitter grows exactly as `1/(1 + z)`, and its rate is exactly 1.
+    !!
+    !! **The one model whose growth is a closed form, and the test every coefficient of the
+    !! equation has to pass.** With `Om0 = 1` and nothing else, `E^2 = e^(3 zeta)` gives
+    !! `dlnE^2/dzeta = 3`, so `q = 1/2` and `Om = 1`, and `f^2 + f/2 - 3/2 = 0` has the root
+    !! `f = 1`: the right-hand side is identically zero, `f` never moves off the 1 the Meszaros
+    !! initial condition starts it at, and `u = lnD + zeta` never moves off zero. A wrong `3/2`,
+    !! a wrong `q`, a flipped sign, a transposed pair or an anchor at the wrong node each move
+    !! this by more than `1e-3`.
+    subroutine test_einstein_de_sitter_growth_is_exact(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zs(20), z
+        integer            :: k
+
+        zs = [-0.9_real64, -0.8_real64, -0.5_real64, -0.1_real64, -1.0e-8_real64, 0.0_real64, &
+              1.0e-8_real64, 1.0e-4_real64, 0.01_real64, 0.1_real64, 0.5_real64, 1.0_real64, &
+              2.0_real64, 5.0_real64, 10.0_real64, 100.0_real64, 1100.0_real64, 1.0e5_real64, &
+              1.0e8_real64, 1.0e10_real64]
+        call c%init(h0 = 70.0_real64, om0 = 1.0_real64, ode0 = 0.0_real64)
+        do k = 1, size(zs)
+            z = zs(k)
+            call check(error, abs(c%growth_factor(z) * (1.0_real64 + z) - 1.0_real64) <= 1.0e-14_real64, &
+                       "Einstein-de Sitter D(z)(1+z) must be 1")
+            if (allocated(error)) return
+            call check(error, abs(c%growth_rate(z) - 1.0_real64) <= 1.0e-14_real64, &
+                       "Einstein-de Sitter f must be 1")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_einstein_de_sitter_growth_is_exact
+
+    !> `D(0)` is exactly one for every model in the grid, and `f(0)` is the generated row.
+    !!
+    !! Bitwise, not to a tolerance: `zeta = 0` is a node of the integer lattice, the pass
+    !! subtracts that node from every other, and the table carries `lnD + zeta`, so the node at
+    !! the origin is an exact zero and `exp` of it is an exact one. An anchor at node 1 instead of
+    !! at the origin -- the two are the same only when the blueshift half is empty -- moves this
+    !! by the whole of `lnD(zeta_m)`.
+    !!
+    !! `f(0)` comes from its own generated value rather than from a row, because the reference's
+    !! redshift grid carries no zero: it is the number a caller forming `f sigma8` at the present
+    !! day reads, so it is pinned on its own.
+    subroutine test_growth_is_anchored_at_the_origin(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        integer            :: i
+
+        do i = 1, n_cmodel
+            call build(c, i)
+            if (par(i, cp_om0) <= 0.0_real64) cycle
+            call check(error, c%growth_factor(0.0_real64) == 1.0_real64, &
+                       "D(0) must be exactly one for " // trim(cmodel_label(i)))
+            if (allocated(error)) return
+            call check(error, abs(c%growth_rate(0.0_real64) - der(i, cd_growth_rate0)) &
+                       <= GROWTH_RATE_TOL, "f(0) must be the generated value for " // trim(cmodel_label(i)))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_growth_is_anchored_at_the_origin
+
+    !> `f = dlnD/dlna` against a central difference of `%growth_factor` itself.
+    !!
+    !! `dlnD/dlna` is `-(1 + z) dlnD/dz`, so the difference is taken in `zeta` where the table is
+    !! uniform. *Catches*: the two bindings wired to each other's arrays, and a sign.
+    subroutine test_growth_rate_is_the_log_derivative(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zeta, d, h, want, got
+        integer            :: i, k
+        integer, parameter :: MODELS(4) = [8, 9, 12, 16]   ! Planck18, flat_no_rad, wcdm, two_massive
+
+        h = 1.0e-4_real64
+        do i = 1, size(MODELS)
+            call build(c, MODELS(i))
+            do k = -6, 12
+                zeta = 0.5_real64 * real(k, real64)
+                d = (log(c%growth_factor(pf_zeta2z(zeta + h))) &
+                     - log(c%growth_factor(pf_zeta2z(zeta - h)))) / (2.0_real64 * h)
+                want = -d
+                got = c%growth_rate(pf_zeta2z(zeta))
+                call check(error, abs(got - want) <= 1.0e-6_real64, &
+                           "f must be minus dlnD/dzeta for " // trim(cmodel_label(MODELS(i))))
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_growth_rate_is_the_log_derivative
+
+    !> The growth pair put back into its own equation, with every term reached another way.
+    !!
+    !! `df/dzeta` by a central difference of `%growth_rate`, against `f^2 + q f - (3/2) Om` with
+    !! `q = 2 - dlnE/dzeta` from a central difference of `ln %efunc` and `Om` from `%om(z)`.
+    !! Nothing on the right-hand side touches the growth table, so this is the equation and not
+    !! the implementation. *Catches*: a wrong or missing Komatsu derivative -- `two_massive` and
+    !! the named models are the ones where it is not zero -- a wrong source, and a transposed `q`.
+    subroutine test_growth_satisfies_its_own_equation(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zeta, h, fz, dfdz, q, om, resid
+        integer            :: i, k
+        integer, parameter :: MODELS(6) = [8, 9, 11, 12, 16, 14]
+
+        h = 1.0e-4_real64
+        do i = 1, size(MODELS)
+            call build(c, MODELS(i))
+            do k = -4, 12
+                zeta = 0.5_real64 * real(k, real64)
+                fz = c%growth_rate(pf_zeta2z(zeta))
+                dfdz = (c%growth_rate(pf_zeta2z(zeta + h)) - c%growth_rate(pf_zeta2z(zeta - h))) &
+                       / (2.0_real64 * h)
+                q = 2.0_real64 - (log(c%efunc(pf_zeta2z(zeta + h))) &
+                                  - log(c%efunc(pf_zeta2z(zeta - h)))) / (2.0_real64 * h)
+                om = c%om(pf_zeta2z(zeta))
+                resid = dfdz - (fz * fz + q * fz - 1.5_real64 * om)
+                call check(error, abs(resid) <= 1.0e-5_real64, &
+                           "the growth pair must satisfy its own equation for " // &
+                           trim(cmodel_label(MODELS(i))))
+                if (allocated(error)) return
+            end do
+        end do
+
+    end subroutine test_growth_satisfies_its_own_equation
+
+    !> `D` falls with redshift, exceeds one at a blueshift, and `f` stays in `(0, 1.1]`.
+    !!
+    !! *Catches*: a table stored backwards, and an off-by-one in the node index.
+    subroutine test_growth_is_monotone_and_bounded(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zeta, d, prev, fz
+        integer            :: i, k
+
+        do i = 1, 8
+            call build(c, i)
+            prev = huge(1.0_real64)
+            do k = -280, 2870, 7
+                zeta = real(k, real64) * 0.008_real64
+                d = c%growth_factor(pf_zeta2z(zeta))
+                fz = c%growth_rate(pf_zeta2z(zeta))
+                call check(error, d < prev, "D must fall with redshift for " // trim(cmodel_label(i)))
+                if (allocated(error)) return
+                call check(error, fz > 0.0_real64 .and. fz <= 1.1_real64, &
+                           "f must stay in (0, 1.1] for " // trim(cmodel_label(i)))
+                if (allocated(error)) return
+                if (zeta < 0.0_real64) then
+                    call check(error, d > 1.0_real64, &
+                               "D must exceed one at a blueshift for " // trim(cmodel_label(i)))
+                    if (allocated(error)) return
+                end if
+                prev = d
+            end do
+        end do
+
+    end subroutine test_growth_is_monotone_and_bounded
+
+    !> `zmax` moves the growth answer by NOTHING, which is stronger than the other tables manage.
+    !!
+    !! The growing mode is an attractor in the direction of time only, so the growth table runs
+    !! from `PFC_GROWTH_TOP_NODE` downward whatever the caller asked to tabulate, and there is no
+    !! fallback above it to disagree with. Two objects six decades apart in `zmax` therefore carry
+    !! the SAME table, bit for bit. *Catches*: a growth grid that ends at `zeta_n`.
+    subroutine test_zmax_does_not_move_the_growth(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: small, big
+        real(real64)       :: zeta, z
+        integer            :: k
+
+        call small%init("Planck18", zmax = 1.0e-6_real64)
+        call big%init("Planck18", zmax = 1.0e5_real64)
+        do k = -280, 2870, 13
+            zeta = real(k, real64) * 0.008_real64
+            z = pf_zeta2z(zeta)
+            call check(error, small%growth_factor(z) == big%growth_factor(z), &
+                       "zmax must not move D by a bit")
+            if (allocated(error)) return
+            call check(error, small%growth_rate(z) == big%growth_rate(z), &
+                       "zmax must not move f by a bit")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_zmax_does_not_move_the_growth
+
+    !> A model whose `E^2` runs out below some blueshift grows above its floor and is NaN below it.
+    !!
+    !! Two of them: the recollapsing closed universe, whose `E^2` reaches zero at `z = -2/3`, and
+    !! a CPL big rip, whose dark-energy term passes the `exp` screen and makes `E^2` infinite
+    !! before `z = -1`. Neither may leave a NaN anywhere above where it belongs -- the defect
+    !! class the review found in the inverses -- and neither may raise an IEEE flag on the way.
+    subroutine test_growth_stops_at_the_model_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zeta, d, fz, e_here, e_below
+        integer            :: i, k, reached, wrong
+        logical            :: alive
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        ! **Where the model exists, growth exists.** `%efunc` is the discriminator, taken at the
+        ! point and a little below it, because the integrator's own midpoints reach below the
+        ! argument: a recollapsing universe's `E` is NaN at and under its floor, and a big rip's
+        ! is `+Infinity` once the dark-energy factor has passed the `exp` screen -- two different
+        ! ends of the domain, and neither of them a reason for growth to be missing above.
+        reached = 0
+        wrong = 0
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        do i = 1, 2
+            if (i == 1) then
+                call c%init(h0 = 70.0_real64, om0 = 1.5_real64, ode0 = 0.0_real64, &
+                            zmin = -0.99_real64)
+            else
+                call c%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = -1.2_real64, wa = 0.5_real64, &
+                            tcmb0 = 2.7255_real64, zmin = -0.99_real64)
+            end if
+            do k = -2870, 2870, 11
+                zeta = real(k, real64) * 0.008_real64
+                d = c%growth_factor(pf_zeta2z(zeta))
+                fz = c%growth_rate(pf_zeta2z(zeta))
+                e_here = c%efunc(pf_zeta2z(zeta))
+                e_below = c%efunc(pf_zeta2z(zeta - 0.05_real64))
+                ! The NaN screens stand alone and come first: an ordered comparison against a
+                ! quiet NaN raises `IEEE_INVALID`, which is exactly what this test is reading.
+                alive = .false.
+                if (e_here == e_here .and. e_below == e_below) then
+                    if (e_here <= huge(e_here) .and. e_below <= huge(e_below)) alive = .true.
+                end if
+                if (alive) then
+                    reached = reached + 1
+                    if (d /= d .or. fz /= fz) wrong = wrong + 1
+                end if
+            end do
+        end do
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+        call check(error, .not. any(raised), "a truncated model must raise no flag in growth")
+        if (allocated(error)) return
+        call check(error, reached > 200, "the sweep must reach a live redshift of both models")
+        if (allocated(error)) return
+        call check(error, wrong == 0, "growth must be a number wherever the model itself is")
+        if (allocated(error)) return
+
+        ! The recollapsing universe, in detail: finite a panel above its floor, NaN below it.
+        call c%init(h0 = 70.0_real64, om0 = 1.5_real64, ode0 = 0.0_real64, zmin = -0.99_real64)
+        call check(error, c%zeta_floor() < 0.0_real64, "the recollapsing model must have a floor")
+        if (allocated(error)) return
+        d = c%growth_factor(pf_zeta2z(c%zeta_floor() + 0.5_real64))
+        fz = c%growth_rate(pf_zeta2z(c%zeta_floor() + 0.5_real64))
+        call check(error, d == d .and. fz == fz .and. d > 1.0_real64, &
+                   "growth above the floor must be a number")
+        if (allocated(error)) return
+        d = c%growth_factor(pf_zeta2z(c%zeta_floor() - 0.1_real64))
+        fz = c%growth_rate(pf_zeta2z(c%zeta_floor() - 0.1_real64))
+        call check(error, d /= d .and. fz /= fz, "growth below the floor must be NaN")
+
+    end subroutine test_growth_stops_at_the_model_floor
+
+    !> de Sitter and Milne have no matter, so both growth bindings answer a quiet NaN.
+    !!
+    !! The Riccati equation is not singular for `Om0 = 0` -- it would answer `f = 0` and `D = 1`
+    !! everywhere, a number that means nothing -- so no table is built and both bindings say so.
+    !! *Catches*: a `0/0`, and a table built where it should have been skipped.
+    subroutine test_no_matter_means_no_growth(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zs(5), d, fz
+        integer            :: i, k
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        zs = [-0.9_real64, -0.5_real64, 0.0_real64, 1.0_real64, 1100.0_real64]
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        do i = 1, 2
+            if (i == 1) then
+                call c%init(h0 = 70.0_real64, om0 = 0.0_real64, ode0 = 1.0_real64)   ! de Sitter
+            else
+                call c%init(h0 = 70.0_real64, om0 = 0.0_real64, ode0 = 0.0_real64)   ! Milne
+            end if
+            do k = 1, size(zs)
+                d = c%growth_factor(zs(k))
+                fz = c%growth_rate(zs(k))
+            end do
+        end do
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+        call check(error, .not. any(raised), "a matterless model must raise no flag in growth")
+        if (allocated(error)) return
+
+        call c%init(h0 = 70.0_real64, om0 = 0.0_real64, ode0 = 1.0_real64)
+        do k = 1, size(zs)
+            call check(error, c%growth_factor(zs(k)) /= c%growth_factor(zs(k)), &
+                       "de Sitter must have no growth factor")
+            if (allocated(error)) return
+            call check(error, c%growth_rate(zs(k)) /= c%growth_rate(zs(k)), &
+                       "de Sitter must have no growth rate")
+            if (allocated(error)) return
+        end do
+        call c%init(h0 = 70.0_real64, om0 = 0.0_real64, ode0 = 0.0_real64)
+        call check(error, c%growth_factor(1.0_real64) /= c%growth_factor(1.0_real64), &
+                   "Milne must have no growth factor")
+
+    end subroutine test_no_matter_means_no_growth
 
 #ifndef __flang__
     !> Can overflow, invalid and divide-by-zero all be held off around a call?

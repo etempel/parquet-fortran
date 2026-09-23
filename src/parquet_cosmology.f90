@@ -10,7 +10,7 @@
 !! dl = cosmo%luminosity_distance(z)                    ! Mpc, a whole column in one call
 !! ```
 !!
-!! Five families, all over `real64`:
+!! Six families, all over `real64`:
 !!
 !! * **Distances** -- `%comoving_distance`, `%comoving_transverse_distance`,
 !!   `%luminosity_distance`, `%angular_diameter_distance`, `%comoving_distance_z1z2`,
@@ -24,6 +24,8 @@
 !! * **The contents of the universe at `z`** -- `%om`, `%ode`, `%ok`, `%ogamma`, `%onu`, which sum
 !!   to one, with `%otot`, `%ob`, `%odm`, `%nu_relative_density`, `%onu_species`, `%tcmb`, `%tnu`,
 !!   `%w`, `%de_density_scale` and `%critical_density`.
+!! * **The growth of structure** -- `%growth_factor`, the linear growth factor `D(z)` normalised
+!!   to `D(0) = 1`, and `%growth_rate`, `f = dlnD/dlna`.
 !! * **Inverses** -- `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`,
 !!   `%z_at_luminosity_distance` and `%z_at_distmod`.
 !!
@@ -71,6 +73,17 @@
 !! an abort there would take a program down for one row. A negative redshift above `-1` is a
 !! blueshift and is answered with its sign. What aborts is a caller's mistake: a cosmology that was
 !! never built, an unknown name, or a parameter outside its admitted range.
+!!
+!! **Growth is INTEGRATED rather than tabulated from a quadrature, and it is the one quantity
+!! `zmax` does not move.** The growing mode is an attractor in the direction of time and only in
+!! that direction, so the linear growth equation -- written as a Riccati equation for the rate `f`
+!! alone, with `lnD` following by one quadrature -- is integrated DOWNWARD from
+!! `PFC_GROWTH_TOP_NODE`, above the domain's ceiling, whatever the caller asked to tabulate. There
+!! is no fallback above the table because there is no correct one to write: the same equation run
+!! upward amplifies its own rounding by a factor of 25 by `z = 1e10`. The source term is `Om0`,
+!! which excludes massive neutrinos, so for a model with a massive species this is the growth of
+!! the cold matter in the scale-independent approximation; a universe with no matter at all has
+!! nothing to grow and both bindings answer NaN for it.
 !!
 !! **A MODEL may end before the domain does.** Where `E(z)^2` reaches zero at a finite blueshift --
 !! a recollapsing closed universe, or any negative `Ode0` -- there is no expansion below that
@@ -281,6 +294,30 @@ module parquet_cosmology
         !! panel costs the whole sliver of blueshifts below it; see `floor_bounds`.
     real(real64), parameter :: PFC_PANEL = 1.0_real64
         !! The width in `zeta` of one Gauss-Legendre panel beyond the table.
+    integer, parameter :: PFC_GROWTH_SUBSTEPS = 2
+        !! Runge-Kutta substeps per grid interval in the growth pass: the ODE step is
+        !! `PFC_H / PFC_GROWTH_SUBSTEPS`.
+        !!
+        !! Measured against a 30-digit oracle over the whole domain, worst over four models and
+        !! nine redshifts from `z = 1e10` to `z = -0.9`:
+        !!
+        !! | step | kernel evaluations | worst `D` | worst `f` |
+        !! |---|---|---|---|
+        !! | `PFC_H` | 5784 | 4.0e-11 | 1.8e-10 |
+        !! | `PFC_H/2` | 11568 | 2.5e-12 | 1.1e-11 |
+        !! | `PFC_H/4` | 23136 | 1.7e-13 | 7.1e-13 |
+        !!
+        !! Fourth order at `PFC_H/2` is six orders below the accuracy of the libraries a caller
+        !! would otherwise reach for, and the `h^4` scaling above is clean to the last row, where
+        !! accumulated rounding over 11568 steps starts to show.
+    integer, parameter :: PFC_GROWTH_TOP_NODE = 2879
+        !! The growth table's TOP node, as a multiple of `PFC_H`: the first lattice node above
+        !! `PFC_ZETA_CEILING`, so the table covers the whole domain whatever `zmax` is.
+        !!
+        !! The growing mode is an attractor in the direction of time and only in that direction,
+        !! so the pass runs DOWNWARD from here and there is no fallback above the table: the
+        !! panels would have to run in the unstable direction, where the same equation amplifies
+        !! its own rounding to `2.4e-07` by `z = 1100` and to `25` by `z = 1e10`.
     real(real64), parameter :: PFC_PAIR_DIRECT = 0.5_real64
         !! Below this separation in `zeta`, `%comoving_distance_z1z2` integrates the pair DIRECTLY
         !! instead of differencing two table reads.
@@ -375,7 +412,10 @@ module parquet_cosmology
         real(real64) :: a_floor   = 0.0_real64 !! `age(zeta_bottom)`: the LARGEST
         integer      :: n_nu      = 0          !! `floor(neff)`: the number of species
         integer      :: n_massless = 0         !! how many of them have zero mass
-        integer      :: n_tab     = 0          !! nodes in the three forward tables
+        integer      :: n_tab     = 0          !! nodes in the four forward tables
+        integer      :: n_growth  = 0          !! nodes in the growth table, zero when there is none
+        real(real64) :: zeta_gw_m = 0.0_real64 !! the growth table's BOTTOM node; its top is always
+                                               !! `PFC_GROWTH_TOP_NODE * PFC_H`
         ! ---- the BUILD's own `nu_rel` table (R11) ----
         !
         ! Filled into the INTEGRAND's copy of this record and never into the object's, so that
@@ -422,6 +462,12 @@ module parquet_cosmology
         real(real64), allocatable :: xv(:)              !! `X(zeta)/zeta` at the nodes, `X` the
                                                         !! absorption distance
         real(real64), allocatable :: xd(:)              !! `d/dzeta` of it there
+        ! The growth table is the same shape and is read by the same quintic, but it is NOT on
+        ! the same node range: it runs to `PFC_GROWTH_TOP_NODE` whatever `zmax` is.
+        real(real64), allocatable :: gwv(:)             !! `ln D(zeta) + zeta` at the nodes, with
+                                                        !! `D(0) = 1`, so the node at the origin is
+                                                        !! exactly zero
+        real(real64), allocatable :: gwd(:)             !! `d/dzeta` of it there, which is `1 - f`
         type(pf_interp_1d) :: zd                        !! `zeta / D` against `D`: the distance inverse
         type(pf_interp_1d) :: zt                        !! `zeta / t` against `t`: the time inverse
         type(pf_interp_1d) :: za                        !! `zeta` against `-ln(age)`: the age inverse
@@ -429,6 +475,8 @@ module parquet_cosmology
         logical :: massive_nu   = .false.               !! at least one species has a positive mass
         logical :: has_ob0      = .false.               !! the caller gave an `ob0`
         logical :: age_diverges = .false.               !! the age integral diverges
+        logical :: has_growth   = .false.               !! the growth table was built; false when
+                                                        !! `om0` is zero and there is nothing to grow
         logical :: ready        = .false.               !! `%init` has built this object
     contains
         procedure, private :: init_params => cosmology_init_params !! `%init` in the parameter form.
@@ -478,6 +526,8 @@ module parquet_cosmology
         procedure :: lookback_distance => cosmology_lookback_distance !! `c t_L(z)` in Mpc.
         procedure :: absorption_distance => cosmology_absorption_distance
             !! The dimensionless absorption distance out to `z`.
+        procedure :: growth_factor => cosmology_growth_factor !! `D(z)`, normalised to `D(0) = 1`.
+        procedure :: growth_rate => cosmology_growth_rate !! `f(z) = dlnD/dlna`.
         procedure :: z_at_comoving_distance => cosmology_z_at_distance !! The redshift at a `D_C`.
         procedure :: z_at_lookback_time => cosmology_z_at_lookback !! The redshift at a `t_L`.
         procedure :: z_at_age => cosmology_z_at_age     !! The redshift at which the universe was `t` old.
@@ -1046,6 +1096,53 @@ module parquet_cosmology
 
     end interface
 
+    ! ---- The growth of structure --------------------------------------------------------------
+
+    interface
+
+        !> `D(z)`, the linear growth factor of matter perturbations, normalised to `D(0) = 1`.
+        !!
+        !! The growing solution of the linear growth equation for pressureless matter in a smooth
+        !! background, written as a first-order equation for the growth rate and integrated on
+        !! the module's own grid:
+        !!
+        !! ```
+        !! df/dzeta   = f^2 + q f - (3/2) Om(zeta),   q = 2 - (1/2) dlnE^2/dzeta
+        !! dlnD/dzeta = -f,                           Om = Om0 e^(3 zeta) / E^2
+        !! ```
+        !!
+        !! **Scale-independent, and of the COLD matter.** The source is `Om0`, which excludes
+        !! massive neutrinos: below their free-streaming length they contribute to `E^2` but not
+        !! to the clustering, so for a model with massive neutrinos this is the growth of the cold
+        !! matter in the scale-independent approximation. There is no `D(k, z)` here, no transfer
+        !! function and no `sigma8`; the product a caller forms is
+        !! `fs8 = sigma8 * %growth_factor(z) * %growth_rate(z)`.
+        !!
+        !! A quiet NaN outside the domain, below the model's own floor, and for a model with no
+        !! matter at all -- de Sitter and Milne have nothing to grow, and answering `D = 1`
+        !! everywhere would be a number that means nothing.
+        pure elemental module function cosmology_growth_factor(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `D(z)`, dimensionless, `D(0) = 1`
+        end function cosmology_growth_factor
+
+        !> `f(z) = dlnD/dlna`, the linear growth rate.
+        !!
+        !! The variable the equation of `%growth_factor` is integrated in, so it is known at every
+        !! node to the integrator's own accuracy rather than differentiated out of a table of
+        !! something else. It is `O(1)` everywhere -- between 0 and 1 for every model tried --
+        !! where `D` itself spans ten decades, and it tends to 1 deep in matter domination.
+        !!
+        !! The same NaNs as `%growth_factor`, for the same reasons.
+        pure elemental module function cosmology_growth_rate(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `f(z)`, dimensionless
+        end function cosmology_growth_rate
+
+    end interface
+
     ! ---- The inverses -------------------------------------------------------------------------
 
     interface
@@ -1342,6 +1439,50 @@ module parquet_cosmology
         !! identity they keep -- that the five density parameters sum to one -- needs the numerator
         !! to be the SAME double the denominator was built from. Evaluating the term twice is what
         !! breaks it: see `cosmology_e2_x`.
+        !> The growth equation's two coefficients at one `zeta`.
+        !!
+        !! `q = 2 - (1/2) dlnE^2/dzeta` and `src = (3/2) Om(zeta)`, which is everything in
+        !! `df/dzeta = f^2 + q f - src` that does not depend on `f`. Both are a quiet NaN where
+        !! `E^2` is not positive, so a redshift below the model's own floor answers NaN through
+        !! the arithmetic rather than through a second screen.
+        !!
+        !! The Einstein-de Sitter check is a fixed point rather than an integration: `E^2 =
+        !! e^(3 zeta)` gives `q = 1/2` and `src = 3/2`, whose root `f = 1` makes `df/dzeta`
+        !! identically zero.
+        pure module subroutine cosmology_growth_coef(p, d, zeta, q, src)
+            type(cosmology_params), intent(in)  :: p    !! the parameters
+            type(cosmology_derived), intent(in) :: d    !! the derived values
+            real(real64), intent(in)            :: zeta !! `ln(1 + z)`
+            real(real64), intent(out)           :: q    !! `2 - (1/2) dlnE^2/dzeta`
+            real(real64), intent(out)           :: src  !! `(3/2) Om(zeta)`
+        end subroutine cosmology_growth_coef
+
+        !> One classical fourth-order Runge-Kutta substep of the growth pair, of width `h`.
+        !!
+        !! `h` is NEGATIVE for the downward pass, which is the only direction the equation may be
+        !! integrated in ([`PFC_GROWTH_TOP_NODE`](../module/parquet_cosmology.html)). The
+        !! coefficients at the step's START are passed in and the ones at its END come back, so a
+        !! walk of many substeps costs TWO kernel evaluations per substep rather than four: the
+        !! four stages need `zeta`, the midpoint twice, and `zeta + h`.
+        !!
+        !! **The second component is `u = ln D + zeta`, not `ln D` itself**, which is the same
+        !! device as tabulating `D_C/zeta` and `ln(age)`: the known behaviour is divided out and
+        !! what is summed is the departure from it. `du/dzeta = 1 - f`, so in matter domination
+        !! the increments are small and in an Einstein-de Sitter universe they are exactly zero --
+        !! `u` stays the zero it started at, and `lnD = -zeta` comes out of a single multiplication
+        !! rather than six thousand additions. Summing `ln D` directly instead leaves the same
+        !! identity `2.3e-12` from 1 at `z = 1100`, all of it the sum and none of it the method.
+        pure module subroutine cosmology_growth_step(p, d, zeta, h, q0, s0, f, u)
+            type(cosmology_params), intent(in)  :: p    !! the parameters
+            type(cosmology_derived), intent(in) :: d    !! the derived values
+            real(real64), intent(in)            :: zeta !! where the substep starts
+            real(real64), intent(in)            :: h    !! its width, negative going downward
+            real(real64), intent(inout)         :: q0   !! `q` at `zeta` in, at `zeta + h` out
+            real(real64), intent(inout)         :: s0   !! `src` at `zeta` in, at `zeta + h` out
+            real(real64), intent(inout)         :: f    !! the growth rate, advanced in place
+            real(real64), intent(inout)         :: u    !! `ln D + zeta`, advanced in place
+        end subroutine cosmology_growth_step
+
         pure module subroutine cosmology_e2_split(p, d, x, de, nu, v)
             type(cosmology_params), intent(in)  :: p  !! the parameters
             type(cosmology_derived), intent(in) :: d  !! the derived values

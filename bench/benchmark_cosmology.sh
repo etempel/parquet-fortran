@@ -21,7 +21,9 @@
 #
 #   bindings  each binding over the same column, inside the table, in nanoseconds per query. They
 #             should differ by a few flops and one transcendental at most; a row far above the
-#             others is a binding doing more work than the design says it does.
+#             others is a binding doing more work than the design says it does. `%growth_factor`
+#             and `%growth_rate` read a table of their own -- filled by an ODE rather than by a
+#             quadrature -- so they belong with the others rather than above them.
 #
 #   inverse   all five inverses over a column, with the worst relative round trip printed beside
 #             each. On the table an inverse is one interpolant read plus one Newton step; beyond

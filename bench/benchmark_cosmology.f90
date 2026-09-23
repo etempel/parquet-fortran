@@ -161,8 +161,49 @@ contains
         ! was chosen from.
         call timed_column(c, n, -0.8_real64, -1.0e-3_real64, "a blueshift, tabulated")
         call timed_column(c, n, -0.999_real64, -0.95_real64, "a blueshift, below the table")
+        ! The same two for GROWTH, which is where the difference bites: below the table the growth
+        ! bindings continue the Runge-Kutta pass at two substeps per grid interval, where the
+        ! distance lays one twenty-point panel per unit. The ratio between these two rows is what
+        ! the guide page's "pass a lower `zmin=` if you query growth below it" is about.
+        call timed_growth(c, n, -0.8_real64, -1.0e-3_real64, "growth, tabulated")
+        call timed_growth(c, n, -0.999_real64, -0.95_real64, "growth, below the table")
 
     end subroutine run_eval
+
+    !> Times `%growth_factor` over one column and prints its row.
+    subroutine timed_growth(cosmo, n, lo, hi, label)
+        type(pf_cosmology), intent(in) :: cosmo !! the cosmology
+        integer, intent(in)            :: n     !! redshifts in the column
+        real(real64), intent(in)       :: lo    !! the smallest redshift
+        real(real64), intent(in)       :: hi    !! the largest
+        character(len=*), intent(in)   :: label !! the row's name
+
+        real(real64), allocatable :: z(:), d(:)
+        real(real64)              :: t0, t1, elapsed
+        integer                   :: laps, m
+
+        ! A column below the table costs hundreds of microseconds per element, so this row takes a
+        ! SHORTER column: a million of them would run for minutes and say nothing more.
+        m = n
+        if (lo < -0.9_real64) m = max(1, n / 500)
+        call log_spaced_redshifts(m, -hi, -lo, z)
+        z = -z
+        allocate (d(m))
+        laps = 0
+        elapsed = 0.0_real64
+        t0 = watch_seconds()
+        do while (elapsed < MIN_LAP)
+            d = cosmo%growth_factor(z)
+            laps = laps + 1
+            elapsed = watch_seconds() - t0
+        end do
+        t1 = watch_seconds()
+        write (output_unit, '(a24,f16.2,f16.3)') label, &
+            1.0e9_real64 * (t1 - t0) / real(laps, real64) / real(m, real64), &
+            1000.0_real64 * (t1 - t0) / real(laps, real64)
+        if (d(1) /= d(1)) write (output_unit, '(a)') "# (a NaN reached the column)"
+
+    end subroutine timed_growth
 
     !> Times `%comoving_distance` over one column and prints its row.
     !!
@@ -217,7 +258,7 @@ contains
         allocate (out(n))
         write (output_unit, '(a)') "# Each binding over the same column of n redshifts, inside the table."
         write (output_unit, '(a28,a16)') "binding", "ns_per_query"
-        do k = 1, 12
+        do k = 1, 14
             laps = 0
             elapsed = 0.0_real64
             t0 = watch_seconds()
@@ -259,6 +300,12 @@ contains
                 case (12)
                     label = "%nu_relative_density"
                     out = c%nu_relative_density(z)
+                case (13)
+                    label = "%growth_factor"
+                    out = c%growth_factor(z)
+                case (14)
+                    label = "%growth_rate"
+                    out = c%growth_rate(z)
                 end select
                 laps = laps + 1
                 elapsed = watch_seconds() - t0

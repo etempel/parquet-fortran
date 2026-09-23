@@ -129,6 +129,8 @@ across finds the same words; the two exceptions are forced by Fortran, which can
 | `%z_at_lookback_time(t)` | the redshift `t` Gyr ago |
 | `%z_at_age(t)` | the redshift at which the universe was `t` Gyr old |
 | `%z_at_luminosity_distance(d)`, `%z_at_distmod(mu)` | the redshift at a `D_L` or a distance modulus |
+| `%growth_factor(z)` | `D(z)`, the linear growth factor of matter perturbations, normalised to `D(0) = 1` |
+| `%growth_rate(z)` | `f(z) = dlnD/dlna`, the linear growth rate |
 
 and the model itself: `%h0()`, `%little_h()`, `%om0()`, `%ode0()`, `%ok0()`, `%ogamma0()`,
 `%onu0()`, `%ob0()`, `%odm0()`, `%tcmb0()`, `%tnu0()`, `%neff()`, `%w0()`, `%wa()`,
@@ -181,6 +183,38 @@ d    = sim%comoving_distance(zred)            ! Mpc; divide by sim%little_h() fo
 zz   = sim%z_at_comoving_distance(d)          ! and back again, to rounding
 ```
 
+## Growth, and what it assumes
+
+`%growth_factor` and `%growth_rate` answer the linear growth of matter perturbations in the
+scale-independent approximation: the growing solution of
+
+```
+D'' + (3/a + E'/E) D' - (3/2) Om0 D / (a^5 E^2) = 0
+```
+
+normalised so that `D(0) = 1`, which is the normalisation CCL and colossus use and the one a
+caller expects. The library integrates it as a first-order equation for the rate `f = dlnD/dlna`
+rather than for `D`, so `f` is a primary quantity and not a derivative of a table of something
+else, and `D(0) = 1` holds exactly rather than by dividing two tabulated numbers.
+
+Three things it assumes, all of which matter before you rely on a number:
+
+- **The source is the COLD matter, `Om0`, which excludes massive neutrinos.** Below their
+  free-streaming length neutrinos contribute to `E(z)` but do not cluster, so for a model with
+  massive neutrinos this is the growth of the cold matter, and a scale-dependent calculation is a
+  different quantity that this module does not offer.
+- **Dark energy is smooth and gravity is general relativity.** There is no clustering
+  dark energy and no modified-gravity parameterisation.
+- **There is no `sigma8` here, and no `P(k)`.** The product a redshift-space-distortion
+  measurement is compared against is formed by the caller:
+
+```fortran
+fs8 = sigma8 * cosmo%growth_factor(z) * cosmo%growth_rate(z)
+```
+
+A universe with no matter at all — de Sitter, Milne — has nothing to grow, and both bindings
+answer NaN rather than the `D = 1` everywhere that the equation would formally give.
+
 ## Beyond the table
 
 `%init` tabulates four integrals — the comoving distance, the lookback time, the age and the
@@ -198,6 +232,21 @@ the build. Either way the answers agree to the accuracy below.
 The fourth integral is the absorption distance's, and it is built whether or not you ask for that
 binding, because the object is fixed once `%init` returns. It is about half the build's cost
 again; `zmin=0` gives back rather more than it takes.
+
+**Growth is the one quantity `zmax` does not move at all.** The growing mode is an attractor in
+the direction of time and only in that direction, so its table is built downward from the top of
+the domain whatever `zmax` is, and two objects six decades apart in `zmax` carry the same growth
+table bit for bit. There is no fallback above it, because integrating the other way amplifies its
+own rounding rather than the answer.
+
+`zmin` does still move growth's seam, and it is the one place where being below the table is
+expensive rather than merely slower: the other quantities lay one twenty-point panel per unit of
+`zeta` there, while growth continues its own integration at two substeps per grid interval, so a
+query well below `zmin` costs **tens to hundreds of microseconds** against tens of nanoseconds
+inside. The answer is the same either way — it is the same integrator — so this is a speed knob
+and nothing else: **a program that asks for growth below `z = -0.9` should pass a lower `zmin=`**,
+which puts every such query back on the table at a few nanoseconds apiece and costs a few more
+milliseconds once, at `%init`. `bench/benchmark_cosmology.sh eval` prints both rows.
 
 `%zmax()` and `%zmin()` report what you asked for. Neither is a boundary: nothing is refused at
 either. `%zeta_floor()` reports something different — the `zeta` at which this model's `E(z)²`
@@ -224,6 +273,12 @@ outside the domain. `%init` does not refuse such a model — it is a perfectly g
 down as it goes — and `%zeta_floor()` says where it ends. The five inverses know about the floor
 too: an argument the model never reaches answers NaN rather than a redshift at which the model
 itself answers NaN.
+
+**The growth bindings have one NaN of their own**, inside the domain and for a perfectly valid
+model: a universe with no matter has no matter perturbations to grow, so `%growth_factor` and
+`%growth_rate` answer NaN for `om0 = 0`. The equation is not singular there — it would answer
+`D = 1` everywhere — but that number would mean nothing, and de Sitter and Milne are exactly the
+models a caller reaches for when checking a limit.
 
 Three admitted inputs answer a signed infinity rather than a number:
 
@@ -259,6 +314,21 @@ digit left by `z = 1e10`.
 `zmax` and `zmin` move the seam between the table and the quadrature, and the answer either side
 of the seam differs by no more than the table's own accuracy. Both seams are continuous: the
 quadrature starts from the tabulated edge value rather than from zero.
+
+**Growth is integrated, not tabulated from a quadrature, and carries its own two numbers.**
+`%growth_factor` is within a few parts in `1e12` of a thirty-digit solution of the same equation
+over the whole domain and every model checked — the fourth-order step is half a grid interval, and
+halving it again moves the answer by `1.6e-13`. `%growth_rate` is accurate to about `1e-11`
+ABSOLUTELY rather than relatively, which is the honest statement for a rate between 0 and 1: at
+`z = 1e10` it is `5e-7` and at a deep blueshift of a strongly evolving dark-energy model it falls
+through twenty decades, and neither of those carries relative digits worth quoting.
+
+Above about `z = 100` this module and CCL part company by around a part in a thousand, and the
+difference is CCL's initial condition rather than either implementation: CCL starts the equation
+from the pure-matter growing mode `D = a` at `a = 1e-6`, which is inside the radiation era for any
+model with a CMB, and the transient that leaves has not fully decayed by recombination. This
+module starts from the exact matter-radiation growing mode instead, whose answer does not move
+when the starting redshift is moved four decades.
 
 Three accuracy notes worth knowing before you rely on an answer:
 

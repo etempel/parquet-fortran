@@ -198,6 +198,25 @@ SINH_CEILING = mp.mpf(700)
 #: `ln(1 + 1e10)` as the module rounds it: the bottom of the domain the floor scan walks down to.
 ZETA_CEILING = mp.mpf("23.02585093004047")
 
+#: The growth ODE's starting point: `PFC_GROWTH_TOP_NODE * PFC_H`, the library's own top node.
+#: Its exact value does not matter -- moving it from `z = 1e10` to `z = 1e14` moves the normalised
+#: `D` by at most `7.1e-13` anywhere in the domain -- but using the library's makes the comparison
+#: one of METHOD rather than of where each side chose to start.
+GROWTH_TOP = mp.mpf(2879) * mp.mpf("0.008")
+#: The macro-step of the growth integration, and the relative accuracy each one is taken to. The
+#: extrapolation table IS the error estimate, so nothing here is asserted: a step that does not
+#: reach the tolerance in `GROWTH_ORDERS` refinements returns the best it has and the caller's
+#: own convergence test -- `--self-test`'s Einstein-de Sitter anchor -- would see it.
+GROWTH_MACRO = mp.mpf("0.5")
+GROWTH_TOL = mp.mpf("1e-25")
+GROWTH_ORDERS = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+#: How many times a macro-step may be HALVED before the solve gives up and says so. A step that
+#: does not converge is halved, never accepted: a CPL model at a deep blueshift has `q` near 46
+#: and `f` falling through twenty decades, and a fixed macro-step returns a plausible wrong
+#: number there rather than a visibly wrong one -- `f` at `z = -0.99` of `w0wacdm` came out
+#: `1.1e-5` against a true `6.1e-23`, which no eye and no tolerance would have caught.
+GROWTH_SPLITS = 24
+
 
 # ---------------------------------------------------------------------------------------------
 # The model
@@ -326,6 +345,39 @@ class Cosmology(object):
                 total += (1 + (KOM_C * y / x) ** KOM_B) ** KOM_INVP
         return KOM_A * (self.neff / self.n_nu) * total
 
+    def dnu_rel(self, x):
+        """`dnu_rel/dzeta`, the Komatsu fit's own derivative at `x = 1 + z`.
+
+        `u = (C y / x)^P` is a fixed power of `x` and `dx/dzeta = x`, so `du/dzeta = -P u` and
+        each term `(1 + u)^Q` contributes `-P Q u (1 + u)^(Q - 1)`. `P Q` is written as the
+        product of the two published constants rather than as 1, for the same reason `KOM_INVP`
+        is `0.54644808743` rather than `1/1.83`. Zero for a massless model and for `Tcmb0 = 0`,
+        which are the two branches `nu_rel` itself takes.
+        """
+        if self.tnu0 == 0 or self.n_nu == 0 or not self.has_massive_nu:
+            return mp.mpf(0)
+        total = mp.mpf(0)
+        for m in self.m_nu:
+            if m > 0:
+                y = m / (K_B_EV * self.tnu0)
+                u = (KOM_C * y / x) ** KOM_B
+                total -= KOM_B * KOM_INVP * u * (1 + u) ** (KOM_INVP - 1)
+        return KOM_A * (self.neff / self.n_nu) * total
+
+    def de2_dzeta(self, zeta):
+        """`dE^2/dzeta`, analytic: what the library's `cosmology_de2_dzeta` forms.
+
+        The dark-energy term is written through `w(z)`, since `dln f_DE/dzeta = 3(1 + w(z))`,
+        rather than by differentiating the CPL exponent a second time.
+        """
+        x = mp.exp(zeta)
+        de = self.de_term(x)
+        w_z = self.w0 + self.wa * (x - 1) / x
+        v = 3 * self.om0 * x ** 3 + 2 * self.ok0 * x ** 2 + 3 * (1 + w_z) * de
+        if self.ogamma0 == 0:
+            return v
+        return v + self.ogamma0 * x ** 4 * (4 * (1 + self.nu_rel(x)) + self.dnu_rel(x))
+
     def f_de_log(self, x):
         """`L`, the logarithm of the CPL factor; `None` for a cosmological constant."""
         if self.is_lambda:
@@ -452,8 +504,141 @@ class Cosmology(object):
         s = mp.sqrt(-self.ok0)
         return lead * (q * mp.sqrt(1 + self.ok0 * q ** 2) - mp.asin(s * q) / s)
 
-    def row(self, z):
+    # -- the growth ODE --------------------------------------------------------------------
+
+    def growth_rhs(self, zeta, y):
+        """`(df/dzeta, du/dzeta)` at `zeta`, with `y = (f, u)` and `u = ln D + zeta`.
+
+        `df/dzeta = f^2 + q f - (3/2) Om` with `q = 2 - (1/2) dlnE^2/dzeta`, and `du/dzeta` is
+        `1 - f`. The second component is `ln D + zeta` rather than `ln D` because that is what the
+        library tabulates, and because in an Einstein-de Sitter universe its every increment is
+        exactly zero -- which is what makes `D = 1/(1 + z)` an identity on both sides rather than
+        an agreement to some number of digits.
+        """
+        e2 = self.e2(zeta)
+        # `E^2 <= 0` is a redshift the model does not reach, and an INFINITE `E^2` -- a CPL
+        # model's dark-energy term past the `exp` screen at a deep blueshift -- would make
+        # `dlnE^2/dzeta` an `Infinity/Infinity`. Both are the NaN the library answers, and the
+        # caller stops there rather than integrating a NaN through several thousand steps.
+        if e2 != e2 or e2 <= 0 or e2 == mp.inf:
+            return [mp.nan, mp.nan]
+        q = 2 - self.de2_dzeta(zeta) / (2 * e2)
+        src = 3 * self.om0 * mp.exp(3 * zeta) / (2 * e2)
+        return [y[0] * y[0] + q * y[0] - src, 1 - y[0]]
+
+    def _growth_mmid(self, zeta, y, h, n):
+        """The modified midpoint rule: `n` substeps of `h/n`, whose error is EVEN in the substep.
+
+        That is what makes Richardson extrapolation in `h^2` gain two orders per refinement
+        rather than one, and it is why this rule rather than a Runge-Kutta is the base of the
+        extrapolation.
+        """
+        hs = h / n
+        f0 = self.growth_rhs(zeta, y)
+        y0 = y
+        y1 = [y[k] + hs * f0[k] for k in (0, 1)]
+        for m in range(1, n):
+            fm = self.growth_rhs(zeta + m * hs, y1)
+            y0, y1 = y1, [y0[k] + 2 * hs * fm[k] for k in (0, 1)]
+        fe = self.growth_rhs(zeta + h, y1)
+        return [(y0[k] + y1[k] + hs * fe[k]) / 2 for k in (0, 1)]
+
+    def _growth_step(self, zeta, y, h, depth=0):
+        """One macro-step of width `h`, extrapolated to `GROWTH_TOL`; HALVED when it will not.
+
+        The Neville table's last two diagonal entries differ by the error of the second-to-last,
+        so the table is its own estimate and nothing is asserted from outside. A step that does
+        not reach the tolerance is split in two rather than returned: the error estimate exists
+        precisely so that it can be acted on, and a CPL model at a deep blueshift -- where `q`
+        reaches 46 and the step is far outside the extrapolation's reach -- is the case that says
+        so. The convergence test is against `max(1, |y|)`, so `f` is judged ABSOLUTELY where it
+        is small, which is the only accuracy it has there: `f` at `z = -0.99` of `w0wacdm` is
+        `6e-23`, the residue of `exp(-INT q dzeta)` over an integral of about 50.
+        """
+        table = []
+        for j, n in enumerate(GROWTH_ORDERS):
+            row = [self._growth_mmid(zeta, y, h, n)]
+            # A NaN anywhere in the step means the model stopped existing inside it. Splitting
+            # would only find the same NaN at half the width, so it is answered at once.
+            if row[0][0] != row[0][0] or row[0][1] != row[0][1]:
+                return [mp.nan, mp.nan]
+            for k in range(1, j + 1):
+                ratio = (mp.mpf(GROWTH_ORDERS[j]) / GROWTH_ORDERS[j - k]) ** 2
+                row.append([row[k - 1][c] + (row[k - 1][c] - table[j - 1][k - 1][c]) / (ratio - 1)
+                            for c in (0, 1)])
+            table.append(row)
+            if j >= 2:
+                err = max(abs(row[j][c] - row[j - 1][c]) for c in (0, 1))
+                scale = max(mp.mpf(1), max(abs(row[j][c]) for c in (0, 1)))
+                if err < GROWTH_TOL * scale:
+                    return row[j]
+        if depth >= GROWTH_SPLITS:
+            raise SystemExit("generate_cosmology_reference.py: the growth ODE did not converge "
+                             "at zeta = %s with a step of %s" % (mp.nstr(zeta, 12), mp.nstr(h, 6)))
+        half = h / 2
+        return self._growth_step(zeta + half, self._growth_step(zeta, y, half, depth + 1),
+                                 half, depth + 1)
+
+    def growth_solve(self, zetas):
+        """`{zeta: (ln D, f)}` at each of `zetas`, normalised to `D(0) = 1`.
+
+        Integrated DOWNWARD from the Meszaros (1974) growing mode at `GROWTH_TOP`, which is the
+        one direction the growing mode is an attractor in. `Or0` there is the RELATIVISTIC
+        radiation density, `Ogamma0 (1 + 0.2271 Neff)`, because at `a = 1e-10` every species is
+        relativistic however massive it is today.
+
+        A model with no matter has nothing to grow and answers NaN everywhere; a redshift at or
+        below the model's own floor answers NaN, as every other quantity there does.
+        """
+        want = sorted(set(list(zetas) + [mp.mpf(0)]), reverse=True)
+        nan_all = dict((t, (mp.nan, mp.nan)) for t in want)
+        if self.om0 <= 0:
+            return nan_all
+        or0 = self.ogamma0 * (1 + KOM_A * self.neff)
+        if or0 > 0:
+            y32 = 3 * (self.om0 / or0) * mp.exp(-GROWTH_TOP) / 2
+            f = y32 / (1 + y32)
+        else:
+            f = mp.mpf(1)                       # the same expression's limit, without the division
+        y = [f, mp.mpf(0)]
+        zeta = GROWTH_TOP
+        out = {}
+        for target in want:
+            if target <= self.zeta_floor or y[0] != y[0]:
+                out[target] = (mp.nan, mp.nan)
+                continue
+            while zeta > target:
+                if y[0] != y[0]:
+                    break
+                step = min(GROWTH_MACRO, zeta - target)
+                y = self._growth_step(zeta, y, -step)
+                zeta -= step
+            out[target] = (y[1], y[0])
+        anchor = out[mp.mpf(0)][0]
+        if anchor != anchor:
+            return nan_all
+        return dict((t, (mp.nan, mp.nan) if v[0] != v[0] else (v[0] - anchor - t, v[1]))
+                    for t, v in out.items())
+
+    def growth_at(self, zetas):
+        """`{zeta: (D, f)}`: `growth_solve` with the exponential taken."""
+        return dict((t, (mp.nan if v[0] != v[0] else mp.exp(v[0]), v[1]))
+                    for t, v in self.growth_solve(zetas).items())
+
+    def growth_pair(self, z):
+        """`(D, f)` at one redshift, solving the whole grid once and keeping it."""
+        if not hasattr(self, "_growth_cache"):
+            zs = [mp.log(1 + as_double(t)) for t in REDSHIFTS]
+            self._growth_cache = self.growth_at(zs)
+        zeta = mp.log(1 + as_double(z))
+        if zeta not in self._growth_cache:
+            self._growth_cache.update(self.growth_at([zeta]))
+        return self._growth_cache[zeta]
+
+    def row(self, z, growth=None):
         """Every stage-1 quantity at one redshift, in the order `CQ_NAMES` fixes."""
+        if growth is None:
+            growth = self.growth_pair(z)
         z = as_double(z)
         x = 1 + z
         zeta = mp.log(x)
@@ -509,7 +694,7 @@ class Cosmology(object):
                 om_z, ode_z, ok_z, og_z, onu_z, self.tcmb0 * x, w_z, self.f_de(x), rho_z,
                 self.dh * tl / self.th,
                 1 / x, otot_z, ob_z, odm_z, self.tnu0 * x,
-                self.absorption_distance_zeta(zeta), self.nu_rel(x)]
+                self.absorption_distance_zeta(zeta), self.nu_rel(x), growth[0], growth[1]]
 
     def row_below_the_floor(self, x, z):
         """The row at a `zeta` at or below `zeta_floor`, where `E^2` is not positive.
@@ -524,7 +709,7 @@ class Cosmology(object):
         nan = mp.nan
         w_z = self.w0 if self.wa == 0 else self.w0 + self.wa * z / x
         return [nan] * 20 + [self.tcmb0 * x, w_z, self.f_de(x), nan, nan,
-                             1 / x, nan, nan, nan, self.tnu0 * x, nan, self.nu_rel(x)]
+                             1 / x, nan, nan, nan, self.tnu0 * x, nan, self.nu_rel(x), nan, nan]
 
     def angular_diameter_z1z2(self, z1, z2):
         """astropy's transverse-of-the-difference form; NEGATIVE when `z2 < z1`."""
@@ -540,7 +725,7 @@ CQ_NAMES = ["dc", "dm", "dl", "da", "tl", "age", "vc", "dv", "mu",
             "om", "ode", "ok", "ogamma", "onu", "tcmb", "w", "de_density_scale",
             "critical_density", "lookback_distance",
             "scale_factor", "otot", "ob", "odm", "tnu", "absorption_distance",
-            "nu_relative_density"]
+            "nu_relative_density", "growth", "growth_rate"]
 
 #: The quantities that do not touch `E` at all, and so survive below a model's own floor.
 CQ_NO_EFUNC = {"tcmb", "w", "de_density_scale", "scale_factor", "tnu", "nu_relative_density"}
@@ -702,8 +887,21 @@ def big_array(decl, name, size_expr, items):
 
 def _row_of(job):
     """One `(model, z)` job's stage-1 row. Module-level so that `map_cases` can pickle it."""
-    model, z = job
-    return model.row(z)
+    model, z, growth = job
+    return model.row(z, growth)
+
+
+def _growth_of(model):
+    """One model's whole growth solve, in redshift order. Its own job, for its own reason.
+
+    The ODE runs from `GROWTH_TOP` down through every redshift in ONE pass, so it is a job per
+    MODEL where everything else here is a job per (model, redshift): fanning it out per row would
+    solve the same equation twenty-five times.
+    """
+    got = model.growth_at([mp.log(1 + as_double(z)) for z in REDSHIFTS])
+    return ([got[mp.log(1 + as_double(z))] for z in REDSHIFTS], got[mp.mpf(0)][1])
+    # `D(0)` is exactly one by construction and needs no reference; `f(0)` is the value a caller
+    # forming `f sigma8` at the present day reads, and the redshift grid has no zero in it.
 
 
 def _pair_of(job):
@@ -721,7 +919,8 @@ def _pair_dc_of(job):
 
 def gen_module():
     ms = models()
-    row_jobs = [(m, z) for m in ms for z in REDSHIFTS]
+    growth = map_cases(_growth_of, ms)
+    row_jobs = [(m, z, g) for m, gs in zip(ms, growth) for z, g in zip(REDSHIFTS, gs[0])]
     by_label = {m.label: m for m in ms}
     pair_jobs = [(by_label[label], z1, z2) for label in PAIR_MODELS for z1, z2 in PAIRS]
     # Every row and every pair is an independent quadrature over its own model, and together they
@@ -730,7 +929,7 @@ def gen_module():
     row_values = map_cases(_row_of, row_jobs)
     pair_values = map_cases(_pair_of, pair_jobs)
     pair_dc_values = map_cases(_pair_dc_of, pair_jobs)
-    rows = [(m, z, value) for (m, z), value in zip(row_jobs, row_values)]
+    rows = [(m, z, value) for (m, z, _), value in zip(row_jobs, row_values)]
     pairs = [(model.label, z1, z2, value)
              for (model, z1, z2), value in zip(pair_jobs, pair_values)]
     pair_dcs = list(pair_dc_values)
@@ -809,17 +1008,18 @@ def gen_module():
                [bits64(v) for v in par_values])
     L.append("")
 
-    der_names = ["ok0", "ogamma0", "onu0", "tnu0", "dh", "th", "age0", "little_h", "odm0"]
+    der_names = ["ok0", "ogamma0", "onu0", "tnu0", "dh", "th", "age0", "little_h", "odm0",
+                 "growth_rate0"]
     L.append("    ! ---- The values `%init` must derive from them ----")
     L.append("    integer, parameter :: n_cderived = %d !! Derived values per model." % len(der_names))
     for n, name in enumerate(der_names, start=1):
         L.append("    integer, parameter :: cd_%s = %d !! Derived `%s`." % (name, n, name))
     L.append("    !> `age0` is `+Infinity` where `cmodel_age_diverges` is `.true.`; `odm0` is NaN")
-    L.append("    !! where `cmodel_has_ob0` is `.false.`.")
+    L.append("    !! where `cmodel_has_ob0` is `.false.`; `growth_rate0` is NaN where `om0` is zero.")
     der_values = []
-    for m in ms:
+    for m, g in zip(ms, growth):
         der_values += [m.ok0, m.ogamma0, m.onu0, m.tnu0, m.dh, m.th, m.age0, m.h0 / 100,
-                       mp.nan if m.ob0 is None else m.om0 - m.ob0]
+                       mp.nan if m.ob0 is None else m.om0 - m.ob0, g[1]]
     L += big_array("integer(int64)", "cmodel_derived_bits", "n_cderived * n_cmodel",
                [bits64(v) for v in der_values])
     L.append("")
@@ -933,6 +1133,12 @@ def self_test():
 
     ms = models()
     by_label = {m.label: m for m in ms}
+    # The growth solves are most of this function's run time and each is independent of every
+    # other, so they are fanned out exactly as the emitted rows are and seeded into the caches
+    # `row` and `growth_pair` read. Serially they cost 45 seconds; this is the same 3 the rest of
+    # the generator takes.
+    for m, g in zip(ms, map_cases(_growth_of, ms)):
+        m._growth_cache = dict(zip([mp.log(1 + as_double(z)) for z in REDSHIFTS], g[0]))
 
     # -- the constants and the named table, against the spec ---------------------------------
     if SPEC_PATH.exists():
@@ -1053,6 +1259,48 @@ def self_test():
             check(row["de_density_scale"] == 1 and row["w"] == -1,
                   "%s is a cosmological constant, so f_DE is 1 and w is -1 at z=%s" % (label, z))
 
+    # -- the growth oracle, against three things that are not it ------------------------------
+    #
+    # The ODE is the one quantity here with no quadrature to check it, so it is checked against
+    # the two closed forms it must reproduce and against a numerical derivative of the kernel it
+    # is built on. Together these catch a wrong ODE in the ORACLE, which no Fortran test could:
+    # the library and the reference would simply agree on the same wrong equation.
+    eds = by_label["einstein_de_sitter"]
+    for z in REDSHIFTS:
+        zeta = mp.log(1 + as_double(z))
+        d, f = eds.growth_pair(z)
+        close(d * (1 + as_double(z)), 1, mp.mpf("1e-25"),
+              "the Einstein-de Sitter growth at z=%s is 1/(1+z)" % z)
+        close(f, 1, mp.mpf("1e-25"), "the Einstein-de Sitter growth rate at z=%s is 1" % z)
+        del zeta
+
+    # The integral form `D = (5 Om0/2) E INT_zeta^inf e^(2t)/E^3 dt` is the EXACT growing solution
+    # when -- and only when -- `E^2` is matter, curvature and a cosmological constant: substituting
+    # `D = E` leaves a residual that vanishes for no other composition. Radiation and CPL dark
+    # energy both break it, which is why the library solves the ODE; where it does hold it is an
+    # independent check on the ODE that shares no arithmetic with it.
+    exact_form = [m for m in ms if m.tcmb0 == 0 and m.is_lambda and m.om0 > 0]
+    check(len(exact_form) >= 5, "only %d models have a closed-form growth to check the ODE against"
+          % len(exact_form))
+    for m in exact_form:
+        i0 = mp.quad(lambda t: mp.exp(2 * t) / m.efunc(t) ** 3, [0, 1, 5, mp.inf])
+        for z in ["0.5", "2", "10", "1100"]:
+            zeta = mp.log(1 + as_double(z))
+            iz = mp.quad(lambda t: mp.exp(2 * t) / m.efunc(t) ** 3, [zeta, zeta + 1, zeta + 5, mp.inf])
+            want = m.efunc(zeta) * iz / (m.efunc(mp.mpf(0)) * i0)
+            close(m.growth_pair(z)[0], want, mp.mpf("1e-20"),
+                  "%s: the ODE growth at z=%s is the closed form" % (m.label, z))
+
+    # `dE^2/dzeta` is written out by hand, term by term, including the Komatsu fit's own
+    # derivative -- which is zero for every massless model, so a missing term would be invisible
+    # in most of the grid. `two_massive` and the named cosmologies are where it is not.
+    for label in ["Planck18", "two_massive", "w0wacdm", "open", "rad_massless"]:
+        m = by_label[label]
+        for zt in ["-0.5", "0", "1", "7", "20"]:
+            zeta = mp.mpf(zt)
+            close(m.de2_dzeta(zeta), mp.diff(lambda t: m.e2(t), zeta), mp.mpf("1e-20"),
+                  "%s: dE^2/dzeta at zeta=%s is the derivative of E^2" % (label, zt))
+
     # -- every emitted literal round-trips, and every NaN is one the model owes ---------------
     #
     # A NaN appears in exactly one place: at a redshift at or below a model's `zeta_floor`, where
@@ -1063,9 +1311,16 @@ def self_test():
     for m in ms:
         no_baryons = m.ob0 is None
         for z in REDSHIFTS:
-            below = mp.log(1 + as_double(z)) <= m.zeta_floor
+            zeta = mp.log(1 + as_double(z))
+            below = zeta <= m.zeta_floor
+            # The growth pair has two NaNs of its own beyond the floor: a universe with no matter
+            # has nothing to grow, and a model whose `E^2` has passed the `exp` screen and become
+            # infinite cannot be integrated through. Both are the library's answers too.
+            no_growth = m.om0 <= 0 or m.e2(zeta) == mp.inf
             for name, value in zip(CQ_NAMES, m.row(z)):
                 unknown = no_baryons and name in ("ob", "odm")
+                if name in ("growth", "growth_rate") and no_growth:
+                    unknown = True
                 packed = struct.unpack("<d", struct.pack("<d", float(value)))[0]
                 if packed != packed:                       # NaN never round-trips by equality
                     if unknown:
@@ -1077,7 +1332,7 @@ def self_test():
                         bad.append("%s of %s at z=%s is NaN, although it never touches E"
                                    % (name, m.label, z))
                 elif unknown:
-                    bad.append("%s of %s at z=%s is a number, but the model has no Ob0"
+                    bad.append("%s of %s at z=%s is a number, but the model owes a NaN there"
                                % (name, m.label, z))
                 elif below and name not in survivors:
                     bad.append("%s of %s at z=%s is a number below the model's own floor"
@@ -1137,6 +1392,134 @@ def astropy_model(m, cosmo_module, units):
     if m.flat:
         return cosmo_module.Flatw0waCDM(**kw)
     return cosmo_module.w0waCDM(Ode0=float(m.ode0), **kw)
+
+
+#: The redshift above which `--verify-oracle` stops comparing GROWTH with CCL. Above it the two
+#: part company by CCL's own initial condition, not by either implementation: CCL starts the
+#: equation from the pure-matter growing mode `D = a` at `a = 1e-6`, which is inside the radiation
+#: era for any model with a CMB, and the transient that leaves is still worth `1.3e-03` at
+#: `z = 1100`. This module starts from the exact matter-radiation growing mode, whose answer does
+#: not move when the starting redshift is moved four decades.
+GROWTH_ORACLE_CEILING = mp.mpf(100)
+#: colossus refuses a redshift above this: it is the ceiling of its own interpolation table.
+COLOSSUS_CEILING = mp.mpf(500)
+
+
+def verify_growth_libraries(ms):
+    """The growth ODE against CCL and colossus, with every exclusion named and counted.
+
+    Neither library is a reference for this module's accuracy -- both solve the same equation to
+    six or seven digits where this one carries twelve -- so what is checked is that the module
+    answers the SAME quantity, not that it answers it to the same precision. Two classes of row
+    are excluded by name rather than dropped quietly, exactly as the astropy comparison excludes
+    four: a model with a massive neutrino, where CCL's growth is a different DEFINITION and no
+    arrangement of parameters removes the difference, and every redshift above
+    `GROWTH_ORACLE_CEILING`.
+    """
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import pyccl as ccl
+    except ImportError:
+        print("  growth: pyccl is not installed; CCL not compared")
+        return [], 0
+    bad, compared = [], 0
+    # **Measured, then chosen.** Up to `z = 10` CCL and this module agree to `4.0e-07` on `D` and
+    # `1.3e-07` on `f`; by `z = 100` -- the last redshift compared -- that has grown to `4.7e-06`
+    # and `1.5e-05`, which is CCL's own initial-condition transient beginning to show rather than
+    # either implementation drifting. The bound below is set to catch "this is a different
+    # quantity", not to chase CCL's accuracy, and every run prints the worst it saw.
+    tol = 1e-4
+    dropped = {"a massive neutrino: CCL's growth is a different definition": 0,
+               "z above %s: CCL's own initial condition" % mp.nstr(GROWTH_ORACLE_CEILING, 6): 0,
+               "no Ob0 or no matter: CCL will not build the model": 0,
+               "a blueshift: CCL refuses a scale factor above one": 0}
+    worst_d, worst_f, where = 0.0, 0.0, ""
+    near_d, near_f = 0.0, 0.0
+    print("  growth: CCL %s" % ccl.__version__)
+    for m in ms:
+        if m.ob0 is None or m.om0 <= 0 or m.ob0 >= m.om0:
+            dropped["no Ob0 or no matter: CCL will not build the model"] += 2 * len(REDSHIFTS)
+            continue
+        if m.has_massive_nu:
+            dropped["a massive neutrino: CCL's growth is a different definition"] += 2 * len(REDSHIFTS)
+            continue
+        try:
+            cos = ccl.Cosmology(Omega_c=float(m.om0 - m.ob0), Omega_b=float(m.ob0),
+                                h=float(m.h0 / 100), n_s=0.96, sigma8=0.81,
+                                Omega_k=float(m.ok0), w0=float(m.w0), wa=float(m.wa),
+                                T_CMB=float(m.tcmb0), Neff=float(m.neff), m_nu=0.0,
+                                transfer_function="bbks")
+        except Exception as exc:
+            print("  growth: CCL refused %s (%s)" % (m.label, exc))
+            continue
+        for z in REDSHIFTS:
+            zf = float(as_double(z))
+            if zf < 0:
+                dropped["a blueshift: CCL refuses a scale factor above one"] += 2
+                continue
+            if mp.mpf(z) > GROWTH_ORACLE_CEILING:
+                dropped["z above %s: CCL's own initial condition"
+                        % mp.nstr(GROWTH_ORACLE_CEILING, 6)] += 2
+                continue
+            want_d, want_f = m.growth_pair(z)
+            a = 1.0 / (1.0 + zf)
+            got_d = float(ccl.growth_factor(cos, a))
+            got_f = float(ccl.growth_rate(cos, a))
+            rel_d = abs(got_d - float(want_d)) / abs(float(want_d))
+            gap_f = abs(got_f - float(want_f))
+            compared += 2
+            if rel_d > worst_d:
+                worst_d, where = rel_d, "%s at z=%s" % (m.label, z)
+            worst_f = max(worst_f, gap_f)
+            if mp.mpf(z) <= 10:
+                near_d, near_f = max(near_d, rel_d), max(near_f, gap_f)
+            if rel_d > tol or gap_f > tol:
+                bad.append("%s growth at z=%s: CCL %r / %r, model %r / %r"
+                           % (m.label, z, got_d, got_f, float(want_d), float(want_f)))
+    print("  growth: worst D relative %.3g (%s), worst f absolute %.3g, %d values compared at %g"
+          % (worst_d, where, worst_f, compared, tol))
+    print("  growth: up to z = 10 the same two are %.3g and %.3g" % (near_d, near_f))
+    for reason, n in sorted(dropped.items()):
+        if n:
+            print("  %6d not compared -- %s" % (n, reason))
+
+    try:
+        from colossus.cosmology import cosmology as col
+    except ImportError:
+        print("  growth: colossus is not installed; not compared")
+        return bad, compared
+    # colossus is asked ABOVE its own ceiling on purpose, so that the refusal is recorded rather
+    # than skipped: its interpolation table stops at `z = 500`, which is the same ceiling the
+    # review found for its distances, re-measured here on `growthFactor`.
+    worst_c, refused, refusal = 0.0, 0, ""
+    for m in ms:
+        if m.ob0 is None or m.om0 <= 0 or m.has_massive_nu or m.tcmb0 == 0 or not m.is_lambda:
+            continue
+        col.setCosmology("pf_check", {"flat": m.ok0 == 0, "H0": float(m.h0), "Om0": float(m.om0),
+                                      "Ob0": float(m.ob0), "sigma8": 0.81, "ns": 0.96,
+                                      "Tcmb0": float(m.tcmb0), "Neff": float(m.neff)})
+        cos = col.getCurrent()
+        for z in REDSHIFTS:
+            zf = float(as_double(z))
+            if zf < 0:
+                continue
+            try:
+                got_d = float(cos.growthFactor(zf))
+            except Exception as exc:
+                refused += 1
+                refusal = str(exc)
+                continue
+            if mp.mpf(z) > GROWTH_ORACLE_CEILING:
+                continue
+            want_d = float(m.growth_pair(z)[0])
+            worst_c = max(worst_c, abs(got_d - want_d) / abs(want_d))
+            compared += 1
+    print("  growth: colossus worst D relative %.3g up to z = %s; %d rows refused"
+          % (worst_c, mp.nstr(GROWTH_ORACLE_CEILING, 6), refused))
+    if refusal:
+        print("  growth: colossus refuses -- %s" % refusal)
+    return bad, compared
 
 
 def verify_oracle():
@@ -1250,7 +1633,14 @@ def verify_oracle():
         for line in bad[:40]:
             print("  " + line, file=sys.stderr)
         return 1
-    print("--verify-oracle: every compared value agrees with astropy")
+    gbad, gn = verify_growth_libraries(models())
+    if gbad:
+        print("--verify-oracle FAILED (%d growth):" % len(gbad), file=sys.stderr)
+        for line in gbad[:20]:
+            print("  " + line, file=sys.stderr)
+        return 1
+    print("--verify-oracle: every compared value agrees with astropy, and %d growth values with CCL"
+          % gn)
     return 0
 
 

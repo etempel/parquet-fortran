@@ -88,6 +88,11 @@ call base%clone(shifted, h0=70.0_real64)          ! the same model, a different 
 source. A source that is flat because `ode0` was omitted is cloned the same way, so the copy of a
 flat model is flat whatever else changed.
 
+**A run's cosmology can come from its configuration file** rather than from parameters compiled
+into the program: `pf_cosmology_from_toml` builds one of these objects from the `[cosmology]`
+section of a TOML file, and `pf_cosmology_to_toml` writes one back. See
+[A cosmology in a configuration file](../utilities/configuration-files.html#a-cosmology-in-a-configuration-file).
+
 ## What it answers
 
 Distances in Mpc, times in Gyr, volumes in Mpc³, `H(z)` in km/s/Mpc, the distance modulus in

@@ -3303,6 +3303,16 @@ contains
                 test_cosmology_init_no_big_bang_aborts), &
                 new_unittest("cosmology_init_table_not_converged aborts", &
                 test_cosmology_init_table_not_converged_aborts), &
+                new_unittest("a configuration with no [cosmology] section and no found= aborts", &
+                test_cosmology_config_missing_section_aborts), &
+                new_unittest("a named cosmology given parameters as well aborts", &
+                test_cosmology_config_named_with_parameters_aborts), &
+                new_unittest("a [cosmology] key of the wrong type aborts", &
+                test_cosmology_config_bad_type_aborts), &
+                new_unittest("an m_nu of the wrong length in a file aborts", &
+                test_cosmology_config_mnu_length_aborts), &
+                new_unittest("a [cosmology] parameter outside its range aborts with the file named", &
+                test_cosmology_config_out_of_range_aborts), &
             new_unittest("a context reaches the interpolation abort message", &
                 test_interpolate_context_reported_aborts), &
             new_unittest("a long context is capped in the interpolation abort message", &
@@ -20583,6 +20593,53 @@ contains
             failure_message="a table that could not converge was expected to error stop", &
             required_stderr="table did not converge")
     end subroutine test_cosmology_init_table_not_converged_aborts
+    !
+    !> An absent `[cosmology]` is `pf_toml_section`'s own required path: this feature adds no
+    !> message of its own for it, because `found=` is how a caller says the section is optional.
+    subroutine test_cosmology_config_missing_section_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_config_missing_section", &
+            expect_abort=.true., &
+            failure_message="a configuration with no [cosmology] section was expected to error stop", &
+            required_stderr="config section not found")
+    end subroutine test_cosmology_config_missing_section_aborts
+    !
+    !> The one message this module writes itself.
+    subroutine test_cosmology_config_named_with_parameters_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_config_named_with_parameters", &
+            expect_abort=.true., &
+            failure_message="a named cosmology given parameters was expected to error stop", &
+            required_stderr="pf_cosmology_from_toml: a named cosmology cannot be given parameters as well")
+    end subroutine test_cosmology_config_named_with_parameters_aborts
+    !
+    !> A wrong-typed value is `parquet_toml`'s abort, unchanged by this module.
+    subroutine test_cosmology_config_bad_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_config_bad_type", &
+            expect_abort=.true., &
+            failure_message="h0 given as a string was expected to error stop", &
+            required_stderr="config value has the wrong type: h0")
+    end subroutine test_cosmology_config_bad_type_aborts
+    !
+    !> Every model validation stays `%init`'s: this module adds no second set of rules.
+    subroutine test_cosmology_config_mnu_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_config_mnu_length", &
+            expect_abort=.true., &
+            failure_message="an m_nu of the wrong length in a file was expected to error stop", &
+            required_stderr="pf_cosmology%init: m_nu needs one finite, non-negative mass per species")
+    end subroutine test_cosmology_config_mnu_length_aborts
+    !
+    !> And the context this module composes reaches that message, so it says WHERE the bad number
+    !> came from -- which is the whole reason the reader passes a `context=` at all.
+    subroutine test_cosmology_config_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_config_out_of_range", &
+            expect_abort=.true., &
+            failure_message="a negative h0 in a file was expected to error stop", &
+            required_stderr="configuration file run.toml, section [cosmology]")
+    end subroutine test_cosmology_config_out_of_range_aborts
     !
     subroutine test_interpolate_eval_before_init_aborts(error)
         type(error_type), allocatable, intent(out) :: error

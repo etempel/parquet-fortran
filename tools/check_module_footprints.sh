@@ -104,7 +104,8 @@ expect_file="$repo/tools/module_footprints.txt"
 ENTRY_MODULES="parquet_version parquet_utils parquet_temporal parquet_strings parquet_random parquet_argsort parquet_index \
 parquet_sampling parquet_spatial parquet_healpix parquet_sphere parquet_skycoord parquet_columns parquet_list \
 parquet_struct parquet_map \
-parquet_sorting parquet_stats parquet_kde parquet_integrate parquet_interpolate parquet_cosmology parquet_optimize \
+parquet_sorting parquet_stats parquet_kde parquet_integrate parquet_interpolate parquet_cosmology \
+parquet_cosmology_config parquet_optimize \
 parquet_prima parquet_root \
 parquet_transform parquet_logging parquet_toml parquet_settings \
 parquet_io parquet_tables parquet"
@@ -251,16 +252,23 @@ fi
 # from the measurement, and an exclusion that is no longer excluded -- because an exclusion list
 # that has gone stale hides the very gap it was written to explain (CLAUDE.md, "A static check that
 # enumerates names goes stale silently").
-FACADE_EXCLUDES="parquet_sorting_oracle.f90 parquet_table_example.f90"
-#                 |                          |
-#                 |                          `-- a worked example emitted by
-#                 |                              tools/generate_user_table_code.py; it ships as a
-#                 |                              demonstration and nothing in the library uses it,
-#                 |                              so no `use parquet` program compiles it.
-#                 `-- the C++ sort engine, reachable only behind parquet_sorting_oracle's procedure
-#                     pointers. TEST-ONLY and deliberately re-exported by no facade -- if this one
-#                     ever appears in the [parquet] footprint, the Arrow-free tiers have lost the
-#                     property check_parquet_*_stays_arrow_free exists to protect.
+FACADE_EXCLUDES="parquet_sorting_oracle.f90 parquet_table_example.f90 parquet_cosmology_config.f90"
+#
+#   parquet_sorting_oracle.f90     the C++ sort engine, reachable only behind
+#                                  parquet_sorting_oracle's procedure pointers. TEST-ONLY and
+#                                  deliberately re-exported by no facade -- if this one ever
+#                                  appears in the [parquet] footprint, the Arrow-free tiers have
+#                                  lost the property check_parquet_*_stays_arrow_free exists to
+#                                  protect.
+#   parquet_table_example.f90      a worked example emitted by tools/generate_user_table_code.py;
+#                                  it ships as a demonstration and nothing in the library uses it,
+#                                  so no `use parquet` program compiles it.
+#   parquet_cosmology_config.f90   the [cosmology] section of a TOML configuration file, over
+#                                  parquet_cosmology and parquet_toml. Deliberately re-exported by
+#                                  no facade: a caller that wants a cosmology from a configuration
+#                                  file names this module, exactly as it already names
+#                                  parquet_toml, and `use parquet` stays clear of a pairing only
+#                                  some programs want (feature_cosmology_config.md section 4).
 
 if [ "$mode" = "check" ] && [ -z "$only" ]; then
     _got_parquet="$work/got_parquet"

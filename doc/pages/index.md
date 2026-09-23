@@ -24,7 +24,7 @@ settings. Every page below assumes that single import.
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
 `parquet_argsort`, `parquet_stats`, `parquet_kde`, `parquet_integrate`, `parquet_interpolate`,
-`parquet_cosmology`, `parquet_optimize`,
+`parquet_cosmology`, `parquet_cosmology_config`, `parquet_optimize`,
 `parquet_prima`, `parquet_root`, `parquet_transform`,
 `parquet_sampling`, `parquet_spatial`,
 `parquet_healpix`, `parquet_sphere`, `parquet_skycoord`,

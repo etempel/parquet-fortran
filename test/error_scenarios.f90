@@ -29,6 +29,9 @@ program error_scenarios
     ! The quadrature scenarios' integrands: module procedures shared with test_integrate.f90,
     ! so a scenario and a test can name the same integrand and neither reaches an internal one.
     use test_integrate_support, only : runge
+    ! NOT re-exported by the `parquet` facade: a caller that wants a cosmology from a
+    ! configuration file names this module, as it already names `parquet_toml`.
+    use parquet_cosmology_config, only : pf_cosmology_from_toml, pf_cosmology_to_toml
     ! The interpolation scenarios' non-finite fixtures, built with `ieee_value` so no fixture's own
     ! arithmetic raises the flag the library is being asked about.
     use test_interpolate_support, only : nan_value, positive_infinity
@@ -3879,6 +3882,16 @@ program error_scenarios
         call scenario_cosmology_init_no_big_bang()
     case ("cosmology_init_table_not_converged")
         call scenario_cosmology_init_table_not_converged()
+    case ("cosmology_config_missing_section")
+        call scenario_cosmology_config_missing_section()
+    case ("cosmology_config_named_with_parameters")
+        call scenario_cosmology_config_named_with_parameters()
+    case ("cosmology_config_bad_type")
+        call scenario_cosmology_config_bad_type()
+    case ("cosmology_config_mnu_length")
+        call scenario_cosmology_config_mnu_length()
+    case ("cosmology_config_out_of_range")
+        call scenario_cosmology_config_out_of_range()
     case ("interpolate_eval_before_init")
         call scenario_interpolate_eval_before_init()
     case ("interpolate_context_reported")
@@ -33589,6 +33602,77 @@ contains
         call c%init("Planck18")
         print '(a, l1)', "accepted a table that did not converge, built: ", c%is_initialised()
     end subroutine scenario_cosmology_init_table_not_converged
+    !
+    ! ---- parquet_cosmology_config: the [cosmology] section of a configuration file ------------
+    !
+    !> Every fixture below is a STRING rather than a file: scenarios run concurrently, one process
+    !> per name, so a string needs neither a unique path nor cleanup. `name = "run.toml"` is what
+    !> the messages quote, and it is what proves the context this module composes reaches them.
+
+    !> A configuration with no `[cosmology]` section, and no `found=` to make it optional.
+    subroutine scenario_cosmology_config_missing_section()
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: c
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        call pf_toml_loads(conf, '[general]' // nl // 'nproc = 1' // nl, name = "run.toml")
+        call pf_cosmology_from_toml(conf, c)
+        print '(a, l1)', "accepted a configuration with no [cosmology] section, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_config_missing_section
+    !
+    !> `name` naming one of the eight BESIDE a model parameter says two different things.
+    subroutine scenario_cosmology_config_named_with_parameters()
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: c
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        call pf_toml_loads(conf, '[cosmology]' // nl // 'name = "Planck18"' // nl // &
+                                 'om0 = 0.25' // nl, name = "run.toml")
+        call pf_cosmology_from_toml(conf, c)
+        print '(a, l1)', "accepted a named cosmology given parameters too, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_config_named_with_parameters
+    !
+    !> A key of the wrong type is `parquet_toml`'s abort, with the offending line quoted.
+    subroutine scenario_cosmology_config_bad_type()
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: c
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        call pf_toml_loads(conf, '[cosmology]' // nl // 'h0 = "seventy"' // nl // &
+                                 'om0 = 0.3' // nl, name = "run.toml")
+        call pf_cosmology_from_toml(conf, c)
+        print '(a, l1)', "accepted h0 as a string, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_config_bad_type
+    !
+    !> An `m_nu` of the wrong length is `%init`'s abort, reached through the file.
+    subroutine scenario_cosmology_config_mnu_length()
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: c
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        call pf_toml_loads(conf, '[cosmology]' // nl // 'h0 = 70.0' // nl // 'om0 = 0.3' // nl // &
+                                 'neff = 3.046' // nl // 'm_nu = [0.0, 0.06]' // nl, name = "run.toml")
+        call pf_cosmology_from_toml(conf, c)
+        print '(a, l1)', "accepted an m_nu of the wrong size from a file, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_config_mnu_length
+    !
+    !> A parameter outside its range is `%init`'s abort, carrying THIS module's context: the file
+    !> and the section, so the message says where the bad number came from.
+    subroutine scenario_cosmology_config_out_of_range()
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: c
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        call pf_toml_loads(conf, '[cosmology]' // nl // 'h0 = -1.0' // nl // 'om0 = 0.3' // nl, &
+                           name = "run.toml")
+        call pf_cosmology_from_toml(conf, c)
+        print '(a, l1)', "accepted a negative h0 from a file, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_config_out_of_range
     !
     subroutine scenario_interpolate_eval_before_init()
         type(pf_interp_1d) :: c

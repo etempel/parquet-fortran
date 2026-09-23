@@ -1,0 +1,25 @@
+# A run configuration whose [cosmology] section gives the parameters.
+#
+# READ-ONLY, and loaded by several tests at once. See cosmology_named.toml for why the other
+# sections are here. `ode0` is absent, so the model is flat; `name` is a label, not one of the
+# eight.
+
+[general]
+nproc      = 4
+output_dir = "out"
+
+[cosmology]
+name  = "my_sim"
+h0    = 67.66
+om0   = 0.30966
+tcmb0 = 2.7255
+neff  = 3.046
+m_nu  = [0.0, 0.0, 0.06]
+ob0   = 0.04897
+w0    = -0.95
+wa    = 0.1
+zmax  = 200.0
+zmin  = -0.5
+
+[[region]]
+id = 1

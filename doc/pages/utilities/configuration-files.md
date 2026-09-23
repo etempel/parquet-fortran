@@ -384,6 +384,158 @@ comments in, copy the file.
 Both take the document handle rather than a section — passing a section handle is fatal rather
 than writing that subtree — and both overwrite.
 
+## A cosmology in a configuration file
+
+A run's cosmology is a run parameter, so it belongs in the run's `.toml` file beside `nproc` and
+`output_dir`. It is not table metadata: a `.maml` file describes a *table* — its columns, units,
+provenance and quality rules — while a cosmology describes the run that made it.
+
+`parquet_cosmology_config` is the module that joins this one to the cosmology tier, and it is a
+module of its own rather than part of either neighbour. `use parquet_cosmology_config` compiles 14
+of this library's Fortran files. Putting the two procedures in `parquet_cosmology` would make every
+consumer of a dependency-free numerical tier fetch toml-f, and putting them in `parquet_toml` would
+make every program that reads a configuration file compile the cosmology tier, its integrator and
+its interpolator; this way nothing anyone already imports grows.
+
+```fortran
+use parquet_cosmology, only: pf_cosmology
+use parquet_toml, only: pf_toml, pf_toml_load, pf_toml_check_all, pf_toml_close, pf_toml_save
+use parquet_cosmology_config, only: pf_cosmology_from_toml, pf_cosmology_to_toml
+
+type(pf_toml)      :: conf
+type(pf_cosmology) :: cosmo
+logical            :: have_cosmology
+
+call pf_toml_load(conf, "run.toml")
+call pf_cosmology_from_toml(conf, cosmo)                          ! [cosmology] must be there
+call pf_cosmology_from_toml(conf, cosmo, found = have_cosmology)  ! ... or need not be
+call pf_toml_check_all(conf)                    ! a misspelt key stops the run here
+...
+call pf_toml_save(conf, "run_used.toml")        ! what the run actually resolved
+call pf_toml_close(conf)
+```
+
+```fortran
+call pf_cosmology_from_toml(conf, cosmo, [found], [section], [context])
+call pf_cosmology_to_toml(cosmo, conf, [section])
+```
+
+`conf` may be a whole document or a section of one, so a file that nests the table under
+`[run.cosmology]` needs no extra argument: take `run` with `pf_toml_section` and pass that handle.
+`section` names a different table (`[cosmology_alt]`), and a program with three cosmologies calls
+the reader three times. Neither procedure has a `stat=`: `parquet_toml`'s getters are fatal by
+default and `%init` aborts on a parameter it will not accept, and a third convention in a call that
+already has two would only be one more thing to forget.
+
+### The section, and the two forms
+
+**`[cosmology]` is one table of your configuration file, not the whole of it.** Both procedures
+work through a section handle and touch nothing outside it, so everything else in the file survives
+a write and your `pf_toml_check_all` still reports what nobody read — including the sections this
+feature knows nothing about.
+
+The **named** form selects one of the eight named cosmologies, matched without regard to case:
+
+```toml
+[general]
+nproc      = 8
+output_dir = "out"
+
+[cosmology]
+name = "Planck18"
+
+[[region]]
+id = 1
+```
+
+The **parameter** form gives the numbers, with `name` a label:
+
+```toml
+[cosmology]
+name  = "my_sim"          # a label; not one of the eight
+h0    = 67.66
+om0   = 0.30966
+tcmb0 = 2.7255
+neff  = 3.046
+m_nu  = [0.0, 0.0, 0.06]
+ob0   = 0.04897
+# ode0 absent: the model is flat
+# w0, wa absent: a cosmological constant
+zmax  = 1100.0
+```
+
+The keys are `%init`'s own argument names, lower case, one spelling only:
+
+| key | absent means | note |
+|---|---|---|
+| `name` | `"custom"` | one of the eight selects that cosmology; anything else is a label |
+| `h0` | **required** in the parameter form | `H0` in km/s/Mpc |
+| `om0` | **required** in the parameter form | |
+| `ode0` | the model is **flat** | its presence is the flag, so `%is_flat()` stays an exact bit test |
+| `tcmb0` | `0` — no radiation and no neutrinos | |
+| `neff` | `3.04` | `%init`'s default, which is not the `3.046` every Planck realization carries |
+| `m_nu` | every species massless | a list; `floor(neff)` of them |
+| `ob0` | unknown, and `%ob0()` answers NaN | |
+| `w0` | `-1` | |
+| `wa` | `0` | |
+| `zmax` | `1100` | tabulation, not model: it changes speed, never an answer |
+| `zmin` | `-0.9` | the blueshift half of the table |
+
+Three of them — `ode0`, `ob0` and `m_nu` — have no value that could stand for "absent", so for
+those three the key's **presence** is what it means. The rest have a documented default, which is
+what the reader passes when the file leaves them out.
+
+**Nothing is inferred that `%init` would not infer**: no `flat = true`, no class name, no `sigma8`,
+no unit suffixes. And every validation is `%init`'s own — an `h0` outside its range, an `m_nu` of
+the wrong length, an `ob0` above `om0` — so the message you get is the library's, with the file and
+the section named in it.
+
+Two shapes are refused rather than guessed at. A `name` that is one of the eight **beside** a model
+parameter is fatal: `name = "Planck18"` with `om0 = 0.25` means two different cosmologies, and
+neither reading is safe. And a `[[cosmology]]` array of tables is not this section; a program that
+wants several cosmologies gives each its own table and passes `section=`.
+
+### Which cosmology did this run use?
+
+If your program read its cosmology from the file, `pf_toml_save` already answers this with no code
+from the cosmology side at all: every getter records the value it resolved, so the saved file
+carries **every key, including the `neff` and `tcmb0` nobody typed**. A `[cosmology]` section that
+said only `name = "Planck18"` saves as that name plus the `zmax` and `zmin` the run used, because
+those are the keys the run resolved.
+
+`pf_cosmology_to_toml` is for the other case, a program that built its cosmology in code. It
+creates the section if the document has none and reuses it otherwise, and deletes each key before
+setting it — so the call is idempotent, leaves behind no key the new model does not set (writing a
+flat model over a curved one leaves no stale `ode0`), and never reaches outside its own section.
+What it writes is what rebuilds the same object: `ode0` only where the model is not flat, `m_nu`
+only where a species is massive, `ob0` only where the model has one, `w0` and `wa` only where they
+are not a cosmological constant.
+
+**It writes the parameters, not the realization.** A model whose name is one of the eight is written
+*without* its `name`, for two reasons: a section carrying both is refused on reading, and a label
+cannot be trusted to mean the realization — `%init` lets any model be labelled `"Planck18"`. What
+the file records is the numbers the run used, which is what stays true if the eight are ever
+re-frozen against a newer astropy; the label is what is given up. Read that file back and you get
+the same model, answering the same numbers, with `%get_name()` saying `custom`.
+
+One more consequence worth knowing before you meet it: **a key the file sets but your program never
+read is absent from a saved file.** A `[cosmology]` key this feature does not know survives in the
+loaded document, and `pf_toml_check_all` reports it, but `pf_toml_save` writes what the run used,
+not what it was handed.
+
+### What the numbers look like in the file
+
+The text is toml-f's, not this library's, and it is the same text every other `real64` in every
+other section gets: seventeen significant digits above `1e3`, and sixteen digits *after the decimal
+point* below it. So `h0 = 67.66` is saved as `67.6599999999999966` and comes back bit for bit, and
+so does every other parameter of a realistic model — but the promise weakens by one digit per
+decade below `1`, and a value smaller than about `5e-17` is written as `0.0000000000000000`.
+
+Nothing a cosmology carries is anywhere near that: the smallest thing in the table above is a
+neutrino mass of `0.06` eV, which round-trips exactly. It is worth stating only because the limit
+is invisible — a model with `wa = 1e-18` would lose that key's meaning with no diagnostic at all.
+Reading a file does not rewrite it, so a configuration you hand-edit keeps the `67.66` you typed.
+
 ## Thread safety
 
 **Every public procedure is safe to call from inside an OpenMP parallel region.** The module

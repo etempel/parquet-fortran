@@ -2666,6 +2666,160 @@ def check_parquet_cosmology_stays_arrow_free():
         "Turning a redshift into a distance must not require the Arrow stack.")
 
 
+def check_parquet_cosmology_config_stays_arrow_free():
+    """`use parquet_cosmology_config` must not drag the Arrow/Parquet C++ stack into a build.
+
+    This tier joins `parquet_cosmology` to `parquet_toml` and is the one place in the library where
+    a numerical tier meets the configuration reader, so it is the natural place for an import that
+    would undo both promises at once: `parquet_core` for "just to read the table's metadata too",
+    or `parquet_settings` for an output knob. Neither parent reaches `parquet_bindings`, and the
+    whole point of putting these two procedures in a module of their own is that nothing anyone
+    already imports grows -- which is a property of the `use` graph that no test can see.
+
+    One check per tier rather than one for the group, per the established pattern.
+    """
+    return _check_stays_arrow_free(
+        "parquet_cosmology_config",
+        "Reading a cosmology out of a configuration file must not require the Arrow stack.")
+
+
+def _fortran_char_array_literal(path, name):
+    """The string elements of a `character(...), parameter :: <name>(...) = [... :: "a", "b"]`.
+
+    Returns `None` when the declaration is not found, so a caller can fail loudly rather than
+    compare against an empty list -- an enumeration check that silently matches nothing is the
+    failure mode this file's own comments keep returning to.
+    """
+    text = path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    start = None
+    for i, raw in enumerate(lines):
+        code = strip_comment(raw)
+        if re.search(r"parameter\s*::\s*%s\s*\(" % re.escape(name), code) and "[" in code:
+            start = i
+            break
+    if start is None:
+        return None
+    buf = []
+    for raw in lines[start:]:
+        code = strip_comment(raw)
+        buf.append(code)
+        if "]" in code:
+            break
+    joined = " ".join(buf)
+    body = joined[joined.index("["):joined.index("]")]
+    return re.findall(r'"([^"]*)"', body)
+
+
+def _fortran_dummy_names(path, proc):
+    """The dummy-argument names of `subroutine <proc>(...)`, continuations followed.
+
+    Returns `None` when the declaration is not found.
+    """
+    text = path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    start = None
+    for i, raw in enumerate(lines):
+        code = strip_comment(raw)
+        if re.search(r"\bsubroutine\s+%s\s*\(" % re.escape(proc), code):
+            start = i
+            break
+    if start is None:
+        return None
+    buf = []
+    for raw in lines[start:]:
+        code = strip_comment(raw).rstrip()
+        buf.append(code.rstrip("&"))
+        if ")" in code:
+            break
+    joined = " ".join(buf)
+    body = joined[joined.index("(") + 1:joined.rindex(")")]
+    return [w.strip() for w in body.split(",") if w.strip()]
+
+
+def check_cosmology_config_keys_match_init():
+    """The `[cosmology]` section's key table is `%init`'s own argument list.
+
+    `src/parquet_cosmology_config.f90` names every key the section carries, and
+    `cosmology_init_params` (`src/parquet_cosmology.f90`) names every parameter a caller can set.
+    The two lists are in different files, are maintained by different changes, and nothing ties
+    them: `%init` gaining an argument leaves a section that cannot set it, and a key added here
+    with no argument behind it is read and then silently dropped. Neither shows up as a test
+    failure, because a key nobody writes is a key nobody round-trips.
+
+    `this` and `context` are excluded and named here rather than filtered by shape: `this` is the
+    object being built and `context` is the caller's own, composed by the reader from the file and
+    the section rather than read from it. Any OTHER argument must have a key.
+
+    The comparison is by set rather than by order -- the key table follows `%init`'s order today
+    and nothing depends on that -- and a parse that finds nothing FAILS, because an enumeration
+    check that matches nothing passes everything.
+    """
+    cfg = REPO_ROOT / "src" / "parquet_cosmology_config.f90"
+    cos = REPO_ROOT / "src" / "parquet_cosmology.f90"
+    keys = _fortran_char_array_literal(cfg, "CFG_KEYS")
+    args = _fortran_dummy_names(cos, "cosmology_init_params")
+    if not keys:
+        return ["src/parquet_cosmology_config.f90: CFG_KEYS could not be read -- this check needs "
+                "updating, and until it is nothing compares the section's keys with %init's "
+                "arguments"]
+    if not args:
+        return ["src/parquet_cosmology.f90: cosmology_init_params' argument list could not be read "
+                "-- this check needs updating, and until it is nothing compares it with the "
+                "[cosmology] section's keys"]
+    NOT_KEYS = {"this", "context"}
+    want = set(args) - NOT_KEYS
+    got = set(keys)
+    problems = []
+    for name in sorted(want - got):
+        problems.append(
+            "src/parquet_cosmology_config.f90: CFG_KEYS has no `%s`, which cosmology_init_params "
+            "takes -- a configuration file cannot set it, and nothing else would say so. Add the "
+            "key, the writer's line for it, its row in the guide page's key table, and a test."
+            % name)
+    for name in sorted(got - want):
+        problems.append(
+            "src/parquet_cosmology_config.f90: CFG_KEYS has `%s`, which cosmology_init_params does "
+            "not take -- the reader would read it and drop it. Remove the key, or add the argument."
+            % name)
+    return problems
+
+
+def check_cosmology_config_names_match_the_library():
+    """The eight named cosmologies `parquet_cosmology_config` copies are the library's own.
+
+    `pfc_named_name` is PRIVATE to `parquet_cosmology`, and this feature deliberately adds no public
+    name to that module, so the configuration tier carries its own copy of the eight spellings --
+    it needs them to tell a section that SELECTS a cosmology from one that merely labels a custom
+    model, and the writer needs them to know which names it must not write beside parameters.
+
+    A copy with nothing checking it is a drift hazard of the worst kind here: a ninth cosmology
+    added to the library would simply not be selectable from a file, and a section naming it would
+    fail with "h0 and om0 are required" rather than with anything that points at the cause.
+
+    Compared without regard to case, because the match itself is: the library folds a caller's
+    token before comparing, and so does the copy. An empty parse FAILS.
+    """
+    cfg = REPO_ROOT / "src" / "parquet_cosmology_config.f90"
+    cos = REPO_ROOT / "src" / "parquet_cosmology.f90"
+    mine = _fortran_char_array_literal(cfg, "CFG_NAMED")
+    theirs = _fortran_char_array_literal(cos, "pfc_named_name")
+    if not mine:
+        return ["src/parquet_cosmology_config.f90: CFG_NAMED could not be read -- this check needs "
+                "updating, and until it is nothing ties the copy to the library's own list"]
+    if not theirs:
+        return ["src/parquet_cosmology.f90: pfc_named_name could not be read -- this check needs "
+                "updating, and until it is nothing ties parquet_cosmology_config's copy to it"]
+    if sorted(x.strip().lower() for x in mine) != sorted(x.strip().lower() for x in theirs):
+        return [
+            "src/parquet_cosmology_config.f90: CFG_NAMED is %s but src/parquet_cosmology.f90's "
+            "pfc_named_name is %s. The copy exists because the original is private; when the "
+            "library gains or renames a named cosmology, this list moves with it -- otherwise a "
+            "configuration file cannot select the new one and says so in a message about h0."
+            % (sorted(mine), sorted(theirs))]
+    return []
+
+
 def check_parquet_version_stays_arrow_free():
     """`use parquet_version` must not reach parquet_bindings.
 
@@ -4541,6 +4695,15 @@ def check_module_tables_match_the_measured_footprints():
     return problems
 
 
+def _standalone_mentions(text, name, universe):
+    """How often `name` appears in `text` other than as part of a longer name in `universe`."""
+    total = text.count(name)
+    for other in universe:
+        if other != name and name in other:
+            total -= text.count(other) * other.count(name)
+    return total
+
+
 def check_prose_footprint_counts():
     """A module's file count written in PROSE, on any guide page, must match the measurement.
 
@@ -4622,7 +4785,14 @@ def check_prose_footprint_counts():
             # 24 files to 8". At paragraph scope that 24 is within the window of
             # `parquet_sorting`'s 22 and reports a defect in correct prose.
             for text in re.split(r"(?<=\.)\s+", para_text):
-                named = [m for m in measured if m in text]
+                # **A module name that only occurs INSIDE a longer one is not named here.**
+                # `parquet_cosmology` is a substring of `parquet_cosmology_config`, so a sentence
+                # stating the latter's count was reported as a wrong count for the former -- a
+                # false positive on correct prose, which is how a check gets switched off. The
+                # occurrences a longer name accounts for are subtracted; what is left is how often
+                # the module is named in its own right.
+                named = [m for m in measured
+                         if _standalone_mentions(text, m, measured) > 0]
                 if not named:
                     continue
                 for m in claim.finditer(text):
@@ -8795,6 +8965,11 @@ CHECKS = (
     ("parquet_healpix stays Arrow-free", check_parquet_healpix_stays_arrow_free),
     ("parquet_sphere stays Arrow-free", check_parquet_sphere_stays_arrow_free),
     ("parquet_skycoord stays Arrow-free", check_parquet_skycoord_stays_arrow_free),
+    ("parquet_cosmology stays Arrow-free", check_parquet_cosmology_stays_arrow_free),
+    ("parquet_cosmology_config stays Arrow-free", check_parquet_cosmology_config_stays_arrow_free),
+    ("the [cosmology] section's keys are %init's arguments", check_cosmology_config_keys_match_init),
+    ("parquet_cosmology_config's named list is the library's",
+     check_cosmology_config_names_match_the_library),
     ("parquet_logging stays Arrow-free", check_parquet_logging_stays_arrow_free),
     ("parquet_toml stays Arrow-free", check_parquet_toml_stays_arrow_free),
     ("every parquet_toml entry takes the module guard", check_parquet_toml_takes_the_guard),

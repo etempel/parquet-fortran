@@ -207,6 +207,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   threads at once. The free functions `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` need no
   cosmology and keep their digits where the obvious forms lose them. Arrow-free, settings-free and
   silent.
+- **A cosmology from a configuration file: `parquet_cosmology_config`.**
+  `pf_cosmology_from_toml` builds a `pf_cosmology` from the `[cosmology]` section of a TOML
+  configuration file and `pf_cosmology_to_toml` writes one back into a document, so a run's
+  cosmology is a run parameter beside `nproc` and `output_dir` rather than something compiled into
+  the program. The section takes either form `%init` takes — `name` naming one of the eight, or the
+  parameters, whose keys are `%init`'s own argument names in lower case — with `ode0`, `ob0` and
+  `m_nu` absent meaning flat, unknown and massless, and every other key defaulting to what `%init`
+  defaults to. `found=` makes an absent section an answer rather than an error, `section=` names a
+  different table, and `conf` may be a section handle, so a nested `[run.cosmology]` needs no extra
+  argument. Every validation stays `%init`'s, with the file and the section named in the message;
+  a misspelt key is caught by your own `pf_toml_check_all`, because the reader marks only what it
+  reads. The writer creates the section or reuses it and deletes each key before setting it, so it
+  is idempotent, leaves no stale key and touches nothing outside its own table; it records the
+  parameters rather than the realization. A new entry module over `parquet_cosmology` and
+  `parquet_toml`, so neither of them grows: Arrow-free, settings-free, and taking no lock of its
+  own. See
+  [A cosmology in a configuration file](doc/pages/utilities/configuration-files.md#a-cosmology-in-a-configuration-file).
 - **Random points on a sphere, in `parquet_random`.** `pf_random_direction_at` draws a uniform unit
   vector and `pf_random_radec_at` the same point as `(ra, dec)` in degrees; `pf_random_disc_at` and
   `pf_random_disc_radec_at` draw uniformly within an angular radius of a direction or a sky

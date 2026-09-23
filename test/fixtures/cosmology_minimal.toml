@@ -1,0 +1,15 @@
+# A run configuration whose [cosmology] section sets only the two required keys, so that every
+# other parameter takes %init's own default.
+#
+# READ-ONLY, and loaded by several tests at once. See cosmology_named.toml for why the other
+# sections are here.
+
+[general]
+nproc = 1
+
+[cosmology]
+h0  = 70.0
+om0 = 0.3
+
+[[region]]
+id = 1

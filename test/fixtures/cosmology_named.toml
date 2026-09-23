@@ -1,0 +1,18 @@
+# A run configuration whose [cosmology] section names one of the eight.
+#
+# READ-ONLY, and loaded by several tests at once. The [general] and [[region]] tables are here on
+# purpose: [cosmology] is one table of a larger configuration file, so a reader that touched
+# anything outside its own section would fail a test rather than pass one.
+
+[general]
+nproc      = 4
+output_dir = "out"
+
+[cosmology]
+name = "planck18"        # lower case, to pin the case-insensitive match
+
+[[region]]
+id = 1
+
+[[region]]
+id = 2

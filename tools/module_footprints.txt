@@ -319,6 +319,23 @@ parquet_interpolate_core.f90
 parquet_utils.f90
 parquet_wrapper.cpp
 
+[parquet_cosmology_config]
+parquet_cosmology.f90
+parquet_cosmology_build.f90
+parquet_cosmology_config.f90
+parquet_cosmology_eval.f90
+parquet_integrate.f90
+parquet_integrate_driver.f90
+parquet_integrate_engine.f90
+parquet_interpolate.f90
+parquet_interpolate_1d.f90
+parquet_interpolate_2d.f90
+parquet_interpolate_core.f90
+parquet_logging.f90
+parquet_toml.f90
+parquet_utils.f90
+parquet_wrapper.cpp
+
 [parquet_optimize]
 parquet_argsort.f90
 parquet_argsort_engine.f90

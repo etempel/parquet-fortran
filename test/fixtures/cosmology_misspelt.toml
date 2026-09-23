@@ -1,0 +1,15 @@
+# A run configuration whose [cosmology] section carries a misspelt key beside the right one.
+#
+# READ-ONLY, and loaded by several tests at once. `om_0` is nobody's key, so nothing reads it and
+# pf_toml_check_all reports it -- which is the only way a misspelt OPTIONAL key is ever caught.
+
+[general]
+nproc = 1
+
+[cosmology]
+h0   = 70.0
+om0  = 0.3
+om_0 = 0.25
+
+[[region]]
+id = 1

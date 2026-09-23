@@ -292,6 +292,12 @@ contains
     !> is `pf_kde_grid%add`'s team counter, which every `%add` inside test-drive's region sets to
     !> 1 (no nested team opens there) and which no test of that suite reads.
     !>
+    !> "cosmology_config_serial" is excluded for the reason "toml_serial" is: its two tests
+    !> attach a file sink to the process-global DEFAULT logger to read the unknown-key sweep back,
+    !> and a sink attached or closed while a sibling test is writing to one is an abort. The
+    !> concurrent "cosmology_config" suite touches no global at all -- it reads committed fixtures
+    !> and writes files named for their own test -- and stays parallel.
+    !>
     !> "kde_omp" is excluded for the nested-team reason "integrate_omp" states, and because it
     !> reads that process-global team counter straight after each `%add` it asserts: run inside
     !> test-drive's region, every team would collapse to one and a concurrent `%add` elsewhere
@@ -340,7 +346,8 @@ contains
             .or. name == "columns_parallel" &
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
-            .or. name == "toml_serial" .or. name == "index_omp" .or. name == "index_strings" &
+            .or. name == "toml_serial" .or. name == "cosmology_config_serial" &
+            .or. name == "index_omp" .or. name == "index_strings" &
             .or. name == "integrate_omp" .or. name == "interpolate_omp" .or. name == "optimize_omp" &
             .or. name == "cosmology_omp" &
             .or. name == "prima_omp" .or. name == "sphere_omp" .or. name == "kde_serial" .or. name == "kde_omp" &

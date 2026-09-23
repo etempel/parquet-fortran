@@ -64,6 +64,7 @@ in every one of them.
 | `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite or infinite range |
 | `parquet_interpolate` | 4 | no | `pf_interp_1d`, `pf_interp_2d` and `pf_interp`: linear, cubic-spline and shape-preserving interpolation of tabulated data, in one dimension and on a rectilinear grid |
 | `parquet_cosmology` | 11 | no | `pf_cosmology`: distances, times and volumes in an expanding universe — the comoving, transverse, luminosity and angular diameter distances, the lookback time and the age, the comoving volume and its element, the distance modulus and the transverse scales, the density parameters, the CMB temperature and the critical density at a redshift, for the eight named cosmologies or a model of your own, with the redshift at a given distance, lookback time, age, luminosity distance or distance modulus; and `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` |
+| `parquet_cosmology_config` | 14 | no | `pf_cosmology_from_toml` and `pf_cosmology_to_toml`: building a `pf_cosmology` from the `[cosmology]` section of a TOML configuration file, and writing one back into a document — the cosmology tier joined to `parquet_toml`, so that neither of them has to carry the other |
 | `parquet_optimize` | 14 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |
 | `parquet_prima` | 24 | no | `pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla`: Powell's derivative-free solvers, vendored from PRIMA — a function of several variables with bounds, linear constraints or nonlinear ones |
 | `parquet_root` | 2 | no | `pf_find_root`: where a function of one variable crosses zero, by Brent's method on a bracket, widened first under a growth policy you state |
@@ -159,6 +160,7 @@ anything else.
 | `parquet_integrate` | none — it reads none, and prints nothing at all |
 | `parquet_interpolate` | none — it reads none, and prints nothing at all |
 | `parquet_cosmology` | none — it reads none, and prints nothing at all |
+| `parquet_cosmology_config` | none — it reads none; its output is governed by `parquet_logging`, not by `verbosity`/`message_stream` |
 | `parquet_prima` | none — it reads none, and prints nothing at all. The one emitter it can reach is the thread clamp inside `pf_minimize_multistart`, which a caller reaches through `parquet_optimize` and silences there |
 | `parquet_optimize` | `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_root` | none — it reads none, and prints nothing at all |

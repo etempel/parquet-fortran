@@ -3867,6 +3867,8 @@ program error_scenarios
         call scenario_cosmology_init_w0_out_of_range()
     case ("cosmology_init_zmax_out_of_range")
         call scenario_cosmology_init_zmax_out_of_range()
+    case ("cosmology_init_zmin_out_of_range")
+        call scenario_cosmology_init_zmin_out_of_range()
     case ("cosmology_init_ob0_above_om0")
         call scenario_cosmology_init_ob0_above_om0()
     case ("cosmology_init_density_too_large")
@@ -33530,6 +33532,14 @@ contains
         call c%init(h0=70.0_real64, om0=0.3_real64, zmax=1.0e11_real64)
         print '(a, l1)', "accepted a zmax above the ceiling, built: ", c%is_initialised()
     end subroutine scenario_cosmology_init_zmax_out_of_range
+    !
+    !> `zmin` at or below `-1`, where no redshift exists.
+    subroutine scenario_cosmology_init_zmin_out_of_range()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, zmin=-1.0_real64)
+        print '(a, l1)', "accepted a zmin at the pole, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_zmin_out_of_range
     !
     !> `ob0` greater than `om0`.
     subroutine scenario_cosmology_init_ob0_above_om0()

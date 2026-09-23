@@ -3291,6 +3291,8 @@ contains
                 test_cosmology_init_w0_out_of_range_aborts), &
                 new_unittest("cosmology_init_zmax_out_of_range aborts", &
                 test_cosmology_init_zmax_out_of_range_aborts), &
+                new_unittest("cosmology_init_zmin_out_of_range aborts", &
+                test_cosmology_init_zmin_out_of_range_aborts), &
                 new_unittest("cosmology_init_ob0_above_om0 aborts", &
                 test_cosmology_init_ob0_above_om0_aborts), &
                 new_unittest("cosmology_init_density_too_large aborts", &
@@ -20539,6 +20541,13 @@ contains
             failure_message="an out-of-range zmax was expected to error stop", &
             required_stderr="pf_cosmology%init: zmax must be finite, positive and at most 1e10")
     end subroutine test_cosmology_init_zmax_out_of_range_aborts
+    !
+    subroutine test_cosmology_init_zmin_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_zmin_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range zmin was expected to error stop", &
+            required_stderr="pf_cosmology%init: zmin must be finite and within (-1, 0]")
+    end subroutine test_cosmology_init_zmin_out_of_range_aborts
     !
     subroutine test_cosmology_init_ob0_above_om0_aborts(error)
         type(error_type), allocatable, intent(out) :: error

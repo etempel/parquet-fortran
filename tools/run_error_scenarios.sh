@@ -1780,6 +1780,7 @@ scenarios=(
     "cosmology_init_m_nu_size:1"
     "cosmology_init_w0_out_of_range:1"
     "cosmology_init_zmax_out_of_range:1"
+    "cosmology_init_zmin_out_of_range:1"
     "cosmology_init_ob0_above_om0:1"
     "cosmology_init_density_too_large:1"
     "cosmology_init_tcmb0_too_hot:1"

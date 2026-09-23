@@ -116,6 +116,21 @@ array = rgv.array
 int_literal = rgv.int_literal
 
 
+def as_double(z):
+    """A redshift as the DOUBLE the generated file carries it as, exactly.
+
+    **The row must be the value AT THE ARGUMENT THE TEST PASSES.** `cz_bits` emits the double
+    nearest each decimal above, and the Fortran side reads that double back and hands it to the
+    library; evaluating the 30-digit model at the decimal instead compares two different
+    redshifts. It costs nothing anywhere the two are close in RELATIVE terms, and everything at a
+    deep blueshift, where they are not: `1 + z` at `z = -0.99999` is `1e-5`, so half an ulp of
+    `z` is a relative `1.1e-12` of `1 + z`, and every quantity built on `1 + z` inherits it --
+    including `%tcmb`, which is a multiplication and nothing else. That artifact, not the table,
+    was the largest residual in the whole grid.
+    """
+    return mp.mpf(float(mp.mpf(z)))
+
+
 def bits64(x):
     """The `transfer` bit pattern of a double (or an mpf rounded to one), as an `int64` literal.
 
@@ -180,6 +195,8 @@ SPEC_CONSTANTS = {
 EXP_CEILING = mp.mpf(709)
 DE_EXP_CEILING = mp.mpf(695)
 SINH_CEILING = mp.mpf(700)
+#: `ln(1 + 1e10)` as the module rounds it: the bottom of the domain the floor scan walks down to.
+ZETA_CEILING = mp.mpf("23.02585093004047")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -245,7 +262,50 @@ class Cosmology(object):
         # de Sitter is the case in the grid.
         self.age_diverges = (self.om0 == 0 and self.ok0 == 0 and self.ogamma0 == 0
                              and 3 * (1 + self.w0 + self.wa) <= 0)
+        # The bottom of the model's own domain, found before any quadrature: below it `E^2` is
+        # not positive, so the universe does not exist there and every quantity is a NaN.
+        self.zeta_floor = self.find_floor()
         self.age0 = mp.inf if self.age_diverges else self.age_of_zeta(mp.mpf(0))
+
+    def find_floor(self):
+        """The largest `zeta < 0` at which `E^2 <= 0`, or `-ZETA_CEILING` when there is none.
+
+        The same walk-and-bisect the library does in `cosmology_find_floor`, at 30 digits: unit
+        steps down from `zeta = 0`, twenty points inside the first step that is not positive, and
+        bisection between the last positive point and the first that is not. Two models in the
+        grid have such a floor; for every other one this returns the domain's edge and nothing
+        below changes.
+        """
+        edge = -ZETA_CEILING
+        hi = mp.mpf(0)
+        lo = mp.mpf(0)
+        found = False
+        for _ in range(int(ZETA_CEILING) + 2):
+            lo = max(hi - 1, edge)
+            if self.e2(lo, screened=False) <= 0:
+                found = True
+                break
+            if lo <= edge:
+                break
+            hi = lo
+        if not found:
+            return edge
+        top, bottom = hi, lo
+        for j in range(1, 20):
+            mid = hi + (lo - hi) * mp.mpf(j) / 20
+            if self.e2(mid, screened=False) <= 0:
+                bottom = mid
+                break
+            top = mid
+        for _ in range(200):
+            if top - bottom <= mp.mpf("1e-25"):
+                break
+            mid = (top + bottom) / 2
+            if self.e2(mid, screened=False) > 0:
+                top = mid
+            else:
+                bottom = mid
+        return bottom
 
     # -- the expansion function ----------------------------------------------------------------
 
@@ -298,11 +358,30 @@ class Cosmology(object):
 
     def e2(self, zeta, screened=True):
         """`E^2` at `zeta = ln(1 + z)`."""
-        x = mp.exp(zeta)
+        return self.e2_at_x(mp.exp(zeta), screened)
+
+    def e2_at_x(self, x, screened=True):
+        """`E^2` from `x = 1 + z`, which is how the CLOSED FORMS form it.
+
+        The library's closed-form bindings screen the caller's `z` and use `1 + z` directly; only
+        the quadratures work in `zeta`. Forming the reference's own `E^2` from `exp(ln(1 + z))`
+        instead leaves the two a rounding apart, which is invisible in every quantity but the
+        ones that CANCEL: `Otot = 1 - Ok` of the Milne universe is exactly zero when both sides
+        come from one `x` and an ulp of the working precision when they do not.
+        """
         total = self.om0 * x ** 3 + self.ok0 * x ** 2 + self.de_term(x, screened)
         if self.ogamma0 != 0:
             total += self.ogamma0 * x ** 4 * (1 + self.nu_rel(x))
         return total
+
+    def efunc_at_x(self, x):
+        """`E` from `x`, screened as `efunc` is."""
+        v = self.e2_at_x(x)
+        if v == mp.inf:
+            return mp.inf
+        if v <= 0:
+            return mp.nan
+        return mp.sqrt(v)
 
     def efunc(self, zeta):
         """`E(zeta)`, screened; `+Infinity` where the dark-energy factor has overflowed."""
@@ -328,6 +407,12 @@ class Cosmology(object):
         if zeta == 0:
             return mp.mpf(0)
         return self.th * mp.quad(self.inv_efunc, [0, zeta])
+
+    def absorption_distance_zeta(self, zeta):
+        """`INT (1+z)^2/E dz` written in `zeta`: `dz = x dzeta` turns `x^2/E` into `x^3/E`."""
+        if zeta == 0:
+            return mp.mpf(0)
+        return mp.quad(lambda t: mp.exp(3 * t) * self.inv_efunc(t), [0, zeta])
 
     def age_of_zeta(self, zeta):
         """`t_H INT_0^b 2 db/(b E(b^2))` with `b = e^(-zeta/2)`: the age's OWN integral."""
@@ -369,9 +454,11 @@ class Cosmology(object):
 
     def row(self, z):
         """Every stage-1 quantity at one redshift, in the order `CQ_NAMES` fixes."""
-        z = mp.mpf(z)
+        z = as_double(z)
         x = 1 + z
         zeta = mp.log(x)
+        if zeta <= self.zeta_floor:
+            return self.row_below_the_floor(x, z)
         dc = self.comoving_distance_zeta(zeta)
         dm = self.comoving_transverse(dc)
         dl = x * dm
@@ -379,7 +466,7 @@ class Cosmology(object):
         tl = self.lookback_time_zeta(zeta)
         age = self.age_of_zeta(zeta)
         vc = self.comoving_volume(dm)
-        ev = self.efunc(zeta)
+        ev = self.efunc_at_x(x)
         dv = mp.mpf(0) if ev == mp.inf else self.dh * dm ** 2 / ev
         mu = -mp.inf if dl == 0 else 5 * mp.log10(abs(dl)) + 25
         rad_min = mp.pi / 10800          # one arcminute in radians
@@ -392,7 +479,7 @@ class Cosmology(object):
         # The density parameters are terms of `E^2` over `E^2`, formed at the same `x`, so the
         # five of them sum to one. Where the CPL factor has overflowed, `E^2` is infinite and the
         # LIMIT is taken -- dark energy is all of it -- rather than `Infinity / Infinity`.
-        e2 = self.e2(zeta)
+        e2 = self.e2_at_x(x)
         if e2 == mp.inf:
             om_z, ok_z, og_z, onu_z, ode_z = (mp.mpf(0),) * 4 + (mp.mpf(1),)
             rho_z = mp.inf
@@ -406,13 +493,42 @@ class Cosmology(object):
             ode_z = self.de_term(x) / e2
             rho_z = self.rho_crit0 * e2
         w_z = self.w0 if self.wa == 0 else self.w0 + self.wa * z / x
+        # `Otot`, `Ob` and `Odm` follow the same three regimes the five above do, and `Ob`/`Odm`
+        # are NaN at every redshift for a model built without an `ob0`: a missing baryon fraction
+        # is not a zero one, which is the one place this module differs from astropy 8 on purpose.
+        if e2 == mp.inf:
+            otot_z = mp.mpf(1)
+            ob_z = odm_z = mp.nan if self.ob0 is None else mp.mpf(0)
+        elif e2 != e2 or e2 <= 0:
+            otot_z = ob_z = odm_z = mp.nan
+        else:
+            otot_z = 1 - ok_z
+            ob_z = mp.nan if self.ob0 is None else self.ob0 * x ** 3 / e2
+            odm_z = mp.nan if self.ob0 is None else (self.om0 - self.ob0) * x ** 3 / e2
         return [dc, dm, dl, da, tl, age, vc, dv, mu, kpc_p, kpc_c, arc_p, arc_c, ev, self.h0 * ev,
                 om_z, ode_z, ok_z, og_z, onu_z, self.tcmb0 * x, w_z, self.f_de(x), rho_z,
-                self.dh * tl / self.th]
+                self.dh * tl / self.th,
+                1 / x, otot_z, ob_z, odm_z, self.tnu0 * x,
+                self.absorption_distance_zeta(zeta), self.nu_rel(x)]
+
+    def row_below_the_floor(self, x, z):
+        """The row at a `zeta` at or below `zeta_floor`, where `E^2` is not positive.
+
+        Everything that needs `E` is a NaN, which is what the library answers there: the walk
+        that would form it sums a quiet NaN, and `%efunc` refuses to take a square root of a
+        non-positive `E^2`. THREE quantities survive, because none of them touches `E` at all --
+        the CMB temperature, the equation of state and the dark-energy scale factor are functions
+        of the redshift alone -- and the library answers all three there, so the reference must
+        carry them rather than a blanket NaN.
+        """
+        nan = mp.nan
+        w_z = self.w0 if self.wa == 0 else self.w0 + self.wa * z / x
+        return [nan] * 20 + [self.tcmb0 * x, w_z, self.f_de(x), nan, nan,
+                             1 / x, nan, nan, nan, self.tnu0 * x, nan, self.nu_rel(x)]
 
     def angular_diameter_z1z2(self, z1, z2):
         """astropy's transverse-of-the-difference form; NEGATIVE when `z2 < z1`."""
-        z1, z2 = mp.mpf(z1), mp.mpf(z2)
+        z1, z2 = as_double(z1), as_double(z2)
         dc1 = self.comoving_distance_zeta(mp.log(1 + z1))
         dc2 = self.comoving_distance_zeta(mp.log(1 + z2))
         return self.comoving_transverse(dc2 - dc1) / (1 + z2)
@@ -422,7 +538,12 @@ class Cosmology(object):
 CQ_NAMES = ["dc", "dm", "dl", "da", "tl", "age", "vc", "dv", "mu",
             "kpc_proper", "kpc_comoving", "arcsec_proper", "arcsec_comoving", "efunc", "hubble",
             "om", "ode", "ok", "ogamma", "onu", "tcmb", "w", "de_density_scale",
-            "critical_density", "lookback_distance"]
+            "critical_density", "lookback_distance",
+            "scale_factor", "otot", "ob", "odm", "tnu", "absorption_distance",
+            "nu_relative_density"]
+
+#: The quantities that do not touch `E` at all, and so survive below a model's own floor.
+CQ_NO_EFUNC = {"tcmb", "w", "de_density_scale", "scale_factor", "tnu", "nu_relative_density"}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -469,11 +590,19 @@ def models():
     out.append(Cosmology("einstein_de_sitter", "70", "1", ode0="0"))
     out.append(Cosmology("milne", "70", "0", ode0="0"))
     out.append(Cosmology("de_sitter", "70", "0", ode0="1"))
+    # The two models whose domain is TRUNCATED: `E^2` reaches zero at a finite blueshift, so the
+    # universe does not exist below it and the rows there are NaN. They are the only models in
+    # the grid with that property, which is exactly why they are pinned at 30 digits -- the
+    # inverses screen against bounds taken AT that floor, and nothing else here would move if
+    # those bounds went wrong.
+    out.append(Cosmology("recollapse_closed", "70", "1.5", ode0="0"))
+    out.append(Cosmology("negative_ode0", "70", "0.3", ode0="-0.5"))
     return out
 
 
 #: The `D_A(z1, z2)` pairs, and the three models they are taken over.
-PAIRS = [("0.1", "0.5"), ("0.5", "2"), ("2", "1100"), ("0.5", "0.5"), ("2", "0.5")]
+PAIRS = [("0.1", "0.5"), ("0.5", "2"), ("2", "1100"), ("0.5", "0.5"), ("2", "0.5"),
+         ("0.5", "0.5001"), ("2", "2.000002"), ("0.1", "0.6")]
 PAIR_MODELS = ["flat_no_rad", "open", "closed"]
 
 
@@ -583,6 +712,13 @@ def _pair_of(job):
     return model.angular_diameter_z1z2(z1, z2)
 
 
+def _pair_dc_of(job):
+    """The same pair's COMOVING separation, `D_C(z2) - D_C(z1)`, signed."""
+    model, z1, z2 = job
+    return (model.comoving_distance_zeta(mp.log(1 + as_double(z2)))
+            - model.comoving_distance_zeta(mp.log(1 + as_double(z1))))
+
+
 def gen_module():
     ms = models()
     row_jobs = [(m, z) for m in ms for z in REDSHIFTS]
@@ -593,9 +729,11 @@ def gen_module():
     # `pairs` are assembled exactly as the comprehensions they replace built them.
     row_values = map_cases(_row_of, row_jobs)
     pair_values = map_cases(_pair_of, pair_jobs)
+    pair_dc_values = map_cases(_pair_dc_of, pair_jobs)
     rows = [(m, z, value) for (m, z), value in zip(row_jobs, row_values)]
     pairs = [(model.label, z1, z2, value)
              for (model, z1, z2), value in zip(pair_jobs, pair_values)]
+    pair_dcs = list(pair_dc_values)
 
     L = [BANNER]
     L.append("!> Golden rows for `parquet_cosmology`, derived from a %d-digit mpmath model of"
@@ -712,6 +850,10 @@ def gen_module():
                [bits64(mp.mpf(v)) for _, z1, z2, _ in pairs for v in (z1, z2)])
     L.append("    !> `D_A(z1, z2)` in Mpc; NEGATIVE where `z2 < z1`, as astropy answers it.")
     L += big_array("integer(int64)", "cpair_da_bits", "n_cpair", [bits64(v) for _, _, _, v in pairs])
+    L.append("    !> `D_C(z2) - D_C(z1)` of each pair, in Mpc, signed. The CLOSE pairs are what")
+    L.append("    !! `%comoving_distance_z1z2` exists for: differencing two tabulated distances")
+    L.append("    !! keeps only the digits the pair's own span leaves.")
+    L += big_array("integer(int64)", "cpair_dc_bits", "n_cpair", [bits64(v) for v in pair_dcs])
     L.append("")
     L.append("end module test_cosmology_vectors ! GCOVR_EXCL_LINE")
     return "\n".join(L) + "\n"
@@ -911,13 +1053,35 @@ def self_test():
             check(row["de_density_scale"] == 1 and row["w"] == -1,
                   "%s is a cosmological constant, so f_DE is 1 and w is -1 at z=%s" % (label, z))
 
-    # -- every emitted literal round-trips ----------------------------------------------------
+    # -- every emitted literal round-trips, and every NaN is one the model owes ---------------
+    #
+    # A NaN appears in exactly one place: at a redshift at or below a model's `zeta_floor`, where
+    # `E^2` is not positive and the universe does not exist. Three quantities survive there,
+    # because none of them touches `E`. Asserting the pattern in BOTH directions is what keeps a
+    # quadrature that quietly returned a NaN from being emitted as a reference row.
+    survivors = CQ_NO_EFUNC
     for m in ms:
+        no_baryons = m.ob0 is None
         for z in REDSHIFTS:
+            below = mp.log(1 + as_double(z)) <= m.zeta_floor
             for name, value in zip(CQ_NAMES, m.row(z)):
+                unknown = no_baryons and name in ("ob", "odm")
                 packed = struct.unpack("<d", struct.pack("<d", float(value)))[0]
                 if packed != packed:                       # NaN never round-trips by equality
-                    bad.append("%s at z=%s is NaN, which no row may be" % (name, z))
+                    if unknown:
+                        pass
+                    elif not below:
+                        bad.append("%s of %s at z=%s is NaN above the model's own floor"
+                                   % (name, m.label, z))
+                    elif name in survivors:
+                        bad.append("%s of %s at z=%s is NaN, although it never touches E"
+                                   % (name, m.label, z))
+                elif unknown:
+                    bad.append("%s of %s at z=%s is a number, but the model has no Ob0"
+                               % (name, m.label, z))
+                elif below and name not in survivors:
+                    bad.append("%s of %s at z=%s is a number below the model's own floor"
+                               % (name, m.label, z))
                 elif packed != float(value):
                     bad.append("%s of %s at z=%s does not round-trip" % (name, m.label, z))
 

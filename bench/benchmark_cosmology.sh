@@ -13,19 +13,21 @@
 #             own cost, which is where a model with massive neutrinos pays its `pow`.
 #
 #   eval      `%comoving_distance` over a column of a million redshifts in random order, in
-#             nanoseconds per query, for four ranges: inside the table, one panel beyond it,
-#             sixteen panels beyond it (z = 1e10), and at a blueshift. The first row is an
-#             interpolant read; the rest add 20 evaluations of E per panel. This is the figure
-#             behind the guide's "tens of nanoseconds inside it, a few microseconds outside".
+#             nanoseconds per query, for five ranges: inside the table, one panel beyond it,
+#             sixteen panels beyond it (z = 1e10), a blueshift the table reaches and one below it.
+#             The tabulated rows are an interpolant read; the rest add 20 evaluations of E per
+#             panel. This is the figure behind the guide's "tens of nanoseconds inside it, a few
+#             microseconds outside", and the last two are what `zmin=` trades between.
 #
 #   bindings  each binding over the same column, inside the table, in nanoseconds per query. They
 #             should differ by a few flops and one transcendental at most; a row far above the
 #             others is a binding doing more work than the design says it does.
 #
-#   inverse   `%z_at_comoving_distance` and `%z_at_lookback_time` over a column, with the worst
-#             relative round trip printed beside each. On the table an inverse is one interpolant
-#             read plus one Newton step; beyond it, a bracketed solve over the panel rule, which
-#             is the expensive case.
+#   inverse   all five inverses over a column, with the worst relative round trip printed beside
+#             each. On the table an inverse is one interpolant read plus one Newton step; beyond
+#             it, a bracketed solve over the panel rule, which is the expensive case. The three
+#             that used to have no table of their own -- `%z_at_age`, and the two luminosity
+#             inverses, which bracket from the distance table instead -- are the rows to watch.
 #
 # USAGE
 #   bench/benchmark_cosmology.sh [build|eval|bindings|inverse|all] [queries]

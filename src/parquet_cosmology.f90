@@ -13,22 +13,25 @@
 !! Five families, all over `real64`:
 !!
 !! * **Distances** -- `%comoving_distance`, `%comoving_transverse_distance`,
-!!   `%luminosity_distance`, `%angular_diameter_distance`, `%angular_diameter_distance_z1z2`,
-!!   `%comoving_volume`, `%differential_comoving_volume`, `%lookback_distance` and `%distmod`,
-!!   with `%comoving_distance_zeta` taking the table's own coordinate directly.
+!!   `%luminosity_distance`, `%angular_diameter_distance`, `%comoving_distance_z1z2`,
+!!   `%angular_diameter_distance_z1z2`, `%comoving_volume`, `%differential_comoving_volume`,
+!!   `%lookback_distance`, `%absorption_distance` and `%distmod`, with
+!!   `%comoving_distance_zeta` taking the table's own coordinate directly.
 !! * **Times** -- `%lookback_time` and `%age`, in Gyr.
-!! * **The expansion** -- `%efunc`, `%inv_efunc`, `%hubble`, and the transverse scales
-!!   `%kpc_proper_per_arcmin`, `%kpc_comoving_per_arcmin`, `%arcsec_per_kpc_proper` and
+!! * **The expansion** -- `%efunc`, `%inv_efunc`, `%hubble`, `%scale_factor`, and the transverse
+!!   scales `%kpc_proper_per_arcmin`, `%kpc_comoving_per_arcmin`, `%arcsec_per_kpc_proper` and
 !!   `%arcsec_per_kpc_comoving`.
 !! * **The contents of the universe at `z`** -- `%om`, `%ode`, `%ok`, `%ogamma`, `%onu`, which sum
-!!   to one, with `%tcmb`, `%w`, `%de_density_scale` and `%critical_density`.
+!!   to one, with `%otot`, `%ob`, `%odm`, `%nu_relative_density`, `%onu_species`, `%tcmb`, `%tnu`,
+!!   `%w`, `%de_density_scale` and `%critical_density`.
 !! * **Inverses** -- `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`,
 !!   `%z_at_luminosity_distance` and `%z_at_distmod`.
 !!
 !! plus the parameter queries (`%h0`, `%om0`, `%ode0`, `%ok0`, `%ogamma0`, `%onu0`, `%ob0`,
 !! `%odm0`, `%tcmb0`, `%tnu0`, `%neff`, `%w0`, `%wa`, `%little_h`, `%hubble_distance`,
-!! `%hubble_time`, `%zmax`), the flags (`%is_flat`, `%has_massive_nu`, `%is_initialised`), the
-!! three subroutines `%get_name`, `%describe` and `%m_nu`, and `%clear`.
+!! `%hubble_time`, `%zmax`, `%zmin`, `%zeta_floor`), the flags (`%is_flat`, `%has_massive_nu`,
+!! `%is_initialised`), the four subroutines `%get_name`, `%describe`, `%m_nu` and `%clone`, and
+!! `%clear`.
 !!
 !! Three free functions need no cosmology: `pf_z2zeta` and `pf_zeta2z` between a redshift and
 !! `zeta = ln(1 + z)`, each exact to rounding at every argument where `log(1 + z)` and
@@ -43,19 +46,23 @@
 !! `tools/generate_cosmology_reference.py` derives the golden rows at 30 digits, and its
 !! `--self-test` holds every literal below to the double nearest the derived value.
 !!
-!! **`%init` tabulates; every other binding reads.** Three integrals -- the comoving distance, the
-!! lookback time and the age -- are built over one uniform grid in `zeta`, out of ONE set of
-!! interval integrals, and interpolated by `pf_interp_1d`. A redshift beyond the table is answered
-!! by a fixed 20-point Gauss-Legendre rule from the table's edge, so **no redshift is ever refused
-!! and the table decides only how fast**: tens of nanoseconds inside it, and microseconds to tens
-!! of microseconds outside, rising with the distance past the edge. `zmax=` moves the seam, never
-!! the answer. `bench/benchmark_cosmology.sh` measures both.
+!! **`%init` tabulates; every other binding reads.** Four integrals -- the comoving distance, the
+!! lookback time, the age and the absorption distance -- are built over one uniform grid in
+!! `zeta`, out of ONE set of interval integrals, and read back by a local quintic Hermite: a value
+!! and an analytic slope at every node, so an interval has six data and the interpolation error is
+!! `O(h^6)` with no end condition to get wrong. The grid is the integer lattice times `PFC_H`,
+!! which puts a node at `zeta = 0` exactly and lets the interval be found by one division. A
+!! redshift beyond either end of the table is answered by a fixed 20-point Gauss-Legendre rule
+!! from that end, so **no redshift is ever refused and the table decides only how fast**: tens of
+!! nanoseconds inside it, and microseconds to tens of microseconds outside, rising with the
+!! distance past the edge. `zmax=` and `zmin=` move the two seams, and the answer by no more than
+!! the table's own accuracy. `bench/benchmark_cosmology.sh` measures both.
 !!
 !! **The age is its own table, never `%age(0) - %lookback_time(z)`.** That difference cancels: at
 !! `z = 1e10` the age is `7.6e-18 Gyr` while both terms are `13.7869 Gyr`, so not one digit of it
-!! survives. Tabulated in its own right it is accurate to about `1e-10` relative at every redshift.
-!! A model whose age integral diverges -- de Sitter is one -- answers `+Infinity` at every
-!! redshift, which is right rather than exceptional.
+!! survives. Tabulated in its own right it is accurate to a few parts in `1e15` relative at every
+!! redshift. A model whose age integral diverges -- de Sitter is one -- answers `+Infinity` at
+!! every redshift, which is right rather than exceptional.
 !!
 !! **Total, not validating.** The redshift domain is `-1 < z <= 1e10`. Inside it every binding
 !! answers a number, or a signed infinity where the mathematics says so. A NaN redshift answers
@@ -64,6 +71,18 @@
 !! an abort there would take a program down for one row. A negative redshift above `-1` is a
 !! blueshift and is answered with its sign. What aborts is a caller's mistake: a cosmology that was
 !! never built, an unknown name, or a parameter outside its admitted range.
+!!
+!! **A MODEL may end before the domain does.** Where `E(z)^2` reaches zero at a finite blueshift --
+!! a recollapsing closed universe, or any negative `Ode0` -- there is no expansion below that
+!! point, and every binding answers NaN there exactly as it does outside the domain. `%init`
+!! builds such a model rather than refusing it, `%zeta_floor()` reports where it ends, and the
+!! five inverses screen against bounds taken AT that floor, so an argument the model never reaches
+!! answers NaN rather than a redshift at which the model itself answers NaN.
+!!
+!! **The no-flag guarantee is over `ieee_usual`** -- invalid, overflow and divide-by-zero -- and
+!! not over `IEEE_UNDERFLOW`, which is outside that set. A denormal-adjacent argument such as
+!! `z = 1e-300` with an extreme `h0` really does underflow something on the way to an answer that
+!! is right, and screening for it would cost every ordinary call.
 !!
 !! **Three admitted inputs answer a signed infinity**, each through `ieee_value` and none raising a
 !! flag: `%distmod(0)` is `-Infinity`, `%arcsec_per_kpc_*(0)` is `+Infinity`, and a divergent age,
@@ -82,7 +101,8 @@ module parquet_cosmology
 
     use iso_fortran_env, only : real64
     use parquet_integrate, only : pf_integrand, pf_tolerance, pf_integration_info, pf_integrate, &
-                                  PF_INT_OK, PF_INT_DIVERGENT, PF_INT_BAD_VALUE
+                                  PF_INT_OK, PF_INT_DIVERGENT, PF_INT_BAD_VALUE, &
+                                  PF_INT_ROUNDOFF, PF_INT_NO_CONVERGENCE
     use parquet_interpolate, only : pf_interp_1d
     use parquet_utils, only : pf_to_lower, pf_to_str
 
@@ -92,6 +112,7 @@ module parquet_cosmology
     public :: pf_cosmology
     public :: pf_z2zeta, pf_zeta2z, pf_z_combine
     public :: parquet_debug_set_cosmology_max_neval, parquet_debug_cosmology_neval
+    public :: parquet_debug_set_cosmology_exact_nu
 
     ! ---- The constants -----------------------------------------------------------------------
     !
@@ -196,6 +217,15 @@ module parquet_cosmology
         !! relative `1e-14` costs nothing; a `z = 1e10` that answers NaN on one platform and a
         !! number on another would cost a great deal. (`23.025850929940457` is `ln(1e10)`, not
         !! `ln(1 + 1e10)`; the two differ by `1e-10`, which is exactly one panel edge out.)
+    real(real64), parameter :: PFC_Z_FLOOR = -0.9999999999000001_real64
+        !! The largest redshift the domain does NOT contain: every binding answers NaN at and
+        !! below it. It is the largest double whose `pf_z2zeta` falls below `-PFC_ZETA_CEILING`,
+        !! found by a one-ulp scan, so that the thirteen CLOSED-FORM bindings can screen the
+        !! caller's `z` directly -- `z <= PFC_Z_FLOOR` -- and admit exactly the redshifts the
+        !! table's own screen admits, without taking a logarithm to find out. The one double above
+        !! it, `-0.9999999998999999917`, is inside. `the closed forms and the table share one
+        !! domain` (`test/test_cosmology.f90`) asserts the two screens agree, which is also what
+        !! would report a libm whose `log` at that point differs by an ulp from this one's.
     real(real64), parameter :: PFC_DENSITY_CEILING = 1.0e6_real64
         !! The largest admitted magnitude of any DERIVED density contribution.
     real(real64), parameter :: PFC_H0_MIN = 1.0e-10_real64
@@ -232,10 +262,41 @@ module parquet_cosmology
         !! strictly inside.
     real(real64), parameter :: PFC_DEFAULT_ZMAX = 1100.0_real64
         !! The default top of the table: recombination.
+    real(real64), parameter :: PFC_DEFAULT_ZMIN = -0.9_real64
+        !! The default bottom of the table. A blueshift OFF the table costs a panel walk, about
+        !! twenty-seven times a table read, and the caller who never passes a negative redshift
+        !! pays a third of the build time and a third of the memory for a floor they do not use.
+        !! `-0.9` is the trade the review settled on: a millisecond, felt once per object, against
+        !! a microsecond felt per row. `zmin=` is the knob for the caller who has measured.
     real(real64), parameter :: PFC_RTOL = 1.0e-12_real64
         !! The relative tolerance every interval integral is taken to.
+    real(real64), parameter :: PFC_FLOOR_RTOL = 1.0e-8_real64
+        !! The relative error estimate at which a panel of the two bounds AT THE DOMAIN'S FLOOR is
+        !! accepted although `PFC_RTOL` was not certified. Those two are SCREENS rather than
+        !! tabulated values -- they decide whether an argument is reachable at all, over distances
+        !! of thousands of Mpc -- and the last panel of a model whose `E^2` vanishes carries an
+        !! inverse-square-root endpoint on which the extrapolation runs out of double before it
+        !! reaches `1e-12`: it returns an answer good to `1e-10` relative and says so in
+        !! `info%abserr`, with a status that means "round-off, not misbehaviour". Refusing that
+        !! panel costs the whole sliver of blueshifts below it; see `floor_bounds`.
     real(real64), parameter :: PFC_PANEL = 1.0_real64
         !! The width in `zeta` of one Gauss-Legendre panel beyond the table.
+    real(real64), parameter :: PFC_PAIR_DIRECT = 0.5_real64
+        !! Below this separation in `zeta`, `%comoving_distance_z1z2` integrates the pair DIRECTLY
+        !! instead of differencing two table reads.
+        !!
+        !! Measured against a 30-digit oracle, at `z1 = 5`: differencing loses the table's own
+        !! relative error scaled by `D_C / (D_C2 - D_C1)`, so it is `2.5e-08` at a separation of
+        !! `1e-8`, `5.3e-12` at `1e-4`, `2.3e-14` at `0.01` and `4.3e-15` at `0.5`, while the
+        !! direct rule is `1e-16` to `3e-15` at every one of them. The direct rule is therefore
+        !! the more accurate of the two at EVERY separation up to a panel's width, and the
+        !! crossover is placed where the difference has fallen to a few parts in `1e15` rather
+        !! than where it overtakes: past that point the extra decade costs twenty integrand
+        !! evaluations against two table reads, and nothing asks for it.
+        !!
+        !! Below about `1e-6` neither form has digits to lose, because the SEPARATION does not:
+        !! two redshifts a part in `1e8` apart pin `zeta2 - zeta1` to eight significant figures
+        !! whatever is done with them afterwards.
     integer, parameter :: PFC_CONTEXT_CAP = 100
         !! Caller-supplied text is capped at this inside a message, as every module caps it.
 
@@ -247,6 +308,9 @@ module parquet_cosmology
         !! `1 / E`, whose integral is `t_L / t_H`.
     integer, parameter :: PFC_INT_AGE_TAIL = 3
         !! `2 / (b E(b^2))` in `b = sqrt(a)`, whose integral is the age past the table's edge.
+    integer, parameter :: PFC_INT_ABSORPTION = 4
+        !! `e^(3 zeta) / E`, whose integral is the absorption distance. In `z` it is
+        !! `INT (1+z)^2/E dz`, and `dz = x dzeta` turns `x^2/E` into `x^3/E`.
 
     !> The parameters a cosmology was built from, kept in their own component so that `%h0()`,
     !! `%om0()` and `%m_nu()` may be bindings: a binding may not share a name with a component.
@@ -260,6 +324,7 @@ module parquet_cosmology
         real(real64) :: w0    = -1.0_real64  !! `w0`
         real(real64) :: wa    = 0.0_real64   !! `wa`
         real(real64) :: zmax  = 0.0_real64   !! the `zmax` the CALLER asked for
+        real(real64) :: zmin  = 0.0_real64   !! the `zmin` the CALLER asked for
         real(real64), allocatable :: m_nu(:) !! the species masses in eV, `floor(neff)` of them
     end type cosmology_params
 
@@ -274,22 +339,54 @@ module parquet_cosmology
         real(real64) :: age0      = 0.0_real64 !! `age(0)` in Gyr; `+Infinity` when it diverges
         real(real64) :: nu_rel0   = 0.0_real64 !! `nu_rel(0)`, the largest the fit reaches
         real(real64) :: zeta_n    = 0.0_real64 !! the table's top in `zeta`
+        real(real64) :: zeta_m    = 0.0_real64 !! the table's BOTTOM in `zeta`, at or below zero
         real(real64) :: d_n       = 0.0_real64 !! `D_C(zeta_n)`, where the fallback starts
         real(real64) :: t_n       = 0.0_real64 !! `t_L(zeta_n)`, likewise
+        real(real64) :: d_m       = 0.0_real64 !! `D_C(zeta_m)`, where the DOWNWARD fallback starts
+        real(real64) :: t_m       = 0.0_real64 !! `t_L(zeta_m)`, likewise
+        real(real64) :: x_n       = 0.0_real64 !! the absorption distance at `zeta_n`
+        real(real64) :: x_m       = 0.0_real64 !! the absorption distance at `zeta_m`
         real(real64) :: d_ceiling = 0.0_real64 !! `D_C(+PFC_ZETA_CEILING)`, the inverse's top
-        real(real64) :: d_floor   = 0.0_real64 !! `D_C(-PFC_ZETA_CEILING)`, the inverse's bottom
+        real(real64) :: d_floor   = 0.0_real64 !! `D_C(zeta_bottom)`, the inverse's bottom
         real(real64) :: t_ceiling = 0.0_real64 !! `t_L(+PFC_ZETA_CEILING)`
-        real(real64) :: t_floor   = 0.0_real64 !! `t_L(-PFC_ZETA_CEILING)`
+        real(real64) :: t_floor   = 0.0_real64 !! `t_L(zeta_bottom)`
+        real(real64) :: zeta_floor = 0.0_real64 !! the largest `zeta < 0` where `E^2 <= 0`, else
+                                                !! `-PFC_ZETA_CEILING`: the model's own bottom
+        real(real64) :: zeta_bottom = 0.0_real64 !! the lowest `zeta` the three stored floors reach;
+                                                 !! `zeta_floor` unless an integral stopped short
         real(real64) :: d_inv_top = 0.0_real64 !! the largest `D_C` the inverse TABLE covers
         real(real64) :: t_inv_top = 0.0_real64 !! the largest `t_L` the inverse table covers
         real(real64) :: zeta_d_inv = 0.0_real64 !! the `zeta` at `d_inv_top`
         real(real64) :: zeta_t_inv = 0.0_real64 !! the `zeta` at `t_inv_top`
+        real(real64) :: d_inv_bot = 0.0_real64 !! the smallest `D_C` the inverse table covers
+        real(real64) :: t_inv_bot = 0.0_real64 !! the smallest `t_L` the inverse table covers
+        real(real64) :: zeta_d_bot = 0.0_real64 !! the `zeta` at `d_inv_bot`
+        real(real64) :: zeta_t_bot = 0.0_real64 !! the `zeta` at `t_inv_bot`
+        logical      :: has_d_inv = .false.    !! the distance inverse table was built
+        logical      :: has_t_inv = .false.    !! the lookback time inverse table was built
+        real(real64) :: a_inv_bot = 0.0_real64 !! the smallest `-ln(age)` the age inverse covers
+        real(real64) :: a_inv_top = 0.0_real64 !! the largest one
+        real(real64) :: zeta_a_bot = 0.0_real64 !! the `zeta` at `a_inv_bot`
+        real(real64) :: zeta_a_top = 0.0_real64 !! the `zeta` at `a_inv_top`
+        logical      :: has_age_inv = .false.  !! the age inverse table was built
         real(real64) :: rho_crit0 = 0.0_real64 !! `rho_crit(0)` in M_sun/Mpc^3
         real(real64) :: a_n       = 0.0_real64 !! `age(zeta_n)`, where the age's own fallback starts
         real(real64) :: a_ceiling = 0.0_real64 !! `age(+PFC_ZETA_CEILING)`: the SMALLEST age attained
-        real(real64) :: a_floor   = 0.0_real64 !! `age(-PFC_ZETA_CEILING)`: the LARGEST
+        real(real64) :: a_floor   = 0.0_real64 !! `age(zeta_bottom)`: the LARGEST
         integer      :: n_nu      = 0          !! `floor(neff)`: the number of species
         integer      :: n_massless = 0         !! how many of them have zero mass
+        integer      :: n_tab     = 0          !! nodes in the three forward tables
+        ! ---- the BUILD's own `nu_rel` table (R11) ----
+        !
+        ! Filled into the INTEGRAND's copy of this record and never into the object's, so that
+        ! every per-query path evaluates the Komatsu fit exactly and `E(z)` stays astropy's
+        ! formula rather than an interpolation of it. See `cosmology_e2`.
+        real(real64), allocatable :: nu_tab(:)   !! `nu_rel` at the build grid's nodes
+        real(real64), allocatable :: nu_slope(:) !! `dnu_rel/dzeta` there
+        real(real64) :: nu_zeta0  = 0.0_real64 !! the first node of that grid
+        real(real64) :: nu_zeta1  = 0.0_real64 !! the last one
+        integer      :: nu_n      = 0          !! how many nodes
+        logical      :: use_nu_tab = .false.   !! read the table instead of the fit
     end type cosmology_derived
 
     !> One of the three integrands, carrying the cosmology it is taken over.
@@ -313,11 +410,21 @@ module parquet_cosmology
         type(cosmology_params)  :: p                    !! the parameters as given
         type(cosmology_derived) :: d                    !! what `%init` derived from them
         character(len=:), allocatable :: label          !! the canonical name, or the caller's
-        type(pf_interp_1d) :: f                         !! `D_C(zeta) / zeta` against `zeta`
-        type(pf_interp_1d) :: g                         !! `t_L(zeta) / zeta` against `zeta`
-        type(pf_interp_1d) :: a                         !! `ln(age(zeta))` against `zeta`
+        ! The three FORWARD tables are quintic Hermite over the uniform grid: a value and an
+        ! analytic slope at every node, and no abscissae, because the nodes are the integer
+        ! lattice times `PFC_H` and the interval is found by one division. See `quintic_at`.
+        real(real64), allocatable :: fv(:)              !! `D_C(zeta)/zeta` at the nodes
+        real(real64), allocatable :: fd(:)              !! `d/dzeta` of it there
+        real(real64), allocatable :: gv(:)              !! `t_L(zeta)/zeta` at the nodes
+        real(real64), allocatable :: gd(:)              !! `d/dzeta` of it there
+        real(real64), allocatable :: av(:)              !! `ln(age(zeta))` at the nodes
+        real(real64), allocatable :: ad(:)              !! `d/dzeta` of it there
+        real(real64), allocatable :: xv(:)              !! `X(zeta)/zeta` at the nodes, `X` the
+                                                        !! absorption distance
+        real(real64), allocatable :: xd(:)              !! `d/dzeta` of it there
         type(pf_interp_1d) :: zd                        !! `zeta / D` against `D`: the distance inverse
         type(pf_interp_1d) :: zt                        !! `zeta / t` against `t`: the time inverse
+        type(pf_interp_1d) :: za                        !! `zeta` against `-ln(age)`: the age inverse
         logical :: flat         = .false.               !! `ok0 == 0` exactly, recorded
         logical :: massive_nu   = .false.               !! at least one species has a positive mass
         logical :: has_ob0      = .false.               !! the caller gave an `ob0`
@@ -327,12 +434,15 @@ module parquet_cosmology
         procedure, private :: init_params => cosmology_init_params !! `%init` in the parameter form.
         procedure, private :: init_named  => cosmology_init_named  !! `%init` in the named form.
         generic :: init => init_params, init_named      !! Builds the cosmology; see the two bodies.
+        procedure :: clone => cosmology_clone           !! A modified copy of this cosmology.
         procedure :: clear => cosmology_clear           !! Releases the tables; harmless on a fresh object.
         procedure :: comoving_distance => cosmology_comoving_distance !! `D_C` in Mpc.
         procedure :: comoving_distance_zeta => cosmology_comoving_distance_zeta !! `D_C` from `zeta`.
         procedure :: comoving_transverse_distance => cosmology_comoving_transverse !! `D_M` in Mpc.
         procedure :: luminosity_distance => cosmology_luminosity_distance !! `D_L` in Mpc.
         procedure :: angular_diameter_distance => cosmology_angular_diameter !! `D_A` in Mpc.
+        procedure :: comoving_distance_z1z2 => cosmology_comoving_distance_z1z2
+            !! `D_C` between two redshifts, in Mpc.
         procedure :: angular_diameter_distance_z1z2 => cosmology_angular_diameter_z1z2
                                                         !! `D_A` between two redshifts, in Mpc.
         procedure :: lookback_time => cosmology_lookback_time !! `t_L` in Gyr.
@@ -348,16 +458,26 @@ module parquet_cosmology
         procedure :: kpc_comoving_per_arcmin => cosmology_kpc_comoving !! Comoving kpc per arcminute.
         procedure :: arcsec_per_kpc_proper => cosmology_arcsec_proper !! Arcseconds per proper kpc.
         procedure :: arcsec_per_kpc_comoving => cosmology_arcsec_comoving !! Arcseconds per comoving kpc.
+        procedure :: scale_factor => cosmology_scale_factor !! `a(z) = 1/(1 + z)`.
         procedure :: om => cosmology_om                 !! `Om(z)`, the matter density parameter at `z`.
         procedure :: ode => cosmology_ode               !! `Ode(z)`, the dark-energy density parameter.
         procedure :: ok => cosmology_ok                 !! `Ok(z)`, the curvature density parameter.
         procedure :: ogamma => cosmology_ogamma         !! `Ogamma(z)`, the photon density parameter.
         procedure :: onu => cosmology_onu               !! `Onu(z)`, the neutrino density parameter.
+        procedure :: otot => cosmology_otot             !! `Otot(z) = 1 - Ok(z)`.
+        procedure :: ob => cosmology_ob                 !! `Ob(z)`, or NaN when no `ob0` was given.
+        procedure :: odm => cosmology_odm               !! `Odm(z)`, or NaN when no `ob0` was given.
+        procedure :: nu_relative_density => cosmology_nu_relative_density
+            !! The Komatsu fit itself: `Onu(z)/Ogamma(z)`.
+        procedure :: onu_species => cosmology_onu_species !! `Onu(z)` split by neutrino species.
         procedure :: tcmb => cosmology_tcmb             !! `T_CMB(z)` in K.
+        procedure :: tnu => cosmology_tnu               !! `T_nu(z) = T_nu0 (1 + z)` in K.
         procedure :: w => cosmology_w                   !! `w(z)`, the dark-energy equation of state.
         procedure :: de_density_scale => cosmology_de_density_scale !! `f_DE(z)`, the CPL factor.
         procedure :: critical_density => cosmology_critical_density !! `rho_crit(z)` in M_sun/Mpc^3.
         procedure :: lookback_distance => cosmology_lookback_distance !! `c t_L(z)` in Mpc.
+        procedure :: absorption_distance => cosmology_absorption_distance
+            !! The dimensionless absorption distance out to `z`.
         procedure :: z_at_comoving_distance => cosmology_z_at_distance !! The redshift at a `D_C`.
         procedure :: z_at_lookback_time => cosmology_z_at_lookback !! The redshift at a `t_L`.
         procedure :: z_at_age => cosmology_z_at_age     !! The redshift at which the universe was `t` old.
@@ -380,6 +500,8 @@ module parquet_cosmology
         procedure :: w0 => cosmology_w0                 !! `w0`.
         procedure :: wa => cosmology_wa                 !! `wa`.
         procedure :: zmax => cosmology_zmax             !! The `zmax` the CALLER asked for.
+        procedure :: zmin => cosmology_zmin             !! The `zmin` the CALLER asked for.
+        procedure :: zeta_floor => cosmology_zeta_floor !! The `zeta` where `E^2` reaches zero below 0.
         procedure :: is_flat => cosmology_is_flat       !! `Ok0` is exactly zero.
         procedure :: has_massive_nu => cosmology_has_massive_nu !! A species has a positive mass.
         procedure :: is_initialised => cosmology_is_initialised !! Built; never aborts.
@@ -394,6 +516,8 @@ module parquet_cosmology
     ! `pure` binding touches them and the thread rule above is unaffected. Under concurrent
     ! builds the counter is the last build's, which is what its doc-comment says.
 
+    logical, save :: pfc_exact_nu = .false.
+        !! TEST-ONLY: `%init` evaluates the Komatsu fit exactly instead of tabulating it.
     integer, save :: pfc_max_neval = 0
         !! The `max_neval` `%init` passes each interval integral; 0 leaves the engine's own budget.
     integer, save :: pfc_neval = 0
@@ -407,7 +531,7 @@ module parquet_cosmology
         !!
         !! ```
         !! call cosmo%init(h0, om0, [ode0], [tcmb0], [neff], [m_nu], [ob0], [w0], [wa], [name], &
-        !!                 [zmax], [context])
+        !!                 [zmax], [zmin], [context])
         !! ```
         !!
         !! Optional arguments are in square brackets. `ode0` ABSENT means flat, and sets `Ok0 = 0`
@@ -416,12 +540,13 @@ module parquet_cosmology
         !! defaults to `3.04`, and `m_nu` must carry `floor(neff)` masses when it is given. `name`
         !! is a free-text label the object carries for `%get_name` and `%describe`, default
         !! `"custom"`: it is NOT checked against the eight named cosmologies, so a caller may label
-        !! a model anything. `zmax` sets the table's top, default `1100`; nothing above it is lost,
-        !! only slower. `context` is appended to any abort message.
+        !! a model anything. `zmax` sets the table's top, default `1100`, and `zmin` its bottom,
+        !! default `-0.9` and admitted in `(-1, 0]`; nothing outside either is lost, only slower.
+        !! `context` is appended to any abort message.
         !!
         !! A second `%init` on a built object replaces it entirely.
         module subroutine cosmology_init_params(this, h0, om0, ode0, tcmb0, neff, m_nu, ob0, w0, &
-                                                wa, name, zmax, context)
+                                                wa, name, zmax, zmin, context)
             class(pf_cosmology), intent(out)       :: this    !! the cosmology to build
             real(real64),     intent(in)           :: h0      !! `H0` in km/s/Mpc, within `[1e-10, 1e10]`
             real(real64),     intent(in)           :: om0     !! `Om0`, finite and non-negative
@@ -434,25 +559,68 @@ module parquet_cosmology
             real(real64),     intent(in), optional :: wa      !! `wa` within `[-3, 3]`; default 0
             character(len=*), intent(in), optional :: name    !! a label for the object; default "custom"
             real(real64),     intent(in), optional :: zmax    !! the table's top; default 1100
+            real(real64),     intent(in), optional :: zmin    !! the table's bottom in `(-1, 0]`; default -0.9
             character(len=*), intent(in), optional :: context !! appended to any abort message
         end subroutine cosmology_init_params
 
         !> Builds one of the eight named cosmologies.
         !!
         !! ```
-        !! call cosmo%init(name, [zmax], [context])
+        !! call cosmo%init(name, [zmax], [zmin], [context])
         !! ```
         !!
         !! `name` is `Planck18`, `Planck15`, `Planck13`, `WMAP9`, `WMAP7`, `WMAP5`, `WMAP3` or
         !! `WMAP1`, matched without regard to case; `%get_name` returns the canonical spelling.
-        !! The parameters are astropy 8.0.1's realizations. `zmax` and `context` are as they are
-        !! for the parameter form.
-        module subroutine cosmology_init_named(this, name, zmax, context)
+        !! The parameters are astropy 8.0.1's realizations. `zmax`, `zmin` and `context` are as
+        !! they are for the parameter form.
+        module subroutine cosmology_init_named(this, name, zmax, zmin, context)
             class(pf_cosmology), intent(out)       :: this    !! the cosmology to build
             character(len=*), intent(in)           :: name    !! one of the eight named cosmologies
             real(real64),     intent(in), optional :: zmax    !! the table's top; default 1100
+            real(real64),     intent(in), optional :: zmin    !! the table's bottom in `(-1, 0]`; default -0.9
             character(len=*), intent(in), optional :: context !! appended to any abort message
         end subroutine cosmology_init_named
+
+        !> A modified copy of this cosmology: every parameter the caller does not name is taken
+        !! from this object, and the copy is built from scratch.
+        !!
+        !! ```
+        !! call source%clone(out, [h0], [om0], [ode0], [tcmb0], [neff], [m_nu], [ob0], [w0], &
+        !!                   [wa], [name], [zmax], [zmin], [context])
+        !! ```
+        !!
+        !! Optional arguments are in square brackets. `call base%clone(c, h0=70.0_real64)` is the
+        !! whole point: one line for "the same model with a different `H0`", where writing out
+        !! `%init` again means reading eleven parameters back out of the source and passing them.
+        !!
+        !! **"Flat by omission" survives the copy.** `ode0` is passed on only when the source was
+        !! built with one; a source that is flat because `ode0` was left out is cloned the same
+        !! way, so `%is_flat()` stays a bit test that cannot fail and the clone of a flat model is
+        !! flat whatever else changed. A flat source can be given a curvature by naming `ode0`
+        !! here; a curved one cannot be made flat by omission, only by naming the `ode0` that
+        !! makes it so.
+        !!
+        !! `neff` and `m_nu` travel together: `m_nu` must carry `floor(neff)` masses, so changing
+        !! `neff` across a species boundary without giving new masses is refused by `%init` with
+        !! its own message.
+        module subroutine cosmology_clone(this, out, h0, om0, ode0, tcmb0, neff, m_nu, ob0, w0, &
+                                          wa, name, zmax, zmin, context)
+            class(pf_cosmology), intent(in)        :: this    !! the cosmology to copy
+            type(pf_cosmology), intent(out)        :: out     !! the copy
+            real(real64),     intent(in), optional :: h0      !! a new `H0`
+            real(real64),     intent(in), optional :: om0     !! a new `Om0`
+            real(real64),     intent(in), optional :: ode0    !! a new `Ode0`; makes the copy curved
+            real(real64),     intent(in), optional :: tcmb0   !! a new `Tcmb0`
+            real(real64),     intent(in), optional :: neff    !! a new `Neff`
+            real(real64),     intent(in), optional :: m_nu(:) !! new species masses
+            real(real64),     intent(in), optional :: ob0     !! a new `Ob0`
+            real(real64),     intent(in), optional :: w0      !! a new `w0`
+            real(real64),     intent(in), optional :: wa      !! a new `wa`
+            character(len=*), intent(in), optional :: name    !! a new label
+            real(real64),     intent(in), optional :: zmax    !! a new table top
+            real(real64),     intent(in), optional :: zmin    !! a new table bottom
+            character(len=*), intent(in), optional :: context !! appended to any abort message
+        end subroutine cosmology_clone
 
         !> Releases the tables and returns the object to unbuilt. Harmless on a fresh object.
         module subroutine cosmology_clear(this)
@@ -494,6 +662,13 @@ module parquet_cosmology
         module subroutine parquet_debug_set_cosmology_max_neval(budget)
             integer, intent(in) :: budget !! evaluations per interval, or 0 for the engine's default
         end subroutine parquet_debug_set_cosmology_max_neval
+
+        !> Makes `%init` evaluate the Komatsu neutrino fit EXACTLY inside its quadrature instead of
+        !! reading the table it builds for it. TEST-ONLY: it exists so that one test can build the
+        !! same model both ways and compare, which is the only way to see what the table costs.
+        module subroutine parquet_debug_set_cosmology_exact_nu(exact)
+            logical, intent(in) :: exact !! evaluate the fit exactly in the build's quadrature
+        end subroutine parquet_debug_set_cosmology_exact_nu
 
         !> Integrand evaluations in the LAST `%init`, for `bench/benchmark_cosmology.f90`.
         !! Meaningless when several objects were built concurrently.
@@ -549,6 +724,22 @@ module parquet_cosmology
             real(real64), intent(in)        :: z    !! redshift
             real(real64)                    :: d    !! `D_A` in Mpc
         end function cosmology_angular_diameter
+
+        !> `D_C` between two redshifts, in Mpc: `D_C(z2) - D_C(z1)`, and NEGATIVE when `z2 < z1`.
+        !!
+        !! Not the same arithmetic at every separation. A CLOSE pair is integrated directly over
+        !! `[zeta1, zeta2]`, because differencing two tabulated distances loses the table's own
+        !! relative error scaled by how much of the distance the pair spans -- `2.5e-08` at a
+        !! separation of `1e-8` in `zeta`, which is what an angular diameter distance between two
+        !! galaxies in one group asks for. A distant pair is the difference of two table reads,
+        !! which has stopped losing anything there and costs two reads instead of a walk.
+        !! `PFC_PAIR_DIRECT` is the measured crossover.
+        pure elemental module function cosmology_comoving_distance_z1z2(this, z1, z2) result(d)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z1   !! the nearer redshift
+            real(real64), intent(in)        :: z2   !! the farther redshift
+            real(real64)                    :: d    !! `D_C(z2) - D_C(z1)` in Mpc
+        end function cosmology_comoving_distance_z1z2
 
         !> The angular diameter distance between two redshifts, in Mpc.
         !!
@@ -672,6 +863,16 @@ module parquet_cosmology
 
     interface
 
+        !> The scale factor at `z`: `a = 1/(1 + z)`, normalised to one today.
+        !!
+        !! NaN outside the domain, as every binding is; `a` is `1e-10` at the ceiling and about
+        !! `1e10` at the floor, and neither overflows.
+        pure elemental module function cosmology_scale_factor(this, z) result(a)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: a    !! `1/(1 + z)`
+        end function cosmology_scale_factor
+
         !> `Om(z) = Om0 (1+z)^3 / E(z)^2`, the matter density parameter at `z`.
         !!
         !! Massive neutrinos are NOT counted here; they are in `%onu`, as astropy counts them.
@@ -714,12 +915,73 @@ module parquet_cosmology
             real(real64)                    :: v    !! `Onu(z)`
         end function cosmology_onu
 
+        !> `Otot(z) = 1 - Ok(z)`, the total density parameter at `z`.
+        !!
+        !! EXACTLY one at every `z` for a flat model, because `%ok` is exactly zero there by
+        !! assignment rather than by subtraction. Formed as `1 - Ok` and never as the sum of the
+        !! five, which would carry their rounding.
+        pure elemental module function cosmology_otot(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Otot(z)`
+        end function cosmology_otot
+
+        !> `Ob(z) = Ob0 (1+z)^3 / E(z)^2`, the baryon density parameter at `z`.
+        !!
+        !! NaN at every `z` when no `ob0` was given, exactly as `%ob0()` is: a missing baryon
+        !! fraction is not a zero one. astropy 8 defaults `Ob0` to zero and answers a number.
+        pure elemental module function cosmology_ob(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Ob(z)`, or NaN
+        end function cosmology_ob
+
+        !> `Odm(z) = (Om0 - Ob0) (1+z)^3 / E(z)^2`, the cold-dark-matter density parameter.
+        !!
+        !! NaN at every `z` when no `ob0` was given, as `%odm0()` is.
+        pure elemental module function cosmology_odm(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `Odm(z)`, or NaN
+        end function cosmology_odm
+
+        !> Komatsu's fit itself: the neutrino density in units of the PHOTON density at `z`.
+        !!
+        !! astropy spells it `nu_relative_density`. `%onu(z)` is `%ogamma(z)` times this, and for
+        !! a massless species it is the constant `0.22710731766 Neff`. Zero when `Tcmb0` is zero.
+        pure elemental module function cosmology_nu_relative_density(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `nu_rel(z)`
+        end function cosmology_nu_relative_density
+
+        !> `Onu(z)` split by species: `floor(neff)` of them, summing to `%onu(z)`.
+        !!
+        !! A SUBROUTINE with an allocatable result, because an `elemental` function cannot return
+        !! `floor(neff)` values per element. `v` comes back with one entry per species, in the
+        !! order `%m_nu` reports the masses, and a model with `neff < 1` gets a zero-length array
+        !! rather than an unallocated one.
+        module subroutine cosmology_onu_species(this, z, v)
+            class(pf_cosmology), intent(in)        :: this !! the cosmology
+            real(real64), intent(in)               :: z    !! redshift
+            real(real64), allocatable, intent(out) :: v(:) !! `Onu` of each species at `z`
+        end subroutine cosmology_onu_species
+
         !> `T_CMB(z) = Tcmb0 (1+z)`, in K. Zero at every `z` when `Tcmb0` is zero.
         pure elemental module function cosmology_tcmb(this, z) result(v)
             class(pf_cosmology), intent(in) :: this !! the cosmology
             real(real64), intent(in)        :: z    !! redshift
             real(real64)                    :: v    !! `T_CMB(z)` in K
         end function cosmology_tcmb
+
+        !> `T_nu(z) = T_nu0 (1 + z)`, the neutrino temperature in K.
+        !!
+        !! Zero at every `z` when `Tcmb0` is zero, which is what switches neutrinos off entirely.
+        pure elemental module function cosmology_tnu(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `T_nu(z)` in K
+        end function cosmology_tnu
 
         !> `w(z) = w0 + wa z / (1 + z)`, the dark-energy equation of state. Exactly `w0` at `z = 0`.
         !!
@@ -765,6 +1027,22 @@ module parquet_cosmology
             real(real64), intent(in)        :: z    !! redshift
             real(real64)                    :: v    !! `c t_L` in Mpc
         end function cosmology_lookback_distance
+
+        !> The absorption distance out to `z`, dimensionless. astropy's `absorption_distance`.
+        !!
+        !! `X(z) = INT_0^z (1+z')^2 / E(z') dz'`, the path length a fixed comoving cross-section
+        !! sweeps, which is what an absorber count per unit redshift is normalised by. In the
+        !! table's own coordinate it is `INT e^(3 zeta)/E dzeta`, and it is a FOURTH tabulated
+        !! integral: it is not a combination of the other three.
+        !!
+        !! Negative at a blueshift, as the other cumulative quantities are. It grows very fast --
+        !! `e^(3 zeta)` is `1e30` at the domain's ceiling -- which is the quantity behaving, not
+        !! an overflow.
+        pure elemental module function cosmology_absorption_distance(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `X(z)`, dimensionless
+        end function cosmology_absorption_distance
 
     end interface
 
@@ -947,6 +1225,31 @@ module parquet_cosmology
             real(real64)                    :: v    !! the requested `zmax`
         end function cosmology_zmax
 
+        !> The `zmin` the CALLER asked for.
+        !!
+        !! Not the table's own bottom, which is rounded DOWN to a node and clamped by
+        !! `%zeta_floor()` where the model itself ends, and NOT a refusal boundary: every redshift
+        !! in the domain is answered either way, by the panel walk where the table does not reach.
+        pure module function cosmology_zmin(this) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64)                    :: v    !! the requested `zmin`
+        end function cosmology_zmin
+
+        !> The `zeta` at which this model's `E^2` reaches zero below `z = 0`, or
+        !! `-PFC_ZETA_CEILING` (about `z = -0.9999999999`) when it stays positive all the way down.
+        !!
+        !! The BOTTOM OF THE DOMAIN, in the table's own coordinate: every binding answers NaN at
+        !! and below it, and every inverse answers NaN for any value beyond what it reaches. A
+        !! recollapsing closed universe (`om0 = 1.5, ode0 = 0`) has it at `ln(1/3)`, and any
+        !! negative `ode0` puts it wherever the matter and curvature terms fall to `|ode0|`.
+        !!
+        !! The COMPANION of `%zmin()`: `%zmin()` is the floor the caller asked to tabulate to,
+        !! this is the floor the model itself allows, and the table stops at whichever is higher.
+        pure module function cosmology_zeta_floor(this) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64)                    :: v    !! the floor, in `zeta`
+        end function cosmology_zeta_floor
+
         !> `Ok0` is exactly zero, which happens when `ode0` was omitted.
         pure module function cosmology_is_flat(this) result(ok)
             class(pf_cosmology), intent(in) :: this !! the cosmology
@@ -976,6 +1279,77 @@ module parquet_cosmology
     ! `parquet_core.f90` pattern for a cross-subtree private helper.
 
     interface
+
+        !> `dE^2/dzeta`, the analytic derivative of the kernel, at `zeta`.
+        !!
+        !! Every term of `E^2` is a power of `x = e^zeta` times a constant or a factor whose
+        !! logarithmic derivative is itself closed form, and `dx/dzeta = x`, so this is arithmetic
+        !! on the same quantities `cosmology_e2` forms -- no second evaluation of anything
+        !! transcendental, and no difference of two nearly equal numbers.
+        !!
+        !! * matter and curvature: `3 Om0 x^3` and `2 Ok0 x^2`;
+        !! * dark energy: `Ode0 f_DE * 3(1 + w(z))`, since `dln f_DE/dzeta = 3(1 + w)`;
+        !! * radiation: `Ogamma0 x^4 [4(1 + nu_rel) + dnu_rel/dzeta]`, with the Komatsu fit's own
+        !!   derivative `dnu_rel/dzeta = A (Neff/N) SUM -u (1 + u)^(1/P - 1)` over the massive
+        !!   species, `u = (C y / x)^P`.
+        !!
+        !! `+Infinity` where `E^2` itself has overflowed, and a quiet NaN for a NaN argument: the
+        !! one caller is `%init`, which asks at `zeta = 0` where neither can happen for an
+        !! admitted model, so the screens are there to keep the function total rather than to
+        !! serve a path.
+        pure module function cosmology_de2_dzeta(p, d, zeta) result(v)
+            type(cosmology_params), intent(in)  :: p    !! the parameters
+            type(cosmology_derived), intent(in) :: d    !! the derived values
+            real(real64), intent(in)            :: zeta !! `ln(1 + z)`
+            real(real64)                        :: v    !! `dE^2/dzeta` there
+        end function cosmology_de2_dzeta
+
+        !> `dnu_rel/dzeta`, the Komatsu fit's own derivative at `x = 1 + z`.
+        !!
+        !! `nu_rel` sums `(1 + u)^(1/P)` over the massive species with `u = (C y / x)^P`, and
+        !! `du/dzeta = -P u` because `u` is a fixed power of `x` and `dx/dzeta = x`; each term
+        !! therefore differentiates to `-u (1 + u)^(1/P - 1)`. Zero for a model with no massive
+        !! species and for one with no CMB, where the fit is a constant.
+        pure module function cosmology_dnu_rel(p, d, x) result(v)
+            type(cosmology_params), intent(in)  :: p !! the parameters
+            type(cosmology_derived), intent(in) :: d !! the derived values
+            real(real64), intent(in)            :: x !! `1 + z`
+            real(real64)                        :: v !! `dnu_rel/dzeta` there
+        end function cosmology_dnu_rel
+
+        !> `E^2` from `x = 1 + z` rather than from `zeta`: the kernel the CLOSED FORMS use.
+        !!
+        !! The same sum `cosmology_e2` forms, with the logarithm taken ONLY on the CPL branch,
+        !! where `f_DE`'s exponent needs it. For a cosmological constant -- every named cosmology
+        !! and every model that does not set `w0` or `wa` -- no logarithm is taken at all.
+        !!
+        !! **A separate module procedure and not a contained one**, so that the thirteen bindings
+        !! over it reach ONE compiled copy rather than thirteen inlined ones optimised apart. At a
+        !! deep blueshift of a CPL model the exponent is of order a few hundred, so its absolute
+        !! rounding is `1e-14` of itself and two copies that group its terms differently answer
+        !! `E^2` values `1e-14` apart -- enough to break the identity that the five density
+        !! parameters sum to one, which ifx showed and gfortran did not.
+        pure module function cosmology_e2_x(p, d, x) result(v)
+            type(cosmology_params), intent(in)  :: p !! the parameters
+            type(cosmology_derived), intent(in) :: d !! the derived values
+            real(real64), intent(in)            :: x !! `1 + z`, known inside the domain
+            real(real64)                        :: v !! `E^2` there
+        end function cosmology_e2_x
+
+        !> `E^2` from `x`, WITH the two terms a caller may want to divide by it.
+        !!
+        !! `%ode` and `%onu` are ratios whose numerator is one of `E^2`'s own terms, and the
+        !! identity they keep -- that the five density parameters sum to one -- needs the numerator
+        !! to be the SAME double the denominator was built from. Evaluating the term twice is what
+        !! breaks it: see `cosmology_e2_x`.
+        pure module subroutine cosmology_e2_split(p, d, x, de, nu, v)
+            type(cosmology_params), intent(in)  :: p  !! the parameters
+            type(cosmology_derived), intent(in) :: d  !! the derived values
+            real(real64), intent(in)            :: x  !! `1 + z`, known inside the domain
+            real(real64), intent(out)           :: de !! `Ode0 f_DE` there
+            real(real64), intent(out)           :: nu !! `nu_rel` there
+            real(real64), intent(out)           :: v  !! `E^2` there
+        end subroutine cosmology_e2_split
 
         !> `E(zeta)^2`, the pure kernel. Screened: `+Infinity` where the CPL factor has overflowed,
         !! and a quiet NaN where the sum is not positive, without taking a square root.

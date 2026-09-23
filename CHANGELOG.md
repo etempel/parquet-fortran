@@ -176,18 +176,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `%angular_diameter_distance`, `%angular_diameter_distance_z1z2`, `%lookback_time`, `%age`,
   `%efunc`, `%inv_efunc`, `%hubble`, `%distmod`, `%comoving_volume`,
   `%differential_comoving_volume`, `%kpc_proper_per_arcmin`, `%kpc_comoving_per_arcmin`,
-  `%arcsec_per_kpc_proper`, `%arcsec_per_kpc_comoving`, `%lookback_distance`, the contents of the
+  `%arcsec_per_kpc_proper`, `%arcsec_per_kpc_comoving`, `%lookback_distance`,
+  `%absorption_distance`, `%comoving_distance_z1z2`, `%scale_factor`, the contents of the
   universe at a redshift — `%om`, `%ode`, `%ok`, `%ogamma`, `%onu`, which sum to one, with
-  `%tcmb`, `%w`, `%de_density_scale` and `%critical_density` in M_sun/Mpc^3 — and the inverses
+  `%otot`, `%ob`, `%odm`, `%nu_relative_density`, `%onu_species`, `%tcmb`, `%tnu`, `%w`,
+  `%de_density_scale` and `%critical_density` in M_sun/Mpc^3 — and the inverses
   `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`, `%z_at_luminosity_distance` and
   `%z_at_distmod`; plus the model's own parameters and derived values, `%is_flat`,
-  `%has_massive_nu`, `%get_name`, `%describe`, `%m_nu` and `%clear`.
-  `%init` tabulates three integrals over a grid in `zeta = ln(1+z)`; a query beyond the table is
-  answered by a fixed 20-point Gauss-Legendre rule from its edge, so **no redshift is refused and
-  `zmax=` decides only how fast**. The age has its own table rather than being `age(0)` minus the
-  lookback time, which would keep no correct digit at high redshift. The domain runs from just
-  above `z = -1` to `z = 1e10`; outside it, and for a NaN, every binding answers NaN quietly
-  without raising an IEEE flag, so a catalogue's `-99` sentinels pass through an elemental call.
+  `%has_massive_nu`, `%get_name`, `%describe`, `%m_nu`, `%clone` and `%clear`.
+  `%init` tabulates four integrals over a uniform grid in `zeta = ln(1+z)` running from `zmin=`
+  (default `-0.9`) to `zmax=` (default 1100) with a node at `zeta = 0`, read back by a quintic
+  Hermite over a value and an analytic slope at every node; a query beyond either end is
+  answered by a fixed 20-point Gauss-Legendre rule from that end, so **no redshift is refused and
+  `zmax=` and `zmin=` decide only how fast**. The age has its own table rather than being `age(0)`
+  minus the lookback time, which would keep no correct digit at high redshift. The domain runs
+  from just above `z = -1` to `z = 1e10`; outside it, and for a NaN, every binding answers NaN
+  quietly without raising an IEEE flag, so a catalogue's `-99` sentinels pass through an elemental
+  call. A model whose `E(z)^2` reaches zero at a finite blueshift is built rather than refused,
+  answers NaN below that point, reports it through `%zeta_floor()`, and has inverses that refuse
+  an argument it never reaches.
   `%distmod(0)` is `-Infinity`, `%arcsec_per_kpc_*(0)` is `+Infinity`, and a model whose age
   integral diverges answers `+Infinity` at every redshift. `%z_at_age` solves on `ln(age)` rather
   than on `age(0)` minus a lookback time, and `%z_at_luminosity_distance` and `%z_at_distmod`

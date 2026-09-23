@@ -156,7 +156,11 @@ contains
         call timed_column(c, n, 1.0e-4_real64, 1.0e3_real64, "inside the table")
         call timed_column(c, n, 2.0e3_real64, 1.0e5_real64, "one panel beyond")
         call timed_column(c, n, 1.0e9_real64, 1.0e10_real64, "sixteen panels beyond")
-        call timed_column(c, n, -0.99_real64, -0.5_real64, "a blueshift")
+        ! The blueshift half is tabulated down to `zmin`, default -0.9: the first of these rows is
+        ! a table read and the second is the panel walk below it, which is the pair the default
+        ! was chosen from.
+        call timed_column(c, n, -0.8_real64, -1.0e-3_real64, "a blueshift, tabulated")
+        call timed_column(c, n, -0.999_real64, -0.95_real64, "a blueshift, below the table")
 
     end subroutine run_eval
 
@@ -213,7 +217,7 @@ contains
         allocate (out(n))
         write (output_unit, '(a)') "# Each binding over the same column of n redshifts, inside the table."
         write (output_unit, '(a28,a16)') "binding", "ns_per_query"
-        do k = 1, 8
+        do k = 1, 12
             laps = 0
             elapsed = 0.0_real64
             t0 = watch_seconds()
@@ -243,6 +247,18 @@ contains
                 case (8)
                     label = "pf_z2zeta"
                     out = pf_z2zeta(z)
+                case (9)
+                    label = "%absorption_distance"
+                    out = c%absorption_distance(z)
+                case (10)
+                    label = "%comoving_distance_z1z2"
+                    out = c%comoving_distance_z1z2(0.5_real64 * z, z)
+                case (11)
+                    label = "%otot"
+                    out = c%otot(z)
+                case (12)
+                    label = "%nu_relative_density"
+                    out = c%nu_relative_density(z)
                 end select
                 laps = laps + 1
                 elapsed = watch_seconds() - t0
@@ -297,6 +313,53 @@ contains
         end do
         t1 = watch_seconds()
         write (output_unit, '(a28,f16.2)') "%z_at_lookback_time", &
+            1.0e9_real64 * (t1 - t0) / real(laps, real64) / real(n, real64)
+        write (output_unit, '(a,es12.4)') "# worst relative round trip in z: ", &
+            maxval(abs(back - z) / z)
+
+        ! The three that had no inverse table of their own: the age now has one, and the two
+        ! luminosity inverses bracket from the distance table rather than from the whole domain.
+        d = c%age(z)
+        laps = 0
+        elapsed = 0.0_real64
+        t0 = watch_seconds()
+        do while (elapsed < MIN_LAP)
+            back = c%z_at_age(d)
+            laps = laps + 1
+            elapsed = watch_seconds() - t0
+        end do
+        t1 = watch_seconds()
+        write (output_unit, '(a28,f16.2)') "%z_at_age", &
+            1.0e9_real64 * (t1 - t0) / real(laps, real64) / real(n, real64)
+        write (output_unit, '(a,es12.4)') "# worst relative round trip in z: ", &
+            maxval(abs(back - z) / z)
+
+        d = c%luminosity_distance(z)
+        laps = 0
+        elapsed = 0.0_real64
+        t0 = watch_seconds()
+        do while (elapsed < MIN_LAP)
+            back = c%z_at_luminosity_distance(d)
+            laps = laps + 1
+            elapsed = watch_seconds() - t0
+        end do
+        t1 = watch_seconds()
+        write (output_unit, '(a28,f16.2)') "%z_at_luminosity_distance", &
+            1.0e9_real64 * (t1 - t0) / real(laps, real64) / real(n, real64)
+        write (output_unit, '(a,es12.4)') "# worst relative round trip in z: ", &
+            maxval(abs(back - z) / z)
+
+        d = c%distmod(z)
+        laps = 0
+        elapsed = 0.0_real64
+        t0 = watch_seconds()
+        do while (elapsed < MIN_LAP)
+            back = c%z_at_distmod(d)
+            laps = laps + 1
+            elapsed = watch_seconds() - t0
+        end do
+        t1 = watch_seconds()
+        write (output_unit, '(a28,f16.2)') "%z_at_distmod", &
             1.0e9_real64 * (t1 - t0) / real(laps, real64) / real(n, real64)
         write (output_unit, '(a,es12.4)') "# worst relative round trip in z: ", &
             maxval(abs(back - z) / z)

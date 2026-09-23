@@ -8,11 +8,12 @@
 !! about a part in a thousand, which no self-consistency check would notice.
 !!
 !! **The tolerances are the TABLE's accuracy, and they are measured rather than chosen.** Inside
-!! the table a scaled not-a-knot spline over a grid of `h = 0.008` in `zeta` carries about `4e-11`
-!! on the distance and `1.4e-10` on the lookback time; beyond it the fixed 20-point rule is exact
-!! to rounding but starts from the tabulated edge value, so it INHERITS that error rather than
-!! improving on it. The age past the table is the one quantity that starts from nothing tabulated,
-!! and it is the one asserted tightly.
+!! the table a scaled quintic Hermite over a grid of `h = 0.008` in `zeta` -- a value and an
+!! analytic slope at every node -- carries a few parts in `1e-15` over the whole of `z` in
+!! `[1e-8, 100]`; beyond it the fixed 20-point rule is exact to rounding but starts from the
+!! tabulated edge value, so it INHERITS that error rather than improving on it. The age past the
+!! table is the one quantity that starts from nothing tabulated, and it is the one asserted
+!! tightly.
 !!
 !! **Three tests exist because a plausible implementation passes without them.** A single-form
 !! `pf_z2zeta` is right at small `z` and `3.6e-9` wrong at `z = 1e10`, so
@@ -44,11 +45,21 @@ module test_cosmology
 
     !> What a quantity read out of the table may differ from the 30-digit model by.
     !!
-    !! Measured, not chosen: the worst over all 20 models, all 25 redshifts and all 15 quantities
-    !! is about `4e-10`, on the volume of a curved model, where the distance's own error is cubed.
-    real(real64), parameter :: TABLE_TOL = 5.0e-9_real64
+    !! Measured, not chosen, and set at ten times the worst: over all 22 models, all 25 redshifts
+    !! and all 25 quantities the worst residual is `6.5e-14` under gfortran and `8.0e-14` under
+    !! ifx, both on the comoving volume of a curved model, where the distance's own error is
+    !! cubed. The two largest contributors are not the interpolant: the first interval above
+    !! `z = 0` of a model whose blueshift half is NOT tabulated (its domain ends before the floor
+    !! the caller asked for), where the quintic's stencil is one-sided, and the closed forms at
+    !! `z = -0.99`, where `1 + z` carries two decimal digits fewer than `z` does.
+    real(real64), parameter :: TABLE_TOL = 1.0e-12_real64
     !> What the age past the table may differ by: it starts from nothing tabulated.
-    real(real64), parameter :: AGE_TAIL_TOL = 1.0e-11_real64
+    !!
+    !! Measured at ten times the worst, as `TABLE_TOL` is: `3.26e-15` under gfortran and `3.26e-15`
+    !! under ifx, both at `z = 1e10`, where the age is `1e-17 Gyr` beside an `age(0)` of about ten
+    !! -- which is exactly why this is asserted on its own rather than folded into the table's
+    !! tolerance.
+    real(real64), parameter :: AGE_TAIL_TOL = 4.0e-14_real64
     !> What a round trip through an inverse may lose, in the DISTANCE.
     real(real64), parameter :: INVERSE_TOL = 1.0e-13_real64
     !> What a round trip through an inverse may lose at a BLUESHIFT, where the loss is the
@@ -98,6 +109,10 @@ contains
                          test_zmax_moves_the_seam_not_the_answer), &
             new_unittest("the seam at the table's edge is continuous", &
                          test_seam_is_continuous), &
+            new_unittest("zmin moves the bottom seam and not the answer, with a node at zeta = 0", &
+                         test_zmin_moves_the_seam_not_the_answer), &
+            new_unittest("the seam at the table's bottom edge is continuous", &
+                         test_bottom_seam_is_continuous), &
             new_unittest("pf_z2zeta is within two ulp over the whole range, not just small z", &
                          test_z2zeta_is_two_ulp_over_the_whole_range), &
             new_unittest("the small-redshift conversions beat log(1+z) and exp(zeta)-1", &
@@ -136,6 +151,22 @@ contains
                          test_every_binding_raises_no_flag_over_the_domain), &
             new_unittest("a big-rip and a negative-ode0 model raise no flag either", &
                          test_extreme_models_raise_no_flag), &
+            new_unittest("the blueshift floor is the root of the model's own E squared", &
+                         test_zeta_floor_is_the_root_of_e2), &
+            new_unittest("a model whose domain ends early inverts to the oracle, or to NaN", &
+                         test_truncated_domain_inverses_match_the_oracle), &
+            new_unittest("the tight luminosity bracket answers what the whole-domain one does", &
+                         test_luminosity_bracket_is_an_identity), &
+            new_unittest("the closed forms and the table share one domain", &
+                         test_closed_forms_share_the_table_domain), &
+            new_unittest("the build's tabulated neutrino fit changes no answer", &
+                         test_tabulated_neutrino_fit_changes_no_answer), &
+            new_unittest("the neutrino species sum to Onu, and Otot is exactly one when flat", &
+                         test_species_split_and_otot), &
+            new_unittest("clone copies what it is not given, and keeps flat models flat", &
+                         test_clone_copies_and_overrides), &
+            new_unittest("ten models by every binding by twenty-three edge inputs raise no flag", &
+                         test_every_binding_and_model_raises_no_flag), &
             new_unittest("every admitted boundary value is accepted", &
                          test_init_validation_negative_controls), &
             new_unittest("describe is the documented line, field for field", &
@@ -260,6 +291,23 @@ contains
 
     end function agrees
 
+    !> The relative gap between two answers, with NaN and the infinities counted as agreeing.
+    pure function gap(a, b) result(r)
+        real(real64), intent(in) :: a !! one answer
+        real(real64), intent(in) :: b !! the other
+        real(real64)             :: r !! the relative difference, or zero where neither is finite
+
+        r = 0.0_real64
+        if (a /= a .or. b /= b) return
+        if (.not. ieee_is_finite(a) .or. .not. ieee_is_finite(b)) return
+        if (b == 0.0_real64) then
+            r = abs(a)
+        else
+            r = abs(a - b) / abs(b)
+        end if
+
+    end function gap
+
     !> Every stage-1 quantity of `c` at redshift `z`, in the reference's own order.
     function answers(c, z) result(v)
         type(pf_cosmology), intent(in) :: c              !! the cosmology
@@ -291,6 +339,13 @@ contains
         v(cq_de_density_scale) = c%de_density_scale(z)
         v(cq_critical_density) = c%critical_density(z)
         v(cq_lookback_distance) = c%lookback_distance(z)
+        v(cq_scale_factor) = c%scale_factor(z)
+        v(cq_otot) = c%otot(z)
+        v(cq_ob) = c%ob(z)
+        v(cq_odm) = c%odm(z)
+        v(cq_tnu) = c%tnu(z)
+        v(cq_absorption_distance) = c%absorption_distance(z)
+        v(cq_nu_relative_density) = c%nu_relative_density(z)
 
     end function answers
 
@@ -544,6 +599,163 @@ contains
     ! =========================================================================================
     ! The redshift conversions
     ! =========================================================================================
+
+    !> `zmin` moves the table's bottom and not the answer, and `zeta = 0` is a node of the grid.
+    !!
+    !! **The node is asserted, not the comment.** The grid is the integer lattice times the
+    !! spacing, so `zeta = 0` is a node and the scaled distance stored there is the closed-form
+    !! limit `F(0) = D_H` exactly. Evaluate the table a decimal decade beyond where any cubic term
+    !! can matter -- `zeta = 1e-300` -- and the interpolant returns that stored value untouched,
+    !! so `D_C(zeta)/zeta` is `D_H` to the BIT. A grid laid from `zmin` to `zmax` without passing
+    !! through the origin puts that evaluation inside an interval whose left node is elsewhere,
+    !! and the ratio comes back a few ulp away.
+    !!
+    !! The rest is the mirror of `zmax_moves_the_seam_not_the_answer`: three objects with floors
+    !! two decades apart must answer the same blueshift the same way, one of them (`zmin = 0`)
+    !! tabulating no blueshift at all and reaching every one of them by the panel walk the table
+    !! replaces.
+    subroutine test_zmin_moves_the_seam_not_the_answer(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: walked, shallow, deep
+        real(real64)       :: zeta, z, got(n_cquantity), want(n_cquantity), ratio
+        integer            :: k, q, bad_k, bad_q
+        character(len=:), allocatable :: tag, tag2
+
+        call walked%init("Planck18", zmin = 0.0_real64)
+        call shallow%init("Planck18", zmin = -0.5_real64)
+        call deep%init("Planck18")
+
+        call check(error, deep%zmin() == -0.9_real64, "zmin() defaults to -0.9")
+        if (allocated(error)) return
+        call check(error, shallow%zmin() == -0.5_real64, "zmin() answers what the caller asked for")
+        if (allocated(error)) return
+
+        ! The node at the origin: the stored limit comes back untouched.
+        ! Compared as a PRODUCT rather than as a quotient: `D_C` is `zeta` times what the
+        ! interpolant returned, so the claim is that the interpolant returned `D_H`, and the same
+        ! multiplication on both sides tests exactly that. Dividing instead adds a rounding of its
+        ! own, which ifx and gfortran do not make the same way.
+        ratio = deep%comoving_distance_zeta(1.0e-300_real64)
+        call check(error, ratio == 1.0e-300_real64 * deep%hubble_distance(), &
+                   "zeta = 0 must be a node, so D_C beside it is exactly zeta times D_H")
+        if (allocated(error)) return
+        call check(error, deep%comoving_distance_zeta(0.0_real64) == 0.0_real64, &
+                   "and D_C at the node itself is exactly zero")
+        if (allocated(error)) return
+        call check(error, walked%comoving_distance_zeta(1.0e-300_real64) &
+                   == 1.0e-300_real64 * walked%hubble_distance(), &
+                   "the origin is a node whether or not the blueshift half is tabulated")
+        if (allocated(error)) return
+
+        ! Every quantity, over the blueshift half the three objects cover differently.
+        bad_k = 0
+        bad_q = 0
+        do k = 1, 25
+            zeta = -0.1_real64 * real(k, real64)
+            z = pf_zeta2z(zeta)
+            want = answers(walked, z)
+            got = answers(deep, z)
+            do q = 1, n_cquantity
+                if (.not. agrees(got(q), want(q), TABLE_TOL)) then
+                    bad_k = k
+                    bad_q = q
+                end if
+            end do
+            if (zeta > -0.4_real64) then
+                got = answers(shallow, z)
+                do q = 1, n_cquantity
+                    if (.not. agrees(got(q), want(q), TABLE_TOL)) then
+                        bad_k = k
+                        bad_q = q
+                    end if
+                end do
+            end if
+        end do
+        call itoa(bad_k, tag)
+        call itoa(bad_q, tag2)
+        call check(error, bad_k == 0, "zmin must move the seam and not the answer; sweep index " // &
+                   tag // ", quantity " // tag2)
+        if (allocated(error)) return
+
+        ! **A zmin at the very bottom of the domain, for models whose tables saturate there.**
+        ! An inverse table goes only as far as its abscissae strictly increase, and a big rip's
+        ! `e^zeta/E` falls away faster than any power as `z -> -1`, so its lowest distance nodes
+        ! carry the same double. The table is truncated where that starts; before it was, `%init`
+        ! aborted for a model that is perfectly well defined.
+        call deep%init("Planck18", zmin = -0.9999999999_real64)
+        call check(error, deep%is_initialised(), "a zmin at the domain's floor must build")
+        if (allocated(error)) return
+        call check(error, agrees(deep%comoving_distance(-0.99_real64), &
+                                 walked%comoving_distance(-0.99_real64), TABLE_TOL), &
+                   "and answer what the panel walk answers")
+        if (allocated(error)) return
+        call deep%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = -1.0_real64, wa = 3.0_real64, &
+                       zmin = -0.9999999999_real64)
+        call check(error, deep%is_initialised(), "a big-rip model with that zmin must build too")
+        if (allocated(error)) return
+        call walked%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = -1.0_real64, wa = 3.0_real64, &
+                         zmin = 0.0_real64)
+        call check(error, agrees(deep%comoving_distance(-0.99_real64), &
+                                 walked%comoving_distance(-0.99_real64), TABLE_TOL), &
+                   "and answer what its own panel walk answers")
+        if (allocated(error)) return
+        ! That model's comoving distance SATURATES below about `z = -0.9`: the dark-energy
+        ! density diverges towards `z = -1`, so `e^zeta/E` falls away faster than any power and
+        ! every redshift down there is the same distance to the last bit. The inverse answers NaN
+        ! rather than picking one of them, which is the honest answer and the reason the table is
+        ! truncated where it is.
+        call check(error, agrees(deep%comoving_distance(-0.999_real64), &
+                                 deep%comoving_distance(-0.99_real64), 1.0e-14_real64), &
+                   "the big rip's comoving distance really has saturated there")
+        if (allocated(error)) return
+        ! Planck18's has not, so the round trip still works at the same depth.
+        call deep%init("Planck18", zmin = -0.9999999999_real64)
+        call check(error, agrees(deep%z_at_comoving_distance( &
+                                     deep%comoving_distance(-0.999999_real64)), &
+                                 -0.999999_real64, 1.0e-9_real64), &
+                   "a deep zmin must still invert where the distance is determined")
+
+    end subroutine test_zmin_moves_the_seam_not_the_answer
+
+    !> The BOTTOM seam, where the table hands over to the downward panel walk.
+    !!
+    !! The fallback starts from the tabulated bottom value, exactly as the upward one starts from
+    !! the tabulated top, so neither seam can step. **Asserted as a SECOND difference**, not as a
+    !! difference: the quantity is changing across the seam at its own slope, and a first
+    !! difference over a span wide enough to straddle the seam is dominated by that slope rather
+    !! than by anything the seam does. `f(x+h) + f(x-h) - 2 f(x)` cancels the slope, so what is
+    !! left is the step itself plus a curvature term of order `f'' h^2`, which at `h = 1e-9` is
+    !! nothing.
+    subroutine test_bottom_seam_is_continuous(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zeta_m, lo, mid, hi, h
+
+        call c%init("Planck18", zmin = -0.9_real64)
+        ! The table's bottom is the first multiple of the spacing at or below ln(1 + zmin).
+        zeta_m = -ceiling(-log(0.1_real64) / 0.008_real64) * 0.008_real64
+        h = 1.0e-9_real64
+        lo = c%comoving_distance_zeta(zeta_m - h)
+        mid = c%comoving_distance_zeta(zeta_m)
+        hi = c%comoving_distance_zeta(zeta_m + h)
+        call check(error, abs(hi + lo - 2.0_real64 * mid) <= 3.0e-14_real64 * abs(mid), &
+                   "D_C steps at the bottom seam")
+        if (allocated(error)) return
+        lo = c%lookback_time(pf_zeta2z(zeta_m - h))
+        mid = c%lookback_time(pf_zeta2z(zeta_m))
+        hi = c%lookback_time(pf_zeta2z(zeta_m + h))
+        call check(error, abs(hi + lo - 2.0_real64 * mid) <= 3.0e-14_real64 * abs(mid), &
+                   "t_L steps at the bottom seam")
+        if (allocated(error)) return
+        lo = c%age(pf_zeta2z(zeta_m - h))
+        mid = c%age(pf_zeta2z(zeta_m))
+        hi = c%age(pf_zeta2z(zeta_m + h))
+        call check(error, abs(hi + lo - 2.0_real64 * mid) <= 3.0e-14_real64 * abs(mid), &
+                   "the age steps at the bottom seam")
+
+    end subroutine test_bottom_seam_is_continuous
 
     !> `pf_z2zeta` over the WHOLE range, which is the point.
     !!
@@ -1046,7 +1258,12 @@ contains
 
     end subroutine test_derived_quantities_are_closed_forms_over_dm
 
-    !> `D_A(z1, z2)` against the reference pairs, including the reversed one.
+    !> `D_A(z1, z2)` and `D_C(z1, z2)` against the reference pairs, the reversed and the close
+    !! ones included.
+    !!
+    !! The close pairs are what `%comoving_distance_z1z2` exists for: at a separation of `1e-4` in
+    !! redshift, differencing two tabulated distances keeps only the digits the pair's own span
+    !! leaves, which is about eight of the sixteen.
     subroutine test_angular_diameter_distance_z1z2_matches_the_pairs(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
@@ -1069,7 +1286,19 @@ contains
             call check(error, agrees(got, rv(cpair_da_bits(k)), TABLE_TOL), &
                        "D_A(z1, z2) at pair " // tag)
             if (allocated(error)) return
+            got = c%comoving_distance_z1z2(z1, z2)
+            call check(error, agrees(got, rv(cpair_dc_bits(k)), TABLE_TOL), &
+                       "D_C(z1, z2) at pair " // tag)
+            if (allocated(error)) return
+            call check(error, agrees(got, c%comoving_distance(z2) - c%comoving_distance(z1), &
+                                     1.0e-6_real64), &
+                       "D_C(z1, z2) must be the difference it replaces, at pair " // tag)
+            if (allocated(error)) return
             if (z1 == z2) then
+                call check(error, got == 0.0_real64, &
+                           "D_C(z, z) must be exactly zero")
+                if (allocated(error)) return
+                got = c%angular_diameter_distance_z1z2(z1, z2)
                 call check(error, got == 0.0_real64, "D_A(z, z) must be exactly zero")
                 if (allocated(error)) return
             end if
@@ -1333,17 +1562,26 @@ contains
 
     end subroutine test_every_binding_raises_no_flag_over_the_domain
 
-    !> A big-rip model and a negative-`ode0` one: the two screens of section 4.8.
+    !> A big-rip model, a negative-`ode0` one and a recollapsing closed one: the two screens of
+    !! section 4.8, and the five INVERSES on each.
+    !!
+    !! The inverses are what makes this test the one that sees a NaN stored in a screen bound. A
+    !! model whose `E^2` turns negative below `z = 0` has no comoving distance, lookback time or
+    !! age down there, and an inverse that screened its argument against a NaN bound raised
+    !! `IEEE_INVALID` on every call -- fatal under nagfor's default `-ieee=stop` -- and then let
+    !! the argument through to a solver whose bracket was NaN-poisoned. Two of the three models
+    !! here have that property; the forward sweep alone cannot show it.
     subroutine test_extreme_models_raise_no_flag(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_cosmology) :: rip, neg
-        real(real64)       :: z, got(n_cquantity)
+        type(pf_cosmology) :: rip, neg, closed
+        real(real64)       :: z, got(n_cquantity), v
         integer            :: k
         logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
 
         call rip%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = -1.0_real64, wa = 3.0_real64)
         call neg%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
+        call closed%init(h0 = 70.0_real64, om0 = 1.5_real64, ode0 = 0.0_real64)
 
         halting = .false.
         call ieee_get_flag(ieee_usual, saved)
@@ -1357,7 +1595,11 @@ contains
         do k = 0, 80
             z = pf_zeta2z(-23.0_real64 + 46.0_real64 * real(k, real64) / 80.0_real64)
             got = answers(rip, z)
+            call sweep_inverses(rip, got, v)
             got = answers(neg, z)
+            call sweep_inverses(neg, got, v)
+            got = answers(closed, z)
+            call sweep_inverses(closed, got, v)
         end do
         call ieee_get_flag(ieee_usual, raised)
 #ifndef __flang__
@@ -1368,6 +1610,595 @@ contains
         call check(error, .not. any(raised), "an extreme model must raise no IEEE flag")
 
     end subroutine test_extreme_models_raise_no_flag
+
+    !> `E^2` at `zeta`, written out from the parameters of a RADIATION-FREE `w0waCDM`.
+    !!
+    !! The closed form the model is defined by, not a reading of the library: `Om0 x^3 + Ok0 x^2`
+    !! plus the CPL dark-energy term `Ode0 x^(3(1+w0+wa)) exp(-3 wa z/x)`, formed through its
+    !! logarithm. The exponent is screened at the same magnitude the module screens it at, because
+    !! `exp(-9e10)` is zero in `real64` and forming it raises `IEEE_UNDERFLOW` for nothing.
+    pure function e2_closed(om0, ok0, ode0, w0, wa, zeta) result(v)
+        real(real64), intent(in) :: om0  !! `Om0`
+        real(real64), intent(in) :: ok0  !! `Ok0`
+        real(real64), intent(in) :: ode0 !! `Ode0`
+        real(real64), intent(in) :: w0   !! `w0`
+        real(real64), intent(in) :: wa   !! `wa`
+        real(real64), intent(in) :: zeta !! `ln(1 + z)`
+        real(real64)             :: v    !! `E^2` there
+
+        real(real64) :: x, ell, f_de
+
+        x = exp(zeta)
+        ell = 3.0_real64 * (1.0_real64 + w0 + wa) * zeta - 3.0_real64 * wa * (x - 1.0_real64) / x
+        if (ell > 695.0_real64) then
+            f_de = ieee_value(f_de, ieee_positive_inf)
+        else if (ell < -695.0_real64) then
+            f_de = 0.0_real64
+        else
+            f_de = exp(ell)
+        end if
+        if (ode0 == 0.0_real64) then
+            v = om0 * x ** 3 + ok0 * x ** 2
+        else
+            v = om0 * x ** 3 + ok0 * x ** 2 + ode0 * f_de
+        end if
+
+    end function e2_closed
+
+    !> The `zeta` at which `e2_closed` crosses zero, bisected from the whole blueshift range.
+    pure function e2_root(om0, ok0, ode0, w0, wa) result(zeta)
+        real(real64), intent(in) :: om0  !! `Om0`
+        real(real64), intent(in) :: ok0  !! `Ok0`
+        real(real64), intent(in) :: ode0 !! `Ode0`
+        real(real64), intent(in) :: w0   !! `w0`
+        real(real64), intent(in) :: wa   !! `wa`
+        real(real64)             :: zeta !! the crossing, taken on the non-positive side
+
+        real(real64) :: lo, hi, mid
+        integer      :: k
+
+        lo = -CEILING_ZETA
+        hi = 0.0_real64
+        do k = 1, 200
+            mid = 0.5_real64 * (lo + hi)
+            if (mid <= lo .or. mid >= hi) exit
+            if (e2_closed(om0, ok0, ode0, w0, wa, mid) > 0.0_real64) then
+                hi = mid
+            else
+                lo = mid
+            end if
+        end do
+        zeta = lo
+
+    end function e2_root
+
+    !> `%zeta_floor()` is the root of the model's own `E^2`, for four models that have one.
+    !!
+    !! Each expected value is the root of the CLOSED FORM above, bisected in the test from the
+    !! parameters, never a number read off a run. The four are the recollapsing closed universe
+    !! (`E^2 = x^2 (Om0 x + Ok0)`, zero at `x = 1/3`), two negative-`Ode0` models four decades
+    !! apart in how deep the crossing sits, and a closed CPL model whose dark-energy term
+    !! collapses towards `z = -1` and leaves the curvature term to turn `E^2` over.
+    subroutine test_zeta_floor_is_the_root_of_e2(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: want, got
+
+        ! A recollapsing closed universe: Om0 x^3 + Ok0 x^2 with Ok0 = -0.5, zero at x = 1/3.
+        call c%init(h0 = 70.0_real64, om0 = 1.5_real64, ode0 = 0.0_real64)
+        got = c%zeta_floor()
+        want = e2_root(1.5_real64, -0.5_real64, 0.0_real64, -1.0_real64, 0.0_real64)
+        call check(error, abs(got - want) <= 1.0e-9_real64, &
+                   "om0 = 1.5, ode0 = 0 must reach E^2 = 0 at ln(1/3)")
+        if (allocated(error)) return
+        call check(error, abs(got - log(1.0_real64 / 3.0_real64)) <= 1.0e-9_real64, &
+                   "and that root is ln(1/3) in closed form")
+        if (allocated(error)) return
+
+        ! A negative dark-energy density, whose crossing sits where Om0 x^3 + Ok0 x^2 falls to
+        ! |Ode0|. At -0.5 that is a tenth of the way down the blueshift range.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
+        got = c%zeta_floor()
+        want = e2_root(0.3_real64, 1.2_real64, -0.5_real64, -1.0_real64, 0.0_real64)
+        call check(error, abs(got - want) <= 1.0e-9_real64, &
+                   "ode0 = -0.5 must reach E^2 = 0 at the root of 0.3 x^3 + 1.2 x^2 - 0.5")
+        if (allocated(error)) return
+
+        ! The same, five decades smaller: the crossing is then most of the way down the range,
+        ! and the panel walk has to reach it before the refinement scan sees anything.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -1.0e-6_real64)
+        got = c%zeta_floor()
+        want = e2_root(0.3_real64, 1.000001_real64 - 0.3_real64, -1.0e-6_real64, &
+                       -1.0_real64, 0.0_real64)
+        call check(error, abs(got - want) <= 1.0e-9_real64, &
+                   "ode0 = -1e-6 must reach E^2 = 0 deep in the blueshift half")
+        if (allocated(error)) return
+        call check(error, got < -6.0_real64 .and. got > -7.0_real64, &
+                   "and that floor is about zeta = -6.7, not the domain edge")
+        if (allocated(error)) return
+
+        ! A closed CPL model: f_DE collapses as z -> -1, so the negative curvature term is left
+        ! alone and E^2 turns over while Ode0 is POSITIVE.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = 1.2_real64, &
+                    w0 = 3.0_real64, wa = -3.0_real64)
+        got = c%zeta_floor()
+        want = e2_root(0.3_real64, -0.5_real64, 1.2_real64, 3.0_real64, -3.0_real64)
+        call check(error, abs(got - want) <= 1.0e-9_real64, &
+                   "the closed CPL model must reach E^2 = 0 at its own root")
+        if (allocated(error)) return
+
+        ! The negative control: a model whose E^2 never vanishes reports the domain edge, not a
+        ! crossing the scan invented.
+        call c%init("Planck18")
+        call check(error, c%zeta_floor() == -CEILING_ZETA, &
+                   "Planck18 has no crossing, so its floor is the domain edge")
+
+    end subroutine test_zeta_floor_is_the_root_of_e2
+
+    !> The five inverses, each fed the forward answer of the same model at the same redshift.
+    !!
+    !! `v` is written so that no call is dead code an optimiser may delete; nothing reads it.
+    subroutine sweep_inverses(c, got, v)
+        type(pf_cosmology), intent(in) :: c              !! the model
+        real(real64), intent(in)       :: got(:)         !! its forward answers, from `answers`
+        real(real64), intent(out)      :: v              !! the last inverse's answer
+
+        v = c%z_at_comoving_distance(got(cq_dc))
+        v = c%z_at_lookback_time(got(cq_tl))
+        v = c%z_at_age(got(cq_age))
+        v = c%z_at_luminosity_distance(got(cq_dl))
+        v = c%z_at_distmod(got(cq_mu))
+
+    end subroutine sweep_inverses
+
+    !> The six rows of the review's defect table, for `om0 = 0.3, ode0 = -0.5, h0 = 70`.
+    !!
+    !! That model's `E^2` vanishes at `z = -0.3981892`, and below it the universe does not exist.
+    !! Four arguments are REACHABLE and must come back as the 40-digit oracle's redshifts, found
+    !! by bisection on the same model; two are BEYOND what the model attains -- a comoving
+    !! distance of `-1e6 Mpc` where it reaches about `-3827 Mpc`, and an age of `1000 Gyr` where
+    !! it reaches about `27.9 Gyr` -- and must come back NaN. Before the floor was found, every
+    !! one of the six answered a redshift near the domain floor at which the model itself
+    !! answers NaN, and raised `IEEE_INVALID` doing it.
+    subroutine test_truncated_domain_inverses_match_the_oracle(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: dc100, dc1000, tl1, age12, far_d, far_a, back
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        dc100 = c%z_at_comoving_distance(-100.0_real64)
+        dc1000 = c%z_at_comoving_distance(-1000.0_real64)
+        tl1 = c%z_at_lookback_time(-1.0_real64)
+        age12 = c%z_at_age(12.0_real64)
+        far_d = c%z_at_comoving_distance(-1.0e6_real64)
+        far_a = c%z_at_age(1000.0_real64)
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+
+        call check(error, .not. any(raised), &
+                   "a truncated-domain model's inverses must raise no IEEE flag")
+        if (allocated(error)) return
+        call check(error, abs(dc100 - (-0.0229040998623_real64)) <= 1.0e-9_real64, &
+                   "z_at_comoving_distance(-100) must be -0.0229040998623")
+        if (allocated(error)) return
+        call check(error, abs(dc1000 - (-0.19247724477_real64)) <= 1.0e-9_real64, &
+                   "z_at_comoving_distance(-1000) must be -0.19247724477")
+        if (allocated(error)) return
+        call check(error, abs(tl1 - (-0.0653429910692_real64)) <= 1.0e-9_real64, &
+                   "z_at_lookback_time(-1) must be -0.0653429910692")
+        if (allocated(error)) return
+        call check(error, abs(age12 - (-0.103330279274_real64)) <= 1.0e-9_real64, &
+                   "z_at_age(12) must be -0.103330279274")
+        if (allocated(error)) return
+        call check(error, far_d /= far_d, &
+                   "a comoving distance the model never reaches must answer NaN")
+        if (allocated(error)) return
+        call check(error, far_a /= far_a, "an age the model never reaches must answer NaN")
+        if (allocated(error)) return
+
+        ! The round trip, which needs no oracle: every redshift answered above is one the model
+        ! itself has a comoving distance at, and that distance is the argument again.
+        back = c%comoving_distance(dc1000)
+        call check(error, abs(back + 1000.0_real64) <= 1.0e-9_real64 * 1000.0_real64, &
+                   "the answered redshift must have the comoving distance that was asked for")
+
+    end subroutine test_truncated_domain_inverses_match_the_oracle
+
+    !> The tight luminosity bracket answers what the whole-domain one answers.
+    !!
+    !! `%z_at_luminosity_distance` brackets `[0, zeta_at_dc(d)]` when the comoving distance's own
+    !! inverse table reaches `d`, and the whole domain `[0, ln(1 + 1e10)]` when it does not. The
+    !! two must agree, and the way to make ONE model take both routes is to build it twice:
+    !! `zmax = 1e-6` forces the minimum four-interval table, whose inverse reaches about
+    !! `z = 0.033`, so every argument here falls outside it and takes the old route.
+    !!
+    !! A flat model and an OPEN one, because the bound `D_L >= D_C` that justifies the tight
+    !! bracket is a statement about `Ok0 >= 0` -- for a closed model `D_M` turns over and
+    !! `%z_at_luminosity_distance` keeps its upward panel walk instead.
+    subroutine test_luminosity_bracket_is_an_identity(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: tight(2), wide(2)
+        real(real64)       :: d, a, b, worst
+        integer            :: k, model
+        character(len=:), allocatable :: tag
+
+        call tight(1)%init(h0 = 70.0_real64, om0 = 0.3_real64)
+        call wide(1)%init(h0 = 70.0_real64, om0 = 0.3_real64, zmax = 1.0e-6_real64)
+        call tight(2)%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = 0.6_real64)
+        call wide(2)%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = 0.6_real64, &
+                          zmax = 1.0e-6_real64)
+
+        worst = 0.0_real64
+        do model = 1, 2
+            do k = 1, 40
+                ! Luminosity distances from a few Mpc to a hundred Gpc, logarithmically spaced.
+                d = 10.0_real64 ** (0.5_real64 + 0.1_real64 * real(k, real64))
+                a = tight(model)%z_at_luminosity_distance(d)
+                b = wide(model)%z_at_luminosity_distance(d)
+                if (a /= a .or. b /= b) then
+                    call itoa(k, tag)
+                    call check(error, .false., "both brackets must answer a number at index " // tag)
+                    return
+                end if
+                if (abs(a - b) / abs(b) > worst) worst = abs(a - b) / abs(b)
+                ! And the answer is the one the forward binding confirms.
+                if (.not. agrees(tight(model)%luminosity_distance(a), d, 1.0e-12_real64)) then
+                    call itoa(k, tag)
+                    call check(error, .false., "the tight bracket must invert D_L at index " // tag)
+                    return
+                end if
+            end do
+        end do
+        call check(error, worst <= 1.0e-13_real64, &
+                   "the two brackets must answer the same redshift")
+
+    end subroutine test_luminosity_bracket_is_an_identity
+
+    !> The thirteen closed forms admit exactly the redshifts the table's own bindings admit.
+    !!
+    !! The closed forms screen the caller's `z` against `PFC_Z_FLOOR` and form `x = 1 + z`; the
+    !! table's bindings screen `pf_z2zeta(z)` against `-PFC_ZETA_CEILING`. The two must accept and
+    !! refuse the same doubles, and the boundary is the interesting part: the scan below steps by
+    !! SINGLE ULPS either side of it, so a one-ulp disagreement fails here rather than turning
+    !! into a redshift that has a distance and no `E`.
+    !!
+    !! **A failure here on a machine where the suite otherwise passes is a libm difference**, not
+    !! a defect in the screens: `PFC_Z_FLOOR` is the largest double whose `log(1 + z)` falls below
+    !! the ceiling, and a `log` an ulp away from this one's moves that boundary by one double.
+    subroutine test_closed_forms_share_the_table_domain(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: z, zs(9), e, dc
+        integer            :: k, n_in
+        integer(int64)     :: bits
+        character(len=:), allocatable :: tag
+
+        call c%init("Planck18")
+        ! Nine doubles straddling the floor: the pattern is monotone in `z`, so stepping the bit
+        ! pattern by one steps the double by one ulp.
+        z = pf_zeta2z(-CEILING_ZETA)
+        bits = transfer(z, bits)
+        do k = 1, 9
+            zs(k) = transfer(bits - int(5 - k, int64), z)
+        end do
+
+        n_in = 0
+        do k = 1, 9
+            e = c%efunc(zs(k))
+            dc = c%comoving_distance(zs(k))
+            call itoa(k, tag)
+            call check(error, (e /= e) .eqv. (dc /= dc), &
+                       "the closed form and the table must agree about the domain at ulp " // tag)
+            if (allocated(error)) return
+            if (e == e) n_in = n_in + 1
+        end do
+        ! The vacuity guard: the scan must straddle the boundary rather than sit on one side.
+        call check(error, n_in > 0 .and. n_in < 9, &
+                   "the ulp scan must straddle the floor, not sit entirely inside or outside it")
+        if (allocated(error)) return
+
+        ! And over the rest of the domain, where nothing subtle happens.
+        do k = -60, 60
+            z = pf_zeta2z(0.38_real64 * real(k, real64))
+            e = c%efunc(z)
+            dc = c%comoving_distance(z)
+            call itoa(k, tag)
+            call check(error, (e /= e) .eqv. (dc /= dc), &
+                       "the two screens must agree over the whole domain, index " // tag)
+            if (allocated(error)) return
+        end do
+        ! Both refuse what is outside it.
+        call check(error, c%efunc(-1.0_real64) /= c%efunc(-1.0_real64) .and. &
+                   c%efunc(1.0e11_real64) /= c%efunc(1.0e11_real64), &
+                   "the closed forms must refuse z = -1 and z above the ceiling")
+
+    end subroutine test_closed_forms_share_the_table_domain
+
+    !> The build's tabulated Komatsu fit changes no answer.
+    !!
+    !! `%init` tabulates `nu_rel` on its own grid and reads it from inside the quadrature only;
+    !! every per-query path evaluates the fit exactly, so `E(z)` is still astropy's formula rather
+    !! than an interpolation of it. What has to be shown is that the SUBSTITUTION costs nothing:
+    !! `parquet_debug_set_cosmology_exact_nu` builds the same model both ways and every quantity
+    !! must agree to the tolerance the build itself is taken to.
+    !!
+    !! The bound here is `1e-12`, the build's own `PFC_RTOL`. The measurement is far below it --
+    !! on gfortran the two builds agree BIT FOR BIT, because the quintic reproduces `nu_rel` to
+    !! rounding and the term it sits in is a thousandth of `E^2`, so the integrand comes out the
+    !! same double and the adaptive quadrature takes the same path. A model with no massive
+    !! species gets no table at all (its fit is a constant), which is why this one has `m_nu`.
+    subroutine test_tabulated_neutrino_fit_changes_no_answer(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: tabulated, exact
+        real(real64)       :: z, worst, r
+        integer            :: k
+
+        call parquet_debug_set_cosmology_exact_nu(.false.)
+        call tabulated%init("Planck18")
+        call parquet_debug_set_cosmology_exact_nu(.true.)
+        call exact%init("Planck18")
+        call parquet_debug_set_cosmology_exact_nu(.false.)
+
+        worst = 0.0_real64
+        do k = -120, 120
+            z = pf_zeta2z(0.19_real64 * real(k, real64))
+            r = gap(tabulated%comoving_distance(z), exact%comoving_distance(z))
+            if (r > worst) worst = r
+            r = gap(tabulated%lookback_time(z), exact%lookback_time(z))
+            if (r > worst) worst = r
+            r = gap(tabulated%age(z), exact%age(z))
+            if (r > worst) worst = r
+        end do
+        call check(error, worst <= 1.0e-12_real64, &
+                   "the tabulated fit must change no answer beyond the build's own tolerance")
+        if (allocated(error)) return
+
+        ! The negative control: the hook has to reach the build, or the comparison above is two
+        ! identical objects agreeing with themselves. A model whose fit is tabulated evaluates
+        ! FEWER `pow` calls, not fewer integrands, so the count cannot show it -- what can is that
+        ! `%onu` is unchanged while the hook is on, which is the property the split promises.
+        call check(error, tabulated%onu0() == exact%onu0(), &
+                   "the per-query neutrino density is the exact fit either way")
+
+    end subroutine test_tabulated_neutrino_fit_changes_no_answer
+
+    !> `%onu_species` sums to `%onu`, and `%otot` is EXACTLY one for a flat model.
+    !!
+    !! Neither is a recorded number. The species split is pinned by the identity it exists to
+    !! respect -- the parts add up to the whole, and a massless species carries the same share of
+    !! `Ogamma` as `nu_rel/N` does -- and `%otot` is pinned by the bit test that `%ok` being
+    !! exactly zero by assignment makes possible.
+    subroutine test_species_split_and_otot(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64), allocatable :: v(:)
+        real(real64)       :: z, lead
+        integer            :: k
+        character(len=:), allocatable :: tag
+
+        ! Planck18 has three species, one of them massive.
+        call c%init("Planck18")
+        do k = -6, 12
+            z = pf_zeta2z(1.7_real64 * real(k, real64))
+            call c%onu_species(z, v)
+            call itoa(k, tag)
+            call check(error, size(v) == 3, "three species at index " // tag)
+            if (allocated(error)) return
+            call check(error, agrees(v(1) + v(2) + v(3), c%onu(z), 1.0e-14_real64), &
+                       "the species must sum to Onu at index " // tag)
+            if (allocated(error)) return
+            ! The two massless ones carry `Ogamma * A Neff / N` each.
+            lead = c%ogamma(z) * 0.22710731766_real64 * (c%neff() / 3.0_real64)
+            call check(error, agrees(v(1), lead, 1.0e-14_real64), &
+                       "a massless species is Ogamma times A Neff/N at index " // tag)
+            if (allocated(error)) return
+            call check(error, v(1) == v(2), "the two massless species must be identical")
+            if (allocated(error)) return
+            call check(error, v(3) >= v(1), "the massive species must carry at least as much")
+            if (allocated(error)) return
+        end do
+
+        ! A model with no species at all gets a zero-length array, not an unallocated one.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, neff = 0.0_real64, &
+                    m_nu = [real(real64) ::])
+        call c%onu_species(0.5_real64, v)
+        call check(error, allocated(v) .and. size(v) == 0, &
+                   "neff = 0 must give a zero-length species array")
+        if (allocated(error)) return
+
+        ! `Otot` is EXACTLY one for a flat model, at every redshift, because `Ok` is exactly zero.
+        call c%init("Planck18")
+        do k = -6, 12
+            z = pf_zeta2z(1.7_real64 * real(k, real64))
+            call itoa(k, tag)
+            call check(error, c%otot(z) == 1.0_real64, &
+                       "a flat model must have Otot exactly one at index " // tag)
+            if (allocated(error)) return
+        end do
+        ! And not one for a curved model, which is the negative control.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = 0.6_real64)
+        call check(error, c%otot(1.0_real64) /= 1.0_real64, &
+                   "an open model must not have Otot exactly one")
+
+    end subroutine test_species_split_and_otot
+
+    !> `%clone` copies what the caller did not name, and keeps "flat by omission" flat.
+    subroutine test_clone_copies_and_overrides(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: base, copy, curved, copy2
+        real(real64), allocatable :: masses(:), masses2(:)
+        character(len=:), allocatable :: name
+
+        call base%init("Planck18")
+        call base%clone(copy)
+        call check(error, copy%h0() == base%h0() .and. copy%om0() == base%om0() .and. &
+                   copy%tcmb0() == base%tcmb0() .and. copy%neff() == base%neff() .and. &
+                   copy%ob0() == base%ob0() .and. copy%w0() == base%w0() .and. &
+                   copy%wa() == base%wa() .and. copy%zmax() == base%zmax() .and. &
+                   copy%zmin() == base%zmin(), &
+                   "an unmodified clone must carry every parameter across")
+        if (allocated(error)) return
+        call base%m_nu(masses)
+        call copy%m_nu(masses2)
+        call check(error, size(masses) == size(masses2) .and. all(masses == masses2), &
+                   "and the species masses with them")
+        if (allocated(error)) return
+        call copy%get_name(name)
+        call check(error, name == "Planck18", "and the label")
+        if (allocated(error)) return
+        call check(error, copy%comoving_distance(1.0_real64) == base%comoving_distance(1.0_real64), &
+                   "an unmodified clone must answer exactly what its source answers")
+        if (allocated(error)) return
+
+        ! Flat by omission stays flat by omission, whatever else moves.
+        call check(error, base%is_flat(), "Planck18 is flat by omission")
+        if (allocated(error)) return
+        call base%clone(copy, h0 = 70.0_real64, om0 = 0.25_real64, name = "shifted")
+        call check(error, copy%is_flat(), "a clone of a flat model is flat, by assignment")
+        if (allocated(error)) return
+        call check(error, copy%ok0() == 0.0_real64, "so its Ok0 is exactly zero")
+        if (allocated(error)) return
+        call check(error, copy%h0() == 70.0_real64 .and. copy%om0() == 0.25_real64, &
+                   "and it took the parameters it was given")
+        if (allocated(error)) return
+        call copy%get_name(name)
+        call check(error, name == "shifted", "and the label it was given")
+        if (allocated(error)) return
+
+        ! A CURVED source keeps its curvature, and a flat one can be given some.
+        call curved%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = 0.6_real64)
+        call curved%clone(copy2, h0 = 60.0_real64)
+        call check(error, .not. copy2%is_flat() .and. copy2%ode0() == 0.6_real64, &
+                   "a clone of a curved model keeps its Ode0")
+        if (allocated(error)) return
+        call base%clone(copy2, ode0 = 0.5_real64)
+        call check(error, .not. copy2%is_flat() .and. copy2%ode0() == 0.5_real64, &
+                   "naming ode0 makes the clone of a flat model curved")
+
+    end subroutine test_clone_copies_and_overrides
+
+    !> Ten models by every binding by twenty-three edge inputs: not one `ieee_usual` flag.
+    !!
+    !! The review's own edge harness, in the repository's shape. It differs from the two flag
+    !! tests beside it in TWO ways, and both are load-bearing: its model list contains the two
+    !! whose `E^2` turns negative at a finite blueshift, and it calls the five INVERSES as well as
+    !! the forward bindings. Either one alone misses the defect that motivated it -- a bound
+    !! stored as a NaN, compared against by every inverse, raising `IEEE_INVALID` on every call
+    !! and letting an unreachable argument through to a solver.
+    !!
+    !! The inputs are the ones a caller gets wrong rather than the ones a model is defined at: a
+    !! NaN, both infinities, a catalogue's `-99`, `huge`, the two doubles either side of the
+    !! domain's floor and the two either side of its ceiling, and a denormal-adjacent `1e-300`.
+    !! `IEEE_UNDERFLOW` is deliberately outside the assertion -- it is not in `ieee_usual`, and a
+    !! `z = 1e-300` really does underflow something on the way to an answer that is right.
+    subroutine test_every_binding_and_model_raises_no_flag(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zs(23), got(n_cquantity), v, floor_z
+        real(real64), allocatable :: species(:)
+        integer            :: i, k
+        integer(int64)     :: bits
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+        character(len=8)   :: names(8)
+
+        names = [character(len=8) :: "Planck18", "Planck15", "Planck13", "WMAP9", "WMAP7", &
+                 "WMAP5", "WMAP3", "WMAP1"]
+
+        floor_z = pf_zeta2z(-CEILING_ZETA)
+        bits = transfer(floor_z, bits)
+        zs(1) = ieee_value(zs(1), ieee_quiet_nan)
+        zs(2) = ieee_value(zs(2), ieee_positive_inf)
+        zs(3) = -ieee_value(zs(3), ieee_positive_inf)
+        zs(4) = -1.0_real64
+        zs(5) = transfer(transfer(-1.0_real64, bits) - 1_int64, zs(5))   ! the double just above -1
+        zs(6) = transfer(bits + 1_int64, zs(6))                          ! just inside the floor
+        zs(7) = floor_z                                                  ! just outside it
+        zs(8) = -0.99_real64
+        zs(9) = -0.5_real64
+        zs(10) = -1.0e-300_real64
+        zs(11) = 0.0_real64
+        zs(12) = 1.0e-300_real64
+        zs(13) = 1.0e-8_real64
+        zs(14) = 1.0e-3_real64
+        zs(15) = 0.5_real64
+        zs(16) = 2.0_real64
+        zs(17) = 1100.0_real64
+        zs(18) = 1.0e5_real64
+        zs(19) = 1.0e10_real64
+        zs(20) = 1.0e10_real64 * (1.0_real64 + 1.0e-15_real64)           ! just past the ceiling
+        zs(21) = -99.0_real64
+        zs(22) = huge(1.0_real64)
+        zs(23) = -huge(1.0_real64)
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        do i = 1, 10
+            if (i <= 8) then
+                call c%init(trim(names(i)))
+            else if (i == 9) then
+                ! The recollapsing closed universe: `E^2` reaches zero at `z = -2/3`.
+                call c%init(h0 = 70.0_real64, om0 = 1.5_real64, ode0 = 0.0_real64)
+            else
+                ! A negative dark-energy density: `E^2` reaches zero at `z = -0.398`.
+                call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
+            end if
+            do k = 1, 23
+                got = answers(c, zs(k))
+                call sweep_inverses(c, got, v)
+                v = c%comoving_distance_zeta(zs(k))
+                v = c%comoving_distance_z1z2(zs(k), zs(k))
+                v = c%comoving_distance_z1z2(0.0_real64, zs(k))
+                v = c%angular_diameter_distance_z1z2(0.0_real64, zs(k))
+                call c%onu_species(zs(k), species)
+            end do
+        end do
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+
+        call check(error, .not. any(raised), &
+                   "ten models by every binding by twenty-three edge inputs must raise no flag")
+        if (allocated(error)) return
+        ! The vacuity guard: the sweep must reach real answers as well as NaNs, or a screen that
+        ! refused everything would pass this test.
+        call check(error, got(cq_dc) /= got(cq_dc), "the last input is outside the domain")
+        if (allocated(error)) return
+        call c%init("Planck18")
+        call check(error, c%comoving_distance(0.5_real64) > 0.0_real64, &
+                   "and the sweep's models answer numbers inside it")
+
+    end subroutine test_every_binding_and_model_raises_no_flag
 
     !> Every admitted boundary value is accepted: the negative control for section 9.4's refusals.
     subroutine test_init_validation_negative_controls(error)
@@ -1472,6 +2303,19 @@ contains
         call c%init("PLANCK18")
         call c%get_name(name)
         call check(error, name == "Planck18", "an upper-case token must give the canonical name")
+        if (allocated(error)) return
+        ! Blanks on EITHER side, not only the trailing ones a `trim` would take.
+        call c%init("  Planck18")
+        call c%get_name(name)
+        call check(error, name == "Planck18", "a leading blank must not hide the name")
+        if (allocated(error)) return
+        call c%init("Planck18   ")
+        call c%get_name(name)
+        call check(error, name == "Planck18", "nor a trailing one")
+        if (allocated(error)) return
+        call c%init("   pLaNcK18  ")
+        call c%get_name(name)
+        call check(error, name == "Planck18", "nor both together")
         if (allocated(error)) return
         call c%init(h0 = 70.0_real64, om0 = 0.3_real64)
         call c%get_name(name)

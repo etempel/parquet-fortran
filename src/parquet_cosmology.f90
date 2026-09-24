@@ -26,6 +26,8 @@
 !!   `%w`, `%de_density_scale` and `%critical_density`.
 !! * **The growth of structure** -- `%growth_factor`, the linear growth factor `D(z)` normalised
 !!   to `D(0) = 1`, and `%growth_rate`, `f = dlnD/dlna`.
+!! * **The sound horizon** -- `%sound_horizon`, the comoving sound horizon at `z` in Mpc,
+!!   `%r_drag`, the BAO scale, `%z_drag`, the drag epoch, and `%z_eq`, matter-radiation equality.
 !! * **Inverses** -- `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`,
 !!   `%z_at_luminosity_distance` and `%z_at_distmod`.
 !!
@@ -171,6 +173,29 @@ module parquet_cosmology
         !! astropy's `KOMATSU_INVP`, AS WRITTEN: not `1/1.83`, so that the model IS astropy's.
     real(real64), parameter :: pfc_komatsu_c = 0.3173_real64
         !! astropy's scale inside the massive-neutrino fit.
+
+    ! ---- The Aubourg et al. (2015) drag-scale fit, AS PUBLISHED ------------------------------
+    !
+    ! Physical Review D 92, 123516, equation (16). Every literal is the paper's own; the fit
+    ! replaced Eisenstein and Hu's `z_drag` here after CAMB showed the older combination 2.5% out
+    ! (`feature_cosmology_extra.md` section 3.2). `%r_drag` is the only binding that reads them,
+    ! and `test/test_cosmology.f90` restates the whole formula from its own copies, so a
+    ! transcribed exponent shows up as a disagreement rather than as a shared mistake.
+
+    real(real64), parameter :: pfc_aubourg_a = 55.154_real64
+        !! The fit's leading coefficient, in Mpc.
+    real(real64), parameter :: pfc_aubourg_b = 72.3_real64
+        !! The coefficient of the massive-neutrino exponential.
+    real(real64), parameter :: pfc_aubourg_c = 0.0006_real64
+        !! The offset inside it, in `Onu h^2`.
+    real(real64), parameter :: pfc_aubourg_p_cb = 0.25351_real64
+        !! The exponent on `Ocb h^2`, the cold dark matter and baryons together.
+    real(real64), parameter :: pfc_aubourg_p_b = 0.12807_real64
+        !! The exponent on `Ob h^2`.
+    real(real64), parameter :: pfc_nu_mass_ev = 93.14_real64
+        !! `SUM m_nu / 93.14 eV` is `Onu h^2`, the massive-neutrino density the fit is written in.
+        !! It is NOT `%onu0() * h^2`, which counts the RELATIVISTIC species too and is about
+        !! `1.7e-05 h^-2` for a massless model.
 
     ! ---- The eight named cosmologies, as astropy 8.0.1's realizations carry them ---------------
 
@@ -348,6 +373,10 @@ module parquet_cosmology
     integer, parameter :: PFC_INT_ABSORPTION = 4
         !! `e^(3 zeta) / E`, whose integral is the absorption distance. In `z` it is
         !! `INT (1+z)^2/E dz`, and `dz = x dzeta` turns `x^2/E` into `x^3/E`.
+    integer, parameter :: PFC_INT_SOUND = 5
+        !! `2 c cosh(v) / (b^3 E(b^2) sqrt(3 (1 + R0 b^2)))` at `b = sound_c sinh(v)`, whose
+        !! integral from the origin is the comoving sound horizon. See `cosmology_sound_tail` for
+        !! why the variable is `v` and not `b` itself.
 
     !> The parameters a cosmology was built from, kept in their own component so that `%h0()`,
     !! `%om0()` and `%m_nu()` may be bindings: a binding may not share a name with a component.
@@ -416,6 +445,16 @@ module parquet_cosmology
         integer      :: n_growth  = 0          !! nodes in the growth table, zero when there is none
         real(real64) :: zeta_gw_m = 0.0_real64 !! the growth table's BOTTOM node; its top is always
                                                !! `PFC_GROWTH_TOP_NODE * PFC_H`
+        real(real64) :: sound_r0_root = 0.0_real64 !! `sqrt(R0)`, `R0 = 3 Ob0 / (4 Ogamma0)` the
+                                               !! baryon-photon momentum ratio at `a = 1`. The
+                                               !! ROOT and never `R0` itself, because `R0`
+                                               !! overflows for an absurdly small `Ogamma0` while
+                                               !! `sqrt(3 Ob0) / sqrt(4 Ogamma0)` does not, and
+                                               !! because `sqrt(1 + R0 b^2)` is formed as
+                                               !! `hypot(1, sqrt(R0) b)`. NaN without an `ob0`.
+        real(real64) :: sound_c   = 1.0_real64 !! the sound horizon's integration scale in
+                                               !! `b = sqrt(a)`: the tighter of `1/sqrt(R0)` and
+                                               !! `sqrt(Or0/Om0)`. See `cosmology_sound_tail`.
         ! ---- the BUILD's own `nu_rel` table (R11) ----
         !
         ! Filled into the INTEGRAND's copy of this record and never into the object's, so that
@@ -436,7 +475,8 @@ module parquet_cosmology
     type, extends(pf_integrand) :: cosmology_integrand
         type(cosmology_params)  :: p            !! the parameters
         type(cosmology_derived) :: d            !! the derived values
-        integer :: which = PFC_INT_DISTANCE     !! `PFC_INT_DISTANCE`, `_TIME` or `_AGE_TAIL`
+        integer :: which = PFC_INT_DISTANCE     !! `PFC_INT_DISTANCE`, `_TIME`, `_AGE_TAIL`,
+                                                !! `_ABSORPTION` or `_SOUND`
     contains
         procedure :: eval => cosmology_integrand_eval !! The integrand at one point.
     end type cosmology_integrand
@@ -528,6 +568,10 @@ module parquet_cosmology
             !! The dimensionless absorption distance out to `z`.
         procedure :: growth_factor => cosmology_growth_factor !! `D(z)`, normalised to `D(0) = 1`.
         procedure :: growth_rate => cosmology_growth_rate !! `f(z) = dlnD/dlna`.
+        procedure :: sound_horizon => cosmology_sound_horizon !! `r_s(z)` in Mpc.
+        procedure :: r_drag => cosmology_r_drag         !! The BAO scale `r_d` in Mpc, a fit.
+        procedure :: z_drag => cosmology_z_drag         !! The drag epoch, where `r_s` is `r_d`.
+        procedure :: z_eq => cosmology_z_eq             !! Matter-radiation equality.
         procedure :: z_at_comoving_distance => cosmology_z_at_distance !! The redshift at a `D_C`.
         procedure :: z_at_lookback_time => cosmology_z_at_lookback !! The redshift at a `t_L`.
         procedure :: z_at_age => cosmology_z_at_age     !! The redshift at which the universe was `t` old.
@@ -1143,6 +1187,101 @@ module parquet_cosmology
 
     end interface
 
+    ! ---- The sound horizon ---------------------------------------------------------------------
+
+    interface
+
+        !> `r_s(z)`, the comoving sound horizon at `z`, in Mpc.
+        !!
+        !! How far a sound wave in the baryon-photon fluid has travelled by `z`, comoving:
+        !!
+        !! ```
+        !! r_s(z) = D_H INT_z^inf  dz' / ( E(z') sqrt(3 (1 + R(z'))) ),   R = 3 Ob0 / (4 Ogamma0 (1 + z))
+        !! ```
+        !!
+        !! **Exact for the model**, not a fit: it is `%r_drag()` that carries the per-mille, and
+        !! the two exist side by side for exactly that reason. Measured against CAMB 2.0.4 at
+        !! `1.8e-06` and CLASS 3.3.4.0 at `2.4e-07`.
+        !!
+        !! **It costs microseconds, not nanoseconds.** Nothing here is tabulated: each call lays
+        !! panels of the 20-point Gauss rule over the whole sound-crossing history, twenty kernel
+        !! evaluations each. It is declared `pure elemental` like every other redshift binding, so
+        !! it will happily be handed a column of a million rows -- and will take a second over it.
+        !! It is meant for the handful of scales a program forms once.
+        !!
+        !! A quiet NaN when the cosmology was built without an `ob0`, as `%ob0()` itself is: with
+        !! no baryon density there is no `R` and no sound speed. Exactly zero when `Tcmb0` is
+        !! zero, because a universe with no photons carries no sound.
+        pure elemental module function cosmology_sound_horizon(this, z) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64), intent(in)        :: z    !! redshift
+            real(real64)                    :: v    !! `r_s(z)` in Mpc
+        end function cosmology_sound_horizon
+
+        !> `r_d`, the BAO scale, in Mpc: the sound horizon at the baryon drag epoch.
+        !!
+        !! **A FIT, and the only fit in this module.** Aubourg et al. (2015), Physical Review D
+        !! 92, 123516, equation (16):
+        !!
+        !! ```
+        !! r_d = 55.154 exp[-72.3 (Onu h^2 + 0.0006)^2] / [ (Ocb h^2)^0.25351 (Ob h^2)^0.12807 ]  Mpc
+        !! ```
+        !!
+        !! with `Ocb h^2 = Om0 h^2` -- cold dark matter and baryons, which is what this module's
+        !! `Om0` already is -- and `Onu h^2 = SUM m_nu / 93.14 eV`, the MASSIVE species alone.
+        !! Measured against CAMB 2.0.4 over the reference grid: `2.1e-04` for the three Planck
+        !! cosmologies, `2.5e-04` to `3.6e-04` for the five WMAP ones -- and **`1.5e-01` for a model
+        !! with six times the baryon density**, which is far outside the range the paper fits over.
+        !! So a caller reading `147.09` off this binding should read three digits and not sixteen,
+        !! and a caller whose model is nothing like a Planck cosmology should read `%sound_horizon`
+        !! instead, which is exact for any model.
+        !!
+        !! The fit is blind to `Tcmb0`: it is `%sound_horizon(%z_drag())` that carries the model's
+        !! own radiation, and the two agree to the fit's accuracy for a realistic model. A quiet
+        !! NaN when there is no `ob0` or when it is exactly zero, since the formula divides by
+        !! `(Ob h^2)^0.12807`, and likewise for a model with no matter.
+        pure module function cosmology_r_drag(this) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64)                    :: v    !! `r_d` in Mpc
+        end function cosmology_r_drag
+
+        !> `z_drag`, the redshift at which `%sound_horizon(z)` equals `%r_drag()`.
+        !!
+        !! Solved, not fitted: the bracketed Newton iteration of the inverses, over `z` in
+        !! `[100, 1e5]`, on a sound horizon that falls monotonically with redshift. Measured
+        !! against CAMB 2.0.4's `zdrag` at `2.6e-04`, which is `%r_drag()`'s own accuracy carried
+        !! through -- the redshift inherits the fit, not the integral.
+        !!
+        !! **This one costs tens of microseconds**: an integral that is itself microseconds, inside
+        !! a solve. Measured at about fifty, against about ten for one `%sound_horizon` near `z = 0`
+        !! -- the solve sits at `z ~ 1060`, where the interval is short and the rule lays two panels
+        !! rather than five. A `pure` function cannot memoise, so keep it in a local if it is needed
+        !! twice; `bench/benchmark_cosmology.sh sound` measures all four.
+        !!
+        !! A quiet NaN whenever `%r_drag()` is one, and also when `Tcmb0` is zero: a sound horizon
+        !! that is identically zero never equals a finite `r_d`.
+        pure module function cosmology_z_drag(this) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64)                    :: v    !! the drag redshift
+        end function cosmology_z_drag
+
+        !> `z_eq`, matter-radiation equality: `Om0 / Or0 - 1`, exact from the parameters.
+        !!
+        !! `Or0 = Ogamma0 (1 + 0.22710731766 Neff)` is the RELATIVISTIC radiation density -- every
+        !! neutrino species counted as massless, however massive it is today -- because at
+        !! equality every one of them is. `%onu0()` is the other quantity, and using it here would
+        !! be wrong by a few per cent for a model with a massive species, silently.
+        !!
+        !! `+Infinity` when `Tcmb0` is zero: with no radiation at all, matter dominates at every
+        !! redshift and equality is never reached. `-1` for a model with no matter, which is the
+        !! same statement the other way round.
+        pure module function cosmology_z_eq(this) result(v)
+            class(pf_cosmology), intent(in) :: this !! the cosmology
+            real(real64)                    :: v    !! the equality redshift
+        end function cosmology_z_eq
+
+    end interface
+
     ! ---- The inverses -------------------------------------------------------------------------
 
     interface
@@ -1552,6 +1691,15 @@ module parquet_cosmology
             real(real64), intent(in)            :: zeta !! `ln(1 + z)`
             real(real64)                        :: v    !! the age there, in units of `t_H`
         end function cosmology_age_tail
+
+        !> The comoving sound horizon at `zeta`, in units of `D_H`: panels of the 20-point rule
+        !! over `[0, asinh(b_top / sound_c)]`, where `b = sound_c sinh(v)` and `b_top = e^(-zeta/2)`.
+        pure module function cosmology_sound_tail(p, d, zeta) result(v)
+            type(cosmology_params), intent(in)  :: p    !! the parameters
+            type(cosmology_derived), intent(in) :: d    !! the derived values
+            real(real64), intent(in)            :: zeta !! `ln(1 + z)`
+            real(real64)                        :: v    !! `r_s / D_H` there
+        end function cosmology_sound_tail
 
     end interface
 

@@ -169,6 +169,17 @@ KOM_B = mp.mpf("1.83")                          # KOMATSU_P
 KOM_INVP = mp.mpf("0.54644808743")              # KOMATSU_INVP, as written, not 1/1.83
 KOM_C = mp.mpf("0.3173")                        # the fit's scale
 
+# The Aubourg et al. (2015) drag-scale fit, Physical Review D 92, 123516 equation (16). These are
+# transcribed from the paper INDEPENDENTLY of `src/parquet_cosmology.f90`'s own copies, and
+# `--self-test` compares the two: a digit dropped on either side shows up as a disagreement
+# rather than as a shared mistake.
+AUB_A = mp.mpf("55.154")                        # Mpc
+AUB_B = mp.mpf("72.3")                          # the massive-neutrino exponential
+AUB_C = mp.mpf("0.0006")                        # its offset in Onu h^2
+AUB_P_CB = mp.mpf("0.25351")                    # the exponent on Ocb h^2
+AUB_P_B = mp.mpf("0.12807")                     # the exponent on Ob h^2
+NU_MASS_EV = mp.mpf("93.14")                    # SUM m_nu / 93.14 eV is Onu h^2
+
 #: The named constants as the Fortran spec spells them, for `--self-test`.
 SPEC_CONSTANTS = {
     "pfc_c_kms": C_KMS,
@@ -185,7 +196,17 @@ SPEC_CONSTANTS = {
     "pfc_komatsu_p": KOM_B,
     "pfc_komatsu_invp": KOM_INVP,
     "pfc_komatsu_c": KOM_C,
+    "pfc_aubourg_a": AUB_A,
+    "pfc_aubourg_b": AUB_B,
+    "pfc_aubourg_c": AUB_C,
+    "pfc_aubourg_p_cb": AUB_P_CB,
+    "pfc_aubourg_p_b": AUB_P_B,
+    "pfc_nu_mass_ev": NU_MASS_EV,
 }
+
+#: `%z_drag`'s bracket in `z`, as `src/parquet_cosmology_eval.f90` carries it.
+DRAG_Z_LO = mp.mpf("100")
+DRAG_Z_HI = mp.mpf("1e5")
 
 #: `exp(L)` is `+Infinity` above this, and `sinh` is screened one unit lower (section 4.8).
 #: The CPL exponent is screened FOURTEEN lower again, because what has to stay finite is
@@ -479,6 +500,92 @@ class Cosmology(object):
 
         return self.th * mp.quad(integrand, [0, b_top])
 
+    # -- the sound horizon ---------------------------------------------------------------------
+
+    def sound_r0(self):
+        """`R0 = 3 Ob0 / (4 Ogamma0)`, or None where the model has no sound speed at all."""
+        if self.ob0 is None or self.ogamma0 == 0:
+            return None
+        return 3 * self.ob0 / (4 * self.ogamma0)
+
+    def sound_c(self):
+        """The tighter of the two crowding scales in `b`, exactly as `sound_scales` picks it.
+
+        The integrand carries a factor `1/sqrt(1 + (b/s)^2)` at `s = 1/sqrt(R0)` and another at
+        `s = sqrt(Or0/Om0)`, each with a branch point at `b = i s`. This is only a change of
+        variable for the oracle -- `mp.quad` would reach the same number over `b` with the same
+        points named -- and it is kept identical to the library's so that the two are comparable
+        step for step.
+        """
+        r0 = self.sound_r0()
+        or0 = self.ogamma0 * (1 + KOM_A * self.neff)
+        c = None
+        if r0 is not None and r0 > 0:
+            c = 1 / mp.sqrt(r0)
+        if self.om0 > 0 and or0 > 0:
+            b_eq = mp.sqrt(or0 / self.om0)
+            if c is None or b_eq < c:
+                c = b_eq
+        return mp.mpf(1) if c is None or not (c > 0) else c
+
+    def sound_horizon_zeta(self, zeta):
+        """`r_s(zeta) = D_H INT_0^b_top 2 db / (b^3 E(b^2) sqrt(3 (1 + R0 b^2)))`, `b = sqrt(a)`.
+
+        NaN without an `ob0`, because there is no `R`; exactly zero without photons, because the
+        sound speed is then zero at every redshift.
+        """
+        if self.ob0 is None:
+            return mp.nan
+        if self.ogamma0 == 0:
+            return mp.mpf(0)
+        if zeta <= self.zeta_floor:
+            return mp.nan
+        r0, c = self.sound_r0(), self.sound_c()
+        v_top = mp.asinh(mp.exp(-zeta / 2) / c)
+
+        def integrand(v):
+            if v == 0:
+                return mp.mpf(0)
+            b = c * mp.sinh(v)
+            return (2 * c * mp.cosh(v)
+                    / (b ** 3 * mp.sqrt(self.e2(-2 * mp.log(b), screened=False))
+                       * mp.sqrt(3 * (1 + r0 * b * b))))
+
+        n = max(1, int(mp.ceil(v_top)))
+        return self.dh * mp.quad(integrand, [v_top * mp.mpf(i) / n for i in range(n + 1)])
+
+    def r_drag(self):
+        """The Aubourg et al. (2015) fit, transcribed here independently of the Fortran."""
+        if self.ob0 is None or self.ob0 == 0 or self.om0 == 0:
+            return mp.nan
+        h2 = (self.h0 / 100) ** 2
+        onuh2 = sum(self.m_nu, mp.mpf(0)) / NU_MASS_EV
+        return (AUB_A * mp.exp(-AUB_B * (onuh2 + AUB_C) ** 2)
+                / ((self.om0 * h2) ** AUB_P_CB * (self.ob0 * h2) ** AUB_P_B))
+
+    def z_drag(self):
+        """The redshift at which `r_s` equals `r_drag`, solved in `zeta` and NOT on a double grid.
+
+        NaN where `r_drag` is one, where the sound horizon is identically zero, and where `r_d`
+        is not attained between `z = 100` and `z = 1e5` -- the same three refusals the library
+        makes, so a disagreement is about the root and never about the contract.
+        """
+        rd = self.r_drag()
+        if rd != rd or self.ogamma0 == 0:
+            return mp.nan
+        lo, hi = mp.log(1 + DRAG_Z_LO), mp.log(1 + DRAG_Z_HI)
+        f = lambda t: self.sound_horizon_zeta(t) / rd - 1
+        if f(lo) < 0 or f(hi) > 0:
+            return mp.nan
+        return mp.expm1(mp.findroot(f, (lo, hi), solver="anderson",
+                                    tol=mp.mpf(10) ** (-2 * PREC + 8)))
+
+    def z_eq(self):
+        """`Om0/Or0 - 1` with the RELATIVISTIC `Or0`: at equality every species is relativistic."""
+        if self.ogamma0 == 0:
+            return mp.inf
+        return self.om0 / (self.ogamma0 * (1 + KOM_A * self.neff)) - 1
+
     # -- the closed forms over them ------------------------------------------------------------
 
     def comoving_transverse(self, dc):
@@ -694,7 +801,8 @@ class Cosmology(object):
                 om_z, ode_z, ok_z, og_z, onu_z, self.tcmb0 * x, w_z, self.f_de(x), rho_z,
                 self.dh * tl / self.th,
                 1 / x, otot_z, ob_z, odm_z, self.tnu0 * x,
-                self.absorption_distance_zeta(zeta), self.nu_rel(x), growth[0], growth[1]]
+                self.absorption_distance_zeta(zeta), self.nu_rel(x), growth[0], growth[1],
+                self.sound_horizon_zeta(zeta)]
 
     def row_below_the_floor(self, x, z):
         """The row at a `zeta` at or below `zeta_floor`, where `E^2` is not positive.
@@ -709,7 +817,8 @@ class Cosmology(object):
         nan = mp.nan
         w_z = self.w0 if self.wa == 0 else self.w0 + self.wa * z / x
         return [nan] * 20 + [self.tcmb0 * x, w_z, self.f_de(x), nan, nan,
-                             1 / x, nan, nan, nan, self.tnu0 * x, nan, self.nu_rel(x), nan, nan]
+                             1 / x, nan, nan, nan, self.tnu0 * x, nan, self.nu_rel(x), nan, nan,
+                             nan]
 
     def angular_diameter_z1z2(self, z1, z2):
         """astropy's transverse-of-the-difference form; NEGATIVE when `z2 < z1`."""
@@ -725,7 +834,7 @@ CQ_NAMES = ["dc", "dm", "dl", "da", "tl", "age", "vc", "dv", "mu",
             "om", "ode", "ok", "ogamma", "onu", "tcmb", "w", "de_density_scale",
             "critical_density", "lookback_distance",
             "scale_factor", "otot", "ob", "odm", "tnu", "absorption_distance",
-            "nu_relative_density", "growth", "growth_rate"]
+            "nu_relative_density", "growth", "growth_rate", "sound_horizon"]
 
 #: The quantities that do not touch `E` at all, and so survive below a model's own floor.
 CQ_NO_EFUNC = {"tcmb", "w", "de_density_scale", "scale_factor", "tnu", "nu_relative_density"}
@@ -780,6 +889,15 @@ def models():
     # the grid with that property, which is exactly why they are pinned at 30 digits -- the
     # inverses screen against bounds taken AT that floor, and nothing else here would move if
     # those bounds went wrong.
+    # The eight named cosmologies are the only ones above with an `ob0`, and all eight are flat
+    # LCDM with a realistic baryon fraction. These two carry a baryon density into the parts of
+    # the parameter space they do not reach: curvature and CPL dark energy inside the sound
+    # integral, and a baryon fraction six times a realistic one, which is what decides WHICH of
+    # the two crowding scales `sound_c` picks (`1/sqrt(R0)` here, `sqrt(Or0/Om0)` for the eight).
+    out.append(Cosmology("bao_open_cpl", "70", "0.3", ode0="0.6", tcmb0="2.7255", neff="3.046",
+                         m_nu=["0", "0", "0"], ob0="0.05", w0="-0.9", wa="0.3"))
+    out.append(Cosmology("bao_baryon_rich", "70", "0.3", tcmb0="2.7255", neff="3.046",
+                         m_nu=["0", "0", "0.06"], ob0="0.29"))
     out.append(Cosmology("recollapse_closed", "70", "1.5", ode0="0"))
     out.append(Cosmology("negative_ode0", "70", "0.3", ode0="-0.5"))
     return out
@@ -904,6 +1022,11 @@ def _growth_of(model):
     # forming `f sigma8` at the present day reads, and the redshift grid has no zero in it.
 
 
+def _scalars_of(model):
+    """One model's three sound-horizon scalars. Its own job: `z_drag` is a root solve."""
+    return (model.r_drag(), model.z_drag(), model.z_eq())
+
+
 def _pair_of(job):
     """One `(model, z1, z2)` job's angular diameter distance. Module-level for the same reason."""
     model, z1, z2 = job
@@ -920,6 +1043,7 @@ def _pair_dc_of(job):
 def gen_module():
     ms = models()
     growth = map_cases(_growth_of, ms)
+    scalars = map_cases(_scalars_of, ms)
     row_jobs = [(m, z, g) for m, gs in zip(ms, growth) for z, g in zip(REDSHIFTS, gs[0])]
     by_label = {m.label: m for m in ms}
     pair_jobs = [(by_label[label], z1, z2) for label in PAIR_MODELS for z1, z2 in PAIRS]
@@ -1009,17 +1133,19 @@ def gen_module():
     L.append("")
 
     der_names = ["ok0", "ogamma0", "onu0", "tnu0", "dh", "th", "age0", "little_h", "odm0",
-                 "growth_rate0"]
+                 "growth_rate0", "r_drag", "z_drag", "z_eq"]
     L.append("    ! ---- The values `%init` must derive from them ----")
     L.append("    integer, parameter :: n_cderived = %d !! Derived values per model." % len(der_names))
     for n, name in enumerate(der_names, start=1):
         L.append("    integer, parameter :: cd_%s = %d !! Derived `%s`." % (name, n, name))
     L.append("    !> `age0` is `+Infinity` where `cmodel_age_diverges` is `.true.`; `odm0` is NaN")
     L.append("    !! where `cmodel_has_ob0` is `.false.`; `growth_rate0` is NaN where `om0` is zero.")
+    L.append("    !! `r_drag` and `z_drag` are NaN without an `ob0`, and `z_drag` also where")
+    L.append("    !! `Tcmb0` is zero; `z_eq` is `+Infinity` there and a number everywhere else.")
     der_values = []
-    for m, g in zip(ms, growth):
+    for m, g, s in zip(ms, growth, scalars):
         der_values += [m.ok0, m.ogamma0, m.onu0, m.tnu0, m.dh, m.th, m.age0, m.h0 / 100,
-                       mp.nan if m.ob0 is None else m.om0 - m.ob0, g[1]]
+                       mp.nan if m.ob0 is None else m.om0 - m.ob0, g[1], s[0], s[1], s[2]]
     L += big_array("integer(int64)", "cmodel_derived_bits", "n_cderived * n_cmodel",
                [bits64(v) for v in der_values])
     L.append("")
@@ -1301,6 +1427,47 @@ def self_test():
             close(m.de2_dzeta(zeta), mp.diff(lambda t: m.e2(t), zeta), mp.mpf("1e-20"),
                   "%s: dE^2/dzeta at zeta=%s is the derivative of E^2" % (label, zt))
 
+    # -- the sound horizon, against a closed form and against its own root --------------------
+    #
+    # For a FLAT universe of matter and radiation alone the integral has an elementary
+    # antiderivative -- `INT da / sqrt(3 (Or0 + Om0 a)(1 + R0 a))` is a logarithm -- and no model
+    # in the emitted grid is that universe, so the anchor is built here for the purpose. It shares
+    # no arithmetic with `sound_horizon_zeta`: no substitution, no quadrature, no panels.
+    probe = Cosmology("rs_probe", "70", "0.3", ode0="0", tcmb0="2.7255", neff="3.046",
+                      m_nu=["0", "0", "0"], ob0="0.05")
+    anchor = Cosmology("rs_anchor", "70", 1 - probe.ogamma0 - probe.onu0, ode0="0",
+                       tcmb0="2.7255", neff="3.046", m_nu=["0", "0", "0"], ob0="0.05")
+    check(abs(anchor.ok0) < mp.mpf("1e-25"),
+          "the sound-horizon anchor is flat to 1e-25, not %s" % mp.nstr(anchor.ok0, 6))
+    a_or0 = anchor.ogamma0 * (1 + KOM_A * anchor.neff)
+    a_r0 = anchor.sound_r0()
+    for zt in ["0", "10", "1100", "1e5"]:
+        zeta = mp.log(1 + mp.mpf(zt))
+        a = mp.exp(-zeta)
+        want = anchor.dh * 2 / (mp.sqrt(3) * mp.sqrt(anchor.om0 * a_r0)) * (
+            mp.log(mp.sqrt(a_r0 * (a_or0 + anchor.om0 * a)) + mp.sqrt(anchor.om0 * (1 + a_r0 * a)))
+            - mp.log(mp.sqrt(a_r0 * a_or0) + mp.sqrt(anchor.om0)))
+        close(anchor.sound_horizon_zeta(zeta), want, mp.mpf("1e-22"),
+              "the matter-radiation sound horizon at z=%s is the closed form" % zt)
+
+    # `z_drag` is the root of `r_s(z) = r_drag`, so the one thing it must satisfy is that equality;
+    # and `z_eq` is where the matter term of `E^2` meets the relativistic radiation term, which for
+    # a massless model is the model's OWN radiation term and so is checkable against `e2`'s parts.
+    for m in ms:
+        zd = m.z_drag()
+        if zd == zd:
+            close(m.sound_horizon_zeta(mp.log(1 + zd)), m.r_drag(), mp.mpf("1e-24"),
+                  "%s: the sound horizon at z_drag is r_drag" % m.label)
+            check(DRAG_Z_LO <= zd <= DRAG_Z_HI,
+                  "%s: z_drag is %s, outside the bracket the library uses" % (m.label, mp.nstr(zd, 8)))
+        elif m.ob0 is not None and m.ob0 > 0 and m.om0 > 0 and m.ogamma0 > 0:
+            bad.append("%s: z_drag is NaN although the model has baryons, matter and photons"
+                       % m.label)
+        if m.ogamma0 > 0 and not m.has_massive_nu and m.om0 > 0:
+            x = 1 + m.z_eq()
+            close(m.om0 * x ** 3, m.ogamma0 * x ** 4 * (1 + m.nu_rel(x)), mp.mpf("1e-25"),
+                  "%s: matter equals radiation at z_eq" % m.label)
+
     # -- every emitted literal round-trips, and every NaN is one the model owes ---------------
     #
     # A NaN appears in exactly one place: at a redshift at or below a model's `zeta_floor`, where
@@ -1318,7 +1485,7 @@ def self_test():
             # infinite cannot be integrated through. Both are the library's answers too.
             no_growth = m.om0 <= 0 or m.e2(zeta) == mp.inf
             for name, value in zip(CQ_NAMES, m.row(z)):
-                unknown = no_baryons and name in ("ob", "odm")
+                unknown = no_baryons and name in ("ob", "odm", "sound_horizon")
                 if name in ("growth", "growth_rate") and no_growth:
                     unknown = True
                 packed = struct.unpack("<d", struct.pack("<d", float(value)))[0]
@@ -1522,6 +1689,167 @@ def verify_growth_libraries(ms):
     return bad, compared
 
 
+def verify_sound_libraries(ms):
+    """The sound horizon, `r_drag`, `z_drag` and `z_eq` against CAMB and CLASS.
+
+    The split here is the point of the pair: `%sound_horizon` is the model's own integral and is
+    compared TIGHTLY, while `%r_drag` is a published fit and is compared at the accuracy the fit
+    claims. CAMB's `rdrag` is an integral over its own recombination history, so
+    `r_s(CAMB's zdrag)` against `CAMB's rdrag` isolates the integral from the fit; comparing our
+    FIT against `rdrag` then measures the fit alone.
+
+    **Two exclusions, both measured before they were chosen, both named and counted** rather than
+    dropped quietly -- the shape `verify_growth_libraries` uses for CCL:
+
+    * A MASSIVE neutrino costs an order of magnitude. Massless models agree to `1.8e-06` against
+      CAMB and `2.5e-07` against CLASS; one 0.06 eV species takes those to `9.0e-06` and `1.1e-05`.
+      That is astropy's Komatsu fit for the massive density against each code's exact Fermi-Dirac
+      integration, not either integral drifting, and it is why `feature_cosmology_extra.md` section
+      3.2's headline numbers -- measured on five massless models -- are the massless ones. Both
+      classes are compared; the bound is set from the massive one and both worsts are printed.
+    * The Aubourg FIT is only compared where the model is inside the range it was calibrated on.
+      `Ob h^2` near `0.0224` and `Ocb h^2` near `0.1417` is what the paper fits over; a model six
+      times outside -- `bao_baryon_rich`, at `Ob h^2 = 0.142` -- puts the fit `1.5e-01` from CAMB
+      and `z_drag` `2.4e-01`, while its INTEGRAL is still `6.4e-06`. Excluding it from the fit's
+      comparison and printing what it does there is the honest report; including it would either
+      fail the arm or loosen the bound until the fit's real accuracy stopped being checked.
+
+    CLASS refuses several of the grid's models outright, including that one, and every refusal is
+    named.
+    """
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import camb
+    except ImportError:
+        print("  sound: camb is not installed; not compared")
+        return [], 0
+    bad, compared = [], 0
+    print("  sound: CAMB %s" % camb.__version__)
+    # Measured, then chosen. The integral: `1.8e-06` massless and `9.0e-06` with one massive
+    # species against CAMB, `2.5e-07` and `1.1e-05` against CLASS -- so `2e-05` catches "this is a
+    # different quantity" with a factor of two to spare and nothing else. The fit: `2.1e-04` to
+    # `3.6e-04` against CAMB over the realistic models, and `z_drag` `3.0e-04` to `5.6e-04`, so
+    # `1e-03` is the same kind of bound on the fit's own claim.
+    tol_rs, tol_fit = 2.0e-5, 1.0e-3
+    # The fit's calibration range, as a factor either side of Planck's parameters.
+    fit_centre_b, fit_centre_cb, fit_span = 0.0224, 0.1417, 2.0
+    worst = {"integral, massless": 0.0, "integral, one or more massive": 0.0,
+             "the fit": 0.0, "z_drag": 0.0, "z_eq": 0.0}
+    where = dict.fromkeys(worst, "")
+    outside = []
+    skipped_models = []
+    for m in ms:
+        if m.ob0 is None or m.ob0 <= 0 or m.om0 <= m.ob0 or m.tcmb0 == 0 or not m.is_lambda:
+            skipped_models.append(m.label)
+            continue
+        h2 = float((m.h0 / 100) ** 2)
+        massive = [x for x in m.m_nu if x > 0]
+        obh2, ocbh2 = float(m.ob0) * h2, float(m.om0) * h2
+        try:
+            pars = camb.set_params(H0=float(m.h0), ombh2=obh2,
+                                   omch2=float(m.om0 - m.ob0) * h2,
+                                   mnu=float(sum(massive, mp.mpf(0))),
+                                   num_massive_neutrinos=len(massive),
+                                   nnu=float(m.neff), TCMB=float(m.tcmb0),
+                                   omk=float(m.ok0), tau=0.054)
+            der = camb.get_background(pars).get_derived_params()
+        except Exception as exc:
+            print("  sound: CAMB refused %s (%s)" % (m.label, exc))
+            continue
+        # The integral, at CAMB's OWN drag redshift, against CAMB's own drag-epoch sound horizon.
+        got = float(m.sound_horizon_zeta(mp.log(1 + mp.mpf(repr(der["zdrag"])))))
+        rel = abs(got - der["rdrag"]) / der["rdrag"]
+        key = "integral, one or more massive" if massive else "integral, massless"
+        if rel > worst[key]:
+            worst[key], where[key] = rel, m.label
+        compared += 1
+        if rel > tol_rs:
+            bad.append("%s: r_s at CAMB's zdrag is %r, CAMB's rdrag is %r"
+                       % (m.label, got, der["rdrag"]))
+        # `z_eq` is exact from the parameters and is compared for every model.
+        rel = abs(float(m.z_eq()) - der["zeq"]) / der["zeq"]
+        if rel > worst["z_eq"]:
+            worst["z_eq"], where["z_eq"] = rel, m.label
+        compared += 1
+        if rel > 1.0e-2:
+            bad.append("%s: z_eq is %r, CAMB's zeq is %r" % (m.label, float(m.z_eq()), der["zeq"]))
+        # The fit, and the redshift the fit implies -- inside the fit's own range only.
+        in_range = (fit_centre_b / fit_span <= obh2 <= fit_centre_b * fit_span
+                    and fit_centre_cb / fit_span <= ocbh2 <= fit_centre_cb * fit_span)
+        rel_fit = abs(float(m.r_drag()) - der["rdrag"]) / der["rdrag"]
+        rel_zd = abs(float(m.z_drag()) - der["zdrag"]) / der["zdrag"]
+        if not in_range:
+            outside.append("%s (Ob h^2 = %.5f, Ocb h^2 = %.5f): the fit is %.3g from CAMB and "
+                           "z_drag %.3g, while the INTEGRAL is %.3g"
+                           % (m.label, obh2, ocbh2, rel_fit, rel_zd,
+                              abs(got - der["rdrag"]) / der["rdrag"]))
+            continue
+        if rel_fit > worst["the fit"]:
+            worst["the fit"], where["the fit"] = rel_fit, m.label
+        if rel_zd > worst["z_drag"]:
+            worst["z_drag"], where["z_drag"] = rel_zd, m.label
+        compared += 2
+        if rel_fit > tol_fit:
+            bad.append("%s: the Aubourg fit is %r, CAMB's rdrag is %r"
+                       % (m.label, float(m.r_drag()), der["rdrag"]))
+        if rel_zd > tol_fit:
+            bad.append("%s: z_drag is %r, CAMB's zdrag is %r"
+                       % (m.label, float(m.z_drag()), der["zdrag"]))
+    for name in ("integral, massless", "integral, one or more massive", "the fit", "z_drag",
+                 "z_eq"):
+        print("  sound: CAMB, %-30s worst %.3g (%s)" % (name, worst[name], where[name] or "none"))
+    for line in outside:
+        print("  sound: OUTSIDE the fit's calibration range, not compared -- %s" % line)
+    if skipped_models:
+        print("  sound: no Ob0, no photons, or not a cosmological constant -- %s"
+              % ", ".join(skipped_models))
+
+    try:
+        from classy import Class
+    except ImportError:
+        print("  sound: classy is not installed; not compared")
+        return bad, compared
+    worst_cl = {"massless": 0.0, "one or more massive": 0.0}
+    refused = []
+    for m in ms:
+        if m.ob0 is None or m.ob0 <= 0 or m.om0 <= m.ob0 or m.tcmb0 == 0 or not m.is_lambda:
+            continue
+        h2 = float((m.h0 / 100) ** 2)
+        massive = [x for x in m.m_nu if x > 0]
+        cfg = {"H0": float(m.h0), "omega_b": float(m.ob0) * h2,
+               "omega_cdm": float(m.om0 - m.ob0) * h2, "T_cmb": float(m.tcmb0),
+               "Omega_k": float(m.ok0)}
+        if massive:
+            cfg.update({"N_ur": float(m.neff) - len(massive) * 1.0132, "N_ncdm": len(massive),
+                        "m_ncdm": ",".join(repr(float(x)) for x in massive)})
+        else:
+            cfg["N_ur"] = float(m.neff)
+        cl = Class()
+        try:
+            cl.set(cfg)
+            cl.compute()
+            d = cl.get_current_derived_parameters(["rs_d", "z_d"])
+        except Exception as exc:
+            refused.append("%s (%s)" % (m.label, str(exc).strip().splitlines()[0][:90]))
+            cl.struct_cleanup()
+            continue
+        got = float(m.sound_horizon_zeta(mp.log(1 + mp.mpf(repr(d["z_d"])))))
+        rel = abs(got - d["rs_d"]) / d["rs_d"]
+        key = "one or more massive" if massive else "massless"
+        worst_cl[key] = max(worst_cl[key], rel)
+        compared += 1
+        if rel > tol_rs:
+            bad.append("%s: r_s at CLASS's z_d is %r, CLASS's rs_d is %r"
+                       % (m.label, got, d["rs_d"]))
+        cl.struct_cleanup()
+    for key in ("massless", "one or more massive"):
+        print("  sound: CLASS, r_s at its own z_d, %-20s worst %.3g" % (key, worst_cl[key]))
+    for line in refused:
+        print("  sound: CLASS refused -- %s" % line)
+    return bad, compared
+
+
 def verify_oracle():
     try:
         import astropy
@@ -1639,8 +1967,14 @@ def verify_oracle():
         for line in gbad[:20]:
             print("  " + line, file=sys.stderr)
         return 1
-    print("--verify-oracle: every compared value agrees with astropy, and %d growth values with CCL"
-          % gn)
+    sbad, sn = verify_sound_libraries(models())
+    if sbad:
+        print("--verify-oracle FAILED (%d sound):" % len(sbad), file=sys.stderr)
+        for line in sbad[:20]:
+            print("  " + line, file=sys.stderr)
+        return 1
+    print("--verify-oracle: every compared value agrees with astropy, %d growth values with CCL"
+          " and %d sound-horizon values with CAMB and CLASS" % (gn, sn))
     return 0
 
 

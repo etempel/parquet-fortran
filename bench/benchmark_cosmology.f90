@@ -83,6 +83,8 @@ program benchmark_cosmology
         call run_bindings(n)
     case ("inverse")
         call run_inverse(n)
+    case ("sound")
+        call run_sound(n)
     case default
         write (error_unit, '(a)') "benchmark_cosmology: unknown mode '" // trim(mode) // "'"
         error stop 1
@@ -169,6 +171,99 @@ contains
         call timed_growth(c, n, -0.999_real64, -0.95_real64, "growth, below the table")
 
     end subroutine run_eval
+
+    !> The four sound-horizon bindings, which are the only ones here that are not table reads.
+    !!
+    !! **A mode of its own, and a short column, because these are microseconds where every other
+    !! binding is nanoseconds.** `%sound_horizon` lays panels of a twenty-point rule over the whole
+    !! sound-crossing history at every call, and `%z_drag` does that inside a solve; a column of
+    !! `n` would run for minutes and say nothing the first thousand does not. The redshift is
+    !! swept because the panel COUNT follows the interval's own length: `asinh(b_top/sound_c)` is
+    !! about 4.8 at `z = 0` and 1.3 at `z = 1100`, so the top of the table is the cheapest place
+    !! to ask and a deep blueshift the dearest.
+    subroutine run_sound(n)
+        integer, intent(in) :: n !! redshifts per timed column, capped hard below
+
+        type(pf_cosmology) :: c
+        real(real64), allocatable :: z(:), out(:)
+        real(real64)       :: t0, t1, elapsed, v
+        integer            :: laps, m, k
+        character(len=28)  :: label
+
+        call c%init("Planck18")
+        m = max(1, min(n, 2000))
+        allocate (out(m))
+        write (output_unit, '(a)') "# The sound horizon over a column of m redshifts, and the three scalars."
+        write (output_unit, '(a)') "# Nothing here is tabulated: every row is a fresh panel rule."
+        write (output_unit, '(a28,a16,a16)') "binding", "us_per_query", "column"
+        do k = 1, 4
+            select case (k)
+            case (1)
+                call log_spaced_redshifts(m, 1.0e-3_real64, 1.0e3_real64, z)
+                label = "%sound_horizon, z < 1000"
+            case (2)
+                call log_spaced_redshifts(m, 1.0e3_real64, 1.0e5_real64, z)
+                label = "%sound_horizon, z > 1000"
+            case (3)
+                call log_spaced_redshifts(m, 0.5_real64, 0.999_real64, z)
+                z = -z
+                label = "%sound_horizon, blueshift"
+            case (4)
+                call log_spaced_redshifts(m, 1.0e-3_real64, 1.0e3_real64, z)
+                label = "%sound_horizon, scalar"
+            end select
+            laps = 0
+            elapsed = 0.0_real64
+            t0 = watch_seconds()
+            do while (elapsed < MIN_LAP)
+                if (k == 4) then
+                    ! The same work one element at a time, which is how a program actually calls
+                    ! it: the elemental form over a column is not what this binding is for.
+                    do laps = 1, m
+                        out(laps) = c%sound_horizon(z(laps))
+                    end do
+                    laps = 1
+                else
+                    out = c%sound_horizon(z)
+                    laps = laps + 1
+                end if
+                elapsed = watch_seconds() - t0
+                if (k == 4) exit
+            end do
+            t1 = watch_seconds()
+            write (output_unit, '(a28,f16.3,i16)') label, &
+                1.0e6_real64 * (t1 - t0) / real(max(laps, 1), real64) / real(m, real64), m
+            if (out(1) /= out(1)) write (output_unit, '(a)') "# (a NaN reached the column)"
+        end do
+
+        ! The three scalars, each timed over its own repeat count: `%r_drag` and `%z_eq` are
+        ! closed forms and `%z_drag` is a solve over the integral above.
+        do k = 1, 3
+            laps = 0
+            elapsed = 0.0_real64
+            t0 = watch_seconds()
+            do while (elapsed < MIN_LAP)
+                select case (k)
+                case (1)
+                    label = "%r_drag"
+                    v = c%r_drag()
+                case (2)
+                    label = "%z_eq"
+                    v = c%z_eq()
+                case (3)
+                    label = "%z_drag"
+                    v = c%z_drag()
+                end select
+                laps = laps + 1
+                elapsed = watch_seconds() - t0
+            end do
+            t1 = watch_seconds()
+            write (output_unit, '(a28,f16.3,i16)') label, &
+                1.0e6_real64 * (t1 - t0) / real(laps, real64), 1
+            if (v /= v) write (output_unit, '(a)') "# (a NaN was returned)"
+        end do
+
+    end subroutine run_sound
 
     !> Times `%growth_factor` over one column and prints its row.
     subroutine timed_growth(cosmo, n, lo, hi, label)

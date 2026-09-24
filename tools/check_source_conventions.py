@@ -2820,6 +2820,45 @@ def check_cosmology_config_names_match_the_library():
     return []
 
 
+def check_cosmology_drag_bracket_matches_the_oracle():
+    """`%z_drag`'s bracket is the same two redshifts in the library and in its oracle.
+
+    `%z_drag` solves `r_s(z) = r_drag` over `z` in `[100, 1e5]` and answers a quiet NaN for a model
+    whose `r_d` is not attained between them. `tools/generate_cosmology_reference.py` makes the
+    SAME refusal when it emits the reference `z_drag`, so that a disagreement between the two is
+    about the root and never about which models have a drag epoch at all.
+
+    Two copies of a bound, in two languages, with nothing tying them together: widening the
+    library's bracket alone would leave the reference carrying NaN for a model the library now
+    answers for, and the row test would fail pointing at the answer rather than at the bound.
+    Widening the oracle's alone is worse -- the reference would carry a number the library refuses.
+    An empty parse FAILS.
+    """
+    src = (REPO_ROOT / "src" / "parquet_cosmology_eval.f90").read_text()
+    gen = (REPO_ROOT / "tools" / "generate_cosmology_reference.py").read_text()
+    out = []
+    for fortran, python in (("PFC_DRAG_Z_LO", "DRAG_Z_LO"), ("PFC_DRAG_Z_HI", "DRAG_Z_HI")):
+        m = re.search(r"::\s*%s\s*=\s*([0-9eE.+_-]+?)_real64" % fortran, src)
+        p = re.search(r'^%s\s*=\s*mp\.mpf\("([^"]+)"\)' % python, gen, re.M)
+        if m is None:
+            out.append("src/parquet_cosmology_eval.f90: %s could not be read -- this check needs "
+                       "updating, and until it is nothing ties the bracket to its oracle" % fortran)
+            continue
+        if p is None:
+            out.append("tools/generate_cosmology_reference.py: %s could not be read -- this check "
+                       "needs updating, and until it is nothing ties the oracle to the bracket"
+                       % python)
+            continue
+        if float(m.group(1)) != float(p.group(1)):
+            out.append(
+                "src/parquet_cosmology_eval.f90's %s is %s but "
+                "tools/generate_cosmology_reference.py's %s is %s. %%z_drag refuses a model whose "
+                "r_d falls outside this bracket, and the reference must refuse the same models: "
+                "move the two together."
+                % (fortran, m.group(1), python, p.group(1)))
+    return out
+
+
 def check_parquet_version_stays_arrow_free():
     """`use parquet_version` must not reach parquet_bindings.
 
@@ -8970,6 +9009,8 @@ CHECKS = (
     ("the [cosmology] section's keys are %init's arguments", check_cosmology_config_keys_match_init),
     ("parquet_cosmology_config's named list is the library's",
      check_cosmology_config_names_match_the_library),
+    ("z_drag's bracket is the same in the library and its oracle",
+     check_cosmology_drag_bracket_matches_the_oracle),
     ("parquet_logging stays Arrow-free", check_parquet_logging_stays_arrow_free),
     ("parquet_toml stays Arrow-free", check_parquet_toml_stays_arrow_free),
     ("every parquet_toml entry takes the module guard", check_parquet_toml_takes_the_guard),

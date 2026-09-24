@@ -1966,7 +1966,7 @@ contains
 
 end module test_module_surface_prima
 
-!> `parquet_cosmology` alone: both `%init` forms, one binding of each of the five families, the
+!> `parquet_cosmology` alone: both `%init` forms, one binding of each of the seven families, the
 !! three free functions, and the statement that the module re-exports no setting.
 module test_module_surface_cosmology
     use parquet_cosmology                ! THE ONLY library import.
@@ -2039,6 +2039,19 @@ contains
             - 1.5_real64) > 1.0e-9_real64) what = "%z_at_luminosity_distance"
         if (what == "" .and. abs(c%z_at_distmod(c%distmod(1.5_real64)) - 1.5_real64) &
             > 1.0e-9_real64) what = "%z_at_distmod"
+
+        ! The growth of structure, and the sound horizon. Neither reads the four tabulated
+        ! integrals: growth has a table of its own, filled by an ODE, and the sound horizon
+        ! tabulates nothing at all, so a standalone build could break on either while every
+        ! binding above still answered.
+        if (what == "" .and. c%growth_factor(0.0_real64) /= 1.0_real64) what = "%growth_factor"
+        if (what == "" .and. abs(c%growth_rate(0.0_real64) - 0.52191_real64) > 1.0e-3_real64) &
+            what = "%growth_rate"
+        if (what == "" .and. abs(c%sound_horizon(0.0_real64) - 1223.07_real64) > 1.0_real64) &
+            what = "%sound_horizon"
+        if (what == "" .and. abs(c%r_drag() - 147.18_real64) > 0.1_real64) what = "%r_drag"
+        if (what == "" .and. abs(c%z_drag() - 1060.3_real64) > 1.0_real64) what = "%z_drag"
+        if (what == "" .and. abs(c%z_eq() - 3387.4_real64) > 1.0_real64) what = "%z_eq"
 
         ! The parameter form, and the parameter queries.
         call sim%init(h0 = 70.0_real64, om0 = 0.3_real64, name = "my_sim")

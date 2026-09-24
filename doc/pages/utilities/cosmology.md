@@ -136,6 +136,10 @@ across finds the same words; the two exceptions are forced by Fortran, which can
 | `%z_at_luminosity_distance(d)`, `%z_at_distmod(mu)` | the redshift at a `D_L` or a distance modulus |
 | `%growth_factor(z)` | `D(z)`, the linear growth factor of matter perturbations, normalised to `D(0) = 1` |
 | `%growth_rate(z)` | `f(z) = dlnD/dlna`, the linear growth rate |
+| `%sound_horizon(z)` | the comoving sound horizon `r_s(z)` in Mpc, exact for the model |
+| `%r_drag()` | the BAO scale `r_d` in Mpc — a published **fit**, see below |
+| `%z_drag()` | the drag epoch: the redshift at which `%sound_horizon` equals `%r_drag()` |
+| `%z_eq()` | matter-radiation equality, exact from the parameters |
 
 and the model itself: `%h0()`, `%little_h()`, `%om0()`, `%ode0()`, `%ok0()`, `%ogamma0()`,
 `%onu0()`, `%ob0()`, `%odm0()`, `%tcmb0()`, `%tnu0()`, `%neff()`, `%w0()`, `%wa()`,
@@ -220,6 +224,63 @@ fs8 = sigma8 * cosmo%growth_factor(z) * cosmo%growth_rate(z)
 A universe with no matter at all — de Sitter, Milne — has nothing to grow, and both bindings
 answer NaN rather than the `D = 1` everywhere that the equation would formally give.
 
+## The sound horizon
+
+Four bindings answer the baryon acoustic scale, and **the first thing to know about them is which
+is exact and which is a fit**:
+
+```fortran
+rs = cosmo%sound_horizon(z)   ! Mpc, exact for the model
+rd = cosmo%r_drag()           ! Mpc, a published fit over the parameters
+zd = cosmo%z_drag()           ! the redshift at which the first equals the second
+ze = cosmo%z_eq()             ! matter-radiation equality, exact from the parameters
+```
+
+**`%sound_horizon(z)` is the model's own integral**, how far a sound wave in the baryon-photon
+fluid has travelled by `z`, comoving:
+
+```
+r_s(z) = D_H INT_z^inf dz' / ( E(z') sqrt(3 (1 + R(z'))) ),   R = 3 Ob0 / (4 Ogamma0 (1 + z))
+```
+
+It carries every digit the rest of the module does: measured against CAMB 2.0.4 at its own drag
+redshift, `1.8e-06` for a model with massless neutrinos and `9.0e-06` with one massive species, and
+against CLASS 3.3.4.0 `2.5e-07` and `1.1e-05`. (The massive-neutrino gap is astropy's fit for the
+neutrino density against each code's exact integration, not this integral drifting.)
+
+**`%r_drag()` is a fit** — Aubourg et al. (2015), equation 16 — a closed form over `Om0 h²`,
+`Ob0 h²` and the massive-neutrino density, which knows nothing of `Tcmb0`, `w0` or curvature. It is
+right to about two parts in ten thousand for the Planck and WMAP cosmologies, so a caller reading
+`147.09` off it should read three digits and not sixteen. **Away from the parameters it was
+calibrated on it is much worse**: for a model carrying six times Planck's baryon density it is 15%
+from CAMB, while `%sound_horizon` for the same model is still right to `6e-06`. If your cosmology
+is not a Planck-like one, use the integral. `%z_drag()` is the redshift at which the exact
+integral reaches the fitted scale, so it inherits the fit's accuracy rather than the integral's.
+`%z_eq()` is `Om0/Or0 - 1` with the **relativistic** radiation density, every neutrino species
+counted as massless however massive it is today — which is what equality means — and is exact.
+
+**Photon decoupling, `z_star`, is deliberately absent.** It needs a recombination history, which
+is a Boltzmann code's job and not a Parquet library's.
+
+Two costs to plan around:
+
+- **`%sound_horizon` costs microseconds, not nanoseconds.** Nothing here is tabulated: every call
+  lays panels of a twenty-point Gauss rule over the whole sound-crossing history. It is declared
+  elemental like every other redshift binding, so it will accept a column of a million rows and
+  take a minute over it. It is meant for the handful of scales a program forms once.
+- **`%z_drag()` costs a few tens of microseconds**, being that integral inside a solve. It is a
+  `pure` function and cannot memoise, so keep it in a local if you need it twice.
+  `bench/benchmark_cosmology.sh sound` measures all four, and `%r_drag()` and `%z_eq()` are closed
+  forms costing tens of nanoseconds.
+
+A cosmology built without an `ob0` has no baryon density, so it has no sound speed:
+`%sound_horizon`, `%r_drag` and `%z_drag` all answer NaN, exactly as `%ob0()` itself does. A
+`Tcmb0` of zero — the default — means no photons, so `%sound_horizon` is exactly zero at every
+redshift, `%z_eq()` is `+Infinity`, and `%z_drag()` is NaN, because a sound horizon that is
+identically zero never equals a finite `r_d`. An `ob0` of exactly zero is the one case where the
+two part company: the integral is a perfectly good number (the sound speed is `1/sqrt(3)`
+throughout) while the fit divides by a power of `Ob0 h²` and answers NaN.
+
 ## Beyond the table
 
 `%init` tabulates four integrals — the comoving distance, the lookback time, the age and the
@@ -284,6 +345,12 @@ model: a universe with no matter has no matter perturbations to grow, so `%growt
 `%growth_rate` answer NaN for `om0 = 0`. The equation is not singular there — it would answer
 `D = 1` everywhere — but that number would mean nothing, and de Sitter and Milne are exactly the
 models a caller reaches for when checking a limit.
+
+**The sound horizon has two**, both about what the model was given rather than about the redshift:
+no `ob0` means no sound speed and `%sound_horizon`, `%r_drag` and `%z_drag` are all NaN at every
+redshift, and a `Tcmb0` of zero makes `%sound_horizon` exactly zero and `%z_drag` NaN. Neither
+raises a flag, and `%z_eq()` answers in both cases — it needs no baryons, and without radiation it
+is `+Infinity`.
 
 Three admitted inputs answer a signed infinity rather than a number:
 

@@ -181,7 +181,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   universe at a redshift — `%om`, `%ode`, `%ok`, `%ogamma`, `%onu`, which sum to one, with
   `%otot`, `%ob`, `%odm`, `%nu_relative_density`, `%onu_species`, `%tcmb`, `%tnu`, `%w`,
   `%de_density_scale` and `%critical_density` in M_sun/Mpc^3 — the linear growth of structure,
-  `%growth_factor` normalised to `D(0) = 1` and `%growth_rate` `f = dlnD/dlna` — and the inverses
+  `%growth_factor` normalised to `D(0) = 1` and `%growth_rate` `f = dlnD/dlna`, the baryon
+  acoustic scale — `%sound_horizon` exact for the model, `%r_drag` from the Aubourg et al. (2015)
+  fit, `%z_drag` the redshift where the two meet, and `%z_eq` exact from the parameters — and the inverses
   `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`, `%z_at_luminosity_distance` and
   `%z_at_distmod`; plus the model's own parameters and derived values, `%is_flat`,
   `%has_massive_nu`, `%get_name`, `%describe`, `%m_nu`, `%clone` and `%clear`.
@@ -192,7 +194,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `zmax=` and `zmin=` decide only how fast**. The growth pair is integrated instead of tabulated,
   downward from the top of the domain with a fourth-order Runge-Kutta at half a grid interval, so
   `zmax=` does not move it at all; the source term is `om0`, which excludes massive neutrinos, and
-  a model with no matter answers NaN from both bindings. The age has its own table rather than being `age(0)`
+  a model with no matter answers NaN from both bindings. The sound horizon tabulates nothing and
+  costs microseconds a call, laying panels of the same 20-point rule over `asinh` of the scale
+  factor's square root so that one fixed rule holds `1e-14` for every admitted `Tcmb0` and
+  baryon fraction; a cosmology built without an `ob0` answers NaN from all three baryon bindings
+  and a `Tcmb0` of zero makes the sound horizon exactly zero and `%z_eq` `+Infinity`. The age has its own table rather than being `age(0)`
   minus the lookback time, which would keep no correct digit at high redshift. The domain runs
   from just above `z = -1` to `z = 1e10`; outside it, and for a NaN, every binding answers NaN
   quietly without raising an IEEE flag, so a catalogue's `-99` sentinels pass through an elemental

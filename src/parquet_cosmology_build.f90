@@ -295,6 +295,8 @@ contains
         call check_density(this, "ogamma0 (1 + nu_rel(0))", &
                            this%d%ogamma0 * (1.0_real64 + this%d%nu_rel0), context)
 
+        call sound_scales(this)
+
         this%d%dh = pfc_c_kms / this%p%h0
         this%d%th = pfc_mpc_km / pfc_gyr_s / this%p%h0
 
@@ -632,6 +634,52 @@ contains
         call growth_pass(this)
 
     end subroutine cosmology_tabulate
+
+    !> `R0` and the sound horizon's integration scale, both fixed by the parameters alone.
+    !!
+    !! **`sound_c` is what makes a FIXED rule work for every admitted model.** The integrand of
+    !! `cosmology_sound_tail` carries two factors of the form `1 / sqrt(1 + (b/s)^2)`: the
+    !! baryon-photon one at `s = 1/sqrt(R0)`, and the matter-radiation one at `s = sqrt(Or0/Om0)`,
+    !! which is `sqrt(a_eq)`. Each puts a branch point at `b = i s`, so a Gauss panel wider than
+    !! the SMALLER of the two converges slowly however analytic the integrand is on the real axis.
+    !! Both scales run with the model: `1/sqrt(R0)` is `0.017` for `Planck18` and `2.3e-05` at
+    !! `Tcmb0 = 0.1 K`, which the module admits. Substituting `b = sound_c sinh(v)` with
+    !! `sound_c` the smaller of the two moves EVERY one of those branch points to an imaginary
+    !! part of at least `pi/2` in `v`, whatever the model, because `asinh(i y)` has imaginary part
+    !! `arcsin(y)` for `y <= 1` and exactly `pi/2` for `y > 1`. That bound is what
+    !! `PFC_SOUND_PANEL` is chosen against.
+    !!
+    !! A model with neither baryons nor matter has neither scale and needs no substitution; there
+    !! `sound_c` is one, and `b = sinh(v)` is a harmless change of variable.
+    subroutine sound_scales(this)
+        class(pf_cosmology), intent(inout) :: this !! the cosmology being built
+
+        real(real64) :: or0, b_eq
+
+        this%d%sound_r0_root = ieee_value(this%d%sound_r0_root, ieee_quiet_nan)
+        this%d%sound_c = 1.0_real64
+        ! No photons, or no baryon density given: `%sound_horizon` never reaches the integrand,
+        ! so neither scale is formed and the division by a zero `Ogamma0` never happens. Under
+        ! nagfor's default `-ieee=stop` that division would end the process, not raise a flag.
+        if (this%d%ogamma0 <= 0.0_real64) return
+        if (.not. this%has_ob0) return
+
+        ! `sqrt(R0)` in one step: `3 Ob0 / (4 Ogamma0)` overflows for an `Ogamma0` below about
+        ! `1e-300`, which `Tcmb0` may reach, and the ratio of the two roots never does.
+        this%d%sound_r0_root = sqrt(3.0_real64 * this%p%ob0) / sqrt(4.0_real64 * this%d%ogamma0)
+        or0 = this%d%ogamma0 * (1.0_real64 + pfc_komatsu_a * this%p%neff)
+        if (this%d%sound_r0_root > 0.0_real64) this%d%sound_c = 1.0_real64 / this%d%sound_r0_root
+        if (this%p%om0 > 0.0_real64 .and. or0 > 0.0_real64) then
+            b_eq = sqrt(or0 / this%p%om0)
+            ! `ob0 = 0` leaves `R0 = 0` and no baryon scale at all, so equality is the only one.
+            if (this%d%sound_r0_root <= 0.0_real64 .or. b_eq < this%d%sound_c) this%d%sound_c = b_eq
+        end if
+        ! A scale that is not a positive finite number resolves nothing, and `sound_c sinh(v)`
+        ! must stay a number: `sqrt(or0 / om0)` overflows for a subnormal `om0`.
+        if (.not. (this%d%sound_c > 0.0_real64 .and. this%d%sound_c < huge(1.0_real64))) &
+            this%d%sound_c = 1.0_real64
+
+    end subroutine sound_scales
 
     !> The linear growth pair, integrated DOWNWARD onto the same integer lattice.
     !!

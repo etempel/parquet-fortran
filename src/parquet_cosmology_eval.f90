@@ -39,6 +39,33 @@ submodule (parquet_cosmology) parquet_cosmology_eval
         !! radiation, and invisible both at `z >= 1100` (`b <= 0.03`) and without radiation. Eight
         !! hold `6.6e-15` at every reachable `b_top` (`feature_cosmology.md` section 4.4).
 
+    real(real64), parameter :: PFC_SOUND_PANEL = 1.0_real64
+        !! The width in `v` of one panel of the sound horizon, `b = sound_c sinh(v)`. A WIDTH and
+        !! not a count, as `PFC_PANEL` is a width in `zeta`, because the interval's own length
+        !! runs from `0.19` at `z = 1e5` to `37` at the domain's floor for an extreme model.
+        !!
+        !! Measured against a 40-digit `mpmath` evaluation of the same integral, worst over four
+        !! redshifts (`0`, `1100`, `1e5`, `-0.9999999999`) and six models from `Tcmb0 = 2.7255` to
+        !! `Tcmb0 = 1e-4`:
+        !!
+        !! | rule | worst relative error | panels |
+        !! |---|---|---|
+        !! | 8 panels, uniform in `b` | 9.7e-02 | 8 |
+        !! | 64 panels, uniform in `b` | 2.7e-02 | 64 |
+        !! | 8 panels, uniform in `v` | 1.8e-06 | 8 |
+        !! | width 1.0 in `v` | **4.9e-19** | up to 37 |
+        !! | width 0.75 in `v` | 8.6e-23 | up to 49 |
+        !!
+        !! The first two rows are why the variable is `v` and not `b`: a uniform mesh in `b` does
+        !! not converge at all once `1/sqrt(R0)` falls below a panel's width, and `R0` rises like
+        !! `Tcmb0^-4`. The third is why the count is not fixed: the interval grows like the
+        !! logarithm of the model's own scale. See `sound_scales`.
+    integer, parameter :: PFC_SOUND_MAX_PANELS = 512
+        !! The cap on that count, which bounds a `pure` loop as `PFC_SOLVE_STEPS` bounds one. The
+        !! panels still span the whole interval when it binds -- they are laid as fractions of it
+        !! -- so a capped rule is less accurate and never wrong. It first binds at about
+        !! `Ogamma0 = 1e-200`, which no `Tcmb0` anyone writes reaches.
+
     real(real64), parameter :: PFC_PI = 3.141592653589793_real64
         !! pi, for the volume and the angular scales.
     real(real64), parameter :: PFC_RAD_PER_ARCMIN = PFC_PI / 10800.0_real64
@@ -65,6 +92,18 @@ submodule (parquet_cosmology) parquet_cosmology_eval
         !! Invert `-ln(age(zeta))`, which INCREASES with `zeta` as the age falls.
     integer, parameter :: PFC_Q_DL = 14
         !! Invert `D_L(zeta)`.
+    integer, parameter :: PFC_Q_SOUND = 15
+        !! Invert `-r_s(zeta)`, which INCREASES with `zeta` as the sound horizon falls. The
+        !! NEGATIVE is the quantity, so `%z_drag` passes `-%r_drag()` as its target.
+
+    real(real64), parameter :: PFC_DRAG_Z_LO = 100.0_real64
+        !! The bottom of `%z_drag`'s bracket in `z`. Input-sanity bounds, not a setting: the drag
+        !! epoch of a model this module admits is around 1060, and a bracket wider than this buys
+        !! nothing a solve over a monotone function needs.
+    real(real64), parameter :: PFC_DRAG_Z_HI = 1.0e5_real64
+        !! The top of it. `%z_drag` answers a quiet NaN for a model whose `r_d` is not reached
+        !! between the two, rather than the endpoint a sign-blind iteration would walk to.
+
 
     real(real64), parameter :: PFC_LOG10_LIMIT = 300.0_real64
         !! `10^p` is formed only for `|p|` below this: `10^309` overflows and `10^-324` is zero,
@@ -318,9 +357,35 @@ contains
 
     module procedure cosmology_integrand_at
 
-        real(real64) :: v2, zeta
+        real(real64) :: v2, zeta, b
 
         select case (which)
+        case (PFC_INT_SOUND)
+            ! `x` is `v`, and `b = sound_c sinh(v)`. The integrand is `b g(b^2)` in `b` times
+            ! `db/dv`, so in `v` it is odd and analytic and vanishes like `v`; the origin is
+            ! answered directly rather than by a division, exactly as the age tail's is.
+            if (x /= x) then
+                v = x
+                return
+            end if
+            if (x <= 0.0_real64) then
+                v = 0.0_real64
+                return
+            end if
+            b = d%sound_c * sinh(x)
+            v2 = cosmology_e2(p, d, -2.0_real64 * log(b))
+            if (v2 /= v2) then
+                v = v2
+            else if (v2 <= 0.0_real64) then
+                v = ieee_value(v, ieee_quiet_nan)
+            else
+                ! `sqrt(3 (1 + R0 b^2))` as `sqrt(3) hypot(1, sqrt(R0) b)`: the product `R0 b^2`
+                ! is `R(z)`, the baryon-photon ratio at that redshift, and it overflows for a
+                ! `Tcmb0` the module admits. `hypot` is exactly this case's intrinsic.
+                v = 2.0_real64 * d%sound_c * cosh(x) &
+                    / (b ** 3 * sqrt(v2) * sqrt(3.0_real64) &
+                       * hypot(1.0_real64, d%sound_r0_root * b))
+            end if
         case (PFC_INT_AGE_TAIL)
             ! `x` is `b = sqrt(a)`. The integrand vanishes like b^3 (with radiation) or b^2
             ! (without), so the origin is answered directly rather than by a division.
@@ -423,6 +488,30 @@ contains
         end do
 
     end procedure cosmology_age_tail
+
+    module procedure cosmology_sound_tail
+
+        real(real64) :: v_top, lo, hi
+        integer      :: i, panels
+
+        if (zeta /= zeta) then
+            v = zeta
+            return
+        end if
+        ! `b_top = e^(-zeta/2)` is the scale factor's square root at `zeta`, and `v_top` the `v`
+        ! it sits at. The ratio cannot overflow: `b_top` is at most `1e5` over the domain and
+        ! `sound_c` at least about `1e-161`, because a non-zero `Ogamma0` is at least the smallest
+        ! subnormal.
+        v_top = asinh(exp(-0.5_real64 * zeta) / d%sound_c)
+        panels = max(1, min(PFC_SOUND_MAX_PANELS, ceiling(v_top / PFC_SOUND_PANEL)))
+        v = 0.0_real64
+        do i = 1, panels
+            lo = v_top * real(i - 1, real64) / real(panels, real64)
+            hi = v_top * real(i, real64) / real(panels, real64)
+            v = v + cosmology_panel(p, d, PFC_INT_SOUND, lo, hi)
+        end do
+
+    end procedure cosmology_sound_tail
 
     ! =========================================================================================
     ! Domain screens and the table readers
@@ -1588,6 +1677,144 @@ contains
 
     end procedure cosmology_growth_rate
 
+    !> `r_s(zeta)` in Mpc for a `zeta` known inside the domain: the panel rule, nothing tabulated.
+    !!
+    !! The whole of the sound horizon's domain contract in one place, so that `%sound_horizon` and
+    !! the `%z_drag` solve cannot drift apart on what they admit.
+    pure function rs_at(this, zeta) result(v)
+        class(pf_cosmology), intent(in) :: this !! the cosmology, known built
+        real(real64), intent(in)        :: zeta !! `ln(1 + z)`, known inside the domain
+        real(real64)                    :: v    !! `r_s` there, in Mpc
+
+        if (.not. this%has_ob0) then
+            ! No baryon density means no `R` and no sound speed, exactly as `%ob0()` itself is a
+            ! NaN rather than a zero: a missing baryon fraction is not a zero one.
+            v = ieee_value(v, ieee_quiet_nan)
+        else if (this%d%ogamma0 <= 0.0_real64) then
+            ! No photons, no sound. Screened BEFORE `R0` is formed, never by dividing by a zero
+            ! `Ogamma0` and cleaning up the flag afterwards -- that division ends the process
+            ! under nagfor's default `-ieee=stop`.
+            v = 0.0_real64
+        else if (this%d%zeta_floor > -PFC_ZETA_CEILING .and. zeta <= this%d%zeta_floor) then
+            v = ieee_value(v, ieee_quiet_nan)
+        else
+            v = this%d%dh * cosmology_sound_tail(this%p, this%d, zeta)
+        end if
+
+    end function rs_at
+
+    !> `d(-r_s)/dzeta = D_H e^zeta / (E sqrt(3 (1 + R0 e^(-zeta))))`, for the Newton step.
+    !!
+    !! The sound horizon FALLS with `zeta`, so its negative is the increasing quantity the solver
+    !! inverts, and this is the analytic derivative OF THAT.
+    pure function rs_neg_slope(this, zeta) result(s)
+        class(pf_cosmology), intent(in) :: this !! the cosmology
+        real(real64), intent(in)        :: zeta !! `ln(1 + z)`
+        real(real64)                    :: s    !! `d(-r_s)/dzeta` in Mpc
+
+        real(real64) :: v2
+
+        v2 = cosmology_e2(this%p, this%d, zeta)
+        if (v2 /= v2) then
+            s = v2
+        else if (v2 <= 0.0_real64) then
+            s = ieee_value(s, ieee_quiet_nan)
+        else
+            s = this%d%dh * exp(zeta) / (sqrt(v2) * sqrt(3.0_real64) &
+                * hypot(1.0_real64, this%d%sound_r0_root * exp(-0.5_real64 * zeta)))
+        end if
+
+    end function rs_neg_slope
+
+    module procedure cosmology_sound_horizon
+
+        real(real64) :: zeta
+
+        if (.not. this%ready) error stop "pf_cosmology%sound_horizon: the cosmology is not initialised"
+        zeta = zeta_of_z(z)
+        if (zeta /= zeta) then
+            v = zeta
+        else
+            v = rs_at(this, zeta)
+        end if
+
+    end procedure cosmology_sound_horizon
+
+    module procedure cosmology_r_drag
+
+        real(real64) :: h2, ocbh2, obh2, onuh2
+
+        if (.not. this%ready) error stop "pf_cosmology%r_drag: the cosmology is not initialised"
+        h2 = (this%p%h0 / 100.0_real64) ** 2
+        ocbh2 = this%p%om0 * h2
+        obh2 = this%p%ob0 * h2
+        ! `obh2` is a quiet NaN when the caller gave no `ob0`, and an ordered comparison against
+        ! one raises `IEEE_INVALID`, so the NaN is tested with `/=` as its own statement first.
+        if (obh2 /= obh2) then
+            v = obh2
+            return
+        end if
+        ! The fit divides by a power of each, so a model with no baryons or no cold matter has no
+        ! drag scale to report. `%sound_horizon` still answers for such a model: it is the FIT
+        ! that has no value here, not the integral.
+        if (obh2 <= 0.0_real64 .or. ocbh2 <= 0.0_real64) then
+            v = ieee_value(v, ieee_quiet_nan)
+            return
+        end if
+        ! `Onu h^2` is `SUM m_nu / 93.14 eV`, the MASSIVE species alone, which is what Aubourg et
+        ! al. define. `%onu0() * h^2` is a different number -- it counts the relativistic species
+        ! too, and is about `1.7e-05` where this is exactly zero -- and using it here would move
+        ! `r_d` by about `1e-04`, which looks like the fit's own accuracy rather than a defect.
+        onuh2 = sum(this%p%m_nu) / pfc_nu_mass_ev
+        v = pfc_aubourg_a * exp(-pfc_aubourg_b * (onuh2 + pfc_aubourg_c) ** 2) &
+            / (ocbh2 ** pfc_aubourg_p_cb * obh2 ** pfc_aubourg_p_b)
+
+    end procedure cosmology_r_drag
+
+    module procedure cosmology_z_drag
+
+        real(real64) :: rd, lo, hi, r_lo, r_hi
+
+        if (.not. this%ready) error stop "pf_cosmology%z_drag: the cosmology is not initialised"
+        v = ieee_value(v, ieee_quiet_nan)
+        rd = this%r_drag()
+        if (rd /= rd) return
+        ! A sound horizon that is identically zero never equals a finite `r_d`.
+        if (this%d%ogamma0 <= 0.0_real64) return
+        lo = pf_z2zeta(PFC_DRAG_Z_LO)
+        hi = pf_z2zeta(PFC_DRAG_Z_HI)
+        ! **The bracket is checked here and not left to the solver.** `solve_zeta` answers the END
+        ! a target lies beyond, which is right for an inverse screened against its own stored
+        ! bounds and wrong here: a model whose `r_d` is not reached between `z = 100` and `z = 1e5`
+        ! has no drag epoch this bracket can name, and saying so is the honest answer.
+        r_lo = rs_at(this, lo)
+        r_hi = rs_at(this, hi)
+        if (r_lo /= r_lo .or. r_hi /= r_hi) return
+        if (rd > r_lo .or. rd < r_hi) return
+        v = pf_zeta2z(solve_zeta(this, PFC_Q_SOUND, -rd, lo, hi))
+
+    end procedure cosmology_z_drag
+
+    module procedure cosmology_z_eq
+
+        real(real64) :: or0
+
+        if (.not. this%ready) error stop "pf_cosmology%z_eq: the cosmology is not initialised"
+        if (this%d%ogamma0 <= 0.0_real64) then
+            ! No radiation at all: matter dominates at every redshift and equality is never
+            ! reached. Screened before the division rather than after the flag it would raise.
+            v = ieee_value(v, ieee_positive_inf)
+            return
+        end if
+        ! The RELATIVISTIC radiation density, because at equality every species is relativistic
+        ! however massive it is today. `Ogamma0 + Onu0` is the other quantity and is a few per
+        ! cent low for a model with a massive species -- silently, since the two agree exactly
+        ! for a massless one.
+        or0 = this%d%ogamma0 * (1.0_real64 + pfc_komatsu_a * this%p%neff)
+        v = this%p%om0 / or0 - 1.0_real64
+
+    end procedure cosmology_z_eq
+
     module procedure cosmology_lookback_distance
 
         real(real64) :: zeta
@@ -1791,7 +2018,7 @@ contains
 
     end function solve_zeta
 
-    !> The quantity the solver is inverting, at `zeta`. Every one of the four INCREASES with
+    !> The quantity the solver is inverting, at `zeta`. Every one of the five INCREASES with
     !! `zeta`, which is what lets one bracketed iteration serve them all.
     pure function value_at(this, which, zeta) result(v)
         class(pf_cosmology), intent(in) :: this  !! the cosmology
@@ -1806,6 +2033,9 @@ contains
             v = tl_at(this, zeta)
         case (PFC_Q_DL)
             v = dl_at(this, zeta)
+        case (PFC_Q_SOUND)
+            ! The sound horizon falls as `zeta` rises, so its negative is the increasing one.
+            v = -rs_at(this, zeta)
         case (PFC_Q_LOG_AGE)
             ! The age FALLS as `zeta` rises, so its negative logarithm is the increasing quantity.
             ! The logarithm is the point: at the top of the domain the age is `7.6e-18 Gyr` beside
@@ -1838,6 +2068,8 @@ contains
             s = tl_slope(this, zeta)
         case (PFC_Q_DL)
             s = dl_slope(this, zeta)
+        case (PFC_Q_SOUND)
+            s = rs_neg_slope(this, zeta)
         case (PFC_Q_LOG_AGE)
             ! `d(age)/dzeta` is exactly `-t_H/E`, because `age + t_L` is constant; so the slope of
             ! `-ln(age)` is the lookback time's own slope over the age.

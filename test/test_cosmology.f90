@@ -45,7 +45,7 @@ module test_cosmology
 
     !> What a quantity read out of the table may differ from the 30-digit model by.
     !!
-    !! Measured, not chosen, and set at ten times the worst: over all 22 models, all 25 redshifts
+    !! Measured, not chosen, and set at ten times the worst: over all 24 models, all 25 redshifts
     !! and all 25 quantities the worst residual is `6.5e-14` under gfortran and `8.0e-14` under
     !! ifx, both on the comoving volume of a curved model, where the distance's own error is
     !! cubed. The two largest contributors are not the interpolant: the first interval above
@@ -87,12 +87,28 @@ module test_cosmology
     real(real64), parameter :: DENSITY_SUM_TOL = 1.0e-14_real64
     !> What `%growth_factor` may differ from the 30-digit ODE oracle by, RELATIVELY.
     !!
-    !! Measured, not chosen, and set at ten times the worst, as `TABLE_TOL` is: over all 22
+    !! Measured, not chosen, and set at ten times the worst, as `TABLE_TOL` is: over all 24
     !! models and all 25 redshifts the worst is `4.4e-11` under gfortran and `4.4e-11` under ifx,
     !! both on the recollapsing model at `z = -0.5`, which is `0.6` below its table's bottom and
     !! `0.4` above its own floor -- the deepest the fallback walk runs anywhere in the grid. Every
     !! other model is at `3.9e-12` or better, which is the `PFC_H/2` integrator's own `2.5e-12`.
     real(real64), parameter :: GROWTH_TOL = 4.0e-10_real64
+    !> What `%sound_horizon` may differ from the 30-digit oracle by, and `%z_drag` with it.
+    !!
+    !! Measured, not chosen, and set at ten times the worst, as `TABLE_TOL` is: over all 24 models
+    !! and all 25 redshifts the worst is `3.0e-15` under gfortran and `2.9e-15` under ifx, both on
+    !! `Planck13` at `z = 1e10`, where the panel rule spans the fewest panels and the answer is
+    !! `2.6 Mpc` beside a `z = 0` value of `1223`. The three scalars are better again: `%r_drag`
+    !! `3.8e-16` on both, `%z_drag` `1.3e-15` and `1.1e-15`, `%z_eq` `5.4e-16` and `4.0e-16`.
+    !! Nothing here is a table read, so there is no interpolation error in any of it -- only the
+    !! rule's own truncation, which `PFC_SOUND_PANEL` holds four orders below this, and the
+    !! rounding of a few hundred sums.
+    real(real64), parameter :: SOUND_TOL = 3.0e-14_real64
+    !> What the matter-radiation closed form may differ by, which is its OWN conditioning rather
+    !! than the library's: the answer is a difference of two logarithms, and at `z = 1e5` they
+    !! agree in the first digit. Measured worst over the three temperatures and five redshifts:
+    !! `1.2e-14` under gfortran and `1.4e-14` under ifx, at `z = 1e5` every time.
+    real(real64), parameter :: SOUND_CLOSED_TOL = 1.5e-13_real64
     !> What `%growth_rate` may differ from the same oracle by, ABSOLUTELY.
     !!
     !! **`f` is a rate between 0 and 1 whose accuracy is absolute, and saying so is more honest
@@ -229,7 +245,19 @@ contains
             new_unittest("a truncated or big-rip model grows above its floor and is NaN below it", &
                          test_growth_stops_at_the_model_floor), &
             new_unittest("a universe with no matter has no growth to report", &
-                         test_no_matter_means_no_growth) &
+                         test_no_matter_means_no_growth), &
+            new_unittest("the sound horizon of a matter-radiation universe is its closed form", &
+                         test_sound_horizon_is_the_closed_form), &
+            new_unittest("r_drag is the published formula and the three scalars are their rows", &
+                         test_r_drag_is_the_published_formula), &
+            new_unittest("z_drag is the redshift at which the sound horizon is r_drag", &
+                         test_z_drag_inverts_the_sound_horizon), &
+            new_unittest("Planck18's BAO scale and equality are the published ones", &
+                         test_planck18_bao_scale_is_the_published_one), &
+            new_unittest("z_eq is matter meeting the relativistic radiation density", &
+                         test_z_eq_uses_the_relativistic_radiation), &
+            new_unittest("no baryons and no photons: the sound horizon's degenerate models", &
+                         test_sound_horizon_degenerate_models) &
             ]
 
     end subroutine collect_tests_cosmology
@@ -383,6 +411,7 @@ contains
         v(cq_nu_relative_density) = c%nu_relative_density(z)
         v(cq_growth) = c%growth_factor(z)
         v(cq_growth_rate) = c%growth_rate(z)
+        v(cq_sound_horizon) = c%sound_horizon(z)
 
     end function answers
 
@@ -424,16 +453,20 @@ contains
 
     !> One quantity of one row against its reference, at the tolerance that quantity carries.
     !!
-    !! The growth pair is the one place a row needs anything but `TABLE_TOL`: `D` is an integrated
-    !! quantity rather than a tabulated quadrature and carries the ODE's own `2.5e-12`, and `f` is
-    !! accurate ABSOLUTELY rather than relatively (`GROWTH_RATE_TOL`).
+    !! The growth pair and the sound horizon are the three places a row needs anything but
+    !! `TABLE_TOL`: `D` is an integrated quantity rather than a tabulated quadrature and carries
+    !! the ODE's own `2.5e-12`, `f` is accurate ABSOLUTELY rather than relatively
+    !! (`GROWTH_RATE_TOL`), and the sound horizon is a panel rule over a fresh integral at every
+    !! call, with nothing tabulated to read (`SOUND_TOL`).
     pure function row_agrees(got, want, q) result(ok)
         real(real64), intent(in) :: got  !! what the library answered
         real(real64), intent(in) :: want !! the reference value
         integer, intent(in)      :: q    !! which quantity, a `cq_*` selector
         logical                  :: ok   !! they agree
 
-        if (q == cq_growth) then
+        if (q == cq_sound_horizon) then
+            ok = agrees(got, want, SOUND_TOL)
+        else if (q == cq_growth) then
             ok = agrees(got, want, GROWTH_TOL)
         else if (q == cq_growth_rate) then
             if (want /= want) then
@@ -2239,6 +2272,11 @@ contains
                 ! A negative dark-energy density: `E^2` reaches zero at `z = -0.398`.
                 call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
             end if
+            ! The three that take no redshift are called once per model rather than once per
+            ! input: `%z_drag` is a solve over an integral and costs about half a millisecond.
+            v = c%r_drag()
+            v = c%z_drag()
+            v = c%z_eq()
             do k = 1, 23
                 got = answers(c, zs(k))
                 call sweep_inverses(c, got, v)
@@ -3264,6 +3302,303 @@ contains
                    "Milne must have no growth factor")
 
     end subroutine test_no_matter_means_no_growth
+
+    ! =========================================================================================
+    ! The sound horizon
+    ! =========================================================================================
+
+    !> A flat universe of matter and radiation alone, where `r_s` has an elementary antiderivative.
+    !!
+    !! **This is the test that decides how the integral is laid out, and the only one that can.**
+    !! The integrand carries a factor `1/sqrt(1 + (b/s)^2)` at `s = 1/sqrt(R0)`, and `R0` rises
+    !! like `Tcmb0^-4`: a mesh uniform in `b = sqrt(a)` -- the shape the age tail uses, and the
+    !! one this feature was planned around -- is `9.7e-02` wrong at `Tcmb0 = 0.1 K` with eight
+    !! panels and `2.7e-02` wrong with sixty-four, because no fixed number of equal panels
+    !! resolves a scale that runs with the model. The library substitutes `b = sound_c sinh(v)`
+    !! and lays panels of a fixed WIDTH in `v`; the three temperatures below are `2.7255`, where
+    !! either mesh works, `1.0`, where the uniform one has lost four digits, and `0.1`, where it
+    !! has lost all of them.
+    !!
+    !! No reference row can catch this: every model in the generated grid has a realistic `Tcmb0`.
+    !! The closed form can, and it shares nothing with the library but the parameters --
+    !!
+    !! ```
+    !! INT_0^a da / sqrt(3 (Or0 + Om0 a) (1 + R0 a))
+    !!     = 2/sqrt(3 Om0 R0) ln[ sqrt(R0 (Or0 + Om0 a)) + sqrt(Om0 (1 + R0 a)) ]
+    !! ```
+    !!
+    !! -- which is exact when `E^2` is matter and radiation and nothing else. Such a model is not
+    !! in the grid, so it is built here: a probe reads `Ogamma0` and `Onu0` off the library, and
+    !! `om0 = 1 - Ogamma0 - Onu0` with `ode0 = 0` leaves a universe flat to about `1e-17`.
+    subroutine test_sound_horizon_is_the_closed_form(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: probe, c
+        real(real64)       :: temps(4), neffs(4), fracs(4), zs(5)
+        real(real64), allocatable :: masses(:)
+        real(real64)       :: om0, or0, r0, a, want, got, worst, t, z, nf
+        integer            :: i, j
+        character(len=:), allocatable :: num
+
+        ! The fourth case is not a cosmology anyone would build; it is the one that separates the
+        ! two crowding scales. `sound_c` is the SMALLER of `1/sqrt(R0)` and `sqrt(Or0/Om0)`, whose
+        ! ratio is `sqrt((4/3)(Om0/Ob0) / (1 + 0.2271 Neff))` -- between 2.2 and 4 for every
+        ! realistic model, so the minimum always picks the SECOND one there and a library that
+        ! dropped the first would answer exactly the same numbers. Only a large `Neff` with every
+        ! particle a baryon separates them: the ratio is 0.24 at `Neff = 100` and 0.14 at 300, and
+        ! taking the wrong one then leaves the baryon-drag branch point inside the panel it should
+        ! have been outside of. MEASURED against the closed form, worst over the five redshifts:
+        ! `5.6e-15` at `Neff = 100` -- under this test's own tolerance, so 100 does not pin it --
+        ! `1.9e-11` at 300, and `1.0e-09` at 1000. Three hundred is the smallest of those that
+        ! fails by a clear margin, and 300 massless species is what it costs to assert it.
+        temps = [2.7255_real64, 1.0_real64, 0.1_real64, 1.9_real64]
+        neffs = [3.046_real64, 3.046_real64, 3.046_real64, 300.0_real64]
+        fracs = [0.05_real64, 0.05_real64, 0.05_real64, 1.0_real64]
+        zs = [0.0_real64, 10.0_real64, 1100.0_real64, 1.0e5_real64, -0.9_real64]
+        worst = 0.0_real64
+        do i = 1, 4
+            t = temps(i)
+            nf = neffs(i)
+            if (allocated(masses)) deallocate (masses)
+            allocate (masses(int(nf)))
+            masses = 0.0_real64
+            call probe%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = 0.0_real64, tcmb0 = t, &
+                            neff = nf, m_nu = masses, ob0 = 0.3_real64 * fracs(i))
+            om0 = 1.0_real64 - probe%ogamma0() - probe%onu0()
+            call c%init(h0 = 70.0_real64, om0 = om0, ode0 = 0.0_real64, tcmb0 = t, &
+                        neff = nf, m_nu = masses, ob0 = om0 * fracs(i))
+            ! Every species is massless here, so `Ogamma0 + Onu0` IS the relativistic radiation
+            ! density the closed form wants, read off the library rather than retyped from a
+            ! constant the library already carries.
+            or0 = c%ogamma0() + c%onu0()
+            r0 = 3.0_real64 * c%ob0() / (4.0_real64 * c%ogamma0())
+            call check(error, abs(c%ok0()) < 1.0e-14_real64, &
+                       "the matter-radiation model must be flat to machine precision")
+            if (allocated(error)) return
+            do j = 1, 5
+                z = zs(j)
+                a = 1.0_real64 / (1.0_real64 + z)
+                want = c%hubble_distance() * 2.0_real64 &
+                       / (sqrt(3.0_real64) * sqrt(c%om0() * r0)) &
+                       * (log(sqrt(r0 * (or0 + c%om0() * a)) &
+                              + sqrt(c%om0() * (1.0_real64 + r0 * a))) &
+                          - log(sqrt(r0 * or0) + sqrt(c%om0())))
+                got = c%sound_horizon(z)
+                worst = max(worst, abs(got - want) / abs(want))
+                if (.not. agrees(got, want, SOUND_CLOSED_TOL)) then
+                    call itoa(i, num)
+                    call check(error, .false., "the sound horizon of a matter-radiation universe" &
+                               // " does not match its closed form, at temperature " // num)
+                    return
+                end if
+            end do
+        end do
+        ! The vacuity guard: the loop must have compared something, and the worst must be a
+        ! number rather than the zero an all-NaN sweep would leave.
+        call check(error, worst == worst .and. worst < SOUND_CLOSED_TOL, &
+                   "the closed-form comparison must have run and agreed")
+
+    end subroutine test_sound_horizon_is_the_closed_form
+
+    !> `%r_drag()` is the Aubourg formula, restated here, and the three scalars are their rows.
+    !!
+    !! The formula is written out from the paper a SECOND time rather than read off the module,
+    !! so a transcribed exponent is a disagreement and not a shared mistake; and `Onu h^2` is
+    !! formed from the species masses, which is the one substitution that looks right and is not
+    !! -- `%onu0() * h^2` counts the relativistic species too and moves `r_d` by about `1e-04`.
+    subroutine test_r_drag_is_the_published_formula(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: h2, onuh2, want, checked
+        real(real64), allocatable :: masses(:)
+        integer            :: i
+
+        checked = 0.0_real64
+        do i = 1, n_cmodel
+            call build(c, i)
+            call check(error, agrees(c%r_drag(), der(i, cd_r_drag), TABLE_TOL), &
+                       "r_drag of " // trim(cmodel_label(i)) // " must be its reference value")
+            if (allocated(error)) return
+            call check(error, agrees(c%z_drag(), der(i, cd_z_drag), SOUND_TOL), &
+                       "z_drag of " // trim(cmodel_label(i)) // " must be its reference value")
+            if (allocated(error)) return
+            call check(error, agrees(c%z_eq(), der(i, cd_z_eq), TABLE_TOL), &
+                       "z_eq of " // trim(cmodel_label(i)) // " must be its reference value")
+            if (allocated(error)) return
+            if (.not. cmodel_has_ob0(i)) cycle
+            call c%m_nu(masses)
+            h2 = (c%h0() / 100.0_real64) ** 2
+            onuh2 = sum(masses) / 93.14_real64
+            want = 55.154_real64 * exp(-72.3_real64 * (onuh2 + 0.0006_real64) ** 2) &
+                   / ((c%om0() * h2) ** 0.25351_real64 * (c%ob0() * h2) ** 0.12807_real64)
+            call check(error, agrees(c%r_drag(), want, TABLE_TOL), &
+                       "r_drag of " // trim(cmodel_label(i)) // " must be the Aubourg formula")
+            if (allocated(error)) return
+            checked = checked + 1.0_real64
+        end do
+        ! The vacuity guard: the grid must carry models with an `ob0`, or the formula above was
+        ! never evaluated and this test asserted nothing about it.
+        call check(error, checked >= 8.0_real64, &
+                   "the reference grid must carry at least eight models with a baryon density")
+
+    end subroutine test_r_drag_is_the_published_formula
+
+    !> `%sound_horizon(%z_drag())` is `%r_drag()`, which is the only identity the pair can have.
+    subroutine test_z_drag_inverts_the_sound_horizon(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zd, rd, checked
+        integer            :: i
+
+        checked = 0.0_real64
+        do i = 1, n_cmodel
+            if (.not. cmodel_has_ob0(i)) cycle
+            call build(c, i)
+            zd = c%z_drag()
+            rd = c%r_drag()
+            call check(error, zd == zd, "z_drag of " // trim(cmodel_label(i)) // &
+                       " must be a number for a model with baryons")
+            if (allocated(error)) return
+            call check(error, zd > 100.0_real64 .and. zd < 1.0e5_real64, &
+                       "z_drag of " // trim(cmodel_label(i)) // " must lie inside its bracket")
+            if (allocated(error)) return
+            call check(error, agrees(c%sound_horizon(zd), rd, 1.0e-12_real64), &
+                       "the sound horizon at z_drag of " // trim(cmodel_label(i)) // &
+                       " must be r_drag")
+            if (allocated(error)) return
+            checked = checked + 1.0_real64
+        end do
+        call check(error, checked >= 8.0_real64, &
+                   "at least eight models must have had a drag epoch to invert")
+
+    end subroutine test_z_drag_inverts_the_sound_horizon
+
+    !> `Planck18`'s BAO scale against the published one: one end-to-end assertion on the chain.
+    !!
+    !! Planck 2018 VI, Table 2, TT,TE,EE+lowE+lensing: `r_drag = 147.09 +/- 0.26 Mpc` and
+    !! `z_eq = 3387 +/- 21`. The module reaches the first through a published FIT over the
+    !! parameters and the second through an exact expression, so `0.5%` is the fit's own claimed
+    !! accuracy and not a tolerance chosen to pass: `%r_drag()` is `147.18`, which is `6.3e-04`
+    !! away, and `%z_eq()` is `3387.35`.
+    subroutine test_planck18_bao_scale_is_the_published_one(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+
+        call c%init("Planck18")
+        call check(error, abs(c%r_drag() - 147.09_real64) <= 0.005_real64 * 147.09_real64, &
+                   "Planck18's r_drag must be within 0.5% of the published 147.09 Mpc")
+        if (allocated(error)) return
+        call check(error, abs(c%z_eq() - 3387.0_real64) <= 21.0_real64, &
+                   "Planck18's z_eq must be within the published uncertainty of 3387")
+        if (allocated(error)) return
+        ! The drag epoch CAMB reports for these parameters is 1059.9; the module solves its own
+        ! integral against its own fit and lands at 1060.3, which is the fit carried through.
+        call check(error, abs(c%z_drag() - 1059.9_real64) <= 5.0_real64, &
+                   "Planck18's z_drag must be within five of CAMB's 1059.9")
+
+    end subroutine test_planck18_bao_scale_is_the_published_one
+
+    !> `z_eq` is where matter meets the RELATIVISTIC radiation density, massive species included.
+    !!
+    !! For a massless model `Ogamma0 (1 + 0.2271 Neff)` and `Ogamma0 + Onu0` are the same number,
+    !! so the substitution that is wrong is invisible there. On a model with a massive species
+    !! they differ, and the test asserts the expression from the parameters rather than a
+    !! recorded value -- which is the whole point, since a recorded value would have been
+    !! recorded from whichever expression the module happened to carry.
+    subroutine test_z_eq_uses_the_relativistic_radiation(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: masses(3), want, wrong
+
+        masses = [0.0_real64, 0.05_real64, 0.1_real64]
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, tcmb0 = 2.7255_real64, &
+                    neff = 3.046_real64, m_nu = masses, ob0 = 0.05_real64)
+        ! `%nu_relative_density(z)` at a redshift deep enough for every species to be
+        ! relativistic IS `0.2271 Neff`, so the relativistic `Or0` comes out of the library's own
+        ! Komatsu fit rather than out of a constant retyped here.
+        want = c%om0() / (c%ogamma0() * (1.0_real64 + c%nu_relative_density(1.0e8_real64))) &
+               - 1.0_real64
+        call check(error, agrees(c%z_eq(), want, 1.0e-10_real64), &
+                   "z_eq must be Om0 over the relativistic Or0, less one")
+        if (allocated(error)) return
+        ! The substitution this test exists to catch, and how far it moves the answer.
+        wrong = c%om0() / (c%ogamma0() + c%onu0()) - 1.0_real64
+        call check(error, abs(wrong - want) > 1.0e-3_real64 * want, &
+                   "the massive-neutrino model must distinguish the two radiation densities")
+        if (allocated(error)) return
+        call check(error, agrees(c%z_eq(), 3.0_real64 * 1.0e3_real64, 1.0_real64), &
+                   "and the answer must be of the order of three thousand")
+
+    end subroutine test_z_eq_uses_the_relativistic_radiation
+
+    !> The two degenerate models: no baryons, and no photons. Neither may raise a flag.
+    subroutine test_sound_horizon_degenerate_models(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: v
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual))
+        logical            :: raised(size(ieee_usual))
+        logical            :: ok(11)
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+
+        ! No `ob0`: there is no `R`, so there is no sound speed. `z_eq` needs no baryons.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, tcmb0 = 2.7255_real64, neff = 3.046_real64)
+        v = c%sound_horizon(0.0_real64)
+        ok(1) = v /= v
+        v = c%r_drag()
+        ok(2) = v /= v
+        v = c%z_drag()
+        ok(3) = v /= v
+        ok(4) = c%z_eq() > 0.0_real64
+
+        ! `Tcmb0 = 0`: no photons, so no sound at any redshift and equality is never reached.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ob0 = 0.05_real64)
+        ok(5) = c%sound_horizon(0.0_real64) == 0.0_real64
+        ok(6) = c%sound_horizon(1100.0_real64) == 0.0_real64
+        v = c%z_drag()
+        ok(7) = v /= v
+        v = c%z_eq()
+        ok(8) = v > 0.0_real64 .and. .not. ieee_is_finite(v)
+
+        ! A zero baryon density is not a missing one: the integral is fine, the FIT is not.
+        call c%init(h0 = 70.0_real64, om0 = 0.3_real64, tcmb0 = 2.7255_real64, &
+                    neff = 3.046_real64, ob0 = 0.0_real64)
+        ok(9) = c%sound_horizon(0.0_real64) > 0.0_real64
+        v = c%r_drag()
+        ok(10) = v /= v
+
+        ! A universe with no matter: equality at `z = -1`, the same statement the other way round.
+        call c%init(h0 = 70.0_real64, om0 = 0.0_real64, ode0 = 1.0_real64, tcmb0 = 2.7255_real64, &
+                    neff = 3.046_real64)
+        ok(11) = c%z_eq() == -1.0_real64
+
+        ! The flags are read and restored BEFORE anything is asserted, so that an early return on
+        ! a failed answer cannot leave the process with the halting modes turned off.
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+
+        call check(error, all(ok), "every degenerate answer must be the documented one")
+        if (allocated(error)) return
+        call check(error, .not. any(raised), "and none of them may raise an IEEE flag")
+
+    end subroutine test_sound_horizon_degenerate_models
 
 #ifndef __flang__
     !> Can overflow, invalid and divide-by-zero all be held off around a call?

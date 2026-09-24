@@ -88,7 +88,9 @@ contains
             new_unittest("a section under another section is read through its handle", &
                 test_nested_section_is_reachable), &
             new_unittest("section= puts a second cosmology in a table of its own", &
-                test_section_argument_names_the_table) &
+                test_section_argument_names_the_table), &
+            new_unittest("a context longer than the cap is carried capped and elided", &
+                test_a_long_context_is_capped) &
             ]
 
     end subroutine collect_tests_cosmology_config
@@ -387,6 +389,47 @@ contains
         call check(error, c%h0() == 70.0_real64, "and it must be the nested section's own h0")
 
     end subroutine test_nested_section_is_reachable
+
+    !> A `context=` longer than `CFG_CAP` reaches the composed context capped, with an ellipsis.
+    !!
+    !! **The cap is exercised on the SUCCESS path, not through an abort.** `where_from` composes
+    !! the file, the section and the caller's context for every read, whether or not one aborts, so
+    !! a context that has to be cut is cut here -- the abort scenarios in
+    !! `test/error_scenarios.f90` then only have to show that the composed text reaches the
+    !! message. What can be asserted in process is that a 150-character context neither aborts nor
+    !! truncates the READ: the cosmology still comes back, whole.
+    !!
+    !! `capped` returns a FIXED-length result and its callers `trim` it, so a context of exactly
+    !! the cap and one past it take the two different arms; both are driven.
+    subroutine test_a_long_context_is_capped(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: long, at_cap, short
+        character(len=*), parameter :: body = '[cosmology]' // new_line("a") // &
+                                              'h0 = 70.0' // new_line("a") // &
+                                              'om0 = 0.3' // new_line("a")
+
+        ! 150 characters: past the 100-character cap, so the composed context is cut and elided.
+        call pf_toml_loads(conf, body, name = "run.toml")
+        call pf_cosmology_from_toml(conf, long, context = repeat("abcdefghij", 15))
+        call pf_toml_close(conf)
+
+        ! Exactly the cap, which must take the other arm and not be cut.
+        call pf_toml_loads(conf, body, name = "run.toml")
+        call pf_cosmology_from_toml(conf, at_cap, context = repeat("abcdefghij", 10))
+        call pf_toml_close(conf)
+
+        call pf_toml_loads(conf, body, name = "run.toml")
+        call pf_cosmology_from_toml(conf, short, context = "short")
+        call pf_toml_close(conf)
+
+        call check(error, long%is_initialised() .and. at_cap%is_initialised() .and. &
+                   short%is_initialised(), "a long context must not stop the section being read")
+        if (allocated(error)) return
+        call check(error, long%h0() == 70.0_real64 .and. at_cap%h0() == 70.0_real64 .and. &
+                   short%h0() == 70.0_real64, "and must not change what it reads")
+
+    end subroutine test_a_long_context_is_capped
 
     !> `section=` is how one document carries more than one cosmology.
     subroutine test_section_argument_names_the_table(error)

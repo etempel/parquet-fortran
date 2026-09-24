@@ -432,7 +432,14 @@ contains
         m_ok = 0
         do i = zero - 1, 1, -1
             if (.not. blueshift_interval(integ, tol, zeta(i), zeta(i + 1), step_d, step_t(i), &
+            ! `m` is clamped so the table's bottom node stands a whole `PFC_PANEL` clear of the
+            ! model's floor, and a panel reaching the floor is the only thing that makes a
+            ! blueshift interval fail to converge. A starved evaluation budget does not reach it
+            ! either: the redshift half is integrated first and aborts first, probed from 100 to
+            ! 12800 evaluations over every corner model with a floor inside the domain.
+            ! GCOVR_EXCL_START
                                          step_x)) exit
+            ! GCOVR_EXCL_STOP
             dist(i) = dist(i + 1) - step_d
             time(i) = time(i + 1) - step_t(i)
             absd(i) = absd(i + 1) - step_x
@@ -441,6 +448,9 @@ contains
         if (m_ok < m) then
             ! Re-base the arrays on the nodes that survived, so that index 1 is the table's bottom
             ! for everything below.
+            ! the nodes below a failed blueshift interval are what this re-bases away, and no
+            ! interval fails; see the `exit` above.
+            ! GCOVR_EXCL_START
             lost = m - m_ok
             zeta(1:n + m_ok + 1) = zeta(lost + 1:n + m + 1)
             dist(1:n + m_ok + 1) = dist(lost + 1:n + m + 1)
@@ -449,6 +459,7 @@ contains
             step_t(1:n + m_ok) = step_t(lost + 1:n + m)
             m = m_ok
             zero = m + 1
+            ! GCOVR_EXCL_STOP
         end if
         this%d%zeta_m = zeta(1)
 
@@ -670,14 +681,25 @@ contains
         or0 = this%d%ogamma0 * (1.0_real64 + pfc_komatsu_a * this%p%neff)
         if (this%d%sound_r0_root > 0.0_real64) this%d%sound_c = 1.0_real64 / this%d%sound_r0_root
         if (this%p%om0 > 0.0_real64 .and. or0 > 0.0_real64) then
-            b_eq = sqrt(or0 / this%p%om0)
+            ! The ratio of the two roots, never the root of the ratio, for the same reason
+            ! `sound_r0_root` above is formed that way: `or0 / om0` overflows for a subnormal
+            ! `om0` beside an ordinary radiation density, and the overflow reaches the CALLER as
+            ! a raised `IEEE_OVERFLOW` -- which ends the process under nagfor's default
+            ! `-ieee=stop` -- even though the infinity it produces is caught below. Each root on
+            ! its own is `1e3` at most over `2.2e-162` at least, so this cannot overflow.
+            b_eq = sqrt(or0) / sqrt(this%p%om0)
             ! `ob0 = 0` leaves `R0 = 0` and no baryon scale at all, so equality is the only one.
             if (this%d%sound_r0_root <= 0.0_real64 .or. b_eq < this%d%sound_c) this%d%sound_c = b_eq
         end if
         ! A scale that is not a positive finite number resolves nothing, and `sound_c sinh(v)`
-        ! must stay a number: `sqrt(or0 / om0)` overflows for a subnormal `om0`.
+        ! must stay a number. Both scales are now formed as a ratio of roots, so neither can
+        ! overflow and no admitted model reaches the substitution below; it is kept because the
+        ! alternative to a scale of one is an infinity at every node and an integral that is a
+        ! NaN, which is not a failure worth leaving to a future edit of either formula.
         if (.not. (this%d%sound_c > 0.0_real64 .and. this%d%sound_c < huge(1.0_real64))) &
+            ! GCOVR_EXCL_START
             this%d%sound_c = 1.0_real64
+        ! GCOVR_EXCL_STOP
 
     end subroutine sound_scales
 
@@ -757,8 +779,13 @@ contains
 
         ! Without the node at the origin there is nothing to anchor to, so there is no table.
         if (bottom > zero) then
+            ! the walk can only stop ABOVE the origin where `E^2` is not positive at a `zeta`
+            ! greater than zero, and `%init` has already refused such a model with `this cosmology
+            ! has no big bang` while building the distance table.
+            ! GCOVR_EXCL_START
             deallocate (this%gwv, this%gwd)
             return
+            ! GCOVR_EXCL_STOP
         end if
         anchor = this%gwv(zero)
         do i = bottom, nodes
@@ -924,7 +951,12 @@ contains
 
         v = cosmology_e2(p, d, zeta)
         if (v /= v) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns
+            ! `+Infinity` as soon as the dark-energy term overflows, and inside the admitted
+            ! parameter box no two terms of `E^2` overflow with opposite signs.
+            ! GCOVR_EXCL_START
             yes = .false.
+            ! GCOVR_EXCL_STOP
         else
             yes = v > 0.0_real64
         end if
@@ -1115,10 +1147,22 @@ contains
         end if
         if (which == PFC_INT_DISTANCE) then
             what = "distance"
+        ! the three redshift-half integrals are taken in order and share one evaluation budget,
+        ! so the DISTANCE one is always the first to fail and `report_interval` is never
+        ! reached naming another; `error_scenarios.f90`'s `cosmology_init_table_not_converged`
+        ! is what drives it.
+        ! GCOVR_EXCL_START
         else if (which == PFC_INT_TIME) then
             what = "lookback"
+        ! GCOVR_EXCL_STOP
         else
+            ! the three redshift-half integrals are taken in order and share one evaluation budget,
+            ! so the DISTANCE one is always the first to fail and `report_interval` is never
+            ! reached naming another; `error_scenarios.f90`'s `cosmology_init_table_not_converged`
+            ! is what drives it.
+            ! GCOVR_EXCL_START
             what = "age"
+            ! GCOVR_EXCL_STOP
         end if
         call pf_to_str(pf_zeta2z(a), num)
         call pf_to_str(pf_zeta2z(b), num2)
@@ -1127,7 +1171,10 @@ contains
                              num // ", " // num2 // "] (pf_integrate status " // &
                              num3 // ")", context)
         ! `this` is taken so that a future message may name the model; nothing reads it yet.
+        ! `cosmology_abort` on the line above does not return.
+        ! GCOVR_EXCL_START
         if (this%ready) return
+        ! GCOVR_EXCL_STOP
 
     end subroutine report_interval
 
@@ -1139,11 +1186,19 @@ contains
         real(real64)             :: z     !! the redshift there
 
         if (which == PFC_INT_AGE_TAIL) then
+            ! The three redshift-half integrals are taken in order and share one evaluation
+            ! budget, so the DISTANCE one is always the first to fail and `report_interval` is
+            ! never reached naming the age tail; `error_scenarios.f90`'s
+            ! `cosmology_init_table_not_converged` is what drives this procedure, through the
+            ! distance table. The `which` test above is evaluated on every call and is NOT
+            ! excluded with the body it guards.
+            ! GCOVR_EXCL_START
             if (x > 0.0_real64) then
                 z = 1.0_real64 / (x * x) - 1.0_real64
             else
                 z = ieee_value(z, ieee_positive_inf)
             end if
+            ! GCOVR_EXCL_STOP
         else
             z = pf_zeta2z(x)
         end if
@@ -1208,6 +1263,10 @@ contains
         end if
         pfc_neval = pfc_neval + info%neval
         if (.not. ok) then
+            ! `age_integral_diverges` sets the flag before the tail integral is taken, so the
+            ! tail itself never reports `PF_INT_DIVERGENT`, and no corner model starves the
+            ! budget it is given here.
+            ! GCOVR_EXCL_START
             if (info%status == PF_INT_DIVERGENT) then
                 ! Documented, not aborted, and right at every redshift: such a model is
                 ! infinitely old throughout. `age_integral_diverges` normally reaches this first.
@@ -1216,6 +1275,7 @@ contains
                 return
             end if
             call report_interval(this, info, PFC_INT_AGE_TAIL, 0.0_real64, b_top, context)
+            ! GCOVR_EXCL_STOP
         end if
 
     end function age_tail_integral

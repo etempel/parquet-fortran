@@ -41,7 +41,7 @@ module test_cosmology
     implicit none
     private
 
-    public :: collect_tests_cosmology
+    public :: collect_tests_cosmology, collect_tests_cosmology_serial
 
     !> What a quantity read out of the table may differ from the 30-digit model by.
     !!
@@ -122,6 +122,8 @@ module test_cosmology
     real(real64), parameter :: GROWTH_RATE_TOL = 2.0e-9_real64
     !> `ln(1 + 1e10)`, the domain's edge, as the module carries it.
     real(real64), parameter :: CEILING_ZETA = 23.02585093004047_real64
+    !> Corner models of the admitted parameter box; see `build_extreme`.
+    integer, parameter :: N_EXTREME = 14
 
 contains
 
@@ -194,8 +196,6 @@ contains
                          test_luminosity_bracket_is_an_identity), &
             new_unittest("the closed forms and the table share one domain", &
                          test_closed_forms_share_the_table_domain), &
-            new_unittest("the build's tabulated neutrino fit changes no answer", &
-                         test_tabulated_neutrino_fit_changes_no_answer), &
             new_unittest("the neutrino species sum to Onu, and Otot is exactly one when flat", &
                          test_species_split_and_otot), &
             new_unittest("clone copies what it is not given, and keeps flat models flat", &
@@ -257,10 +257,46 @@ contains
             new_unittest("z_eq is matter meeting the relativistic radiation density", &
                          test_z_eq_uses_the_relativistic_radiation), &
             new_unittest("no baryons and no photons: the sound horizon's degenerate models", &
-                         test_sound_horizon_degenerate_models) &
+                         test_sound_horizon_degenerate_models), &
+            new_unittest("inv_efunc is the reciprocal of efunc, and screens what efunc screens", &
+                         test_inv_efunc_is_the_reciprocal_of_efunc), &
+            new_unittest("a pair binding screens a bad redshift in either argument", &
+                         test_pair_bindings_screen_either_argument), &
+            new_unittest("fourteen corners of the admitted parameter box raise no flag", &
+                         test_extreme_parameter_box_raises_no_flag), &
+            new_unittest("a table bottom on the model's own floor keeps the redshift half", &
+                         test_a_bottom_node_on_the_models_own_floor), &
+            new_unittest("a label longer than the cap is cut and elided", &
+                         test_a_long_label_is_capped), &
+            new_unittest("a subnormal matter density builds quietly", &
+                         test_a_subnormal_matter_density_builds_quietly) &
             ]
 
     end subroutine collect_tests_cosmology
+
+    !> Registers the tests that write this module's PROCESS-GLOBAL debug state.
+    !!
+    !! `parquet_debug_set_cosmology_exact_nu` and `parquet_debug_set_cosmology_max_neval` are
+    !! module variables of `parquet_cosmology` that `%init` reads, so a test setting one decides
+    !! how every OTHER thread's `%init` builds. test-drive dispatches a suite's tests inside its
+    !! own `!$omp parallel do`, which is why these are a suite of their own and why
+    !! `suite_is_safe_to_parallelize` excludes `cosmology_serial`: run concurrently with the rest
+    !! of `cosmology`, the exact-versus-tabulated comparison below builds BOTH of its models the
+    !! same way whenever another test's `%init` resets the flag between the two calls, and then
+    !! passes without comparing anything.
+    subroutine collect_tests_cosmology_serial(testsuite)
+        type(unittest_type), allocatable, intent(out) :: testsuite(:) !! Receives the suite's tests.
+
+        testsuite = [ &
+            new_unittest("the build's tabulated neutrino fit changes no answer", &
+                         test_tabulated_neutrino_fit_changes_no_answer), &
+            new_unittest("the evaluation counter reports the build it just did", &
+                         test_neval_hook_reports_the_last_build), &
+            new_unittest("a budget at the integrator's own default changes no answer", &
+                         test_a_generous_budget_changes_no_answer) &
+            ]
+
+    end subroutine collect_tests_cosmology_serial
 
     ! =========================================================================================
     ! Reading the reference
@@ -2082,6 +2118,533 @@ contains
 
     end subroutine test_tabulated_neutrino_fit_changes_no_answer
 
+    !> `parquet_debug_cosmology_neval` reports the evaluations the LAST `%init` spent.
+    !!
+    !! The counter is zeroed by `%init` and added to by each of the three integrator entry points,
+    !! so the observable is one build's own total and not a running sum. `zmax` is what the third
+    !! assertion varies, because it is the one input that moves the count STRUCTURALLY: the table
+    !! is integrated interval by interval over a grid of fixed spacing in `zeta`, so a table
+    !! reaching `z = 10` has about a third of the intervals of one reaching `z = 1100` and cannot
+    !! cost as much. A hook returning a constant fails the first two; one returning a running
+    !! total fails the second; one reporting the wrong build fails the third.
+    !!
+    !! **It does NOT compare the tabulated neutrino fit against the exact one.** Those two builds
+    !! spend the SAME evaluations -- the substitution changes what each evaluation costs, not how
+    !! many the adaptive rule asks for, which is the same fact
+    !! `the build's tabulated neutrino fit changes no answer` rests on.
+    subroutine test_neval_hook_reports_the_last_build(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        integer            :: full, again, shallow
+
+        call c%init("Planck18")
+        full = parquet_debug_cosmology_neval()
+        call c%init("Planck18")
+        again = parquet_debug_cosmology_neval()
+        call c%init("Planck18", zmax = 10.0_real64)
+        shallow = parquet_debug_cosmology_neval()
+
+        call check(error, full > 0, "a build must spend integrand evaluations")
+        if (allocated(error)) return
+        ! Zeroed per build, not accumulated: two builds of one model report one count, not two
+        ! growing ones.
+        call check(error, again == full, &
+                   "the counter must report the LAST build alone, so two identical builds agree")
+        if (allocated(error)) return
+        call check(error, shallow < full, &
+                   "a table reaching z = 10 has fewer intervals than one reaching z = 1100, and " // &
+                   "the counter must follow the build it just did")
+
+    end subroutine test_neval_hook_reports_the_last_build
+
+    !> `parquet_debug_set_cosmology_max_neval` at the integrator's own default builds the same
+    !> model, bit for bit, as passing no budget at all.
+    !!
+    !! The hook exists for `error_scenarios.f90`'s `cosmology_init_table_not_converged`, which sets
+    !! it to 21 and proves a starved build ABORTS. That is the negative control for this test: the
+    !! two together say the budget is really consulted (21 aborts) and that consulting it changes
+    !! nothing when it is not binding. `DEFAULT_MAX_NEVAL` in `src/parquet_integrate.f90` is the
+    !! value used here, so the budget passed is the budget `pf_integrate` would have applied by
+    !! itself -- a model that came out different would mean the two paths through `floor_panel`
+    !! and `age_tail_integral` are not the same integral.
+    !!
+    !! A model with a blueshift FLOOR is what makes this more than a repeat of the default path:
+    !! `om0 = 0.3, ode0 = -0.5` has `E^2 = 0` at `z = -0.398`, so `%init` runs the floor search,
+    !! which is the one caller of `floor_panel`.
+    subroutine test_a_generous_budget_changes_no_answer(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: plain, budgeted, plain_neg, budgeted_neg
+        real(real64)       :: z, worst
+        integer            :: k
+
+        call plain%init("Planck18")
+        call plain_neg%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
+        call parquet_debug_set_cosmology_max_neval(100000)
+        call budgeted%init("Planck18")
+        call budgeted_neg%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
+        call parquet_debug_set_cosmology_max_neval(0)
+
+        worst = 0.0_real64
+        do k = -120, 120
+            z = pf_zeta2z(0.19_real64 * real(k, real64))
+            worst = max(worst, gap(budgeted%comoving_distance(z), plain%comoving_distance(z)))
+            worst = max(worst, gap(budgeted%age(z), plain%age(z)))
+            worst = max(worst, gap(budgeted_neg%comoving_distance(z), plain_neg%comoving_distance(z)))
+            worst = max(worst, gap(budgeted_neg%age(z), plain_neg%age(z)))
+        end do
+
+        call check(error, worst == 0.0_real64, &
+                   "a budget at the integrator's own default must change no answer at all")
+        if (allocated(error)) return
+        call check(error, budgeted_neg%zeta_floor() == plain_neg%zeta_floor(), &
+                   "nor the floor the budgeted build searched for")
+
+    end subroutine test_a_generous_budget_changes_no_answer
+
+    !> `%inv_efunc` is `1/E(z)`: the reference's own `E(z)` column inverted, and `%efunc`'s
+    !> screens reproduced exactly.
+    !!
+    !! **It is asserted against the reference rather than against `%efunc`**, because the two are
+    !! one edit apart -- `sqrt(v)` against `1/sqrt(v)` on the same `v` -- so an A/B between them
+    !! would pass for a model whose `E^2` itself is wrong. `1/ref_efunc` is the 30-digit model's
+    !! value, and `agrees` compares a NaN with a NaN and an infinity with an infinity.
+    !!
+    !! The second half is what a reference grid cannot say: that the reciprocal answers NaN
+    !! wherever `%efunc` does and a POSITIVE number wherever it does not, including the two arms a
+    !! reference row never lands on -- a redshift outside `[-1, 1e10]`, and a redshift a model with
+    !! negative dark energy does not reach, where `E^2` is negative rather than NaN.
+    subroutine test_inv_efunc_is_the_reciprocal_of_efunc(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c, neg
+        real(real64)       :: z, got, e, want, bad(4)
+        integer            :: i, j, k, nbad, nmismatch, nproduct
+
+        ! ---- the reference grid ----
+        nbad = 0
+        do i = 1, n_cmodel
+            call build(c, i)
+            do j = 1, n_cz
+                z = rv(cz_bits(j))
+                got = c%inv_efunc(z)
+                want = 1.0_real64 / ref(i, j, cq_efunc)
+                if (.not. agrees(got, want, TABLE_TOL)) nbad = nbad + 1
+            end do
+        end do
+        call check(error, nbad == 0, "inv_efunc must be the reference E(z) inverted, at every row")
+        if (allocated(error)) return
+
+        ! ---- the whole domain, against efunc's own screens ----
+        call c%init("Planck18")
+        nmismatch = 0
+        nproduct = 0
+        do k = 0, 120
+            z = pf_zeta2z(-23.0_real64 + 46.0_real64 * real(k, real64) / 120.0_real64)
+            got = c%inv_efunc(z)
+            e = c%efunc(z)
+            if ((got /= got) .neqv. (e /= e)) nmismatch = nmismatch + 1
+            if (got == got .and. e == e .and. e > 0.0_real64) then
+                if (abs(got * e - 1.0_real64) > 8.0_real64 * epsilon(1.0_real64)) nproduct = nproduct + 1
+            end if
+        end do
+        call check(error, nmismatch == 0, "inv_efunc must answer NaN exactly where efunc does")
+        if (allocated(error)) return
+        call check(error, nproduct == 0, "and E(z)/E(z) must be one to a few ulp over the whole domain")
+        if (allocated(error)) return
+
+        ! ---- the two screened arms ----
+        bad(1) = ieee_value(bad(1), ieee_quiet_nan)
+        bad(2) = -2.0_real64      ! below `z = -1`: `1 + z` is not a scale factor
+        bad(3) = 1.0e11_real64    ! above the domain's ceiling
+        bad(4) = -1.0_real64      ! the ceiling of the blueshift half, excluded
+        nbad = 0
+        do k = 1, size(bad)
+            got = c%inv_efunc(bad(k))
+            if (got == got) nbad = nbad + 1
+        end do
+        call check(error, nbad == 0, "inv_efunc must answer NaN for a redshift outside the domain")
+        if (allocated(error)) return
+
+        ! `E^2 < 0` rather than NaN: a model with negative dark energy does not reach `z = -0.5`.
+        call neg%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.5_real64)
+        got = neg%inv_efunc(-0.5_real64)
+        call check(error, got /= got, &
+                   "inv_efunc must answer NaN at a redshift whose E squared is negative")
+        if (allocated(error)) return
+        got = neg%inv_efunc(0.0_real64)
+        call check(error, got == 1.0_real64, "and exactly one at z = 0, where E is exactly one")
+
+    end subroutine test_inv_efunc_is_the_reciprocal_of_efunc
+
+    !> `%comoving_distance_z1z2` and `%angular_diameter_distance_z1z2` screen EACH argument.
+    !!
+    !! A pair binding has two redshifts to reject and one result to reject them into, so a screen
+    !! written for the first argument alone passes every test that varies only the second. Both
+    !! positions are driven here, with a NaN and with a redshift outside the domain, and the flags
+    !! are read around the sweep: an ordered comparison against a quiet NaN raises `IEEE_INVALID`,
+    !! which is fatal under nagfor's default `-ieee=stop`.
+    subroutine test_pair_bindings_screen_either_argument(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: bad(3), good, got
+        integer            :: k, nbad
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        call c%init("Planck18")
+        bad(1) = ieee_value(bad(1), ieee_quiet_nan)
+        bad(2) = -2.0_real64
+        bad(3) = 1.0e11_real64
+        good = 1.0_real64
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        nbad = 0
+        do k = 1, size(bad)
+            got = c%comoving_distance_z1z2(bad(k), good)
+            if (got == got) nbad = nbad + 1
+            got = c%comoving_distance_z1z2(good, bad(k))
+            if (got == got) nbad = nbad + 1
+            got = c%angular_diameter_distance_z1z2(bad(k), good)
+            if (got == got) nbad = nbad + 1
+            got = c%angular_diameter_distance_z1z2(good, bad(k))
+            if (got == got) nbad = nbad + 1
+        end do
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+
+        call check(error, nbad == 0, &
+                   "a pair binding must answer NaN for a bad redshift in either argument")
+        if (allocated(error)) return
+        call check(error, .not. any(raised), "and must raise no IEEE flag doing it")
+        if (allocated(error)) return
+        ! The negative control: the same bindings answer NUMBERS for two good redshifts, so the
+        ! sweep above is not passing because every call answers NaN.
+        got = c%comoving_distance_z1z2(0.5_real64, good)
+        call check(error, got == got .and. got > 0.0_real64, &
+                   "and a number for two good redshifts, or the sweep proves nothing")
+
+    end subroutine test_pair_bindings_screen_either_argument
+
+    !> The fourteen corners of the parameter box `%init` admits, by every binding, by the same
+    !> edge inputs -- and by inverses fed targets the model does not attain.
+    !!
+    !! **The eight named cosmologies and the two beside them are all one shape**: positive dark
+    !! energy near `-1`, a percent of radiation, a floor either at the domain's edge or a little
+    !! below `z = 0`. Everything that only misbehaves at a CORNER of the admitted box is therefore
+    !! untested by them, and the box is much larger than the eight suggest: `|w0|` and `|wa|` up to
+    !! `3`, any density up to `1e6` in magnitude, `h0` over eighteen decades, a CMB of 300 K,
+    !! neutrinos of 10 eV. `bench/`-style probing found two corners `%init` refuses -- a deeply
+    !! closed model with `ode0` at the ceiling has no big bang -- and the fourteen below are what
+    !! it admits, the last of them a model whose table is a sliver.
+    !!
+    !! **The second half is the one a forward sweep cannot reach.** An inverse screens its argument
+    !! against a STORED bound and then brackets; a target inside the bound but outside what the
+    !! forward function actually attains is what drives the bracket-failure arms, and no forward
+    !! answer is ever such a target. They are constructed here by nudging each model's own ceiling
+    !! and floor values, and by handing every inverse the other quantities' answers -- a lookback
+    !! time to `%z_at_comoving_distance`, a distance to `%z_at_age` -- which is what a caller who
+    !! mixed two bindings up would do.
+    !!
+    !! The assertion is the suite's usual one: not one `ieee_usual` flag, with a vacuity guard
+    !! that the sweep reached real answers and not only NaNs.
+    subroutine test_extreme_parameter_box_raises_no_flag(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c
+        real(real64)       :: zs(12), got(n_cquantity), v, finite_seen, nan_seen
+        real(real64), allocatable :: species(:)
+        integer            :: i, k, q
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        zs(1) = ieee_value(zs(1), ieee_quiet_nan)
+        zs(2) = ieee_value(zs(2), ieee_positive_inf)
+        zs(3) = -0.999999_real64
+        zs(4) = -0.9_real64
+        zs(5) = -0.5_real64
+        zs(6) = -1.0e-6_real64
+        zs(7) = 0.0_real64
+        zs(8) = 1.0e-8_real64
+        zs(9) = 1.0_real64
+        zs(10) = 1100.0_real64
+        zs(11) = 1.0e10_real64
+        zs(12) = -99.0_real64
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        finite_seen = 0.0_real64
+        nan_seen = 0.0_real64
+        do i = 1, N_EXTREME
+            call build_extreme(c, i)
+            v = c%r_drag()
+            v = c%z_drag()
+            v = c%z_eq()
+            do k = 1, size(zs)
+                got = answers(c, zs(k))
+                call sweep_inverses(c, got, v)
+                v = c%inv_efunc(zs(k))
+                v = c%comoving_distance_zeta(pf_z2zeta(zs(k)))
+                v = c%comoving_distance_z1z2(0.0_real64, zs(k))
+                v = c%angular_diameter_distance_z1z2(zs(k), 1.0_real64)
+                call c%onu_species(zs(k), species)
+                ! Targets the model does not attain: its own answers moved off the value, and
+                ! each inverse handed a quantity that is not its own.
+                v = c%z_at_comoving_distance(got(cq_dc) * 1.5_real64)
+                v = c%z_at_comoving_distance(got(cq_tl))
+                v = c%z_at_lookback_time(got(cq_tl) * 1.5_real64)
+                v = c%z_at_lookback_time(got(cq_dc))
+                v = c%z_at_age(got(cq_age) * 1.5_real64)
+                v = c%z_at_age(got(cq_age) * 0.5_real64)
+                ! Ages just inside `age(0)`: for a model whose table is a sliver these land
+                ! between the table's top age and `age(0)`, which is a bracket of its own.
+                v = c%z_at_age(c%age(0.0_real64) * (1.0_real64 - 1.0e-9_real64))
+                v = c%z_at_age(c%age(0.0_real64) * (1.0_real64 - 1.0e-3_real64))
+                v = c%z_at_luminosity_distance(got(cq_dl) * 1.5_real64)
+                v = c%z_at_luminosity_distance(-got(cq_dl))
+                v = c%z_at_distmod(got(cq_mu) + 5.0_real64)
+                v = c%z_at_distmod(got(cq_mu) - 50.0_real64)
+                do q = 1, n_cquantity
+                    if (got(q) /= got(q)) then
+                        nan_seen = nan_seen + 1.0_real64
+                    else if (ieee_is_finite(got(q))) then
+                        finite_seen = finite_seen + 1.0_real64
+                    end if
+                end do
+            end do
+        end do
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+
+        call check(error, .not. any(raised), &
+                   "the corners of the admitted parameter box must raise no IEEE flag")
+        if (allocated(error)) return
+        ! The vacuity guard, in both directions: a screen that refused everything, or one that
+        ! refused nothing, would otherwise pass.
+        call check(error, finite_seen > 0.0_real64, "the sweep must reach real answers")
+        if (allocated(error)) return
+        call check(error, nan_seen > 0.0_real64, "and must reach redshifts the models do not have")
+
+    end subroutine test_extreme_parameter_box_raises_no_flag
+
+    !> Builds corner model `i` of the admitted parameter box. See
+    !! `test_extreme_parameter_box_raises_no_flag` for what the corners are for.
+    !!
+    !! Every one of these is accepted by `%init`; the two probed corners that are NOT -- a deeply
+    !! closed model whose `ode0` is at the density ceiling, either sign -- abort with "this
+    !! cosmology has no big bang" and belong in `test/error_scenarios.f90`, not here.
+    subroutine build_extreme(c, i, zmin)
+        type(pf_cosmology), intent(out)    :: c    !! receives the model
+        integer, intent(in)                :: i    !! its index, 1 to `N_EXTREME`
+        real(real64), intent(in), optional :: zmin !! the table's bottom, if not the default
+
+        select case (i)
+        case (1)   ! curvature at the density ceiling: a floor 5e-7 below z = 0
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -999000.0_real64, zmin = zmin)
+        case (2)   ! the far corner of the CPL box: a big rip
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = -3.0_real64, wa = 3.0_real64, zmin = zmin)
+        case (3)   ! the opposite corner: dark energy dilutes faster than matter
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = 3.0_real64, wa = -3.0_real64, zmin = zmin)
+        case (4)   ! a 300 K CMB with baryons: radiation dominates, and there IS a sound speed
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, tcmb0 = 300.0_real64, &
+                        ob0 = 0.05_real64, zmin = zmin)
+        case (5)   ! neutrinos of 10 eV, far into the non-relativistic regime today
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, tcmb0 = 2.7255_real64, &
+                        m_nu = [10.0_real64, 10.0_real64, 10.0_real64], zmin = zmin)
+        case (6)   ! no matter at all: de Sitter, and a distance of 4e13 Mpc
+            call c%init(h0 = 70.0_real64, om0 = 0.0_real64, ode0 = 1.0_real64, zmin = zmin)
+        case (7)   ! almost no matter, curvature dominated
+            call c%init(h0 = 70.0_real64, om0 = 1.0e-6_real64, ode0 = 0.0_real64, zmin = zmin)
+        case (8)   ! h0 eight decades below the usual one
+            call c%init(h0 = 1.0e-8_real64, om0 = 0.3_real64, zmin = zmin)
+        case (9)   ! and eight above it
+            call c%init(h0 = 1.0e8_real64, om0 = 0.3_real64, zmin = zmin)
+        case (10)  ! a shallow negative dark energy with radiation and baryons: a sound horizon
+                   ! that runs out at a floor, which is what `rs_at` screens below
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = -0.01_real64, &
+                        tcmb0 = 2.7255_real64, ob0 = 0.05_real64, zmin = zmin)
+        case (11)  ! radiation, a massive species and a big rip together
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, tcmb0 = 2.7255_real64, &
+                        w0 = -1.0_real64, wa = 3.0_real64, &
+                        m_nu = [0.06_real64, 0.0_real64, 0.0_real64], zmin = zmin)
+        case (12)  ! deeply closed with no dark energy: a floor 1e-3 below z = 0
+            call c%init(h0 = 70.0_real64, om0 = 1000.0_real64, ode0 = 0.0_real64, zmin = zmin)
+        case (13)  ! a constant w far from -1
+            call c%init(h0 = 70.0_real64, om0 = 0.3_real64, w0 = -3.0_real64, zmin = zmin)
+        case default
+            ! **Almost no table at all.** `zmax = 1e-6` gives the fewest intervals `%init` will
+            ! build, so the inverse tables cover a sliver of the domain and every inverse falls
+            ! through to the bracket-from-the-stored-bounds path that a full table never reaches.
+            call c%init("Planck18", zmax = 1.0e-6_real64, zmin = zmin)
+        end select
+
+    end subroutine build_extreme
+
+    !> A table whose BOTTOM NODE sits on the model's own floor still builds, and the redshift
+    !> half is untouched by what the blueshift half loses.
+    !!
+    !! `%init` walks the blueshift half downward and **stops rather than aborts** when an interval
+    !! will not converge, dropping the nodes below and re-basing the table on what survived. The
+    !! walk's last interval is the one that ends at the floor, where `1/E` has an inverse-square-
+    !! root singularity, and that interval is taken with a FIXED rule while the floor itself was
+    !! found with an adaptive one -- so asking for a bottom exactly at the floor is what makes the
+    !! two disagree and the drop happen. Left to the default `zmin` it does not: every model in
+    !! the grid has a bottom the fixed rule reaches comfortably.
+    !!
+    !! **What has to hold is that the loss is confined to the half that took it.** The re-base
+    !! moves every array's index 1, so an off-by-one there would corrupt the redshift half
+    !! silently -- a table still built, still monotone, answering slightly wrong numbers. The
+    !! assertion is therefore bit equality above `z = 0` against the same model built with the
+    !! default bottom, not a tolerance.
+    subroutine test_a_bottom_node_on_the_models_own_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: plain, pinned
+        real(real64)       :: zf, z, worst
+        integer            :: i, k, with_a_floor, built
+
+        with_a_floor = 0
+        built = 0
+        worst = 0.0_real64
+        do i = 1, N_EXTREME
+            call build_extreme(plain, i)
+            zf = plain%zeta_floor()
+            ! A floor at the domain's edge is not a floor: the model exists all the way down.
+            if (zf <= -CEILING_ZETA) cycle
+            with_a_floor = with_a_floor + 1
+            call build_extreme(pinned, i, zmin = pf_zeta2z(zf))
+            if (pinned%is_initialised()) built = built + 1
+            do k = 0, 40
+                z = pf_zeta2z(CEILING_ZETA * real(k, real64) / 40.0_real64)
+                ! `agrees` at a tolerance of ZERO is bit equality that also calls a NaN equal to a
+                ! NaN, which `/=` does not: the top of the sweep lands a rounding past the
+                ! ceiling, where both objects answer NaN and must be counted as agreeing.
+                if (.not. agrees(pinned%comoving_distance(z), plain%comoving_distance(z), &
+                                 0.0_real64)) worst = worst + 1.0_real64
+                if (.not. agrees(pinned%age(z), plain%age(z), 0.0_real64)) worst = worst + 1.0_real64
+                if (.not. agrees(pinned%lookback_time(z), plain%lookback_time(z), 0.0_real64)) &
+                    worst = worst + 1.0_real64
+            end do
+        end do
+
+        ! The vacuity guard: the grid must contain models with a floor inside the domain, or this
+        ! test asserted nothing at all.
+        call check(error, with_a_floor >= 4, &
+                   "the corner grid must hold models whose E squared vanishes inside the domain")
+        if (allocated(error)) return
+        call check(error, built == with_a_floor, &
+                   "a bottom asked for at the model's own floor must still build")
+        if (allocated(error)) return
+        call check(error, worst == 0.0_real64, &
+                   "and must not move a single answer at or above z = 0")
+
+    end subroutine test_a_bottom_node_on_the_models_own_floor
+
+    !> A label longer than the cap is stored cut and elided, and is still the label.
+    !!
+    !! `%init` caps caller text at `PFC_CONTEXT_CAP` the same way a message does, so a 150-
+    !! character `name` comes back at the cap plus an ellipsis rather than in full or truncated
+    !! silently. A label of exactly the cap takes the other arm and is kept whole.
+    subroutine test_a_long_label_is_capped(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: long, at_cap
+        character(len=:), allocatable :: got, want
+
+        call long%init(h0 = 70.0_real64, om0 = 0.3_real64, name = repeat("abcdefghij", 15))
+        call long%get_name(got)
+        want = repeat("abcdefghij", 10) // "..."
+        call check(error, got == want, "a 150-character label must come back cut to the cap and elided")
+        if (allocated(error)) return
+
+        call at_cap%init(h0 = 70.0_real64, om0 = 0.3_real64, name = repeat("abcdefghij", 10))
+        call at_cap%get_name(got)
+        call check(error, got == repeat("abcdefghij", 10), &
+                   "and a label of exactly the cap must come back whole")
+        if (allocated(error)) return
+        call check(error, len(got) == 100, "which is 100 characters, the cap itself")
+
+    end subroutine test_a_long_label_is_capped
+
+    !> A subnormal `Om0` beside an ordinary radiation density builds quietly and answers a number.
+    !!
+    !! `sound_c`, the sound horizon's integration scale, is the tighter of `1/sqrt(R0)` and
+    !! `sqrt(Or0)/sqrt(Om0)`. **Both are ratios of roots rather than roots of ratios, and that is
+    !! what this test pins.** Written as `sqrt(or0 / om0)` the second overflows for a subnormal
+    !! `Om0` -- the quotient reaches infinity before the root is taken -- and although `%init`
+    !! catches the infinity and falls back to a scale of one, the OVERFLOW FLAG is already raised
+    !! and reaches the caller. Under nagfor's default `-ieee=stop` that ends the process inside
+    !! `%init`, for a model every other binding answers perfectly well.
+    !!
+    !! So the assertion is in two parts and both are load-bearing: the horizon is a positive
+    !! finite number of Mpc, AND building the model raises no `ieee_usual` flag. The second fails
+    !! against the quotient form; the first does not, which is why the flags are read here rather
+    !! than the value alone being trusted.
+    subroutine test_a_subnormal_matter_density_builds_quietly(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_cosmology) :: c, ordinary
+        real(real64)       :: v, w
+        logical            :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        call c%init(h0 = 70.0_real64, om0 = 1.0e-320_real64, ode0 = 1.0_real64, &
+                    tcmb0 = 100.0_real64, ob0 = 0.0_real64)
+        v = c%sound_horizon(1000.0_real64)
+        call ieee_get_flag(ieee_usual, raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+
+        call check(error, v == v, "a subnormal om0 must not make the sound horizon a NaN")
+        if (allocated(error)) return
+        call check(error, v > 0.0_real64 .and. ieee_is_finite(v), &
+                   "it must be a positive, finite number of Mpc")
+        if (allocated(error)) return
+        call check(error, .not. any(raised), &
+                   "and forming the sound horizon's scale must raise no IEEE flag")
+        if (allocated(error)) return
+        ! The negative control: an ORDINARY model of the same shape -- no baryons, the same
+        ! radiation -- answers a different horizon, so the assertions above are not passing on a
+        ! constant or on a scale that resolved nothing.
+        call ordinary%init(h0 = 70.0_real64, om0 = 0.3_real64, ode0 = 1.0_real64, &
+                           tcmb0 = 100.0_real64, ob0 = 0.0_real64)
+        w = ordinary%sound_horizon(1000.0_real64)
+        call check(error, w == w .and. w /= v, &
+                   "and a model with an ordinary om0 answers a different horizon")
+
+    end subroutine test_a_subnormal_matter_density_builds_quietly
+
     !> `%onu_species` sums to `%onu`, and `%otot` is EXACTLY one for a flat model.
     !!
     !! Neither is a recorded number. The species split is pinned by the identity it exists to
@@ -2196,6 +2759,34 @@ contains
         call base%clone(copy2, ode0 = 0.5_real64)
         call check(error, .not. copy2%is_flat() .and. copy2%ode0() == 0.5_real64, &
                    "naming ode0 makes the clone of a flat model curved")
+        if (allocated(error)) return
+
+        ! `ob0` and `m_nu` are the two arguments `%clone` forwards through an ALLOCATABLE local
+        ! rather than through `merge_real`, because for them "absent" is itself a value the source
+        ! may carry. Naming each is therefore a separate branch from omitting it, and omitting it
+        ! is all the assertions above exercise.
+        call base%clone(copy2, ob0 = 0.04_real64)
+        call check(error, copy2%ob0() == 0.04_real64, "naming ob0 gives the clone that ob0")
+        if (allocated(error)) return
+        call check(error, copy2%odm0() == copy2%om0() - 0.04_real64, &
+                   "and its Odm0 follows from it")
+        if (allocated(error)) return
+        call check(error, base%ob0() /= 0.04_real64, &
+                   "and the source's own ob0 is not what was named, or the assertion is vacuous")
+        if (allocated(error)) return
+
+        call base%clone(copy2, m_nu = [0.02_real64, 0.03_real64, 0.04_real64])
+        call copy2%m_nu(masses2)
+        call check(error, size(masses2) == 3 .and. masses2(1) == 0.02_real64 .and. &
+                   masses2(2) == 0.03_real64 .and. masses2(3) == 0.04_real64, &
+                   "naming m_nu gives the clone those masses")
+        if (allocated(error)) return
+        call base%m_nu(masses)
+        call check(error, .not. (size(masses) == 3 .and. all(masses == masses2)), &
+                   "and the source's own masses are not what was named")
+        if (allocated(error)) return
+        call check(error, copy2%onu0() /= base%onu0(), &
+                   "so the clone's neutrino density really moved")
 
     end subroutine test_clone_copies_and_overrides
 

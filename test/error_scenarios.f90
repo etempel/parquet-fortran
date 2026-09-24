@@ -3868,6 +3868,16 @@ program error_scenarios
         call scenario_cosmology_init_m_nu_size()
     case ("cosmology_init_w0_out_of_range")
         call scenario_cosmology_init_w0_out_of_range()
+    case ("cosmology_init_wa_out_of_range")
+        call scenario_cosmology_init_wa_out_of_range()
+    case ("cosmology_init_ode0_not_finite")
+        call scenario_cosmology_init_ode0_not_finite()
+    case ("cosmology_init_neff_negative")
+        call scenario_cosmology_init_neff_negative()
+    case ("cosmology_init_m_nu_negative")
+        call scenario_cosmology_init_m_nu_negative()
+    case ("cosmology_init_context_capped")
+        call scenario_cosmology_init_context_capped()
     case ("cosmology_init_zmax_out_of_range")
         call scenario_cosmology_init_zmax_out_of_range()
     case ("cosmology_init_zmin_out_of_range")
@@ -3892,6 +3902,8 @@ program error_scenarios
         call scenario_cosmology_config_mnu_length()
     case ("cosmology_config_out_of_range")
         call scenario_cosmology_config_out_of_range()
+    case ("cosmology_config_label_without_parameters")
+        call scenario_cosmology_config_label_without_parameters()
     case ("interpolate_eval_before_init")
         call scenario_interpolate_eval_before_init()
     case ("interpolate_context_reported")
@@ -33538,6 +33550,54 @@ contains
         print '(a, l1)', "accepted a w0 below the range, built: ", c%is_initialised()
     end subroutine scenario_cosmology_init_w0_out_of_range
     !
+    !> `wa` outside `[-3, 3]`. Its own branch, not `w0`'s: the two are validated separately and a
+    !> guard written for one alone lets the other through.
+    subroutine scenario_cosmology_init_wa_out_of_range()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, wa=4.0_real64)
+        print '(a, l1)', "accepted a wa above the range, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_wa_out_of_range
+    !
+    !> An `ode0` that is not a number. Unlike every other density it has no RANGE -- a negative
+    !> `ode0` is an admitted model -- so finiteness is the whole of its guard.
+    subroutine scenario_cosmology_init_ode0_not_finite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_cosmology) :: c
+        real(real64) :: bad
+
+        bad = ieee_value(bad, ieee_quiet_nan)
+        call c%init(h0=70.0_real64, om0=0.3_real64, ode0=bad)
+        print '(a, l1)', "accepted a NaN ode0, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_ode0_not_finite
+    !
+    !> A negative `neff`. `floor(neff)` becomes the species count, so a negative one would
+    !> allocate nothing and every neutrino sum would run over an empty range.
+    subroutine scenario_cosmology_init_neff_negative()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, neff=-1.0_real64)
+        print '(a, l1)', "accepted a negative neff, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_neff_negative
+    !
+    !> An `m_nu` of the right LENGTH carrying a negative mass: the per-entry guard, which the
+    !> length guard beside it does not cover.
+    subroutine scenario_cosmology_init_m_nu_negative()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=70.0_real64, om0=0.3_real64, neff=3.046_real64, &
+                    m_nu=[0.0_real64, -0.1_real64, 0.0_real64])
+        print '(a, l1)', "accepted a negative neutrino mass, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_m_nu_negative
+    !
+    !> A 150-character `context` is reproduced to its first 100 characters and elided.
+    subroutine scenario_cosmology_init_context_capped()
+        type(pf_cosmology) :: c
+
+        call c%init(h0=-1.0_real64, om0=0.3_real64, context=repeat("abcdefghij", 15))
+        print '(a, l1)', "accepted a negative h0 with a long context, built: ", c%is_initialised()
+    end subroutine scenario_cosmology_init_context_capped
+    !
     !> `zmax` above `1e10`.
     subroutine scenario_cosmology_init_zmax_out_of_range()
         type(pf_cosmology) :: c
@@ -33673,6 +33733,24 @@ contains
         call pf_cosmology_from_toml(conf, c)
         print '(a, l1)', "accepted a negative h0 from a file, built: ", c%is_initialised()
     end subroutine scenario_cosmology_config_out_of_range
+    !
+    !> A `name` that is not one of the eight, in a section that gives neither `h0` nor `om0`.
+    !!
+    !! Almost always a MISSPELT cosmology, so it gets a message that lists the eight rather than
+    !! `pf_toml_require`'s "these keys are missing", which would send the reader looking for the
+    !! parameters they never meant to give.
+    subroutine scenario_cosmology_config_label_without_parameters()
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: c
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        call pf_toml_loads(conf, '[cosmology]' // nl // 'name = "Plank18"' // nl // &
+                                 'zmax = 50.0' // nl, name = "run.toml")
+        call pf_cosmology_from_toml(conf, c)
+        print '(a, l1)', "accepted a misspelt cosmology name with no parameters, built: ", &
+            c%is_initialised()
+    end subroutine scenario_cosmology_config_label_without_parameters
     !
     subroutine scenario_interpolate_eval_before_init()
         type(pf_interp_1d) :: c

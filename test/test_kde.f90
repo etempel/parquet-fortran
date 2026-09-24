@@ -1101,9 +1101,12 @@ contains
         character(len=9), parameter :: RULES(3) = [character(len=9) :: "isj", "silverman", "scott"]
         type(pf_kde) :: k
         real(real64), allocatable :: x(:), w(:)
-        real(real64) :: h
+        real(real32), allocatable :: x32(:)
+        logical, allocatable :: bmask(:)
+        type(parquet_column) :: bc
+        real(real64) :: h, h32, hc
         character(len=:), allocatable :: want, got
-        integer(int64) :: nn, nd, no
+        integer(int64) :: nn, nd, no, n, i
         logical :: ok1, ok2
         integer :: r
 
@@ -1151,6 +1154,51 @@ contains
         call pf_kde_bandwidth([2.5_real64, 2.5_real64, 2.5_real64], h, ok=ok2, rule_used=got)
         call check(error, .not. ok2 .and. ieee_is_nan(h) .and. got == "none", &
             "a constant sample must leave the standalone bandwidth undefined and name no rule")
+        if (allocated(error)) return
+
+        ! ---- the generic's OTHER TWO specifics ------------------------------------------------
+        !
+        ! `pf_kde_bandwidth` resolves over `real64`, `real32` and `parquet_column`, and the last
+        ! two widen to the first and call it. Neither was reached by anything above: a generic is
+        ! resolved at compile time, so a test that only ever passes a `real64` array exercises one
+        ! specific and reports the other two as covered by nothing. Each is held to the widening
+        ! it performs -- the `real32` form to the `real64` array of its own widened values, the
+        ! column form to the array plus the mask its nulls become -- which is a stronger statement
+        ! than "it answers something": a specific that widened wrongly, or dropped an argument on
+        ! the way through, fails it.
+        allocate(x32(size(x)))
+        x32 = real(x, real32)
+        call pf_kde_bandwidth(x32, h32, rule="silverman", ok=ok1, rule_used=got)
+        call pf_kde_bandwidth(real(x32, real64), h, rule="silverman", ok=ok2, rule_used=want)
+        call check(error, same_h(h32, h) .and. (ok1 .eqv. ok2) .and. got == want, &
+            "the real32 form must answer the real64 form's number for its own widened values")
+        if (allocated(error)) return
+
+        n = int(size(x), int64)
+        ! `allocate` first: assigning the scalar `.true.` to an unallocated allocatable array does
+        ! NOT auto-allocate it -- only an array-valued right-hand side does -- so the mask has to
+        ! be given its shape here.
+        allocate(bmask(n))
+        call bc%init(PK_FLOAT64, n)
+        call bc%set_all(x)
+        bmask = .true.
+        do i = 1_int64, n, 7_int64
+            call bc%set_null(i)
+            bmask(i) = .false.
+        end do
+        call pf_kde_bandwidth(bc, hc, rule="silverman", n_null=nn)
+        call pf_kde_bandwidth(x, h, rule="silverman", is_valid=bmask)
+        call check(error, same_h(hc, h), &
+            "the column form must answer what the array form does under the mask its nulls become")
+        if (allocated(error)) return
+        call check(error, nn == count(.not. bmask, kind=int64), &
+            "and must count the nulls it excluded")
+        if (allocated(error)) return
+        ! The negative control: without the mask the array form answers a DIFFERENT number, so the
+        ! equality above is not one that holds however the nulls are treated.
+        call pf_kde_bandwidth(x, h, rule="silverman")
+        call check(error, .not. same_h(hc, h), &
+            "and the nulls must matter, or the column form proved nothing")
 
     end subroutine test_standalone_bandwidth
 

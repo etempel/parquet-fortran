@@ -3289,6 +3289,18 @@ contains
                 test_cosmology_init_m_nu_size_aborts), &
                 new_unittest("cosmology_init_w0_out_of_range aborts", &
                 test_cosmology_init_w0_out_of_range_aborts), &
+                new_unittest("cosmology_init_wa_out_of_range aborts", &
+                test_cosmology_init_wa_out_of_range_aborts), &
+                new_unittest("cosmology_init_ode0_not_finite aborts", &
+                test_cosmology_init_ode0_not_finite_aborts), &
+                new_unittest("cosmology_init_neff_negative aborts", &
+                test_cosmology_init_neff_negative_aborts), &
+                new_unittest("cosmology_init_m_nu_negative aborts", &
+                test_cosmology_init_m_nu_negative_aborts), &
+                new_unittest("cosmology_init_context_capped aborts", &
+                test_cosmology_init_context_capped_aborts), &
+                new_unittest("cosmology_config_label_without_parameters aborts", &
+                test_cosmology_config_label_without_parameters_aborts), &
                 new_unittest("cosmology_init_zmax_out_of_range aborts", &
                 test_cosmology_init_zmax_out_of_range_aborts), &
                 new_unittest("cosmology_init_zmin_out_of_range aborts", &
@@ -20544,6 +20556,52 @@ contains
             failure_message="an out-of-range w0 was expected to error stop", &
             required_stderr="pf_cosmology%init: w0 must be finite and within [-3, 3]")
     end subroutine test_cosmology_init_w0_out_of_range_aborts
+    !
+    subroutine test_cosmology_init_wa_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_wa_out_of_range", expect_abort=.true., &
+            failure_message="an out-of-range wa was expected to error stop", &
+            required_stderr="pf_cosmology%init: wa must be finite and within [-3, 3]")
+    end subroutine test_cosmology_init_wa_out_of_range_aborts
+    !
+    subroutine test_cosmology_init_ode0_not_finite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_ode0_not_finite", expect_abort=.true., &
+            failure_message="a NaN ode0 was expected to error stop", &
+            required_stderr="pf_cosmology%init: ode0 must be finite")
+    end subroutine test_cosmology_init_ode0_not_finite_aborts
+    !
+    subroutine test_cosmology_init_neff_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_neff_negative", expect_abort=.true., &
+            failure_message="a negative neff was expected to error stop", &
+            required_stderr="pf_cosmology%init: neff must be finite and non-negative")
+    end subroutine test_cosmology_init_neff_negative_aborts
+    !
+    !> The PER-ENTRY m_nu guard. The message names the offending entry, which is what tells it
+    !> apart from the LENGTH guard `cosmology_init_m_nu_size` asserts.
+    subroutine test_cosmology_init_m_nu_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_m_nu_negative", expect_abort=.true., &
+            failure_message="a negative neutrino mass was expected to error stop", &
+            required_stderr="per species: entry")
+    end subroutine test_cosmology_init_m_nu_negative_aborts
+    !
+    !> A 150-character context reaches the message cut to 100 characters and elided.
+    subroutine test_cosmology_init_context_capped_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_init_context_capped", expect_abort=.true., &
+            failure_message="a negative h0 with a long context was expected to error stop", &
+            required_stderr="abcdefghijabcdefghij...]")
+    end subroutine test_cosmology_init_context_capped_aborts
+    !
+    subroutine test_cosmology_config_label_without_parameters_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_config_label_without_parameters", &
+            expect_abort=.true., &
+            failure_message="a misspelt cosmology name with no parameters was expected to error stop", &
+            required_stderr="a name that is not one of the eight named cosmologies is a label")
+    end subroutine test_cosmology_config_label_without_parameters_aborts
     !
     subroutine test_cosmology_init_zmax_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error

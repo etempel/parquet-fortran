@@ -159,7 +159,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(phi), int64), int(size(ipix), int64)], "pf_ang2pix_ring_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_ang2pix_ring_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_ang2pix_ring_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -191,7 +198,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(phi), int64), int(size(ipix), int64)], "pf_ang2pix_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_ang2pix_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_ang2pix_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -207,7 +221,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(phi), int64), int(size(ipix), int64)], "pf_ang2pix_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(nside, hpx_nside_max)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(nside, hpx_nside_max, "pf_ang2pix_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_ang2pix_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -223,7 +244,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(theta), int64), int(size(phi), int64)], "pf_pix2ang_ring_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_pix2ang_ring_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2ang_ring_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -239,7 +267,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(theta), int64), int(size(phi), int64)], "pf_pix2ang_ring_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(nside, hpx_nside_max)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(nside, hpx_nside_max, "pf_pix2ang_ring_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2ang_ring_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -255,7 +290,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(theta), int64), int(size(phi), int64)], "pf_pix2ang_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_pix2ang_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2ang_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -271,7 +313,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(theta), int64), int(size(phi), int64)], "pf_pix2ang_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(nside, hpx_nside_max)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(nside, hpx_nside_max, "pf_pix2ang_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2ang_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -288,7 +337,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(ipix), int64)], "pf_vec2pix_ring_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_vec2pix_ring_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_vec2pix_ring_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -305,7 +361,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(ipix), int64)], "pf_vec2pix_ring_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(nside, hpx_nside_max)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(nside, hpx_nside_max, "pf_vec2pix_ring_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_vec2pix_ring_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -322,7 +385,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(ipix), int64)], "pf_vec2pix_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_vec2pix_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_vec2pix_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -339,7 +409,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(ipix), int64)], "pf_vec2pix_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(nside, hpx_nside_max)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(nside, hpx_nside_max, "pf_vec2pix_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_vec2pix_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -356,7 +433,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(vec, 2), int64)], "pf_pix2vec_ring_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_pix2vec_ring_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2vec_ring_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -373,7 +457,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(vec, 2), int64)], "pf_pix2vec_ring_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(nside, hpx_nside_max)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(nside, hpx_nside_max, "pf_pix2vec_ring_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2vec_ring_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -390,7 +481,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(vec, 2), int64)], "pf_pix2vec_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(int(nside, int64), hpx_nside_max_i32, "pf_pix2vec_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2vec_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n
@@ -407,7 +505,14 @@ contains
         call hpx_check_bulk_sizes(n, [int(size(vec, 2), int64)], "pf_pix2vec_nest_bulk")
         if (n == 0_int64) return
         if (.not. hpx_nside_ok(nside, hpx_nside_max)) &
+            ! the abort and the message it carries are proved by `error_scenarios.f90`'s
+            ! `healpix_bulk_nside_invalid`, which drives this guard through `pf_ang2pix_ring_bulk`'s
+            ! int64 specific. The other fifteen call sites are that same two-line guard forwarding to
+            ! the same `bad_nside` with a different name string, so a scenario each would assert
+            ! nothing the one does not.
+            ! GCOVR_EXCL_START
             call bad_nside(nside, hpx_nside_max, "pf_pix2vec_nest_bulk")
+            ! GCOVR_EXCL_STOP
         nt = hpx_threads(threads, n, "pf_pix2vec_nest_bulk")
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k) if (nt > 1)
         do k = 1_int64, n

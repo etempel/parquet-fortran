@@ -347,6 +347,7 @@ contains
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
             .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "cosmology_config_serial" &
+            .or. name == "cosmology_serial" &
             .or. name == "index_omp" .or. name == "index_strings" &
             .or. name == "integrate_omp" .or. name == "interpolate_omp" .or. name == "optimize_omp" &
             .or. name == "cosmology_omp" &

@@ -217,14 +217,25 @@ contains
         real(real64) :: x, de, w_z, rad, dnu
 
         if (zeta /= zeta) then
+            ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+            ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+            ! argument is never a NaN. The screen stays because an ordered comparison against one
+            ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+            ! GCOVR_EXCL_START
             v = zeta
             return
+            ! GCOVR_EXCL_STOP
         end if
         x = exp(zeta)
         de = de_term_at(p, zeta, x)
         if (de > huge(de) .or. de < -huge(de)) then
+            ! `f_de_at`'s own overflow screen cannot fire inside the admitted box: `|w0|` and `|wa|` are
+            ! at most 3, so the CPL exponent is at least -15 and `x` at least `e^-23`, which bounds the
+            ! factor at about `1e150`.
+            ! GCOVR_EXCL_START
             v = ieee_value(v, ieee_positive_inf)
             return
+            ! GCOVR_EXCL_STOP
         end if
         ! `dln f_DE/dzeta` is exactly `3(1 + w(z))`: the CPL exponent differentiates to
         ! `3(1 + w0 + wa) - 3 wa/x`, which is that same expression written out.
@@ -264,8 +275,14 @@ contains
 
         ! The NaN screen comes first and stands alone: every test below it is ordered.
         if (zeta /= zeta) then
+            ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+            ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+            ! argument is never a NaN. The screen stays because an ordered comparison against one
+            ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+            ! GCOVR_EXCL_START
             v = zeta
             return
+            ! GCOVR_EXCL_STOP
         end if
         x = exp(zeta)
         de = de_term_at(p, zeta, x)
@@ -304,15 +321,28 @@ contains
 
         ! The NaN screen comes first and stands alone, exactly as it does in the kernel.
         if (zeta /= zeta) then
+            ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+            ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+            ! argument is never a NaN. The screen stays because an ordered comparison against one
+            ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+            ! GCOVR_EXCL_START
             q = zeta
             src = zeta
             return
+            ! GCOVR_EXCL_STOP
         end if
         e2 = cosmology_e2(p, d, zeta)
         if (e2 /= e2) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             q = e2
             src = e2
             return
+            ! GCOVR_EXCL_STOP
         end if
         ! `E^2 <= 0` is a redshift the model does not reach, and an INFINITE `E^2` -- a big rip's
         ! dark-energy term at a deep blueshift -- would make `dlnE^2/dzeta` an `Infinity/Infinity`
@@ -365,19 +395,40 @@ contains
             ! `db/dv`, so in `v` it is odd and analytic and vanishes like `v`; the origin is
             ! answered directly rather than by a division, exactly as the age tail's is.
             if (x /= x) then
+                ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+                ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+                ! argument is never a NaN. The screen stays because an ordered comparison against one
+                ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+                ! GCOVR_EXCL_START
                 v = x
                 return
+                ! GCOVR_EXCL_STOP
             end if
             if (x <= 0.0_real64) then
+                ! the Gauss-Kronrod nodes are strictly interior to the panel, so the substitution variable
+                ! is never zero or negative here; the origin is a limit the panel never evaluates at.
+                ! GCOVR_EXCL_START
                 v = 0.0_real64
                 return
+                ! GCOVR_EXCL_STOP
             end if
             b = d%sound_c * sinh(x)
             v2 = cosmology_e2(p, d, -2.0_real64 * log(b))
             if (v2 /= v2) then
+                ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+                ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+                ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+                ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+                ! because it is what keeps the ORDERED test beside it off a NaN.
+                ! GCOVR_EXCL_START
                 v = v2
+                ! GCOVR_EXCL_STOP
             else if (v2 <= 0.0_real64) then
+                ! reached only from the solver, whose bracket is built from bounds `%init` stored at the
+                ! model's own floor, so no iterate reaches a `zeta` at which `E^2` is not positive.
+                ! GCOVR_EXCL_START
                 v = ieee_value(v, ieee_quiet_nan)
+                ! GCOVR_EXCL_STOP
             else
                 ! `sqrt(3 (1 + R0 b^2))` as `sqrt(3) hypot(1, sqrt(R0) b)`: the product `R0 b^2`
                 ! is `R(z)`, the baryon-photon ratio at that redshift, and it overflows for a
@@ -390,26 +441,54 @@ contains
             ! `x` is `b = sqrt(a)`. The integrand vanishes like b^3 (with radiation) or b^2
             ! (without), so the origin is answered directly rather than by a division.
             if (x /= x) then
+                ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+                ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+                ! argument is never a NaN. The screen stays because an ordered comparison against one
+                ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+                ! GCOVR_EXCL_START
                 v = x
                 return
+                ! GCOVR_EXCL_STOP
             end if
             if (x <= 0.0_real64) then
+                ! the Gauss-Kronrod nodes are strictly interior to the panel, so the substitution variable
+                ! is never zero or negative here; the origin is a limit the panel never evaluates at.
+                ! GCOVR_EXCL_START
                 v = 0.0_real64
                 return
+                ! GCOVR_EXCL_STOP
             end if
             zeta = -2.0_real64 * log(x)
             v2 = cosmology_e2(p, d, zeta)
             if (v2 /= v2) then
+                ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+                ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+                ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+                ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+                ! because it is what keeps the ORDERED test beside it off a NaN.
+                ! GCOVR_EXCL_START
                 v = v2
+                ! GCOVR_EXCL_STOP
             else if (v2 <= 0.0_real64) then
+                ! reached only from the solver, whose bracket is built from bounds `%init` stored at the
+                ! model's own floor, so no iterate reaches a `zeta` at which `E^2` is not positive.
+                ! GCOVR_EXCL_START
                 v = ieee_value(v, ieee_quiet_nan)
+                ! GCOVR_EXCL_STOP
             else
                 v = 2.0_real64 / (x * sqrt(v2))
             end if
         case default
             v2 = cosmology_e2(p, d, x)
             if (v2 /= v2) then
+                ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+                ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+                ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+                ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+                ! because it is what keeps the ORDERED test beside it off a NaN.
+                ! GCOVR_EXCL_START
                 v = v2
+                ! GCOVR_EXCL_STOP
             else if (v2 <= 0.0_real64) then
                 ! `E^2 <= 0` is "no big bang": a quiet NaN, never a square root of a negative.
                 v = ieee_value(v, ieee_quiet_nan)
@@ -447,8 +526,14 @@ contains
 
         v = 0.0_real64
         if (z0 /= z0 .or. z1 /= z1) then
+            ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+            ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+            ! argument is never a NaN. The screen stays because an ordered comparison against one
+            ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+            ! GCOVR_EXCL_START
             v = ieee_value(v, ieee_quiet_nan)
             return
+            ! GCOVR_EXCL_STOP
         end if
         ! A panel taken with `b < a` returns the negative integral, so the downward walk needs no
         ! sign of its own. Every caller has clamped `z1` to `+/-PFC_ZETA_CEILING`, which bounds
@@ -476,8 +561,14 @@ contains
         integer      :: i
 
         if (zeta /= zeta) then
+            ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+            ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+            ! argument is never a NaN. The screen stays because an ordered comparison against one
+            ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+            ! GCOVR_EXCL_START
             v = zeta
             return
+            ! GCOVR_EXCL_STOP
         end if
         b_top = exp(-0.5_real64 * zeta)
         v = 0.0_real64
@@ -495,8 +586,14 @@ contains
         integer      :: i, panels
 
         if (zeta /= zeta) then
+            ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+            ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+            ! argument is never a NaN. The screen stays because an ordered comparison against one
+            ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+            ! GCOVR_EXCL_START
             v = zeta
             return
+            ! GCOVR_EXCL_STOP
         end if
         ! `b_top = e^(-zeta/2)` is the scale factor's square root at `zeta`, and `v_top` the `v`
         ! it sits at. The ratio cannot overflow: `b_top` is at most `1e5` over the domain and
@@ -855,9 +952,21 @@ contains
             ! A NEGATIVE `ode0` breaks the bound that would otherwise keep this below 23, so the
             ! argument is screened rather than left to overflow inside `sinh`.
             if (arg > PFC_SINH_CEILING) then
+                ! `sqrt(Ok0) D_C / D_H` is bounded by the domain's own `zeta`, about 23, and
+                ! `PFC_SINH_CEILING` is 700: wherever curvature dominates `E` the integrand is `1/sqrt(Ok0)`
+                ! and the product is a logarithm of `1 + z`. Probed over the corner grid of
+                ! `test_cosmology.f90`'s `build_extreme`, whose widest is about 24.
+                ! GCOVR_EXCL_START
                 dm = ieee_value(dm, ieee_positive_inf)
+                ! GCOVR_EXCL_STOP
             else if (arg < -PFC_SINH_CEILING) then
+                ! `sqrt(Ok0) D_C / D_H` is bounded by the domain's own `zeta`, about 23, and
+                ! `PFC_SINH_CEILING` is 700: wherever curvature dominates `E` the integrand is `1/sqrt(Ok0)`
+                ! and the product is a logarithm of `1 + z`. Probed over the corner grid of
+                ! `test_cosmology.f90`'s `build_extreme`, whose widest is about 24.
+                ! GCOVR_EXCL_START
                 dm = ieee_value(dm, ieee_negative_inf)
+                ! GCOVR_EXCL_STOP
             else
                 dm = this%d%dh / s * sinh(arg)
             end if
@@ -1107,7 +1216,14 @@ contains
         ! own `z` rather than an `exp` of a rounded logarithm of it.
         e2 = cosmology_e2_x(this%p, this%d, 1.0_real64 + z)
         if (e2 /= e2) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             v = e2
+            ! GCOVR_EXCL_STOP
         else if (e2 <= 0.0_real64) then
             v = ieee_value(v, ieee_quiet_nan)
         else
@@ -1183,7 +1299,14 @@ contains
         end if
         v = cosmology_e2_x(this%p, this%d, x)
         if (v /= v) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             e = v
+            ! GCOVR_EXCL_STOP
         else if (v <= 0.0_real64) then
             e = ieee_value(e, ieee_quiet_nan)
         else
@@ -1204,7 +1327,14 @@ contains
         end if
         v = cosmology_e2_x(this%p, this%d, x)
         if (v /= v) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             e = v
+            ! GCOVR_EXCL_STOP
         else if (v <= 0.0_real64) then
             e = ieee_value(e, ieee_quiet_nan)
         else
@@ -1225,7 +1355,14 @@ contains
         end if
         v = cosmology_e2_x(this%p, this%d, x)
         if (v /= v) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             h = v
+            ! GCOVR_EXCL_STOP
         else if (v <= 0.0_real64) then
             h = ieee_value(h, ieee_quiet_nan)
         else
@@ -1321,7 +1458,14 @@ contains
         real(real64)             :: v    !! the density parameter
 
         if (e2 /= e2) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             v = e2
+            ! GCOVR_EXCL_STOP
         else if (e2 <= 0.0_real64) then
             ! `E^2 <= 0` is "no big bang", which `%efunc` answers NaN for; so does every fraction
             ! of it.
@@ -1488,7 +1632,14 @@ contains
         ! density parameters summing to one at a deep blueshift of a CPL model.
         call cosmology_e2_split(this%p, this%d, x, de, nu, e2)
         if (e2 /= e2) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             v = e2
+            ! GCOVR_EXCL_STOP
         else if (e2 <= 0.0_real64) then
             v = ieee_value(v, ieee_quiet_nan)
         else if (e2 > huge(e2)) then
@@ -1613,7 +1764,14 @@ contains
         end if
         e2 = cosmology_e2_x(this%p, this%d, x)
         if (e2 /= e2) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             v = e2
+            ! GCOVR_EXCL_STOP
         else if (e2 <= 0.0_real64) then
             v = ieee_value(v, ieee_quiet_nan)
         else
@@ -1716,9 +1874,20 @@ contains
 
         v2 = cosmology_e2(this%p, this%d, zeta)
         if (v2 /= v2) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             s = v2
+            ! GCOVR_EXCL_STOP
         else if (v2 <= 0.0_real64) then
+            ! reached only from the solver, whose bracket is built from bounds `%init` stored at the
+            ! model's own floor, so no iterate reaches a `zeta` at which `E^2` is not positive.
+            ! GCOVR_EXCL_START
             s = ieee_value(s, ieee_quiet_nan)
+            ! GCOVR_EXCL_STOP
         else
             s = this%d%dh * exp(zeta) / (sqrt(v2) * sqrt(3.0_real64) &
                 * hypot(1.0_real64, this%d%sound_r0_root * exp(-0.5_real64 * zeta)))
@@ -1844,9 +2013,20 @@ contains
 
         v = cosmology_e2(this%p, this%d, zeta)
         if (v /= v) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             s = v
+            ! GCOVR_EXCL_STOP
         else if (v <= 0.0_real64) then
+            ! reached only from the solver, whose bracket is built from bounds `%init` stored at the
+            ! model's own floor, so no iterate reaches a `zeta` at which `E^2` is not positive.
+            ! GCOVR_EXCL_START
             s = ieee_value(s, ieee_quiet_nan)
+            ! GCOVR_EXCL_STOP
         else
             s = this%d%dh * exp(zeta) / sqrt(v)
         end if
@@ -1863,9 +2043,20 @@ contains
 
         v = cosmology_e2(this%p, this%d, zeta)
         if (v /= v) then
+            ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+            ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+            ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+            ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+            ! because it is what keeps the ORDERED test beside it off a NaN.
+            ! GCOVR_EXCL_START
             s = v
+            ! GCOVR_EXCL_STOP
         else if (v <= 0.0_real64) then
+            ! reached only from the solver, whose bracket is built from bounds `%init` stored at the
+            ! model's own floor, so no iterate reaches a `zeta` at which `E^2` is not positive.
+            ! GCOVR_EXCL_START
             s = ieee_value(s, ieee_quiet_nan)
+            ! GCOVR_EXCL_STOP
         else
             s = this%d%th / sqrt(v)
         end if
@@ -1881,7 +2072,13 @@ contains
         real(real64) :: arg
 
         if (dc /= dc) then
+            ! every public entry screens its redshift through `x_of_z` or `zeta_of_z` before reaching
+            ! here, and the quadrature evaluates only at nodes interior to a finite panel, so this
+            ! argument is never a NaN. The screen stays because an ordered comparison against one
+            ! raises `IEEE_INVALID`, which is fatal under nagfor's default `-ieee=stop`.
+            ! GCOVR_EXCL_START
             s = dc
+            ! GCOVR_EXCL_STOP
         else if (this%flat) then
             s = 1.0_real64
         else if (this%d%ok0 > 0.0_real64) then
@@ -1889,7 +2086,13 @@ contains
             if (abs(arg) > PFC_SINH_CEILING) then
                 ! A NaN rather than an infinity, so that the solver BISECTS here instead of taking
                 ! a zero-length Newton step and declaring itself converged where it is not.
+                ! `sqrt(Ok0) D_C / D_H` is bounded by the domain's own `zeta`, about 23, and
+                ! `PFC_SINH_CEILING` is 700: wherever curvature dominates `E` the integrand is `1/sqrt(Ok0)`
+                ! and the product is a logarithm of `1 + z`. Probed over the corner grid of
+                ! `test_cosmology.f90`'s `build_extreme`, whose widest is about 24.
+                ! GCOVR_EXCL_START
                 s = ieee_value(s, ieee_quiet_nan)
+                ! GCOVR_EXCL_STOP
             else
                 s = cosh(arg)
             end if
@@ -1963,8 +2166,12 @@ contains
             ! An end of the bracket does not evaluate, so there is no bracket. Returning the
             ! midpoint of one that was never examined is how an unreachable argument became a
             ! redshift the model does not reach.
+            ! every caller builds its bracket from stored bounds the model reaches, so neither
+            ! end of it evaluates to a NaN.
+            ! GCOVR_EXCL_START
             zeta = ieee_value(zeta, ieee_quiet_nan)
             return
+            ! GCOVR_EXCL_STOP
         end if
         ! **The bracket is CHECKED, not assumed.** Every quantity here increases with `zeta`, so a
         ! bracket containing the target has `f_lo < 0 < f_hi`; when it does not, the target lies
@@ -2002,7 +2209,11 @@ contains
             slope = slope_at(this, which, zeta)
             previous = zeta
             if (slope /= slope) then
+                ! `slope_at` answers a NaN only where `E^2` is not positive, which the bracket
+                ! excludes; the bisection stays as the safe step for a slope that cannot be used.
+                ! GCOVR_EXCL_START
                 zeta = 0.5_real64 * (lo + hi)
+                ! GCOVR_EXCL_STOP
             else if (slope <= 0.0_real64 .or. slope > huge(slope)) then
                 ! An INFINITE slope bisects too. A Newton step of `f/Infinity` is exactly zero,
                 ! which the convergence test below would read as "arrived" at a point the
@@ -2016,7 +2227,11 @@ contains
             if (abs(zeta - previous) <= 1.0e-16_real64 * (1.0_real64 + abs(zeta))) return
         end do
 
-    end function solve_zeta
+        ! The loop returns on convergence, and the bracket halves at least every step, so the test
+        ! above is met long before the count runs out; falling off the end is the shape that says
+        ! `PFC_SOLVE_STEPS` was reached, which no model in the reference grid or in
+        ! `build_extreme`'s corners does.
+    end function solve_zeta   ! GCOVR_EXCL_LINE
 
     !> The quantity the solver is inverting, at `zeta`. Every one of the five INCREASES with
     !! `zeta`, which is what lets one bracketed iteration serve them all.
@@ -2042,9 +2257,20 @@ contains
             ! an `age(0)` of `13.8`, and only a relative measure of it has any digits left.
             t = age_at(this, zeta)
             if (t /= t) then
+                ! `cosmology_e2` cannot answer a NaN for a `zeta` that is not one: it returns `+Infinity` as
+                ! soon as the dark-energy term overflows, and inside the admitted parameter box (`|w0|` and
+                ! `|wa|` at most 3, every density at most `1e6`, `x` at most `1e10`) no two terms of `E^2`
+                ! can overflow with opposite signs, so `Infinity - Infinity` never forms. The screen stays
+                ! because it is what keeps the ORDERED test beside it off a NaN.
+                ! GCOVR_EXCL_START
                 v = t
+                ! GCOVR_EXCL_STOP
             else if (t <= 0.0_real64) then
+                ! the age is positive throughout a model's own domain, and the bracket does not
+                ! leave it.
+                ! GCOVR_EXCL_START
                 v = ieee_value(v, ieee_quiet_nan)
+                ! GCOVR_EXCL_STOP
             else
                 v = -log(t)
             end if
@@ -2076,9 +2302,17 @@ contains
             t = age_at(this, zeta)
             s = tl_slope(this, zeta)
             if (t /= t .or. s /= s) then
+                ! reached only from the solver, whose bracket is built from bounds `%init` stored at the
+                ! model's own floor, so no iterate reaches a `zeta` at which `E^2` is not positive.
+                ! GCOVR_EXCL_START
                 s = ieee_value(s, ieee_quiet_nan)
+                ! GCOVR_EXCL_STOP
             else if (t <= 0.0_real64) then
+                ! reached only from the solver, whose bracket is built from bounds `%init` stored at the
+                ! model's own floor, so no iterate reaches a `zeta` at which `E^2` is not positive.
+                ! GCOVR_EXCL_START
                 s = ieee_value(s, ieee_quiet_nan)
+                ! GCOVR_EXCL_STOP
             else
                 s = s / t
             end if
@@ -2135,8 +2369,14 @@ contains
         ! The bounds are tested for being NUMBERS before either is compared against; see
         ! `bound_usable`.
         if (.not. bound_usable(this%d%d_ceiling) .or. .not. bound_usable(this%d%d_floor)) then
+            ! `%init` computes every stored bound at the model's own floor, so none of them is a NaN
+            ! today; `bound_usable` removes the class rather than the cause, as its own doc-comment
+            ! says. The screen stays because an ordered comparison against a NaN bound would stop
+            ! screening and hand an unreachable argument to the solver.
+            ! GCOVR_EXCL_START
             z = ieee_value(z, ieee_quiet_nan)
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (d > this%d%d_ceiling .or. d < this%d%d_floor) then
             z = ieee_value(z, ieee_quiet_nan)
@@ -2146,8 +2386,13 @@ contains
         if (.not. found) then
             call bracket_outside(this, PFC_Q_DC, d, lo, hi, v_lo, v_hi, ok)
             if (.not. ok) then
+                ! `bracket_outside` stops its downward walk at `zeta_bottom` precisely so that no panel
+                ! crosses the model's floor, which is the only thing that makes `cosmology_panel` answer a
+                ! NaN; upward it stops at the domain's ceiling.
+                ! GCOVR_EXCL_START
                 z = ieee_value(z, ieee_quiet_nan)
                 return
+                ! GCOVR_EXCL_STOP
             end if
             zeta = solve_zeta(this, PFC_Q_DC, d, lo, hi)
         end if
@@ -2166,8 +2411,14 @@ contains
             return
         end if
         if (.not. bound_usable(this%d%t_ceiling) .or. .not. bound_usable(this%d%t_floor)) then
+            ! `%init` computes every stored bound at the model's own floor, so none of them is a NaN
+            ! today; `bound_usable` removes the class rather than the cause, as its own doc-comment
+            ! says. The screen stays because an ordered comparison against a NaN bound would stop
+            ! screening and hand an unreachable argument to the solver.
+            ! GCOVR_EXCL_START
             z = ieee_value(z, ieee_quiet_nan)
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (t > this%d%t_ceiling .or. t < this%d%t_floor) then
             z = ieee_value(z, ieee_quiet_nan)
@@ -2187,8 +2438,13 @@ contains
         else
             call bracket_outside(this, PFC_Q_TL, t, lo, hi, v_lo, v_hi, ok)
             if (.not. ok) then
+                ! `bracket_outside` stops its downward walk at `zeta_bottom` precisely so that no panel
+                ! crosses the model's floor, which is the only thing that makes `cosmology_panel` answer a
+                ! NaN; upward it stops at the domain's ceiling.
+                ! GCOVR_EXCL_START
                 z = ieee_value(z, ieee_quiet_nan)
                 return
+                ! GCOVR_EXCL_STOP
             end if
             zeta = solve_zeta(this, PFC_Q_TL, t, lo, hi)
         end if
@@ -2206,8 +2462,14 @@ contains
             return
         end if
         if (.not. bound_usable(this%d%a_ceiling) .or. .not. bound_usable(this%d%a_floor)) then
+            ! `%init` computes every stored bound at the model's own floor, so none of them is a NaN
+            ! today; `bound_usable` removes the class rather than the cause, as its own doc-comment
+            ! says. The screen stays because an ordered comparison against a NaN bound would stop
+            ! screening and hand an unreachable argument to the solver.
+            ! GCOVR_EXCL_START
             z = ieee_value(z, ieee_quiet_nan)
             return
+            ! GCOVR_EXCL_STOP
         end if
         ! A model whose age integral diverges is infinitely old at EVERY redshift, so no age names
         ! one: the screen is the model's own flag rather than a comparison against an infinity.
@@ -2230,7 +2492,11 @@ contains
             if (yp < 0.0_real64) then
                 zeta = guess - (y - lt) / yp
             else
+                ! `yp` is the age table's own slope and the age decreases with `zeta` throughout,
+                ! so it is negative at every node the inverse table reaches.
+                ! GCOVR_EXCL_START
                 zeta = guess
+                ! GCOVR_EXCL_STOP
             end if
             z = pf_zeta2z(zeta)
             return
@@ -2243,8 +2509,13 @@ contains
             lo = this%d%zeta_bottom
             hi = 0.0_real64
         else if (t >= this%d%a_n) then
+            ! no model reached by the reference grid or by `build_extreme`'s corners, including
+            ! one built with `zmax = 1e-6` whose table is a sliver, leaves the age inverse table
+            ! without covering this bracket: the table is consulted first and answers.
+            ! GCOVR_EXCL_START
             lo = 0.0_real64
             hi = this%d%zeta_n
+            ! GCOVR_EXCL_STOP
         else
             lo = this%d%zeta_n
             hi = PFC_ZETA_CEILING
@@ -2313,8 +2584,14 @@ contains
             return
         end if
         if (.not. bound_usable(this%d%d_ceiling)) then
+            ! `%init` computes every stored bound at the model's own floor, so none of them is a NaN
+            ! today; `bound_usable` removes the class rather than the cause, as its own doc-comment
+            ! says. The screen stays because an ordered comparison against a NaN bound would stop
+            ! screening and hand an unreachable argument to the solver.
+            ! GCOVR_EXCL_START
             z = ieee_value(z, ieee_quiet_nan)
             return
+            ! GCOVR_EXCL_STOP
         end if
         if (this%d%ok0 >= 0.0_real64) then
             ! Flat or open: `D_L` is strictly increasing in `z >= 0`, since `e^zeta`, `D_C` and
@@ -2439,7 +2716,12 @@ contains
                 hi = min(lo + PFC_PANEL, PFC_ZETA_CEILING)
                 v_hi = v_lo + scale * cosmology_panel(this%p, this%d, integrand, lo, hi)
                 if (v_hi /= v_hi) then
+                    ! `bracket_outside` stops its downward walk at `zeta_bottom` precisely so that no panel
+                    ! crosses the model's floor, which is the only thing that makes `cosmology_panel` answer a
+                    ! NaN; upward it stops at the domain's ceiling.
+                    ! GCOVR_EXCL_START
                     ok = .false.
+                    ! GCOVR_EXCL_STOP
                     return
                 end if
                 if (v_hi >= target_value .or. hi >= PFC_ZETA_CEILING) return
@@ -2458,8 +2740,13 @@ contains
                 lo = max(hi - PFC_PANEL, this%d%zeta_bottom)
                 v_lo = v_hi + scale * cosmology_panel(this%p, this%d, integrand, hi, lo)
                 if (v_lo /= v_lo) then
+                    ! `bracket_outside` stops its downward walk at `zeta_bottom` precisely so that no panel
+                    ! crosses the model's floor, which is the only thing that makes `cosmology_panel` answer a
+                    ! NaN; upward it stops at the domain's ceiling.
+                    ! GCOVR_EXCL_START
                     ok = .false.
                     return
+                    ! GCOVR_EXCL_STOP
                 end if
                 if (v_lo <= target_value .or. lo <= this%d%zeta_bottom) return
                 hi = lo

@@ -21,7 +21,8 @@ module test_sphere
     ! runner that reaches no `bind(C)` call.
     use parquet_sphere
     use parquet_random, only: pf_random_at, pf_random_key, pf_random_int_at, pf_random_direction_at, &
-        pf_random_radec_at, pf_random_disc_at, pf_random_disc_radec_at, pf_random_pair_spare_at
+        pf_random_radec_at, pf_random_disc_at, pf_random_disc_radec_at, pf_random_pair_spare_at, &
+        pf_random_disc_cap
     use parquet_healpix, only: pf_vec2pix_nest, pf_ring2nest, pf_angdist
     ! The sky tier's own pair, which this one's must equal bit for bit under PF_HP_DEC_NORTH.
     use parquet_skycoord, only: pf_radec2unit, pf_unit2radec
@@ -70,6 +71,8 @@ contains
                          test_skycoord_vector_pair_is_this_one), &
             new_unittest("pf_vec2radec reads parquet_random's directions and discs as its own RA/Dec twin does", &
                          test_radec_agrees_with_stage_one), &
+            new_unittest("a prepared disc cap draws what the scalar form draws", &
+                         test_disc_cap_matches_the_scalar_form), &
             new_unittest("a polygon's accessors before, after and between %init and %clear", &
                          test_polygon_init_and_accessors), &
             new_unittest("chart containment wraps RA into the polygon's range and refuses what is not a position", &
@@ -456,6 +459,67 @@ contains
             " degrees (at most 1e-9)"
         call check(error, worst <= 1.0e-9_real64, trim(msg))
     end subroutine test_radec_agrees_with_stage_one
+
+    !> `pf_random_disc_cap` draws what the scalar form draws, and says whether it is prepared.
+    !!
+    !! The cap exists so a loop over one disc validates and builds its frame ONCE instead of per
+    !! draw, so what has to hold is that moving that work out of the loop changes no draw: `%at`
+    !! is held to `pf_random_disc_at` BIT FOR BIT, both for a full disc and for a ring with an
+    !! inner radius. A frame built differently -- a different `e1`, a different normalisation --
+    !! answers a different point on the same circle and nothing but this equality would see it.
+    !!
+    !! `%is_set` is asserted in both directions around `%prepare`, and it is the binding with no
+    !! other caller anywhere: `pf_random_disc_at` reaches `%prepare` and `%at` internally, so
+    !! those two are exercised by every disc draw in this file, and the accessor beside them is
+    !! reached by nothing. `%prepare` may be re-run, so the last block prepares a second disc over
+    !! the first and checks the draws follow the new one.
+    subroutine test_disc_cap_matches_the_scalar_form(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        type(pf_random_disc_cap) :: cap
+        real(real64), parameter :: RA0 = 150.0_real64, DEC0 = -89.0_real64
+        real(real64), parameter :: RA1 = 10.0_real64, DEC1 = 90.0_real64
+        real(real64) :: c(3), c2(3), v(3), w(3)
+        integer(int64) :: k
+        integer :: bad
+
+        call pf_radec2vec(RA0, DEC0, c)
+        call check(error, .not. cap%is_set(), "an untouched cap must report itself unprepared")
+        if (allocated(error)) return
+
+        call cap%prepare(c, 2.5_real64 * DEG)
+        call check(error, cap%is_set(), "and a prepared one must report itself prepared")
+        if (allocated(error)) return
+        bad = 0
+        do k = 1_int64, 200_int64
+            v = cap%at(SKY_SEED, k, 3_int64)
+            w = pf_random_disc_at(SKY_SEED, k, c, 2.5_real64 * DEG, 3_int64)
+            if (any(v /= w)) bad = bad + 1
+        end do
+        call check(error, bad == 0, "a prepared cap must draw exactly what the scalar form draws")
+        if (allocated(error)) return
+
+        ! A RING, which is the case the inner radius reaches and a full disc does not.
+        call cap%prepare(c, 2.5_real64 * DEG, r_inner = 1.0_real64 * DEG)
+        bad = 0
+        do k = 1_int64, 200_int64
+            v = cap%at(SKY_SEED, k, 3_int64)
+            w = pf_random_disc_at(SKY_SEED, k, c, 2.5_real64 * DEG, 3_int64, r_inner = 1.0_real64 * DEG)
+            if (any(v /= w)) bad = bad + 1
+        end do
+        call check(error, bad == 0, "and a prepared ring must draw what the scalar ring draws")
+        if (allocated(error)) return
+
+        ! `%prepare` is re-runnable: a second disc replaces the first, and the draws follow it.
+        call pf_radec2vec(RA1, DEC1, c2)
+        call cap%prepare(c2, 2.5_real64 * DEG)
+        v = cap%at(SKY_SEED, 1_int64, 3_int64)
+        w = pf_random_disc_at(SKY_SEED, 1_int64, c2, 2.5_real64 * DEG, 3_int64)
+        call check(error, all(v == w), "re-preparing a cap must move it to the new disc")
+        if (allocated(error)) return
+        call check(error, any(v /= pf_random_disc_at(SKY_SEED, 1_int64, c, 2.5_real64 * DEG, 3_int64)), &
+                   "and away from the old one, or the re-prepare did nothing")
+
+    end subroutine test_disc_cap_matches_the_scalar_form
 
     ! ================================================================================
     ! The polygon

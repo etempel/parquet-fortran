@@ -208,6 +208,30 @@ contains
             call check(error, maxval(abs(v32 - v64)), 0.0_real64, &
                        "%pix2vec int32 disagreed with int64", thr=0.0_real64)
             if (allocated(error)) return
+            ! `%pix2vec_offset`, a separate specific per index kind, reached by nothing else.
+            ! `dx` and `dy` run over `[0, 1)` ACROSS the pixel, so `(0.5, 0.5)` is its centre and
+            ! reproduces `%pix2vec` TO ROUNDING, which is what the contract promises and all it
+            ! promises: the centre path puts the half-integer through the projection's integer
+            ! arithmetic and the offset path through its continuous form. That is still the
+            ! assertion that catches a specific forwarding `dx` and `dy` the wrong way round,
+            ! where an int32-versus-int64 A/B alone would not -- the two would agree on the
+            ! transposed answer.
+            call g%pix2vec_offset(ip32, 0.25_real64, 0.75_real64, v32)
+            call g%pix2vec_offset(ip64, 0.25_real64, 0.75_real64, v64)
+            call check(error, maxval(abs(v32 - v64)), 0.0_real64, &
+                       "%pix2vec_offset int32 disagreed with int64", thr=0.0_real64)
+            if (allocated(error)) return
+            call g%pix2vec_offset(ip32, 0.5_real64, 0.5_real64, v32)
+            call g%pix2vec(ip32, v64)
+            call check(error, maxval(abs(v32 - v64)), 0.0_real64, &
+                       "%pix2vec_offset at the pixel centre is not %pix2vec", thr=1.0e-14_real64)
+            if (allocated(error)) return
+            ! The negative control: an offset that is NOT the centre answers a direction further
+            ! from the centre than that rounding, so the agreement above says something.
+            call g%pix2vec_offset(ip32, 0.25_real64, 0.75_real64, v32)
+            call check(error, maxval(abs(v32 - v64)) > 1.0e-4_real64, &
+                       "%pix2vec_offset ignored its offset")
+            if (allocated(error)) return
 
             call g%radec2pix(123.5_real64, -17.25_real64, ip32)
             call g%radec2pix(123.5_real64, -17.25_real64, ip64)

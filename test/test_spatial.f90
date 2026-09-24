@@ -40,6 +40,7 @@ module test_spatial
     private
 
     public :: collect_tests_parquet_spatial
+    public :: collect_tests_parquet_spatial_serial
 
     !> Seed for every fixture here. Fixed so a failure is reproducible.
     integer(int64), parameter :: fixture_seed = 20260825_int64
@@ -63,7 +64,20 @@ module test_spatial
 
 contains
 
-    !> Registers every test in this suite.
+    !> Every spatial test that touches no process-global debug hook, so they run concurrently.
+    !! 
+    !! The suite was ONE suite of 130 tests until the per-test timings showed it was the single
+    !! most expensive thing in `fpm test` -- about 15 s of a 62 s run -- entirely because the
+    !! whole of it was excluded from test-drive's per-test parallelism for the sake of the 38
+    !! tests below. Those 38 keep the exclusion; these 92 no longer pay for it.
+    !! 
+    !! **Membership is decided by what a test can OBSERVE, not by what it sets.** A test that
+    !! only READS a counter (`parquet_debug_spatial_probe_count`, `_rebuilds`, `_work`, ...)
+    !! belongs with the serial group just as much as one that writes a forced cell size: a
+    !! sibling running concurrently charges the counter under assertion, which PASSES against a
+    !! measurement nobody made. `tools/check_source_conventions.py`'s
+    !! `check_spatial_suite_split_is_by_observability` re-derives the split and fails when a test
+    !! here reaches such a name, directly or through a helper.
     subroutine collect_tests_parquet_spatial(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the suite's tests.
 
@@ -88,8 +102,6 @@ contains
                          test_fof_chain_int32), &
             new_unittest("connected components accepts an int32 edge list with either nvert kind", &
                          test_components_int32_edges), &
-            new_unittest("grid answers in both kinds and the int32 ceiling hook is reversible", &
-                         test_grid_int32_and_ceiling_hook), &
             new_unittest("a 2D index matches a brute-force scan", test_2d_matches_brute_force), &
             new_unittest("a 2D index has exactly one cell along z", test_2d_grid_is_flat), &
             new_unittest("a flat, a collinear and a single-point cloud all build", test_degenerate_axes_build), &
@@ -113,16 +125,6 @@ contains
                          test_sky_pairs_sum_within_ceiling), &
             new_unittest("every combine= rule on the line-of-sight cylinder matches its own oracle", &
                          test_pairs_los_matches_cylinder_oracle), &
-            new_unittest("omitting los= is the distance from the observer", &
-                         test_pairs_los_default_los_is_distance), &
-            new_unittest("a los= steeper than the distance widens the walk by its measured slope", &
-                         test_pairs_los_with_slope), &
-            new_unittest("pairs closer than the gap floor in los are carried by the spread alone", &
-                         test_pairs_los_close_los_is_complete), &
-            new_unittest("the slope is measured cleanly on a continuous redshift list", &
-                         test_pairs_los_slope_is_clean), &
-            new_unittest("comoving coordinates with the redshift as los= match the oracle", &
-                         test_pairs_los_redshift_example), &
             new_unittest("dperp and dpar report the two separations in their two units", &
                          test_pairs_los_reports_separations), &
             new_unittest("observer= reproduces the origin's pairs on shifted coordinates", &
@@ -133,30 +135,6 @@ contains
                          test_within_los_sorted_by_normalised_measure), &
             new_unittest("within_los reports the true count when the buffer is short", &
                          test_within_los_short_buffer_keeps_true_count), &
-            new_unittest("los= stays aligned through copy=.false., re-tuning and %rebuild", &
-                         test_pairs_los_survives_rebuild_and_copy_false), &
-            new_unittest("the cylinder walk returns exactly the ball walk's pairs under every rule", &
-                         test_los_cylinder_walk_matches_ball_walk), &
-            new_unittest("the union's tiebreak emits a pair in both cylinders exactly once", &
-                         test_los_union_tiebreak_counts), &
-            new_unittest("within_los walks the cylinder and answers as the ball does", &
-                         test_within_los_walks_the_cylinder), &
-            new_unittest("the cells-per-point override relaxes the ceiling and changes no answer", &
-                         test_cells_per_point_override_relaxes_the_ceiling), &
-            new_unittest("the line-of-sight walk is the ball when it fits a cell and the cylinder otherwise", &
-                         test_los_walk_choice_follows_the_cell), &
-            new_unittest("pairs_within_los emits the same list in the same order under any team", &
-                         test_los_sweep_order_is_team_invariant), &
-            new_unittest("the sweep's buffers grow and lose nothing", test_los_sweep_buffers_grow), &
-            new_unittest("dperp and dpar travel with their pair through the copy", &
-                         test_los_sweep_separations_follow_pairs), &
-            new_unittest("a chunk boundary neither drops nor repeats a pair", test_los_sweep_chunk_boundaries), &
-            new_unittest("the envelope-wide window is the tie groups' own spread", &
-                         test_los_window_is_the_groups_spread), &
-            new_unittest("an emitter reads its own group's window", test_los_window_is_the_emitters_own), &
-            new_unittest("windows are read only where the covering ball exceeds the cell", &
-                         test_los_windows_follow_the_cell), &
-            new_unittest("the phase counters account for a sweep and reset to zero", test_los_phase_counters), &
             new_unittest("segment, cylinder and cone match a brute-force scan", test_axis_matches_brute_force), &
             new_unittest("an axis shape is exactly the ball that contains it, filtered", &
                          test_axis_is_the_covering_ball_filtered), &
@@ -188,13 +166,10 @@ contains
                          test_annulus_in_bulk_and_on_the_sky), &
             new_unittest("sorted= orders by distance and keeps the same rows", &
                          test_sorted_orders_by_distance), &
-            new_unittest("an exact tie is broken by ascending row index", test_sorted_breaks_ties_by_row), &
             new_unittest("nearest matches a full sort of every distance", &
                          test_nearest_matches_a_full_sort), &
             new_unittest("nearest handles k at and beyond the catalogue size", &
                          test_nearest_k_at_and_beyond_the_size), &
-            new_unittest("the shell's starting radius changes rounds, not answers", &
-                         test_nearest_shell_start_does_not_change_answers), &
             new_unittest("nearest on the sky and on a periodic index", test_nearest_sky_and_periodic), &
             new_unittest("kth_distance matches a full per-point sort", &
                          test_kth_distance_matches_a_full_sort), &
@@ -202,28 +177,20 @@ contains
                          test_kth_distance_sky_and_duplicates), &
             new_unittest("a threaded kth_distance sweep equals the serial one", &
                          test_kth_distance_threaded_matches_serial), &
-            new_unittest("the carried radius saves expansion rounds", &
-                         test_kth_distance_carry_over_saves_rounds), &
             new_unittest("connected components on hand-built graphs", test_components_hand_built_graphs), &
             new_unittest("min_size thresholds components, and the default of 1 keeps singletons", &
                          test_components_min_size_threshold), &
             new_unittest("Friends-of-Friends matches a label-propagation scan", &
                          test_components_friends_of_friends), &
-            new_unittest("a threaded bulk sweep equals the serial one", test_bulk_threaded_matches_serial), &
             new_unittest("a periodic index matches a minimum-image scan", test_periodic_matches_brute_force), &
             new_unittest("a periodic index is translation invariant", test_periodic_translation_invariant), &
             new_unittest("a periodic 2D index matches a minimum-image scan", test_periodic_2d), &
             new_unittest("a periodic grid tiles the box exactly, whatever cell was asked for", &
                 test_periodic_cells_tile_the_box), &
-            new_unittest("the probe runs, and a forced cell stops it", test_probe_runs_and_can_be_stopped), &
             new_unittest("every single-point query answers the same in int32 as in int64", &
                          test_single_query_int32_buffers_match), &
             new_unittest("kth_distance_sky answers the same under an int64 k", &
                          test_kth_sky_k64_matches_k32), &
-            new_unittest("rebuild folds a radius, as a scalar and as a list", &
-                         test_rebuild_folds_a_radius), &
-            new_unittest("the work hook counts cells and points for the h it is given", &
-                         test_debug_work_counts_both_halves), &
             new_unittest("an index over no points builds and answers every query", &
                          test_empty_index_answers_everything), &
             new_unittest("a periodic copy=.false. index answers as a copying one", &
@@ -232,51 +199,115 @@ contains
                          test_per_point_inner_radii), &
             new_unittest("an empty graph answers in int32 as in int64", &
                          test_components_empty_graph_int32), &
-            new_unittest("rebuild_for re-tunes through every forced and degenerate arm", &
-                         test_retune_honours_every_arm), &
-            new_unittest("copy=.false. reaches every bound and combine= accept", &
-                         test_copy_false_reaches_every_accept), &
             new_unittest("a periodic copy=.false. index ranks a per-point radius", &
                          test_periodic_per_point_radius), &
             new_unittest("the remaining single-route branches", &
                          test_remaining_single_routes), &
-            new_unittest("the bound and the los accept run in every loop", &
-                         test_bound_and_los_accept_in_every_loop), &
-            new_unittest("the chosen ball and cylinder routes on a copy=.false. index", &
-                         test_los_chosen_walks_on_a_no_copy_index), &
-            new_unittest("the same points give the same cell twice", test_probe_is_deterministic), &
             new_unittest("every cell size gives the same answers", test_answers_survive_any_cell), &
             new_unittest("an explicit cell is honoured", test_explicit_cell_is_honoured), &
-            new_unittest("the two ceilings bind where they should", test_two_ceilings_bind), &
             new_unittest("a radius list collapses to its moment ratio", test_effective_radius_moment_ratio), &
             new_unittest("rebuild is a no-op on unchanged data and rebuilds on changed", test_rebuild_detects_change), &
             new_unittest("rebuild_for re-tunes without the caller's arrays", test_rebuild_for_retunes), &
-            new_unittest("a distant query radius rebuilds, a near one does not", test_auto_rebuild), &
-            new_unittest("a single-point query never rebuilds the index", test_single_queries_never_rebuild), &
             new_unittest("copy=.false. answers exactly as copy=.true.", test_copy_false_matches), &
             new_unittest("the metadata queries report what was built", test_metadata_queries), &
-            new_unittest("the HEALPix backend answers every single-point sky query identically", &
-                         test_healpix_matches_grid3d), &
             new_unittest("the HEALPix backend answers every BULK sky query identically", &
                          test_healpix_bulk_matches_grid3d), &
             new_unittest("the HEALPix backend answers nearest and kth-distance identically", &
                          test_healpix_nearest_matches_grid3d), &
             new_unittest("a HEALPix index reports its own shape and hides the grid's", &
                          test_healpix_metadata), &
-            new_unittest("nside= is honoured, and the resolution probe can be stopped", &
-                         test_healpix_nside_forced), &
             new_unittest("rebuild_for re-pixelates and keeps the backend", &
                          test_healpix_rebuild_for), &
             new_unittest("duplicated sky positions tie-break identically on both backends", &
                          test_healpix_duplicate_positions), &
-            new_unittest("a disc outgrowing the walk's run buffer still answers identically", &
-                         test_healpix_run_buffer_overflow), &
             new_unittest("rebuild_for takes degrees on a sky index, not chords", &
                          test_sky_rebuild_for_takes_degrees), &
             new_unittest("count_within_sky agrees with within_sky's own count", &
                          test_count_within_sky) &
             ]
     end subroutine collect_tests_parquet_spatial
+
+    !> Every spatial test that sets or reads a process-global debug hook; run serially.
+    !! 
+    !! The probe counter, the rebuild counter, the resolved thread count, the forced cell size and
+    !! the line-of-sight counters are all process-global, because the state they force is private
+    !! to `parquet_spatial` and there is no `bind(C)` boundary to hide a hook behind. Run
+    !! concurrently, a sibling forcing a cell mid-run would leave the probe test asserting a count
+    !! nobody produced -- and since a spatial query's ANSWERS do not depend on the cell size, every
+    !! correctness test would go on passing while the tuner tests measured each other.
+    !! 
+    !! Its companion `collect_tests_parquet_spatial` holds the 92 tests that observe none of this.
+    subroutine collect_tests_parquet_spatial_serial(testsuite)
+        type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the suite's tests.
+
+        testsuite = [ &
+            new_unittest("grid answers in both kinds and the int32 ceiling hook is reversible", &
+                         test_grid_int32_and_ceiling_hook), &
+            new_unittest("omitting los= is the distance from the observer", &
+                         test_pairs_los_default_los_is_distance), &
+            new_unittest("a los= steeper than the distance widens the walk by its measured slope", &
+                         test_pairs_los_with_slope), &
+            new_unittest("pairs closer than the gap floor in los are carried by the spread alone", &
+                         test_pairs_los_close_los_is_complete), &
+            new_unittest("the slope is measured cleanly on a continuous redshift list", &
+                         test_pairs_los_slope_is_clean), &
+            new_unittest("comoving coordinates with the redshift as los= match the oracle", &
+                         test_pairs_los_redshift_example), &
+            new_unittest("los= stays aligned through copy=.false., re-tuning and %rebuild", &
+                         test_pairs_los_survives_rebuild_and_copy_false), &
+            new_unittest("the cylinder walk returns exactly the ball walk's pairs under every rule", &
+                         test_los_cylinder_walk_matches_ball_walk), &
+            new_unittest("the union's tiebreak emits a pair in both cylinders exactly once", &
+                         test_los_union_tiebreak_counts), &
+            new_unittest("within_los walks the cylinder and answers as the ball does", &
+                         test_within_los_walks_the_cylinder), &
+            new_unittest("the cells-per-point override relaxes the ceiling and changes no answer", &
+                         test_cells_per_point_override_relaxes_the_ceiling), &
+            new_unittest("the line-of-sight walk is the ball when it fits a cell and the cylinder otherwise", &
+                         test_los_walk_choice_follows_the_cell), &
+            new_unittest("pairs_within_los emits the same list in the same order under any team", &
+                         test_los_sweep_order_is_team_invariant), &
+            new_unittest("the sweep's buffers grow and lose nothing", test_los_sweep_buffers_grow), &
+            new_unittest("dperp and dpar travel with their pair through the copy", &
+                         test_los_sweep_separations_follow_pairs), &
+            new_unittest("a chunk boundary neither drops nor repeats a pair", test_los_sweep_chunk_boundaries), &
+            new_unittest("the envelope-wide window is the tie groups' own spread", &
+                         test_los_window_is_the_groups_spread), &
+            new_unittest("an emitter reads its own group's window", test_los_window_is_the_emitters_own), &
+            new_unittest("windows are read only where the covering ball exceeds the cell", &
+                         test_los_windows_follow_the_cell), &
+            new_unittest("the phase counters account for a sweep and reset to zero", test_los_phase_counters), &
+            new_unittest("an exact tie is broken by ascending row index", test_sorted_breaks_ties_by_row), &
+            new_unittest("the shell's starting radius changes rounds, not answers", &
+                         test_nearest_shell_start_does_not_change_answers), &
+            new_unittest("the carried radius saves expansion rounds", &
+                         test_kth_distance_carry_over_saves_rounds), &
+            new_unittest("a threaded bulk sweep equals the serial one", test_bulk_threaded_matches_serial), &
+            new_unittest("the probe runs, and a forced cell stops it", test_probe_runs_and_can_be_stopped), &
+            new_unittest("rebuild folds a radius, as a scalar and as a list", &
+                         test_rebuild_folds_a_radius), &
+            new_unittest("the work hook counts cells and points for the h it is given", &
+                         test_debug_work_counts_both_halves), &
+            new_unittest("rebuild_for re-tunes through every forced and degenerate arm", &
+                         test_retune_honours_every_arm), &
+            new_unittest("copy=.false. reaches every bound and combine= accept", &
+                         test_copy_false_reaches_every_accept), &
+            new_unittest("the bound and the los accept run in every loop", &
+                         test_bound_and_los_accept_in_every_loop), &
+            new_unittest("the chosen ball and cylinder routes on a copy=.false. index", &
+                         test_los_chosen_walks_on_a_no_copy_index), &
+            new_unittest("the same points give the same cell twice", test_probe_is_deterministic), &
+            new_unittest("the two ceilings bind where they should", test_two_ceilings_bind), &
+            new_unittest("a distant query radius rebuilds, a near one does not", test_auto_rebuild), &
+            new_unittest("a single-point query never rebuilds the index", test_single_queries_never_rebuild), &
+            new_unittest("the HEALPix backend answers every single-point sky query identically", &
+                         test_healpix_matches_grid3d), &
+            new_unittest("nside= is honoured, and the resolution probe can be stopped", &
+                         test_healpix_nside_forced), &
+            new_unittest("a disc outgrowing the walk's run buffer still answers identically", &
+                         test_healpix_run_buffer_overflow) &
+            ]
+    end subroutine collect_tests_parquet_spatial_serial
 
     ! ---- Fixtures and the brute-force oracle ----
 

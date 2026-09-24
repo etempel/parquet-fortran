@@ -5,13 +5,16 @@
 # here as a standalone script for manual/CI use without going through fpm's
 # test-drive runner.
 #
-# Keep this list in sync with the `select case` in test/error_scenarios.f90 --
+# Keep this list in sync with the `select case` blocks in test/error_scenarios*.f90 --
 # it is intentionally a complete, independent mirror of every scenario name
 # there (not a curated subset), since a script that silently only covers some
 # scenarios would be misleading for the "quick manual check"/"CI step" use
-# this is documented for in README.md. `check_scenario_list_is_complete` proves
-# every dispatched name is listed and `check_scenario_list_has_no_duplicates`
-# proves no name is listed twice.
+# this is documented for in README.md. The dispatch is spread over five files:
+# error_scenarios.f90 holds only the `ok` control, and the four
+# error_scenarios_<group>.f90 modules hold one `select case` each.
+# `check_scenario_list_is_complete` proves every dispatched name is listed (and
+# that no two groups claim the same name) and `check_scenario_list_has_no_duplicates`
+# proves no name is listed twice here.
 #
 # Environment:
 #   RUN_ERROR_SCENARIOS_JOBS=N          scenarios to run at once (default: one per logical CPU).

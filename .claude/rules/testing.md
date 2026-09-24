@@ -25,17 +25,24 @@ paths:
 
 Procedure for adding one: the `/add-error-scenario` skill.
 
-- An abort path is tested out of process: a `case` in `test/error_scenarios.f90`, a wrapper in
-  `test/test_errors.f90` (`check_scenario_exit_status_and_stderr` asserting the library's own
-  message), and an entry in `tools/run_error_scenarios.sh`'s `scenarios=(...)` array
-  (`check_scenario_list_is_complete` derives the names from the `select case`). A scenario needing
-  OpenMP goes in the `concurrency_scenarios` bucket instead.
-- `run_tester` primes every listed scenario once, in parallel from the shell (`xargs -P`, one fork
-  with no OpenMP team active), into `test_run/.primed/`; every failure path degrades to the old
-  on-demand spawn, never to a wrong answer. Do not move that parallelism into the test process.
-  Only a full run and the `errors` suite prime; a named suite or test spawns on demand — do not widen
-  `suite_drives_error_scenarios`. `PARQUET_TEST_NO_PRIME=1` disables priming;
-  `PARQUET_TEST_PRIME_JOBS=<n>` sets the concurrency.
+- An abort path is tested out of process: a `case` in the `error_scenarios_<group>.f90` module for
+  its area, a wrapper in the matching `test_errors[_<group>].f90`
+  (`check_scenario_exit_status_and_stderr` asserting the library's own message), and an entry in
+  `tools/run_error_scenarios.sh`'s `scenarios=(...)` array (`check_scenario_list_is_complete`
+  derives the names from the four `select case` blocks). A scenario needing OpenMP goes in the
+  `concurrency_scenarios` bucket instead.
+- **The scenarios are split four ways, for compile time**: `error_scenarios_io.f90` (writer,
+  reader, settings, read-time filters), `_table.f90` (qc rules, columns, temporal, the table type),
+  `_analysis.f90` (sorting, statistics, geometry, nested containers, logging, TOML) and
+  `_numeric.f90` (indexes, message-stream routing, the numeric tier), with cross-group fixtures in
+  `error_scenarios_support.f90`. `error_scenarios.f90` only walks the four `dispatch_*` procedures
+  in turn, so a name may be dispatched by ONE of them. The test side mirrors it: `test_errors.f90`
+  (machinery + the `errors` suite) and `test_table_errors/_analysis/_numeric.f90`.
+- `run_tester_errors` primes every listed scenario once, in parallel from the shell (`xargs -P`,
+  one fork with no OpenMP team active), into `test_run/.primed/`; every failure path degrades to
+  the old on-demand spawn, never to a wrong answer. Do not move that parallelism into the test
+  process. It primes for any run but a single named test. `PARQUET_TEST_NO_PRIME=1` disables
+  priming; `PARQUET_TEST_PRIME_JOBS=<n>` sets the concurrency.
 - Both harnesses probe `timeout` by running `timeout -s KILL 1 true` and fall through to `gtimeout`
   (a BSD `timeout` satisfies `command -v` and rejects `-s KILL`, making every scenario fail with a
   usage message). Probe with the command and flags you will actually run. Scenarios that pass by
@@ -54,7 +61,7 @@ Procedure for adding one: the `/add-error-scenario` skill.
   filename**, even for identical contents; a shared helper takes the filename as an argument.
 - `tools/run_error_scenarios.sh` is concurrent too, per scenario NAME: a helper backing several
   `case` entries derives its fixture path from its own arguments, never a `parameter`
-  (`grep -oE "call scenario_[a-z0-9_]+" test/error_scenarios.f90 | sort | uniq -c` lists the
+  (`grep -hoE "call scenario_[a-z0-9_]+" test/error_scenarios*.f90 | sort | uniq -c` lists the
   multi-invoked helpers). A collision reads as a library crash (`Couldn't deserialize thrift`, exit
   134 via `std::terminate`); reproduce with forced interleaving (`taskset -c 0`), not more
   parallelism.

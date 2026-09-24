@@ -4088,45 +4088,68 @@ def check_scenario_list_is_complete():
     it just falls back to spawning on demand, so nothing fails and nothing says anything. That is
     the drift this check closes.
 
-    The names are derived by SHAPE rather than from a list kept here: the `select case
-    (trim(scenario))` block is located and its `case ("...")` labels read until `case default`, so
-    a new scenario is picked up with no edit (CLAUDE.md, "A static check that enumerates names goes
-    stale silently"). An empty result is treated as a failure for the same reason -- it means the
-    dispatch moved, not that the invariant holds.
+    The names are derived by SHAPE rather than from a list kept here: in each dispatch file the
+    `select case (trim(scenario))` block is located and its `case ("...")` labels read until `case
+    default`, so a new scenario is picked up with no edit (CLAUDE.md, "A static check that
+    enumerates names goes stale silently"). An empty result from any of them is treated as a
+    failure for the same reason -- it means that dispatch moved, not that the invariant holds.
+
+    THE DISPATCH IS SPREAD OVER FIVE FILES: `error_scenarios.f90` (the control scenario only) and
+    the four `error_scenarios_*.f90` group modules it walks in turn. Each file is read separately
+    and the labels are unioned, and a name dispatched by two of them is reported: the program stops
+    at the first group that claims a name, so the second copy would never run and nothing else
+    would say so.
 
     `concurrency_scenarios=(...)` counts as listed too: those genuinely need a real OpenMP race and
     are deliberately excluded from priming, but they are still named in the script and still run.
     """
-    dispatch_file = TEST / "error_scenarios.f90"
+    dispatch_files = sorted(TEST.glob("error_scenarios*.f90"))
     runner = TOOLS / "run_error_scenarios.sh"
-    for path in (dispatch_file, runner):
-        if not path.is_file():
-            return ["%s: not found -- this check needs updating" % path.relative_to(REPO_ROOT)]
+    if len(dispatch_files) < 2:
+        return ["test/error_scenarios*.f90: expected the driver plus its group modules, found %d "
+                "-- this check needs updating" % len(dispatch_files)]
+    if not runner.is_file():
+        return ["%s: not found -- this check needs updating" % runner.relative_to(REPO_ROOT)]
 
-    lines = dispatch_file.read_text(encoding="utf-8").splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if re.match(r"\s*select case\s*\(\s*trim\(\s*scenario\s*\)\s*\)\s*$", line):
-            start = i
-            break
-    if start is None:
-        return [
-            "test/error_scenarios.f90: no `select case (trim(scenario))` dispatch found -- the "
-            "scenario dispatch moved or was renamed, so this check can no longer see it"
-        ]
-
-    dispatched = []
-    for line in lines[start + 1:]:
-        if re.match(r"\s*case\s+default\s*$", line):
-            break
-        found = re.match(r'\s*case\s*\(\s*"([a-z0-9_]+)"\s*\)\s*$', line)
-        if found:
-            dispatched.append(found.group(1))
-    if not dispatched:
-        return [
-            "test/error_scenarios.f90: the `select case (trim(scenario))` dispatch yielded no "
-            "`case (\"...\")` labels -- its shape changed, so this check is now blind"
-        ]
+    dispatched, seen_in, problems = [], {}, []
+    for path in dispatch_files:
+        rel = path.relative_to(REPO_ROOT)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        start = None
+        for i, line in enumerate(lines):
+            if re.match(r"\s*select case\s*\(\s*trim\(\s*scenario\s*\)\s*\)\s*$", line):
+                start = i
+                break
+        if start is None:
+            if path.stem == "error_scenarios_support":
+                continue               # fixtures only, it dispatches nothing
+            problems.append(
+                "%s: no `select case (trim(scenario))` dispatch found -- the scenario dispatch "
+                "moved or was renamed, so this check can no longer see it" % rel)
+            continue
+        here = []
+        for line in lines[start + 1:]:
+            if re.match(r"\s*case\s+default\s*$", line):
+                break
+            found = re.match(r'\s*case\s*\(\s*"([a-z0-9_]+)"\s*\)\s*$', line)
+            if found:
+                here.append(found.group(1))
+        if not here:
+            problems.append(
+                "%s: the `select case (trim(scenario))` dispatch yielded no `case (\"...\")` "
+                "labels -- its shape changed, so this check is now blind" % rel)
+            continue
+        for name in here:
+            if name in seen_in:
+                problems.append(
+                    "scenario '%s' is dispatched by both %s and %s -- error_scenarios.f90 stops at "
+                    "the first group that claims a name, so the second copy can never run"
+                    % (name, seen_in[name], rel))
+            else:
+                seen_in[name] = rel
+        dispatched += here
+    if problems:
+        return problems
 
     listed = set(re.findall(r'"([a-z0-9_]+):[01]"', runner.read_text(encoding="utf-8")))
     listed |= set(re.findall(r'^\s*"([a-z0-9_]+)"\s*$', runner.read_text(encoding="utf-8"), re.M))
@@ -7158,7 +7181,16 @@ def check_test_runner_partition():
       4. no file outside `run_tester_errors` drives an error scenario;
       5. `run_tester_noundef` is held to 2 and 3 and NOTHING MORE -- its membership is decided by
          a person after running the checked build (decision 8), and nothing in the source
-         distinguishes "Arrow-free and undef-safe" from "Arrow-free and not".
+         distinguishes "Arrow-free and undef-safe" from "Arrow-free and not";
+      6. every suite that drives a scenario is NAMED so that `suite_is_safe_to_parallelize`
+         (`test/test_runner_support.f90`) runs it serially -- `errors`, or a name ending in
+         `_errors`. That function matches the suffix by shape precisely so a future split
+         inherits the exclusion for free, and a suite named the other way round
+         (`errors_table` rather than `table_errors`) silently defeats it: its tests then fork
+         `error_scenarios` subprocesses from inside test-drive's `!$omp parallel do`, which is a
+         deterministic SIGSEGV under libiomp5 and merely lucky under libgomp. A primed cache
+         hides it, because a primed test forks nothing -- so the full suite passes and the
+         hazard is latent.
 
     Clause 3 is easy to get wrong in the direction that makes the check useless: the Arrow-free
     modules are full of doc-comments containing the phrase `bind(C)`, so a naive case-insensitive
@@ -7232,6 +7264,31 @@ def check_test_runner_partition():
                     "%s (suite '%s', %s): references %s -- only run_tester_errors may drive an "
                     "error_scenarios subprocess, so that every other runner forks nothing"
                     % (path.name, suite, runner, hit.group(1)))
+
+    # ---- clause 5: a scenario-driving suite is named so the serial rule catches it -----------
+    support = TEST / "test_runner_support.f90"
+    if not support.is_file():
+        return problems + ["test/test_runner_support.f90: not found -- this check needs updating"]
+    rule = "\n".join(strip_comment(ln) for ln in support.read_text(encoding="utf-8").splitlines())
+    if '== "_errors"' not in rule or 'name == "errors"' not in rule:
+        return problems + [
+            "test/test_runner_support.f90: suite_is_safe_to_parallelize no longer excludes by the "
+            "`_errors` suffix plus the bare name `errors`, so this check can no longer tell which "
+            "suite names are run serially -- update it together with that function"]
+    for suite, coll in regs.get("run_tester_errors", []):
+        path = file_of.get(coll.lower())
+        if path is None:
+            continue
+        code = "\n".join(strip_comment(ln) for ln in path.read_text(encoding="utf-8").splitlines())
+        if not re.search(r"\b(run_error_scenario|check_scenario_[a-z_]*)\b", code):
+            continue
+        if suite != "errors" and not suite.endswith("_errors"):
+            problems.append(
+                "%s: suite '%s' drives error scenarios but its name does not end in '_errors', so "
+                "suite_is_safe_to_parallelize runs its tests CONCURRENTLY and they fork from "
+                "inside an OpenMP team. Rename it '<area>_errors' (the file and its collector to "
+                "match); a primed cache hides this, so a green run is no evidence"
+                % (path.name, suite))
     return problems
 
 
@@ -7877,49 +7934,57 @@ def check_scenario_uses_a_pure_result():
     self-maintaining in the direction that matters: the day someone marks an existing procedure
     `pure` -- `parquet_slice_range` and `%view` are the obvious candidates -- every scenario that
     discards its result starts failing here rather than silently testing nothing.
+
+    Every `test/error_scenarios*.f90` is scanned, not just the driver: the scenarios live in the
+    four group modules, so naming one file here would leave the other three unchecked.
     """
-    path = TEST / "error_scenarios.f90"
-    if not path.exists():
-        return ["%s: not found -- this check needs updating" % path]
+    paths = sorted(TEST.glob("error_scenarios*.f90"))
+    if not paths:
+        return ["test/error_scenarios*.f90: not found -- this check needs updating"]
     names = _pure_callable_names()
     if len(names) < 50:
-        return ["%s: found only %d pure callable name(s) in src/ -- this check has gone blind"
-                % (path.relative_to(REPO_ROOT), len(names))]
+        return ["test/error_scenarios*.f90: found only %d pure callable name(s) in src/ -- this "
+                "check has gone blind" % len(names)]
     alternatives = "|".join(sorted(map(re.escape, names), key=len, reverse=True))
     call = re.compile(r"(?<!\w)(?:" + alternatives + r")\s*\(")
     problems = []
-    name, body = None, []
-    for n, stmt in _joined_statements(path):
-        opened = re.match(r"^\s*subroutine\s+(scenario_\w+)\s*\(", stmt)
-        if opened:
-            name, body = opened.group(1), []
-            continue
-        if name and re.match(r"^\s*end subroutine\s+%s\s*$" % name, stmt):
-            assigned = {}
-            for ln, line in body:
-                found = re.match(r"^\s*([A-Za-z]\w*)\s*=\s*(.+)$", line)
-                if found and call.search(found.group(2)):
-                    assigned.setdefault(found.group(1), (ln, found.group(2).strip()))
-            for var, (ln, rhs) in sorted(assigned.items()):
-                read = False
-                for _, line in body:
-                    if re.match(r"^\s*(?:type|class|integer|real|logical|character|procedure)\b"
-                                r".*::", line):
-                        continue           # a declaration is not a read
-                    rest = re.sub(r"^(\s*)%s\s*=" % re.escape(var), r"\1", line)
-                    if re.search(r"\b%s\b" % re.escape(var), rest):
-                        read = True
-                        break
-                if not read:
-                    problems.append(
-                        "%s:%d: %s assigns `%s` from a pure call and never reads it -- the "
-                        "optimiser may delete the call, and the abort with it. Print it. See "
-                        "this check's docstring."
-                        % (path.relative_to(REPO_ROOT), ln, name, var))
-            name = None
-            continue
-        if name:
-            body.append((n, stmt))
+    scanned = 0
+    for path in paths:
+        name, body = None, []
+        for n, stmt in _joined_statements(path):
+            opened = re.match(r"^\s*subroutine\s+(scenario_\w+)\s*\(", stmt)
+            if opened:
+                name, body = opened.group(1), []
+                continue
+            if name and re.match(r"^\s*end subroutine\s+%s\s*$" % name, stmt):
+                assigned = {}
+                for ln, line in body:
+                    found = re.match(r"^\s*([A-Za-z]\w*)\s*=\s*(.+)$", line)
+                    if found and call.search(found.group(2)):
+                        assigned.setdefault(found.group(1), (ln, found.group(2).strip()))
+                for var, (ln, rhs) in sorted(assigned.items()):
+                    read = False
+                    for _, line in body:
+                        if re.match(r"^\s*(?:type|class|integer|real|logical|character|procedure)\b"
+                                    r".*::", line):
+                            continue           # a declaration is not a read
+                        rest = re.sub(r"^(\s*)%s\s*=" % re.escape(var), r"\1", line)
+                        if re.search(r"\b%s\b" % re.escape(var), rest):
+                            read = True
+                            break
+                    if not read:
+                        problems.append(
+                            "%s:%d: %s assigns `%s` from a pure call and never reads it -- the "
+                            "optimiser may delete the call, and the abort with it. Print it. See "
+                            "this check's docstring."
+                            % (path.relative_to(REPO_ROOT), ln, name, var))
+                name = None
+                continue
+            if name:
+                body.append((n, stmt))
+        scanned += 1
+    if not scanned:
+        return ["test/error_scenarios*.f90: no dispatch file was scanned -- this check is blind"]
     return problems
 
 
@@ -7942,6 +8007,86 @@ CONTEXT_SUFFIX_EXEMPT = {
         "scope, so maml_name_suffix -- the helper its file uses elsewhere -- cannot be called "
         "here at all.",
 }
+
+
+def check_spatial_suite_split_is_by_observability():
+    """No test in the parallel `spatial` suite may observe a process-global debug hook.
+
+    `test_spatial.f90` carries two collectors: `collect_tests_parquet_spatial` (the `spatial`
+    suite, run concurrently) and `collect_tests_parquet_spatial_serial` (`spatial_serial`, which
+    `suite_is_safe_to_parallelize` runs one test at a time). The split exists for speed -- as one
+    suite all 130 tests paid the serial cost of the 38 that need it -- and it is only safe while
+    membership follows what a test can OBSERVE.
+
+    Reading a counter is as disqualifying as writing a setting. A test that only reads
+    `parquet_debug_spatial_probe_count` is charged by every sibling doing spatial work, so run
+    concurrently it asserts a number nobody produced -- which PASSES, against a measurement that
+    never happened. That is this project's worst failure mode, and it is invisible: the suite
+    stays green.
+
+    Derived by SHAPE, not from a list here: every `parquet_debug_*`, `parquet_set_*`, `pf_log_*`
+    and `omp_set_*` reference is followed through the file's own call graph, so a test reaching a
+    hook through a helper is caught too, and a new hook needs no edit here.
+    """
+    path = TEST / "test_spatial.f90"
+    if not path.is_file():
+        return ["test/test_spatial.f90: not found -- this check needs updating"]
+    text = path.read_text(encoding="utf-8")
+    lines = [strip_comment(ln) for ln in text.splitlines()]
+
+    procs, cur = {}, None
+    for ln in lines:
+        opened = re.match(r"^    (?:pure |elemental )?(?:subroutine|function) (\w+)", ln)
+        if opened:
+            cur = opened.group(1)
+            procs[cur] = []
+        if cur is not None:
+            procs[cur].append(ln)
+        if re.match(r"^    end (?:subroutine|function)\b", ln):
+            cur = None
+    if len(procs) < 50:
+        return ["test/test_spatial.f90: found only %d procedures -- this check has gone blind"
+                % len(procs)]
+
+    hook = re.compile(r"\bparquet_debug_\w+|\bparquet_set_\w+|\bpf_log_\w+|\bomp_set_\w+")
+    direct = {n: sorted({m.group(0) for m in hook.finditer("\n".join(b))}) for n, b in procs.items()}
+    names = set(procs)
+    calls = {n: {w for w in re.findall(r"\b(\w+)\b", "\n".join(b)) if w in names and w != n}
+             for n, b in procs.items()}
+
+    def reaches(name, seen=None):
+        seen = seen if seen is not None else set()
+        if name in seen:
+            return []
+        seen.add(name)
+        found = list(direct.get(name, []))
+        for callee in sorted(calls.get(name, ())):
+            found += reaches(callee, seen)
+        return found
+
+    flat = re.sub(r"&\s*\n\s*", "", "\n".join(lines))
+    collectors = {}
+    for coll in ("collect_tests_parquet_spatial", "collect_tests_parquet_spatial_serial"):
+        found = re.search(r"subroutine %s\(.*?end subroutine %s" % (coll, coll), flat, re.S)
+        if not found:
+            return ["test/test_spatial.f90: %s not found -- the suite split moved, so this check "
+                    "is now blind" % coll]
+        collectors[coll] = re.findall(r'new_unittest\(\s*"([^"]*)"\s*,\s*(\w+)', found.group(0))
+    if not collectors["collect_tests_parquet_spatial"] or \
+            not collectors["collect_tests_parquet_spatial_serial"]:
+        return ["test/test_spatial.f90: one of the two spatial collectors registered no test -- "
+                "the split's shape changed, so this check is now blind"]
+
+    problems = []
+    for desc, sub in collectors["collect_tests_parquet_spatial"]:
+        hooks = sorted(set(reaches(sub)))
+        if hooks:
+            problems.append(
+                "test/test_spatial.f90: '%s' (%s) is in the concurrent `spatial` suite but reaches "
+                "%s -- a process-global hook. Move it to collect_tests_parquet_spatial_serial: run "
+                "beside a sibling it asserts a count nobody produced, and that PASSES."
+                % (desc, sub, ", ".join(hooks[:3])))
+    return problems
 
 
 def check_warnings_carry_their_context():
@@ -9072,6 +9217,8 @@ CHECKS = (
      check_spatial_kind_specifics_forward_every_argument),
     ("every filter operator is handled at every consuming site",
      check_filter_operators_are_handled_everywhere),
+    ("the spatial suite split follows what a test can observe",
+     check_spatial_suite_split_is_by_observability),
 )
 
 

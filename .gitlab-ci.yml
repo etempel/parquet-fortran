@@ -81,7 +81,7 @@ stages:
 # so this deliberately overrides the top-level before_script the same way the readthedocs job
 # below does, for a job that runs in well under a second. tools/check_bindc_boundary.py verifies
 # every Fortran bind(C) interface (src/parquet_bindings.f90, plus the debug-hook interfaces in
-# test/error_scenarios.f90/test_temporal.f90) still matches its C++ extern "C" definition in
+# test/error_scenarios*.f90/test_temporal.f90) still matches its C++ extern "C" definition in
 # src/parquet_wrapper.cpp -- a mismatch here compiles cleanly on both sides and corrupts memory
 # silently at runtime, so this permanently retires that failure class instead of relying on a
 # one-off manual review (see CLAUDE.md's "bind(C)" boundary notes). tools/check_doc_anchors.py
@@ -234,10 +234,11 @@ test:
     # counter rather than a test doing genuinely that much work. The cost is a
     # slower instrumented build; the alternative is a report that invents gaps.
     - FPM_FFLAGS="--coverage -fprofile-update=atomic" fpm test --verbose
-    # Runs tools/run_error_scenarios.sh's own scenario list too, so it can't silently drift out
-    # of parity with test/error_scenarios.f90's `select case` (see run_error_scenarios.sh's own
-    # header comment) -- fpm test above already exercises every scenario via test_errors.f90, but
-    # only this script checks that its independently-maintained list still names every one of them.
+    # Runs tools/run_error_scenarios.sh's own scenario list too, so it can't silently drift out of
+    # parity with the `select case` blocks in test/error_scenarios*.f90 (see run_error_scenarios.sh's
+    # own header comment) -- fpm test above already exercises every scenario via the test_errors*
+    # modules, but only this script checks that its independently-maintained list still names every
+    # one of them.
     - tools/run_error_scenarios.sh
     # Standalone-compiles src/parquet_random.f90 across optimisation settings INCLUDING LTO, and
     # checks the golden vectors and the strict reference in each. Two things make this worth a

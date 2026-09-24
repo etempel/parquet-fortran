@@ -338,7 +338,7 @@ done | sort | uniq -c | sort -rn
   wrong specific runs. Give such a generic non-elemental specifics distinguished by rank alone
   (`pf_interp_1d`'s `eval_rank0` to `eval_rank7`), and pin the resolution through a caller that
   reaches the type across a re-export, by an observable the specifics differ in
-  (`interpolate_eval_array_before_init`, `test/error_scenarios.f90`).
+  (`interpolate_eval_array_before_init`, `test/error_scenarios_numeric.f90`).
 - **A dummy PROCEDURE argument in an abbreviated `module procedure` body has an IMPLICIT interface
   under gfortran 15** (`-Werror=implicit-interface` at every call of it), although the spec
   declares it `procedure(<abstract interface>)`; nagfor accepts the body. Restate that body's

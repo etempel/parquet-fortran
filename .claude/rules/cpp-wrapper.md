@@ -72,7 +72,7 @@ paths:
 
 - Run `tools/check_bindc_boundary.py` after touching either side: a signature in
   `src/parquet_bindings.f90`, an `extern "C"` function, or a local `bind(C)` debug-hook interface in
-  `test/error_scenarios.f90`/`test/test_temporal.f90`. It cross-checks arity, base type,
+  `test/error_scenarios*.f90`/`test/test_temporal.f90`. It cross-checks arity, base type,
   by-value-vs-by-reference and return type (CI lint stage). It does not check length/ownership
   contracts, rank or NUL-termination.
 - Values cross the boundary resolved (`api-conventions.md`, Settings).
@@ -100,7 +100,7 @@ per-column-total ceiling copy `check_col_size_fits_arrow_limit`/`check_column_co
    restores), reached only through a local `bind(C)` interface in the scenario.
 3. `check_..._fits_arrow_limit(...)` comparing against the override or the constant, calling
    `report_fatal_error` (never a truncating cast) before the value flows into the Arrow API.
-4. A scenario (shrink the limit, tiny fixture) + `test/test_errors.f90` wrapper asserting the exact
+4. A scenario (shrink the limit, tiny fixture) + a `test/test_errors*.f90` wrapper asserting the exact
    stderr + `tools/run_error_scenarios.sh` entry + a README Limitations bullet.
 
 The STRING/BINARY offset ceiling is the exception: WIDENED, never refused, on both sides. The writer

@@ -49,7 +49,7 @@ program run_tester_pf
     use test_random_omp, only : collect_tests_parquet_random_omp
     use test_random_weighted, only : collect_tests_parquet_random_weighted
     use test_root, only : collect_tests_root
-    use test_spatial, only : collect_tests_parquet_spatial
+    use test_spatial, only : collect_tests_parquet_spatial, collect_tests_parquet_spatial_serial
     use test_sphere, only : collect_tests_sphere
     use test_sphere_omp, only : collect_tests_sphere_omp
     use test_skycoord, only : collect_tests_skycoord
@@ -94,6 +94,7 @@ program run_tester_pf
         new_testsuite("toml_serial", collect_tests_toml_serial), &
         new_testsuite("stats", collect_tests_parquet_stats), &
         new_testsuite("spatial", collect_tests_parquet_spatial), &
+        new_testsuite("spatial_serial", collect_tests_parquet_spatial_serial), &
         new_testsuite("healpix", collect_tests_parquet_healpix), &
         new_testsuite("healpix_reference", collect_tests_healpix_reference), &
         new_testsuite("healpix_tier_b", collect_tests_healpix_tier_b), &

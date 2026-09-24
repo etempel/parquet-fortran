@@ -174,15 +174,19 @@ contains
     !> 0 and nonzero, purely from sibling tests sorting at the same time. The suite is ~25 fast
     !> file-based tests and the lost parallelism is not measurable.
     !>
-    !> "spatial" is excluded for the same reason again, in its sharpest form: the probe counter,
-    !> the rebuild counter, the resolved thread count and the forced cell size
-    !> (parquet_debug_spatial_probe_count, _rebuilds, _threads_used, parquet_debug_set_spatial_cell)
-    !> are all process-global, because the state they force is private to parquet_spatial and there
-    !> is no bind(C) boundary to hide a hook behind. A sibling test forcing a cell mid-run would
-    !> leave the probe test asserting a count nobody produced -- and since a spatial query's ANSWERS
-    !> do not depend on the cell size, every correctness test in the suite would go on passing while
-    !> the tuner tests measured each other. The suite is pure in-memory work and costs under a
-    !> second serially.
+    !> "spatial_serial" is excluded for the same reason again, in its sharpest form: the probe
+    !> counter, the rebuild counter, the resolved thread count, the forced cell size and the
+    !> line-of-sight counters (parquet_debug_spatial_probe_count, _rebuilds, _threads_used,
+    !> _los_bounds, parquet_debug_set_spatial_cell, ...) are all process-global, because the state
+    !> they force is private to parquet_spatial and there is no bind(C) boundary to hide a hook
+    !> behind. A sibling test forcing a cell mid-run would leave the probe test asserting a count
+    !> nobody produced -- and since a spatial query's ANSWERS do not depend on the cell size, every
+    !> correctness test in the suite would go on passing while the tuner tests measured each other.
+    !>
+    !> **Only the 38 tests that observe such a hook are in it.** "spatial" was ONE suite of 130
+    !> until the per-test timings showed it was the most expensive thing in `fpm test`, 15 s of a
+    !> 62 s run, because all 130 paid for the 38. The other 92 are the "spatial" suite and run
+    !> concurrently; check_spatial_suite_split_is_by_observability re-derives the membership.
     !>
     !> "filter_screen" is excluded for a different reason from the four below: the screen setting
     !> (parquet_set_statistics_prescreen) and the pruned-row-group count
@@ -345,7 +349,7 @@ contains
             .or. name == "table_parallel" .or. name == "string_parallel" .or. name == "diagnostics" &
             .or. name == "columns_parallel" &
             .or. name == "random_omp" .or. name == "random_perm" .or. name == "module_surface" &
-            .or. name == "spatial" .or. name == "logging" .or. name == "logging_env" &
+            .or. name == "spatial_serial" .or. name == "logging" .or. name == "logging_env" &
             .or. name == "toml_serial" .or. name == "cosmology_config_serial" &
             .or. name == "cosmology_serial" &
             .or. name == "index_omp" .or. name == "index_strings" &

@@ -88,7 +88,7 @@ in `api-conventions.md`; module placement in `module-structure.md`; language and
   `assign_guard` name is load-bearing; give any new special binding on a large type an early-sorting
   name.
 - **A statement may carry at most 255 continuation lines** (nagfor enforces it; the others do not).
-  When a `test/test_errors.f90` registration part fills up, add a new part rather than growing one;
+  When a `test/test_errors*.f90` registration part fills up, add a new part rather than growing one;
   close a split part by removing the comma, not the trailing `&`. Enforced by
   `check_statement_continuation_lines`; run it after adding entries, not only at the end.
 - gfortran 15.2 ICE: `parquet_parse_protected_cols` called from a submodule two levels below

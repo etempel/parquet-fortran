@@ -104,7 +104,8 @@
   hooks (`parquet_debug_get_*`) are fine.
 - **A new message does not get a knob of its own**; it is governed by its class through
   `verbosity`. If one seems needed, decide which class it belongs to first
-  (`settings: the automatic-rebuild advice is said, and can be silenced`, `test/test_errors.f90`).
+  (`settings: the automatic-rebuild advice is said, and can be silenced`,
+  `test/test_analysis_errors.f90`).
 - Renaming a public setting is a semantic-versioning event; check the published CHANGELOG sections
   first. The C++ side is decoupled by `bind(C, name=)`.
 - Every `feature_*.md` carries a settings analysis (`workflow.md`).

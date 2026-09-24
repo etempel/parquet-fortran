@@ -141,12 +141,23 @@ fpm test error_scenarios -- ok                        # the control: exits 0
 tools/run_error_scenarios.sh                          # every scenario, standalone
 ```
 
-The scenario names are the `select case` at the top of `test/error_scenarios.f90`.
-`test/test_errors.f90` drives every scenario as part of the `errors` suite;
-`tools/run_error_scenarios.sh` does the same standalone, without test-drive. **Keep that script's
-scenario list a complete mirror of the `select case`** — `tools/check_source_conventions.py` fails
-when it is not, and the list also drives the parallel pre-run that makes `fpm test` roughly three
-times faster. See the script's own header for the priming, timeout and dispatch details.
+**The scenarios are in four group modules, not in that program**, which only walks them in turn
+until one claims the name: `error_scenarios_io.f90` (writer, reader, settings, read-time filters),
+`error_scenarios_table.f90` (qc rules, columns, temporal, the table type),
+`error_scenarios_analysis.f90` (sorting, statistics, geometry, nested containers, logging, TOML)
+and `error_scenarios_numeric.f90` (indexes and the numeric tier), with the fixtures more than one
+of them needs in `error_scenarios_support.f90`. Add a scenario to the group it belongs to; a name
+may be dispatched by only one of them, which `check_scenario_list_is_complete` enforces. The split
+is for compile time — see `error_scenarios_io.f90`'s own header.
+
+The test side mirrors it one-to-one: `test/test_errors.f90` holds the subprocess-driving machinery
+and the `errors` suite, and `test_table_errors.f90`, `test_analysis_errors.f90` and
+`test_numeric_errors.f90` hold `table_errors`, `analysis_errors` and `numeric_errors`.
+`tools/run_error_scenarios.sh` drives the same scenarios standalone, without test-drive. **Keep
+that script's scenario list a complete mirror of the four `select case` blocks** —
+`tools/check_source_conventions.py` fails when it is not, and the list also drives the parallel
+pre-run that makes `fpm test` roughly three times faster. See the script's own header for the
+priming, timeout and dispatch details.
 
 ### Regenerating the test fixtures
 

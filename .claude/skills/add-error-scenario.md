@@ -1,6 +1,6 @@
 ---
 name: add-error-scenario
-description: "Add an out-of-process error scenario for an abort path — the case in test/error_scenarios.f90, its test-drive wrapper, its entry in tools/run_error_scenarios.sh — and prove it fails against a broken implementation."
+description: "Add an out-of-process error scenario for an abort path — the case in the right test/error_scenarios_<group>.f90, its test-drive wrapper, its entry in tools/run_error_scenarios.sh — and prove it fails against a broken implementation."
 argument-hint: "<scenario name and the abort it must provoke>"
 allowed-tools: Bash(fpm:*), Bash(git:*), Bash(grep:*), Bash(find:*), Bash(ls:*), Bash(cat:*), Bash(sed:*), Bash(awk:*), Bash(cp:*), Bash(diff:*), Bash(python3:*), Bash(tools/:*), Bash(build/:*), Bash(test_run/:*)
 disable-model-invocation: true
@@ -14,23 +14,36 @@ provokes it and a test-drive test that asserts the exit and the message. The rul
 
 Injected context:
 
-- Scenario count: !`grep -cE '^\s*case \("' test/error_scenarios.f90`
+- Scenario count: !`grep -hcE '^\s*case \("' test/error_scenarios_*.f90 | paste -sd+ | bc`
 - Scenario list line: !`grep -n '^scenarios=(' tools/run_error_scenarios.sh`
 - Working tree: !`git status --short | head -10`
 
 ## 1 Name and place
 
-- Name: snake_case, naming the abort (`write_undeclared_column`). Check it is unused:
-  `grep -n 'case ("<name>")' test/error_scenarios.f90`.
-- The abort's area decides the wrapper file: `test/test_writing_errors.f90` (`writing_errors`),
-  `test/test_reading_errors.f90`, `test/test_maml_errors.f90`, `test/test_metadata_errors.f90`;
-  everything else `test/test_errors.f90` (`errors`). All five suites run under
-  `run_tester_errors`, the only runner that forks.
+- Name: snake_case, naming the abort (`write_undeclared_column`). Check it is unused across ALL
+  the dispatch files: `grep -n 'case ("<name>")' test/error_scenarios*.f90`. A name may be
+  dispatched by only one group module — `error_scenarios.f90` stops at the first that claims it,
+  and `check_scenario_list_is_complete` fails on a second.
+- **The abort's area decides both files, and they have matching names.** The scenario goes in the
+  group module for its area and its wrapper in the test module of the same name:
 
-## 2 The scenario (`test/error_scenarios.f90`)
+  | scenario file | wrapper file | suite | what it holds |
+  |---|---|---|---|
+  | `error_scenarios_io.f90` | `test_errors.f90` | `errors` | writer, reader, settings, read-time filters, row verbs |
+  | `error_scenarios_table.f90` | `test_table_errors.f90` | `table_errors` | qc rules, columns, temporal, write masks, the table type |
+  | `error_scenarios_analysis.f90` | `test_analysis_errors.f90` | `analysis_errors` | sorting, statistics, geometry, nested containers, logging, TOML |
+  | `error_scenarios_numeric.f90` | `test_numeric_errors.f90` | `numeric_errors` | indexes, message streams, the numeric tier |
 
-- Add `case ("<name>")` calling `scenario_<name>()` to the `select case (trim(scenario))` at the
-  top, and the subroutine beside its siblings.
+  Four older suites keep their own files: `test/test_writing_errors.f90` (`writing_errors`),
+  `test/test_reading_errors.f90`, `test/test_maml_errors.f90`, `test/test_metadata_errors.f90`.
+  All eight suites run under `run_tester_errors`, the only runner that forks.
+- A fixture helper two groups both need goes in `test/error_scenarios_support.f90` and is imported
+  by name; never copy one into a second group.
+
+## 2 The scenario (`test/error_scenarios_<group>.f90`)
+
+- Add `case ("<name>")` calling `scenario_<name>()` to that module's `dispatch_*` procedure, and
+  the subroutine beside its siblings further down the same file.
 - The smallest fixture that provokes exactly one abort. Every fixture path is under `test_run/`
   and unique to the scenario (`test_run/error_scenario_<name>.parquet`); a helper backing several
   `case` entries derives its path from its arguments, never from a `parameter` — scenarios run
@@ -48,7 +61,7 @@ Injected context:
 ## 3 The wrapper
 
 - Register `new_unittest("<what aborts>", test_<name>_aborts)` in the suite's registration array.
-  In `test/test_errors.f90` the array is built in parts `p1 … pN`, because one statement may carry
+  In each `test/test_errors*.f90` the array is built in parts `p1 … pN`, because one statement may carry
   at most 255 continuation lines: add a new part rather than growing one, open it after the
   previous part's `]`, add it to the concatenation, and close a split part by removing the comma,
   not the trailing `&`.

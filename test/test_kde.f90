@@ -4058,7 +4058,7 @@ contains
 
     !> Compares one adaptive golden case: `ok`, the global bandwidth, and the density and CDF at
     !> every probe, the density to `rel_pdf` of its peak and the CDF to `abs_cdf`.
-    subroutine check_adaptive_case(error, name, h, pdf, cdf, rel_pdf, abs_cdf)
+    subroutine check_adaptive_case(error, name, h, pdf, cdf, rel_pdf, abs_cdf, fitted)
         type(error_type), allocatable, intent(out) :: error    !! set on the first failed check
         character(len=*), intent(in)               :: name     !! the case
         real(real64), intent(in)                   :: h        !! the global bandwidth
@@ -4066,12 +4066,22 @@ contains
         real(real64), intent(in)                   :: cdf(NKX) !! the CDF at `KG_X`
         real(real64), intent(in)                   :: rel_pdf  !! the density's tolerance, over its peak
         real(real64), intent(in)                   :: abs_cdf  !! the CDF's tolerance
+        !> A fit of THIS case already made at the pilot resolution under test. Passing it is what
+        !! keeps `test_adaptive_golden_fine` from fitting the 262144-cell pilot twice per case:
+        !! its convergence check has to make that fit anyway, and the fit is the whole cost.
+        !! Absent, the case is fitted here at whatever pilot resolution is in force.
+        type(pf_kde), intent(in), optional         :: fitted
         type(pf_kde) :: k
         logical :: ok
         real(real64) :: got_pdf(NKX), got_cdf(NKX)
         character(len=200) :: msg
 
-        call fit_golden_case(name, k, ok)
+        if (present(fitted)) then
+            k = fitted
+            ok = .true.
+        else
+            call fit_golden_case(name, k, ok)
+        end if
         call check(error, ok .and. k%is_adaptive(), name // ": the adaptive fit must be defined")
         if (allocated(error)) return
         call check(error, close_to(k%bandwidth(), h, 1.0e-13_real64, h), &
@@ -5833,39 +5843,37 @@ contains
     !> cell count, so it runs serially, and restores the rule.
     subroutine test_adaptive_golden_fine(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kf !! the 262144-cell fit check_fine leaves behind, reused by the case check
 
-        call check_fine("ADAPT", KG_ADAPT_PDF)
-        if (allocated(error)) return
-        call check_fine("ADAPT_CAP", KG_ADAPT_CAP_PDF)
-        if (allocated(error)) return
-        call check_fine("ADAPT_REF", KG_ADAPT_REF_PDF)
-        if (allocated(error)) return
-        call check_fine("ADAPT_W", KG_ADAPT_W_PDF)
-        if (allocated(error)) return
-        call check_fine("ADAPT_LIN", KG_ADAPT_LIN_PDF)
-        if (allocated(error)) return
-        call parquet_debug_set_kde_pilot_cells(262144)
-        call check_adaptive_case(error, "ADAPT", KG_ADAPT_H, KG_ADAPT_PDF, KG_ADAPT_CDF, 1.0e-9_real64, &
-            1.0e-10_real64)
+        ! Each check_fine call leaves its 262144-cell fit in `kf`, and the case check below is
+        ! given that object rather than fitting the same case at the same resolution again: the
+        ! fit IS the cost here, and this test used to pay for every fine one twice.
+        call check_fine("ADAPT", KG_ADAPT_PDF, kf)
+        if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT", KG_ADAPT_H, KG_ADAPT_PDF, &
+            KG_ADAPT_CDF, 1.0e-9_real64, 1.0e-10_real64, fitted=kf)
+        if (.not. allocated(error)) call check_fine("ADAPT_CAP", KG_ADAPT_CAP_PDF, kf)
         if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_CAP", KG_ADAPT_CAP_H, KG_ADAPT_CAP_PDF, &
-            KG_ADAPT_CAP_CDF, 1.0e-9_real64, 1.0e-10_real64)
+            KG_ADAPT_CAP_CDF, 1.0e-9_real64, 1.0e-10_real64, fitted=kf)
+        if (.not. allocated(error)) call check_fine("ADAPT_REF", KG_ADAPT_REF_PDF, kf)
         if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_REF", KG_ADAPT_REF_H, KG_ADAPT_REF_PDF, &
-            KG_ADAPT_REF_CDF, 1.0e-9_real64, 1.0e-10_real64)
+            KG_ADAPT_REF_CDF, 1.0e-9_real64, 1.0e-10_real64, fitted=kf)
+        if (.not. allocated(error)) call check_fine("ADAPT_W", KG_ADAPT_W_PDF, kf)
         if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_W", KG_ADAPT_W_H, KG_ADAPT_W_PDF, &
-            KG_ADAPT_W_CDF, 1.0e-9_real64, 1.0e-10_real64)
+            KG_ADAPT_W_CDF, 1.0e-9_real64, 1.0e-10_real64, fitted=kf)
+        if (.not. allocated(error)) call check_fine("ADAPT_LIN", KG_ADAPT_LIN_PDF, kf)
         ! Under `"linear"` each point's bandwidth is read from a pilot whose cells are the CLIPPED
         ! estimate over its own mass, and every moment, zone edge and per-point integral is then
         ! formed at that bandwidth: the same tolerance as the four above.
         if (.not. allocated(error)) call check_adaptive_case(error, "ADAPT_LIN", KG_ADAPT_LIN_H, &
-            KG_ADAPT_LIN_PDF, KG_ADAPT_LIN_CDF, 1.0e-9_real64, 1.0e-10_real64)
-        call parquet_debug_set_kde_pilot_cells(0)
+            KG_ADAPT_LIN_PDF, KG_ADAPT_LIN_CDF, 1.0e-9_real64, 1.0e-10_real64, fitted=kf)
 
     contains
 
         !> The gap to the oracle at 65536 cells over the gap at 262144: second order, so about 16.
-        subroutine check_fine(name, pdf)
+        subroutine check_fine(name, pdf, fine)
             character(len=*), intent(in) :: name     !! the case
             real(real64), intent(in)     :: pdf(NKX) !! the oracle's density at `KG_X`
+            type(pf_kde), intent(out)    :: fine     !! the second (262144-cell) fit, for the caller
             type(pf_kde) :: k
             logical :: ok
             real(real64) :: got(NKX), e(2)
@@ -5878,6 +5886,7 @@ contains
                 call k%pdf(KG_X, got)
                 e(r) = maxval(abs(got - pdf))
             end do
+            fine = k
             call parquet_debug_set_kde_pilot_cells(0)
             write(msg, '(2a,f8.3)') name, ": quartering the pilot's cells must divide the gap by about 16; it is ", &
                 e(1)/e(2)

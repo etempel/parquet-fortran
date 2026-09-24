@@ -17,6 +17,11 @@
 !! `test_run/.primed/`) is confined to one program rather than being a property of any runner
 !! anyone adds later.
 !!
+!! The `errors` suite is split four ways -- `errors`, `table_errors`, `analysis_errors`,
+!! `numeric_errors` -- one per `error_scenarios_*` group module, so that a scenario and the test
+!! driving it stay in files with matching names. The split is for compile time; see
+!! `test_table_errors.f90`'s header.
+!!
 !! Priming is all-or-nothing over the whole scenario set, which is why it is unconditional here and
 !! absent everywhere else: a narrower trade — priming ~1100 scenarios to serve one suite's few
 !! dozen — is a bad one, and was measured to be so before this split.
@@ -24,6 +29,9 @@ program run_tester_errors
     use testdrive, only : new_testsuite, testsuite_type
     use test_runner_support, only : run_tester_args, run_tester_main
     use test_errors, only : collect_tests_parquet_errors
+    use test_table_errors, only : collect_tests_parquet_table_errors
+    use test_analysis_errors, only : collect_tests_parquet_analysis_errors
+    use test_numeric_errors, only : collect_tests_parquet_numeric_errors
     use test_maml_errors, only : collect_tests_parquet_maml_errors
     use test_metadata_errors, only : collect_tests_parquet_metadata_errors
     use test_reading_errors, only : collect_tests_parquet_reading_errors
@@ -46,6 +54,9 @@ program run_tester_errors
     !
     testsuites = [ &
         new_testsuite("errors", collect_tests_parquet_errors), &
+        new_testsuite("table_errors", collect_tests_parquet_table_errors), &
+        new_testsuite("analysis_errors", collect_tests_parquet_analysis_errors), &
+        new_testsuite("numeric_errors", collect_tests_parquet_numeric_errors), &
         new_testsuite("writing_errors", collect_tests_parquet_writing_errors), &
         new_testsuite("reading_errors", collect_tests_parquet_reading_errors), &
         new_testsuite("maml_errors", collect_tests_parquet_maml_errors), &

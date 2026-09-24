@@ -58,6 +58,7 @@ program check_random_kernels
     call check_literal_seed_shapes()
     call check_variable_shapes()
     call check_integer_widths()
+    call check_sphere_exact_rules()
 
     write(output_unit, '(a,a,a,a,a,i0)') "KERNEL=", trim(kernel), &
         "  RESULT=", trim(merge("PASS", "FAIL", failed == 0)), "  FAILED=", failed
@@ -312,5 +313,46 @@ contains
             end do
         end do
     end subroutine check_integer_widths
+
+    !> The two rules `pf_random_disc_at` states EXACTLY, which no optimisation setting may bend.
+    !!
+    !! **A ring whose inner radius is the half turn is the antipode alone** -- this module's own
+    !! refusal message for a larger `r_inner` says so in those words -- and a disc of radius `pi`
+    !! must be able to reach it. Both rest on `h = 1 - cos(r)` being exactly 2 at the half turn,
+    !! and `2*sin(r/2)**2` does not deliver that by itself: **gfortran from `-O2` packs this
+    !! module's `sin` calls into glibc's vector sine** (`_ZGVbN2v_sin`, an `-ftree-vectorize`
+    !! transformation; `nm -u` shows it replacing the scalar `sin`), which is a few-ulp routine
+    !! and answers one ulp below 1 at `pi/2`.
+    !!
+    !! One ulp of `h` is 3e-8 of POSITION at the pole, because the point is placed at a transverse
+    !! offset of `sqrt(h*(2 - h))` -- so the ring came out as a circle of that radius instead of
+    !! the antipode. `fpm test --profile release` caught it and nothing in the pipeline did: the
+    !! CI test job passes `FPM_FFLAGS`, which REPLACES the profile flags, so it builds at `-O0`.
+    !! This driver is the one thing that compiles this module at every level, which is why the
+    !! rule is asserted here as well as in `test/test_random_dist.f90`.
+    subroutine check_sphere_exact_rules()
+        real(real64), parameter :: PI = 3.14159265358979323846264338327950288_real64
+        real(real64), parameter :: ANTIPODE(3) = [0.0_real64, 0.0_real64, -1.0_real64]
+        real(real64), parameter :: ZAXIS(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+        real(real64) :: v(3)
+        integer(int64) :: k
+        logical :: moved
+        do k = 1_int64, 200_int64
+            ! The outer radius is deliberately ABOVE the half turn, so the clamp is exercised too.
+            v = pf_random_disc_at(20260821_int64, 37_int64, ZAXIS, 4.0_real64, k, PI)
+            if (any(v /= ANTIPODE)) then
+                call bad("a ring whose inner radius is the half turn is not the antipode")
+                exit
+            end if
+        end do
+        ! The control, without which the assertion above would hold for a sampler that answered the
+        ! antipode to everything: the same centre at a radius that is not the half turn moves.
+        moved = .false.
+        do k = 1_int64, 200_int64
+            v = pf_random_disc_at(20260821_int64, 33_int64, ZAXIS, PI, k)
+            if (any(v /= ANTIPODE)) moved = .true.
+        end do
+        if (.not. moved) call bad("control: a disc of radius pi answered the antipode every time")
+    end subroutine check_sphere_exact_rules
 
 end program check_random_kernels

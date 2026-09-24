@@ -308,6 +308,84 @@ contains
     !> could overwrite the counter between a call and its assertion. Serially it costs well under
     !> a second.
     !>
+    !> "sorting_cpp" is excluded for the reason "sorting" gives, many times over: twenty-two of its
+    !> thirty-five tests drive a process-global, and they are of both kinds. The FORCING kind --
+    !> parquet_debug_use_fortran_sort_engine, parquet_set_sort_counting_path,
+    !> parquet_debug_set_sort_depth_limit, parquet_debug_set_sort_radix_fail_alloc and the merge
+    !> overrides its co-rank sweep cannot run without -- decides which engine and which path a
+    !> SIBLING's sort takes, and each is restored at the end of the test that set it, so a sibling
+    !> is left running against a setting that was never its own. The OBSERVING kind --
+    !> parquet_debug_sort_threads_used, _tie_threads_used, _offsets_threads_used, _radix_passes,
+    !> _refine_runs -- is a stale counter holding whatever the last sort anywhere in the process
+    !> wrote, which is the form this project treats as worst: a test reading a sibling's count
+    !> PASSES.
+    !>
+    !> "columns_parallel" is excluded for the reason "table_parallel" and "string_parallel" give,
+    !> one tier down: its single test gathers a column on several threads and compares it with the
+    !> same gather forced serial, and a bulk column operation resolves to ONE thread inside an
+    !> existing parallel region -- so run inside test-drive's own region both arms would be the
+    !> serial path and the comparison would pass while testing nothing. It reads
+    !> parquet_debug_column_gather_threads and parquet_debug_string_bulk_threads to prove the
+    !> threaded arm really threaded, and writes parquet_debug_set_string_min_bytes to reach it, all
+    !> three process-global, which is the second and independent reason.
+    !>
+    !> "index_omp" is excluded for BOTH reasons at once, which is why it is stated separately:
+    !> thirteen of its twenty-three tests open a region or pass threads=, so the nested-team
+    !> collapse "random_omp" describes would silently serialise them, and fourteen read a global
+    !> observable -- parquet_debug_index_threads_used, _get_many_threads_used, _spills,
+    !> _concurrent_builds -- straight after the call they are about. Either failure alone passes;
+    !> together they would leave the suite green against work that never happened.
+    !>
+    !> "optimize_omp" and "prima_omp" are excluded for the nested-team reason "random_omp" states:
+    !> all six of their tests run a multistart or a differential-evolution population over a team
+    !> and compare the answer with the serial one, so a team of one would compare the serial path
+    !> with itself. Both also read parquet_debug_optimize_threads_used, the process-global
+    !> observable their team assertions are written against.
+    !>
+    !> "sphere_omp" is excluded for the same nested-team reason, and its own file header says so:
+    !> its one test fills a polygon and a mask over a dynamic schedule at three team sizes and
+    !> compares them with the serial fill bit for bit, which a nested team of one would satisfy
+    !> without two threads ever having run.
+    !>
+    !> "random_perm" is excluded because half of its six tests force the permutation construction
+    !> itself through process-global hooks -- parquet_debug_set_perm_parity, _force_feistel and
+    !> _rounds -- and read parquet_debug_perm_config back to say which one answered. The parity
+    !> hook is the sharpest: it fixes the sign of every permutation the process produces, so a
+    !> sibling drawing one while it is set gets a permutation it did not ask for. At 6.2 s it is the
+    !> second most expensive suite on this list, after "spatial_serial" at 9.4 s, and that cost is
+    !> inherent rather than a consequence of the exclusion: its sample sizes ARE its assertions,
+    !> since a coverage or k-tuple claim is a statement about how many draws were taken, and its
+    !> four slowest tests are four of those claims.
+    !>
+    !> "stats" is excluded because fifteen of its hundred and fifty tests reset a process-global
+    !> counter, do the work they measure, and then assert the counter moved by exactly so much:
+    !> parquet_debug_reset_stats_scans/_sorts against parquet_debug_stats_scans/_sorts. A
+    !> sibling computing a statistic or taking a quantile in that window charges the very counter
+    !> under assertion, which does not fail -- it PASSES, against a measurement that never
+    !> happened. Two more force the threading floor (parquet_debug_set_stats_min_per_thread) and
+    !> read parquet_debug_stats_team, one forces the quantile's sort threshold, and one silences
+    !> %print through the process-global verbosity, for the reasons "settings" and "kde_serial"
+    !> give. The other hundred and thirty-five pay for those fifteen, which is the shape that made
+    !> the spatial split worth doing -- but not here: the whole suite is 0.51 s, so a split would
+    !> buy nothing measurable. Its two slowest tests are 0.41 s of that, and neither is one of the
+    !> fifteen.
+    !>
+    !> "module_surface" is excluded for the reason "settings" gives, one entry module at a time:
+    !> every one of its thirty tests round-trips process-global settings -- set, get, assert,
+    !> restore -- through a single module import, ninety-seven setter calls in the file, among them
+    !> twenty-two of parquet_set_verbosity and seventeen of parquet_set_message_stream. Run
+    !> concurrently, a sibling would be read between the set and the get; and because each helper
+    !> restores the value it FOUND rather than a default, a sibling suite's deliberate setting
+    !> would be put back to whatever this suite happened to see. Pure in-memory work; serially it
+    !> costs nothing.
+    !>
+    !> "cosmology_serial" is excluded because all three of its tests drive a process-global: two
+    !> force a build mode (parquet_debug_set_cosmology_exact_nu,
+    !> parquet_debug_set_cosmology_max_neval) that every concurrent %init would take as well, and
+    !> the third reads parquet_debug_cosmology_neval, which reports what the LAST %init spent and
+    !> is zeroed by each one -- so a sibling building a cosmology between the call and the read
+    !> hands it that build's count. The concurrent "cosmology" suite touches none of the three.
+    !>
     !> "parquet_string" no longer needs an entry here: it used to, because of a
     !> gfortran/OpenMP runtime bug (not a bug in parquet_strings.f90's own
     !> logic) that silently corrupted memory when multiple threads

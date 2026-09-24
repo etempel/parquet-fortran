@@ -7499,16 +7499,27 @@ contains
     !> A kernel far wider than a two-sided support keeps a reflected mass that UNDERFLOWS to zero,
     !> and the deposit would divide each point's shares by it: the grid poisons itself instead, as
     !> it does for a kept NaN, rather than returning having deposited nothing.
+    !>
+    !> **Every number in the fixture is NORMAL** -- the two bounds, the point and both bandwidths.
+    !> That is what lets one fixture serve every build: ifx turns denormals-are-zero on at `-O1`
+    !> and above, so a support one SUBNORMAL wide (which this fixture used to be) arrives at
+    !> `%init` there as a support of ZERO width and is refused -- an `error stop` raised from
+    !> inside a threaded suite, which takes the whole runner down without naming a test. A support
+    !> two of the smallest normal numbers wide asks the same question of the library under abrupt
+    !> and gradual underflow alike.
     subroutine test_a_reflecting_grid_whose_mass_underflows(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde_grid) :: g, control
         real(real64) :: d(1), dc(1)
+        real(real64), parameter :: LO = tiny(1.0_real64)          !! the support's lower bound
+        real(real64), parameter :: HI = 3.0_real64*LO             !! its upper bound, two wide
+        real(real64), parameter :: X = 2.0_real64*LO              !! the one point, at the middle
 
-        ! The support is one subnormal wide and the bandwidth is ten thousand billion: the two
-        ! reflected images keep a mass of about `1e-324`, which is below the smallest number.
-        call g%init(1, 0.0_real64, 1.0e-310_real64, 1.0e14_real64, lower=0.0_real64, &
-            upper=1.0e-310_real64, boundary="reflect")
-        call g%add([5.0e-311_real64])
+        ! The support is two of the smallest normal numbers wide and the bandwidth is a hundred
+        ! thousand million billion: the two reflected images keep a mass of about `4e-325`, which
+        ! is below the smallest number there is under either underflow model.
+        call g%init(1, LO, HI, 1.0e17_real64, lower=LO, upper=HI, boundary="reflect")
+        call g%add([X])
         call g%finish()
         call g%density(d)
         call check(error, g%n_valid() == 1_int64, "the point must be counted as retained")
@@ -7517,10 +7528,10 @@ contains
             "a grid whose reflected mass underflowed must answer NaN")
         if (allocated(error)) return
         ! The control: the same geometry at a bandwidth whose reflected mass is an ordinary number.
-        ! Normal, not subnormal -- `%init` refuses a subnormal bandwidth in its own right.
-        call control%init(1, 0.0_real64, 1.0e-310_real64, 1.0e-307_real64, lower=0.0_real64, &
-            upper=1.0e-310_real64, boundary="reflect")
-        call control%add([5.0e-311_real64])
+        ! Normal, not subnormal -- `%init` refuses a subnormal bandwidth in its own right -- and
+        ! still far wider than the support, so it is the same branch that answers.
+        call control%init(1, LO, HI, 1.0e-304_real64, lower=LO, upper=HI, boundary="reflect")
+        call control%add([X])
         call control%finish()
         call control%density(dc)
         call check(error, .not. ieee_is_nan(dc(1)) .and. dc(1) > 0.0_real64, &

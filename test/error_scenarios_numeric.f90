@@ -8397,15 +8397,35 @@ contains
     end subroutine scenario_kde_curve_default_range_collapses
     !
     !> Proves that pf_kde_grid%init refuses a cell width that UNDERFLOWS to zero, which the range
-    !> check before it cannot see: the range is the smallest subnormal and is positive, and one
-    !> cell holds it, but two do not. `kde_grid_cell_width` is the sibling at the other end, where
-    !> the range is wider than the largest number.
+    !> check before it cannot see: the range is positive, and one cell holds it, but two do not.
+    !> `kde_grid_cell_width` is the sibling at the other end, where the range is wider than the
+    !> largest number.
+    !!
+    !! **The range is the smallest one THIS BUILD can halve to zero**, and that is not one number
+    !! under the two underflow models. Where underflow is gradual the smallest subnormal is the
+    !! only such range, since the smallest normal halves to a perfectly good subnormal; where
+    !! subnormals are flushed to zero -- ifx turns flush-to-zero and denormals-are-zero on at
+    !! `-O1` and above, which is what a flagless `fpm test` selects -- the smallest normal already
+    !! halves to zero, and a SUBNORMAL range would not survive the journey: denormals-are-zero
+    !! collapses it on the comparison that reads it, so `%init` would see a range of zero and
+    !! refuse it by the range rule above instead, leaving this rule untested and the control call
+    !! aborting. Choosing by the mode asks the same question of the library at either floor.
     subroutine scenario_kde_grid_cell_width_underflow()
+        use, intrinsic :: ieee_arithmetic, only : ieee_support_underflow_control, ieee_get_underflow_mode
         type(pf_kde_grid) :: g
+        real(real64) :: range
+        logical :: gradual
 
-        call g%init(1, 0.0_real64, tiny(1.0_real64)*epsilon(1.0_real64), 1.0_real64)
+        gradual = .true.
+        if (ieee_support_underflow_control(1.0_real64)) call ieee_get_underflow_mode(gradual)
+        if (gradual) then
+            range = tiny(1.0_real64)*epsilon(1.0_real64)
+        else
+            range = tiny(1.0_real64)
+        end if
+        call g%init(1, 0.0_real64, range, 1.0_real64)
         print '(a, es22.15)', "kde control initialised: ", g%step()
-        call g%init(2, 0.0_real64, tiny(1.0_real64)*epsilon(1.0_real64), 1.0_real64)
+        call g%init(2, 0.0_real64, range, 1.0_real64)
         print '(a)', "accepted a cell width that underflowed to zero"
     end subroutine scenario_kde_grid_cell_width_underflow
     !

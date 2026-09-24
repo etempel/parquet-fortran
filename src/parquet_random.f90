@@ -2937,6 +2937,21 @@ contains
     !!
     !! `intent(inout)` rather than `intent(out)`: a `pure` procedure may not take a polymorphic
     !! `intent(out)` dummy at all, and every component is assigned on every path that returns.
+    !!
+    !! **The half turn is the antipode BY RULE, at either end of the ring**, rather than by what
+    !! `2*sin(r/2)**2` happens to evaluate to there. That versine form is written for accuracy near
+    !! `r = 0`, and nothing requires it to give exactly 2 at `r = pi`: **gfortran from `-O2` packs
+    !! the two `sin` calls below into one call to glibc's vector sine** (`_ZGVbN2v_sin`, an
+    !! `-ftree-vectorize` transformation visible with `nm -u`), which is a few-ulp routine rather
+    !! than a correctly rounded one and answers one ulp below 1 for `pi/2`. That leaves
+    !! `h_in = 2 - 2**-51`.
+    !!
+    !! One ulp of `h` is 3e-8 of POSITION at the pole, not one ulp of it, because `sph_place` puts
+    !! the point at a transverse offset of `sqrt(h*(2 - h))`: the ring this module's own refusal
+    !! message calls "the antipode alone" came out as a circle of that radius, and a disc of radius
+    !! `pi` left a hole of it at the antipode. So both ends are stated rather than computed, for
+    !! the reason `sph_centre_radec` states one for a declination of +/-90. The product form still
+    !! answers for every ring that does not touch the half turn, which is what it is there for.
     pure subroutine disc_prepare(cap, who, centre, radius, r_inner)
         class(pf_random_disc_cap), intent(inout) :: cap !! the cap to fill in
         character(len=*), intent(in) :: who          !! the entry point, for the message
@@ -2954,6 +2969,9 @@ contains
         s = sin(0.5_real64 * ri)
         cap%h_in = 2.0_real64 * s * s
         cap%dh = 2.0_real64 * sin(0.5_real64 * (ro + ri)) * sin(0.5_real64 * (ro - ri))
+        ! Both radii are already clamped to the half turn, so each test is an equality in effect.
+        if (ri >= sphere_pi) cap%h_in = 2.0_real64
+        if (ro >= sphere_pi) cap%dh = 2.0_real64 - cap%h_in
         cap%set = .true.
     end subroutine disc_prepare
 

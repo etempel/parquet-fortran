@@ -9072,6 +9072,140 @@ def _joined_lines(lines, first, last):
     return out
 
 
+
+#: Real literals whose value is SUBNORMAL for the kind they are written in, kept deliberately.
+#: One entry per (file, literal), each carrying what a build with abrupt underflow makes of it,
+#: because that is the thing an entry has to be justified against.
+#:
+#: Nothing else in `src/` or `test/` may write one. Where a subnormal value IS the fixture, build
+#: it from `tiny`/`epsilon` or from its bit pattern (`transfer(1_int64, 0.0_real64)`) so the
+#: intent survives the read, and guard the assertion with the test file's own
+#: `subnormals_are_flushed()`; where it is only a small number, move it into the normal range.
+SUBNORMAL_LITERAL_ALLOWED = {
+    # Empty, and it has been since the one entry it was written with was fixed rather than
+    # excused: `test_the_smallest_matter_density_builds_quietly` (`test/test_cosmology.f90`) used
+    # to pass `om0 = 1.0e-320_real64` and, under abrupt underflow, never reach the
+    # `sqrt(or0)/sqrt(om0)` line it exists to pin -- `om0` arrived at `cosmology_prepare_sound` as
+    # 0 and its `if (om0 > 0.0_real64 ...)` guard was false. `tiny(1.0_real64)` still overflows
+    # `or0/om0` there and is positive under every model, so the line is reached everywhere; proved
+    # by mutating the library to the root-of-ratio form, which the old fixture let through under
+    # ifx and the new one fails on.
+}
+
+
+def check_no_subnormal_literals():
+    """No `src/` or `test/` source may write a real literal that is subnormal for its own kind.
+
+    **ifx turns flush-to-zero and denormals-are-zero on at `-O1` and above, and a flagless
+    `fpm test` builds at ifx's own default `-O2`.** A subnormal literal therefore reaches the
+    library as `0.0` there, on the comparison that reads it, whatever the compiler folded it to.
+    Three things follow, and this project has now seen all three:
+
+    - the fixture is silently a different one (`test_the_smallest_matter_density_builds_quietly`
+      asked about a matter density of ZERO, and the branch it was written to pin was not reached
+      -- a library mutation it exists to catch survived under ifx and was caught under gfortran);
+    - a guard fires that the test was not asking about (`kde_grid_cell_width_underflow`'s control
+      call was refused for a range of zero width, so the abort it does assert proved nothing);
+    - an `error stop` is raised from inside a CONCURRENT suite, which takes the runner down on
+      SIGSEGV naming no test and leaves every suite after it unrun -- how `a reflecting grid
+      whose mass underflows poisons itself` presented, and the reason this check exists.
+
+    ifx is not in CI (`.gitlab-ci.yml` builds gfortran only), so nothing else catches any of them.
+
+    Matched by SHAPE: every exponent-bearing real literal in the tree is read and compared against
+    `tiny` for the kind it is written in -- `_real32`/`_sp` against the single-precision floor, a
+    `d` exponent or `_real64`/`_dp` against the double one, and a bare `e` literal against the
+    single floor, since that is the default-real value the standard gives it.
+    """
+    lit = re.compile(r"(?<![\w.])(\d+\.?\d*|\.\d+)[eEdD]([-+]?\d+)(_(\w+))?")
+    quoted = re.compile(r"'[^']*'|\"[^\"]*\"")
+    tiny32, tiny64 = 1.1754943508222875e-38, 2.2250738585072014e-308
+
+    problems, matched, scanned = [], set(), 0
+    for path in sorted(list(SRC.glob("*.f90")) + list(TEST.glob("*.f90"))):
+        rel = str(path.relative_to(REPO_ROOT))
+        for lineno, raw in enumerate(stripped_lines(path), 1):
+            for m in lit.finditer(quoted.sub("", raw)):
+                scanned += 1
+                mantissa, exponent, kind = m.group(1), m.group(2), (m.group(4) or "").lower()
+                letter = m.group(0)[len(mantissa)].lower()
+                if kind in ("real32", "sp"):
+                    floor, floor_name = tiny32, "tiny(1.0_real32)"
+                elif kind in ("real64", "dp") or letter == "d":
+                    floor, floor_name = tiny64, "tiny(1.0_real64)"
+                else:
+                    floor, floor_name = tiny32, "tiny(1.0) -- a bare exponent is DEFAULT REAL"
+                value = float(mantissa + "e" + exponent)
+                if not 0.0 < value < floor:
+                    continue
+                if (rel, m.group(0)) in SUBNORMAL_LITERAL_ALLOWED:
+                    matched.add((rel, m.group(0)))
+                    continue
+                problems.append(
+                    "%s:%d: `%s` is subnormal for its kind (below %s), so a build with abrupt "
+                    "underflow -- ifx at `-O1` and above, which is what a flagless `fpm test` "
+                    "selects -- reads it as 0.0 and the fixture is not the one written here. "
+                    "Build the value from `tiny`/`epsilon` or from its bit pattern and guard the "
+                    "assertion with `subnormals_are_flushed()`, or move the fixture into the "
+                    "normal range." % (rel, lineno, m.group(0), floor_name))
+    if scanned < 1000:
+        return ["src/ and test/: only %d exponent-bearing real literals were read -- this check "
+                "has gone blind and is no longer looking at the tree" % scanned]
+    for stale in sorted(SUBNORMAL_LITERAL_ALLOWED.keys() - matched):
+        problems.append(
+            "tools/check_source_conventions.py: SUBNORMAL_LITERAL_ALLOWED names `%s` in %s, which "
+            "is no longer written there. Delete the entry -- an allow-list nobody re-derives is "
+            "how a check goes half blind." % (stale[1], stale[0]))
+    return problems
+
+
+def check_every_serial_suite_records_its_reason():
+    """Every suite excluded from test-drive's per-test parallelism says in the file WHY.
+
+    `suite_is_safe_to_parallelize` (`test/test_runner_support.f90`) is a list of suite names that
+    run one test at a time. The list is load-bearing in a way that is invisible when it is wrong:
+    a suite that belongs on it and is not on it runs its tests concurrently and PASSES, against a
+    counter a sibling moved or a parallel arm that was really the serial one -- and a suite that is
+    on it for no reason anybody recorded is a second of wall time nobody can argue with, because
+    the argument was never written down.
+
+    So the rule is that an entry carries a reason in the same file, and this check holds the list
+    to it: every `name == "<suite>"` must appear, quoted or in backticks, in a comment there. It
+    does not read the reason -- no check can -- but a paragraph naming the suite is what makes the
+    next reader able to challenge it.
+
+    Written after an audit claimed two entries were undocumented and the count was actually TEN:
+    `sorting_cpp`, `columns_parallel`, `index_omp`, `optimize_omp`, `prima_omp`, `sphere_omp`,
+    `random_perm`, `stats`, `module_surface` and `cosmology_serial`. Nothing had gone wrong,
+    which is the point -- a list nobody re-derives drifts quietly, and the drift is only ever
+    found by someone counting by hand.
+    """
+    path = TEST / "test_runner_support.f90"
+    if not path.is_file():
+        return ["test/test_runner_support.f90: not found -- this check needs updating"]
+    text = stripped_text(path)
+    marker = "logical function suite_is_safe_to_parallelize"
+    if marker not in text:
+        return ["test/test_runner_support.f90: suite_is_safe_to_parallelize is gone -- this check "
+                "has gone blind"]
+    names = sorted(set(re.findall(r'name == "(\w+)"', text[text.index(marker):])))
+    if len(names) < 20:
+        return ["test/test_runner_support.f90: only %d excluded suite names were read from "
+                "suite_is_safe_to_parallelize -- this check has gone blind" % len(names)]
+    prose = "\n".join(ln for ln in source_lines(path) if ln.lstrip().startswith("!"))
+    problems = []
+    for name in names:
+        if not re.search(r'["`]%s["`]' % re.escape(name), prose):
+            problems.append(
+                'test/test_runner_support.f90: the suite "%s" is excluded from per-test '
+                "parallelism and no comment in this file names it. Add a paragraph to the block "
+                "above suite_is_safe_to_parallelize saying which process-global it writes or "
+                "reads, or which comparison would collapse to the serial path inside test-drive's "
+                "own region -- an entry whose reason is not written down cannot be challenged, "
+                "and cannot be removed when the reason goes away." % name)
+    return problems
+
+
 CHECKS = (
     ("the comment stripper's fast paths agree with its loop",
      check_comment_stripper_fast_paths_agree),
@@ -9217,6 +9351,8 @@ CHECKS = (
      check_spatial_kind_specifics_forward_every_argument),
     ("every filter operator is handled at every consuming site",
      check_filter_operators_are_handled_everywhere),
+    ("no source writes a subnormal real literal", check_no_subnormal_literals),
+    ("every serially-run suite records why", check_every_serial_suite_records_its_reason),
     ("the spatial suite split follows what a test can observe",
      check_spatial_suite_split_is_by_observability),
 )

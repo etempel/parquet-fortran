@@ -388,10 +388,22 @@ contains
     !> `%quantile` inverting `%cdf`; `%curve` being `%pdf` at its points; and the sample's mean the
     !> population's to five standard errors. An adaptive fit's `%pdf` and `%sample` agree across
     !> the two counts as well.
+    !>
+    !> **`NP` is a hundred rather than four hundred, and `NQ` a thousand rather than two.** What is
+    !> split across the team is the QUERY vector, one element per thread, so the number of query
+    !> points is what the bitwise comparison needs -- a thousand is two hundred and fifty per
+    !> thread -- and not how long each one takes. A `%quantile` point costs `KDE_QUANTILE_STEPS`
+    !> `%cdf` evaluations over the whole sample, which made four hundred of them 43% of this
+    !> suite's entire running time (1.05 s of 2.43 s, measured) while adding nothing the first
+    !> hundred had not already asserted: the inversion is checked point by point against `%cdf`,
+    !> so the grid's JOB is to span `(0, 1)`, which a hundred points do at 1% resolution. The two
+    !> counts are still far above the team floor, and `team4` is asserted rather than assumed, so a
+    !> reduction that took a query below `KDE_QUERY_MIN_WORK` would fail here rather than quietly
+    !> compare the serial answer with itself.
     subroutine test_queries_ignore_the_team(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         real(real64), parameter :: H = 5.0_real64, LO = -450.0_real64
-        integer, parameter :: NQ = 2000, NP = 400, NS = 100000, NL = 200
+        integer, parameter :: NQ = 1000, NP = 100, NS = 100000, NL = 200
         type(pf_kde) :: k, ka, kl
         type(pf_kde_grid) :: g
         real(real64), allocatable :: x(:), w(:), t(:), f1(:), f4(:), c1(:), c4(:), s1(:), s4(:)
@@ -461,7 +473,8 @@ contains
         wsum = sum(w, mask=x >= LO)
         gap_f = 0.0_real64
         gap_c = 0.0_real64
-        do i = 1, NQ, 20
+        ! Every tenth query point: a hundred of them, as before, each an O(sample) kernel sum.
+        do i = 1, NQ, 10
             fe = 0.0_real64
             ce = 0.0_real64
             do j = 1_int64, size(x, kind=int64)

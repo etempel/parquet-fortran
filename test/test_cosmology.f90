@@ -268,8 +268,8 @@ contains
                          test_a_bottom_node_on_the_models_own_floor), &
             new_unittest("a label longer than the cap is cut and elided", &
                          test_a_long_label_is_capped), &
-            new_unittest("a subnormal matter density builds quietly", &
-                         test_a_subnormal_matter_density_builds_quietly) &
+            new_unittest("the smallest matter density builds quietly", &
+                         test_the_smallest_matter_density_builds_quietly) &
             ]
 
     end subroutine collect_tests_cosmology
@@ -2587,21 +2587,33 @@ contains
 
     end subroutine test_a_long_label_is_capped
 
-    !> A subnormal `Om0` beside an ordinary radiation density builds quietly and answers a number.
+    !> The SMALLEST matter density there is, beside an ordinary radiation density, builds quietly
+    !> and answers a number.
     !!
     !! `sound_c`, the sound horizon's integration scale, is the tighter of `1/sqrt(R0)` and
     !! `sqrt(Or0)/sqrt(Om0)`. **Both are ratios of roots rather than roots of ratios, and that is
-    !! what this test pins.** Written as `sqrt(or0 / om0)` the second overflows for a subnormal
-    !! `Om0` -- the quotient reaches infinity before the root is taken -- and although `%init`
-    !! catches the infinity and falls back to a scale of one, the OVERFLOW FLAG is already raised
-    !! and reaches the caller. Under nagfor's default `-ieee=stop` that ends the process inside
-    !! `%init`, for a model every other binding answers perfectly well.
+    !! what this test pins.** Written as `sqrt(or0 / om0)` the second overflows at this `Om0` --
+    !! the quotient reaches infinity before the root is taken -- and although `%init` catches the
+    !! infinity and falls back to a scale of one, the OVERFLOW FLAG is already raised and reaches
+    !! the caller. Under nagfor's default `-ieee=stop` that ends the process inside `%init`, for a
+    !! model every other binding answers perfectly well.
+    !!
+    !! **`Om0` is `tiny`, the smallest NORMAL number, and was a subnormal literal until it was
+    !! found not to reach the line above on every build.** ifx turns denormals-are-zero on at
+    !! `-O1` and above, so a subnormal arrives at `cosmology_prepare_sound` as zero, its
+    !! `if (om0 > 0 ...)` guard is false and `b_eq` is never formed -- the test went on passing
+    !! there against a model with no matter at all, and a library mutated to the root-of-ratio
+    !! form passed with it. `tiny` is positive under every floating-point model and still
+    !! overflows: `or0/tiny` exceeds `huge` for any `Or0` above `huge*tiny`, which is 4, and this
+    !! fixture's `Tcmb0 = 100` makes `Or0` 155 -- a factor of 38. So the same line is reached
+    !! everywhere, and the mutation now fails under gfortran and ifx alike
+    !! (`check_no_subnormal_literals` keeps the literal form out).
     !!
     !! So the assertion is in two parts and both are load-bearing: the horizon is a positive
     !! finite number of Mpc, AND building the model raises no `ieee_usual` flag. The second fails
     !! against the quotient form; the first does not, which is why the flags are read here rather
     !! than the value alone being trusted.
-    subroutine test_a_subnormal_matter_density_builds_quietly(error)
+    subroutine test_the_smallest_matter_density_builds_quietly(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(pf_cosmology) :: c, ordinary
@@ -2617,7 +2629,7 @@ contains
         end if
 #endif
         call ieee_set_flag(ieee_usual, .false.)
-        call c%init(h0 = 70.0_real64, om0 = 1.0e-320_real64, ode0 = 1.0_real64, &
+        call c%init(h0 = 70.0_real64, om0 = tiny(1.0_real64), ode0 = 1.0_real64, &
                     tcmb0 = 100.0_real64, ob0 = 0.0_real64)
         v = c%sound_horizon(1000.0_real64)
         call ieee_get_flag(ieee_usual, raised)
@@ -2643,7 +2655,7 @@ contains
         call check(error, w == w .and. w /= v, &
                    "and a model with an ordinary om0 answers a different horizon")
 
-    end subroutine test_a_subnormal_matter_density_builds_quietly
+    end subroutine test_the_smallest_matter_density_builds_quietly
 
     !> `%onu_species` sums to `%onu`, and `%otot` is EXACTLY one for a flat model.
     !!

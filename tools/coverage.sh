@@ -256,6 +256,26 @@ if not per_file:
     print("No src/ coverage data found in JSON output.", file=sys.stderr)
     sys.exit(1)
 
+# ---- Hottest lines, against gcovr's "suspicious hit" ceiling -----------------
+#
+# gcovr 7.x and later treat a hit count at or above 2**32 as evidence of the
+# counter race of GCC PR68080 and refuse to parse the file, so CI's `gcovr`
+# step (.gitlab-ci.yml) dies with exit 64 while THIS script, which reads the
+# same JSON itself and has no such ceiling, reports a clean 100%. That is a
+# miserable way to find out: the counts are genuine -- the build sets
+# -fprofile-update=atomic, so they are not racing -- and the real message is
+# that some test drives a hot loop far harder than the branches it covers
+# need. Recorded once: two pf_kde sampler tests fitted 500 points and drew
+# 20000 from a kernel wider than the support, which puts every draw through a
+# root find over the whole fit with an eight-point quadrature per term, and
+# took kde_kernel_pdf past 1.3e10 calls. Report the ceiling here so it is seen
+# on the machine where it can be fixed.
+SUSPICIOUS_HITS = 2 ** 32
+hottest = sorted(
+    ((c, src, ln) for src, lines in per_file.items() for ln, c in lines.items()),
+    reverse=True,
+)[:3]
+
 
 def gcovr_excluded_lines(path):
     """Line numbers gcovr itself would drop from both numerator and
@@ -385,6 +405,23 @@ for src, exec_n, n, pct in rows:
 print("-" * (name_w + 26))
 total_pct = 100.0 * total_exec / total_lines if total_lines else 0.0
 print(f"{'TOTAL':<{name_w}}  {total_exec:>6}/{total_lines:<6}  {total_pct:6.2f}%")
+
+if hottest:
+    peak = hottest[0][0]
+    print()
+    print("Hottest lines (gcovr rejects a file holding a hit count at or above 2**32):")
+    print("-" * (name_w + 26))
+    for c, src, ln in hottest:
+        print(f"  {c:>14,}  {src}:{ln}")
+    if peak >= SUSPICIOUS_HITS:
+        print(f"  WARNING: {peak:,} is at or above gcovr's ceiling of {SUSPICIOUS_HITS:,}.")
+        print("  CI's gcovr step will refuse to parse this and exit 64. The counts are real,")
+        print("  not racing (-fprofile-update=atomic): find the test driving that line and cut")
+        print("  its size to what the branches it covers actually need.")
+    elif peak >= SUSPICIOUS_HITS // 4:
+        print(f"  NOTE: {100.0 * peak / SUSPICIOUS_HITS:.0f}% of gcovr's {SUSPICIOUS_HITS:,} ceiling.")
+    else:
+        print(f"  ({100.0 * peak / SUSPICIOUS_HITS:.1f}% of that ceiling.)")
 
 
 def condense_ranges(line_numbers):

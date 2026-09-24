@@ -7275,17 +7275,30 @@ contains
     !> Where the kernel is wider than half the support the two corrected zones MEET: nothing lies
     !> between them, and a draw that rounds into the gap is placed in whichever zone is on rather
     !> than in an interior that does not exist. Every draw must still land inside the support.
+    !>
+    !> **`M` and `N` are small on purpose, and cost is the reason.** This is the most expensive
+    !> shape the sampler has. Every term is cut at BOTH bounds, so each one is built by
+    !> `centred_moments`' eight-point Gauss-Legendre quadrature rather than by a closed form; and
+    !> with the zones meeting there is no interior to draw from, so every draw inverts a zone's own
+    !> integral -- a root find whose every step sums the whole fit. The cost is therefore
+    !> proportional to `M*N`, measured at 4.4e-5 s per unit on one core. Written first with
+    !> `M = 500, N = 4000` it cost 89 s of one core, and in an instrumented build it drove gcov's
+    !> per-line counts on those kernel primitives past the 2**32 above which gcovr refuses to read
+    !> the gcov output at all. Nothing here needs a large sample: the assertion is that a draw lands
+    !> inside the support, and a sampler that breaks that breaks it systematically, not rarely.
     subroutine test_a_sample_where_the_zones_meet(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         integer(int64), parameter :: SEED = 20260919_int64
+        integer, parameter :: M = 25   !! points fitted; the cost of one draw is proportional to it
+        integer, parameter :: N = 400  !! draws taken
         type(pf_kde) :: k
-        real(real64) :: x(500), v(4000)
+        real(real64) :: x(M), v(N)
         integer :: i
         logical :: ok
         character(len=200) :: msg
 
-        do i = 1, 500
-            x(i) = (real(i, real64) - 0.5_real64)/500.0_real64
+        do i = 1, M
+            x(i) = (real(i, real64) - 0.5_real64)/real(M, real64)
         end do
         ! Ten times the support's width: each zone reaches well past the other bound, so they meet.
         call k%fit(x, bandwidth=2.0_real64, lower=0.0_real64, upper=1.0_real64, &
@@ -7546,18 +7559,38 @@ contains
     !> than by the rejection sampler -- which needs a one-sided term to bound, and there is none.
     !> Every draw must still land inside the support and follow the estimate: the share of them in
     !> the upper zone is the estimate's own mass there, to five standard errors.
+    !>
+    !> **`M` and `N` are sized by cost, and what that gives up is stated here rather than left to
+    !> be found.** Every draw inverts a zone's integral, a root find whose every step sums the
+    !> whole fit, and the terms reaching both bounds are each built by `centred_moments`'
+    !> eight-point Gauss-Legendre quadrature; the cost is proportional to `M*N`, measured at
+    !> 2.1e-5 s per unit on one core. Written first with `M = 500, N = 20000` it cost 197 s of one
+    !> core -- the slowest test in the suite by a factor of two thousand -- and in an instrumented
+    !> build it drove gcov's per-line counts on the kernel primitives past the 2**32 above which
+    !> gcovr refuses to read the gcov output at all.
+    !>
+    !> `M` is free: the reference is `%cdf` of the SAME fit, so a smaller fit changes what is
+    !> compared, not whether the comparison is exact, and the crossing itself is geometry -- the
+    !> zone edges are `lower + reach` and `upper - reach` whatever `M` is. `N` is not free: the
+    !> five-standard-error band is `5 sqrt(w(1-w)/N)`, so cutting it from 20000 to 1500 widens the
+    !> band from about two parts in a hundred to about six. That is deliberate. A sampler that
+    !> takes zone draws any other way -- from the interior term, from the wrong zone, from an
+    !> unnormalised integral -- misplaces tens of parts in a hundred, so six is still far inside
+    !> what this test exists to catch, and the precision the first version bought was never the
+    !> point. Do not raise `N` back without raising the cost knowingly.
     subroutine test_a_draw_from_two_crossing_zones(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         integer(int64), parameter :: SEED = 20260919_int64
-        integer, parameter :: N = 20000
+        integer, parameter :: M = 20   !! points fitted; the cost of one draw is proportional to it
+        integer, parameter :: N = 1500 !! draws taken; the five-sigma band narrows as its root
         type(pf_kde) :: k
-        real(real64) :: x(500), v(N), meet, p_meet, want, got, se
+        real(real64) :: x(M), v(N), meet, p_meet, want, got, se
         integer :: i
         logical :: ok
         character(len=200) :: msg
 
-        do i = 1, 500
-            x(i) = (real(i, real64) - 0.5_real64)/500.0_real64
+        do i = 1, M
+            x(i) = (real(i, real64) - 0.5_real64)/real(M, real64)
         end do
         ! The B-spline's reach at this bandwidth is `2 sqrt(3) * 0.2 = 0.69`, more than half the
         ! support and less than all of it: each zone's inner edge lies past the other's, so the two

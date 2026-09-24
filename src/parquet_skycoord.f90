@@ -997,4 +997,4 @@ module parquet_skycoord
         end subroutine skc_unit_radec
     end interface
 
-end module parquet_skycoord
+end module parquet_skycoord ! GCOVR_EXCL_LINE

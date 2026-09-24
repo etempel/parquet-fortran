@@ -1999,8 +1999,17 @@ contains
         first_idx = 0_int64
         want_len = present(run_len)
         if (want_len) then
+            ! GCOVR_EXCL_START -- no caller supplies `run_len` to THIS impl.
+            ! `pf_value_counts` has a specific for each of the nine element types and
+            ! for a string column, and every one of them asks for the run lengths; the
+            ! type-erased `parquet_column` form is reached only by `pf_unique_count`,
+            ! which wants the distinct COUNT and nothing else. The argument is kept so
+            ! this impl has the same signature as its nine siblings -- a
+            ! `pf_value_counts` specific over a column would then need no change here
+            ! -- and the body is kept with it.
             allocate(run_len(max(n, 1_int64)))
             run_len = 0_int64
+            ! GCOVR_EXCL_STOP
         end if
         ndist = 0_int64
         nnull = 0_int64

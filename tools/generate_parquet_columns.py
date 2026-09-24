@@ -2506,7 +2506,9 @@ contains""")
             ! reach here is a caller that has not been taught about containers, and a silent wrong
             ! copy cannot be taken back where a loud abort can. Add an arm if a real caller turns
             ! up; do not add one speculatively.
+            ! GCOVR_EXCL_START -- not reachable through the library, for the reason above it.
             error stop EP//"copy_storage: a container column is copied by clone_into, not here"
+            ! GCOVR_EXCL_STOP
         case default
             error stop EP//"copy_storage: column has no active storage"
         end select

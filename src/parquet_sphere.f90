@@ -1102,4 +1102,4 @@ module parquet_sphere
         end subroutine parquet_debug_sphere_pixel_draw
     end interface
 
-end module parquet_sphere
+end module parquet_sphere ! GCOVR_EXCL_LINE

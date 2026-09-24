@@ -162,7 +162,12 @@ contains
     module procedure adopt_container
         if (.not. allocated(container)) error stop EP//"adopt_container: the container is not allocated"
         if (.not. parquet_kind_is_container(container%kindof())) then
+            ! GCOVR_EXCL_START -- not reachable from inside the library: `kindof` is deferred, and
+            ! each of the three concrete containers answers its own PK_LIST/PK_MAP/PK_STRUCT and
+            ! nothing else. The guard is for an extension of the abstract type written OUTSIDE it,
+            ! where the alternative is a column whose kind and whose contents disagree for good.
             error stop EP//"adopt_container: the container reports a kind that is not a container kind"
+            ! GCOVR_EXCL_STOP
         end if
         call self%clear()
         ! Taken from the container itself rather than from an argument, so the column cannot end up

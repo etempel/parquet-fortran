@@ -729,6 +729,26 @@ contains
                 test_row_mask_list_quoted_aborts), &
             new_unittest("row_mask: a literal finer than the column's stored unit aborts", &
                 test_row_mask_temporal_precision_aborts), &
+            new_unittest("row_mask: a clause on a variable-length list column aborts", &
+                test_row_mask_list_column_aborts), &
+            new_unittest("row_mask: a clause on a map column aborts", &
+                test_row_mask_map_column_aborts), &
+            new_unittest("row_mask: a clause on a struct column aborts", &
+                test_row_mask_struct_column_aborts), &
+            new_unittest("row_mask: a quoted bound on an integer column aborts", &
+                test_row_mask_quoted_integer_aborts), &
+            new_unittest("row_mask: a quoted bound on a float column aborts", &
+                test_row_mask_quoted_real_aborts), &
+            new_unittest("row_mask: an unreadable, non-NaN bound on a float column aborts", &
+                test_row_mask_bad_real_aborts), &
+            new_unittest("row_mask: a quoted bound on a boolean column aborts", &
+                test_row_mask_quoted_bool_aborts), &
+            new_unittest("row_mask: a bound that is not true/false on a boolean column aborts", &
+                test_row_mask_bad_bool_aborts), &
+            new_unittest("row_mask: an unquoted starts_with pattern aborts", &
+                test_row_mask_unquoted_match_aborts), &
+            new_unittest("row_mask: an unquoted bound on a temporal column aborts", &
+                test_row_mask_unquoted_temporal_aborts), &
             new_unittest("row_mask/filter_rows: a well-formed multi-clause rule applies cleanly", &
                 test_row_mask_control_succeeds) &
             ]
@@ -2183,6 +2203,30 @@ contains
             new_unittest("a chunked map read under an active sort aborts", test_map_chunk_refuses_sort_aborts), &
             new_unittest("the bare map token is rejected", test_maml_map_bare_token_aborts), &
             new_unittest("a map token with a container value is rejected", test_maml_map_nested_value_aborts), &
+            new_unittest("a list column written under an undeclared name is refused", &
+                test_write_undeclared_column_list_aborts), &
+            new_unittest("a map column written under an undeclared name is refused", &
+                test_write_undeclared_column_map_aborts), &
+            new_unittest("a struct column written under an undeclared name is refused", &
+                test_write_undeclared_column_struct_aborts), &
+            new_unittest("writing a map whose value is a container is refused by kind", &
+                test_write_map_nested_value_aborts), &
+            new_unittest("add_agg with weights= and exact= together is refused", &
+                test_table_group_add_agg_weights_exact_aborts), &
+            new_unittest("%container_ptr on a non-container column is refused by name", &
+                test_column_container_wrong_kind_aborts), &
+            new_unittest("%append_row_of from a container column says it is not implemented", &
+                test_column_append_row_of_container_aborts), &
+            new_unittest("a filter set name past the 64-character limit is refused", &
+                test_filter_set_name_too_long_aborts), &
+            new_unittest("a filter rule whose set name is a bare @ is refused", &
+                test_filter_bare_at_set_name_aborts), &
+            new_unittest("an over-long sep is quoted back capped at 100 characters", &
+                test_skycoord_text_long_separator_aborts), &
+            new_unittest("a list token with a container element in MAML text is rejected", &
+                test_maml_text_list_bad_element_aborts), &
+            new_unittest("a map token with an unknown value type in MAML text is rejected", &
+                test_maml_text_map_bad_value_aborts), &
             new_unittest("a struct column with no fields aborts", test_struct_init_no_fields_aborts), &
             new_unittest("a struct column with duplicate field names aborts", &
                 test_struct_init_duplicate_name_aborts), &
@@ -2698,6 +2742,14 @@ contains
                 test_table_index_control_completes), &
             new_unittest("a date set against a timestamp column aborts", &
                 test_filter_temporal_set_mismatch_aborts), &
+            new_unittest("a time set against an int32 column is refused, naming the set's family", &
+                test_filter_time_set_on_int_aborts), &
+            new_unittest("a timestamp set against an int32 column is refused, naming the set's family", &
+                test_filter_timestamp_set_on_int_aborts), &
+            new_unittest("a sub-millisecond value under map[timestamp[ms]] is refused at the declared unit", &
+                test_map_write_millisecond_precision_aborts), &
+            new_unittest("an all-NaN qc column reports NaN as its observed range, and completes", &
+                test_qc_all_nan_range_reports_nan), &
             new_unittest("a literal list on a temporal column aborts", &
                 test_filter_temporal_literal_list_aborts), &
             new_unittest("two concurrent duplicate-key builds abort once, cleanly", &
@@ -3361,6 +3413,10 @@ contains
                 test_interpolate_slopes_inf_aborts), &
             new_unittest("a not-a-knot spline over three points is refused", &
                 test_interpolate_not_a_knot_too_few_aborts), &
+            new_unittest("a linear interpolant over one point is refused", &
+                test_interpolate_linear_too_few_aborts), &
+            new_unittest("a pchip interpolant over one point is refused", &
+                test_interpolate_pchip_too_few_aborts), &
             new_unittest("differentiating an interpolant that was never built aborts", &
                 test_interpolate_derivative_before_init_aborts), &
             new_unittest("integrating an interpolant that was never built aborts", &
@@ -3471,6 +3527,12 @@ contains
                 test_sphere_polygon_size_mismatch_aborts), &
             new_unittest("a sky polygon refuses an infinite vertex", &
                 test_sphere_polygon_nonfinite_vertex_aborts), &
+            new_unittest("a sky polygon refuses a NaN vertex, and names it", &
+                test_sphere_polygon_nan_vertex_aborts), &
+            new_unittest("a sky polygon names a vertex beyond the fixed-point range in exponent form", &
+                test_sphere_polygon_extreme_vertex_aborts), &
+            new_unittest("strict= refuses a band written the short way round", &
+                test_sphere_polygon_strict_short_way_aborts), &
             new_unittest("a sky polygon refuses a declination outside [-90, 90]", &
                 test_sphere_polygon_dec_out_of_range_aborts), &
             new_unittest("a sky polygon refuses an unknown edge rule", &
@@ -5659,6 +5721,100 @@ contains
             failure_message="a map token with a container value was expected to be rejected", &
             required_stderr="has invalid data_type 'map[list[int32]]'")
     end subroutine test_maml_map_nested_value_aborts
+
+    subroutine test_maml_text_list_bad_element_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "maml_text_list_bad_element", expect_abort=.true., &
+            failure_message="a list token with a container element in MAML text was expected to be rejected", &
+            required_stderr="has invalid data_type 'list[list[int32]]'")
+    end subroutine test_maml_text_list_bad_element_aborts
+
+    subroutine test_maml_text_map_bad_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "maml_text_map_bad_value", expect_abort=.true., &
+            failure_message="a map token with an unknown value type in MAML text was expected to be rejected", &
+            required_stderr="has invalid data_type 'map[nosuchtype]'")
+    end subroutine test_maml_text_map_bad_value_aborts
+    !
+    !> See scenario_write_undeclared_column_list.
+    subroutine test_write_undeclared_column_list_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "write_undeclared_column_list", expect_abort=.true., &
+            failure_message="a list column under an undeclared name was expected to abort", &
+            required_stderr="parquet_write_column: column not defined in parquet_open_writer: not_a_real_column")
+    end subroutine test_write_undeclared_column_list_aborts
+    !
+    !> See scenario_write_undeclared_column_map.
+    subroutine test_write_undeclared_column_map_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "write_undeclared_column_map", expect_abort=.true., &
+            failure_message="a map column under an undeclared name was expected to abort", &
+            required_stderr="parquet_write_column: column not defined in parquet_open_writer: not_a_real_column")
+    end subroutine test_write_undeclared_column_map_aborts
+    !
+    !> See scenario_write_undeclared_column_struct.
+    subroutine test_write_undeclared_column_struct_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "write_undeclared_column_struct", expect_abort=.true., &
+            failure_message="a struct column under an undeclared name was expected to abort", &
+            required_stderr="parquet_write_column: column not defined in parquet_open_writer: not_a_real_column")
+    end subroutine test_write_undeclared_column_struct_aborts
+    !
+    !> See scenario_write_map_nested_value.
+    subroutine test_write_map_nested_value_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "write_map_nested_value", expect_abort=.true., &
+            failure_message="a map with a container value was expected to abort", &
+            required_stderr="writing a container inside a container is not supported")
+    end subroutine test_write_map_nested_value_aborts
+    !
+    !> See scenario_table_group_add_agg_weights_exact.
+    subroutine test_table_group_add_agg_weights_exact_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "table_group_add_agg_weights_exact", expect_abort=.true., &
+            failure_message="add_agg with weight_column= and exact= together was expected to abort", &
+            required_stderr="weights= and weight_column= have no meaning with exact=.true.")
+    end subroutine test_table_group_add_agg_weights_exact_aborts
+    !
+    !> See scenario_column_container_wrong_kind.
+    subroutine test_column_container_wrong_kind_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_container_wrong_kind", expect_abort=.true., &
+            failure_message="%container_ptr on an int32 column was expected to abort", &
+            required_stderr="container: column kind is PK_INT32, but this call requires a container kind")
+    end subroutine test_column_container_wrong_kind_aborts
+    !
+    !> See scenario_column_append_row_of_container.
+    subroutine test_column_append_row_of_container_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "column_append_row_of_container", expect_abort=.true., &
+            failure_message="%append_row_of from a list column was expected to abort", &
+            required_stderr="append_row_of: appending a container row is not implemented yet")
+    end subroutine test_column_append_row_of_container_aborts
+    !
+    !> See scenario_filter_set_name_too_long.
+    subroutine test_filter_set_name_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "filter_set_name_too_long", expect_abort=.true., &
+            failure_message="an over-long set name was expected to abort", &
+            required_stderr="is longer than the 64-character limit")
+    end subroutine test_filter_set_name_too_long_aborts
+    !
+    !> See scenario_filter_bare_at_set_name.
+    subroutine test_filter_bare_at_set_name_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "filter_bare_at_set_name", expect_abort=.true., &
+            failure_message="a bare @ set name was expected to abort", &
+            required_stderr="'@' must be followed by a set name")
+    end subroutine test_filter_bare_at_set_name_aborts
+    !
+    !> See scenario_skycoord_text_long_separator.
+    subroutine test_skycoord_text_long_separator_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_text_long_separator", expect_abort=.true., &
+            failure_message="a 150-character separator was expected to abort", &
+            required_stderr="xxx..."")")
+    end subroutine test_skycoord_text_long_separator_aborts
 
     subroutine test_struct_init_bad_kind_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -13107,6 +13263,86 @@ contains
             required_stderr="is more precise than that column's stored unit can represent")
     end subroutine test_row_mask_temporal_precision_aborts
 
+    subroutine test_row_mask_list_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_list_column", expect_abort=.true., &
+            failure_message="a clause on a list column was expected to abort", &
+            required_stderr="is a variable-length list column; filtering only supports scalar columns")
+    end subroutine test_row_mask_list_column_aborts
+
+    subroutine test_row_mask_map_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_map_column", expect_abort=.true., &
+            failure_message="a clause on a map column was expected to abort", &
+            required_stderr="is a map column; filtering only supports scalar columns")
+    end subroutine test_row_mask_map_column_aborts
+
+    subroutine test_row_mask_struct_column_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_struct_column", expect_abort=.true., &
+            failure_message="a clause on a struct column was expected to abort", &
+            required_stderr="is a struct column; filtering only supports scalar columns")
+    end subroutine test_row_mask_struct_column_aborts
+
+    subroutine test_row_mask_quoted_integer_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_quoted_integer", expect_abort=.true., &
+            failure_message="a quoted bound on an integer column was expected to abort", &
+            required_stderr="is not a valid integer for column 'id'")
+    end subroutine test_row_mask_quoted_integer_aborts
+
+    subroutine test_row_mask_quoted_real_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_quoted_real", expect_abort=.true., &
+            failure_message="a quoted bound on a float column was expected to abort", &
+            required_stderr="is not a valid number for column 'x'")
+    end subroutine test_row_mask_quoted_real_aborts
+
+    subroutine test_row_mask_bad_real_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_bad_real", expect_abort=.true., &
+            failure_message="an unreadable bound on a float column was expected to abort", &
+            required_stderr="is not a valid number for column 'x'")
+    end subroutine test_row_mask_bad_real_aborts
+
+    subroutine test_row_mask_quoted_bool_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_quoted_bool", expect_abort=.true., &
+            failure_message="a quoted bound on a boolean column was expected to abort", &
+            required_stderr="must be true or false (unquoted)")
+    end subroutine test_row_mask_quoted_bool_aborts
+
+    subroutine test_row_mask_bad_bool_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_bad_bool", expect_abort=.true., &
+            failure_message="a non-boolean bound was expected to abort", &
+            required_stderr="is not true/false for boolean column 'flag'")
+    end subroutine test_row_mask_bad_bool_aborts
+
+    subroutine test_row_mask_unquoted_match_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_unquoted_match", expect_abort=.true., &
+            failure_message="an unquoted matcher pattern was expected to abort", &
+            required_stderr="value for string column 'name' must be double-quoted")
+    end subroutine test_row_mask_unquoted_match_aborts
+
+    subroutine test_row_mask_unquoted_temporal_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        call check_scenario_exit_status_and_stderr(error, "row_mask_unquoted_temporal", expect_abort=.true., &
+            failure_message="an unquoted temporal bound was expected to abort", &
+            required_stderr="must be a double-quoted ISO-8601 literal")
+    end subroutine test_row_mask_unquoted_temporal_aborts
+
     !> The NEGATIVE CONTROL for the thirteen refusals above, and for %filter_rows as well: one rule
     !> naming a scalar column of every family the evaluator supports, plus a literal list, applied
     !> through both entry points. Without it, an evaluator that refused every input would pass all
@@ -19491,6 +19727,40 @@ contains
             required_stderr="the 'date' set in the filter clause on column 'ts' cannot be compared")
     end subroutine test_filter_temporal_set_mismatch_aborts
     !
+    !> See `scenario_filter_time_set_on_int` (test/error_scenarios.f90).
+    subroutine test_filter_time_set_on_int_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "filter_time_set_on_int", expect_abort=.true., &
+            failure_message="a time set against an int32 column was expected to abort", &
+            required_stderr="the 'time' set in the filter clause on column 'v' cannot be compared")
+    end subroutine test_filter_time_set_on_int_aborts
+    !
+    !> See `scenario_filter_timestamp_set_on_int` (test/error_scenarios.f90).
+    subroutine test_filter_timestamp_set_on_int_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "filter_timestamp_set_on_int", expect_abort=.true., &
+            failure_message="a timestamp set against an int32 column was expected to abort", &
+            required_stderr="the 'timestamp' set in the filter clause on column 'v' cannot be compared")
+    end subroutine test_filter_timestamp_set_on_int_aborts
+    !
+    !> See `scenario_map_write_millisecond_precision` (test/error_scenarios.f90).
+    subroutine test_map_write_millisecond_precision_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "map_write_millisecond_precision", expect_abort=.true., &
+            failure_message="a sub-millisecond value in a map[timestamp[ms]] column was expected to abort", &
+            required_stderr="timestamp value has finer precision than the column's declared unit")
+    end subroutine test_map_write_millisecond_precision_aborts
+    !
+    !> See `scenario_qc_all_nan_range` (test/error_scenarios.f90). A WARNING, so the exit status is
+    !> 0 and the message is the assertion: `[NaN, NaN]` rather than the `[0, 0]` the accumulators
+    !> still hold when every valid element was set aside as a NaN.
+    subroutine test_qc_all_nan_range_reports_nan(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "qc_all_nan_range", expect_abort=.false., &
+            failure_message="an all-NaN qc column was expected to warn and complete", &
+            required_stderr="data range [NaN, NaN], 3 of 3 valid element(s) out of range")
+    end subroutine test_qc_all_nan_range_reports_nan
+    !
     !> See `scenario_filter_temporal_literal_list` (test/error_scenarios.f90).
     subroutine test_filter_temporal_literal_list_aborts(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
@@ -20907,6 +21177,20 @@ contains
             required_stderr="pf_interp_1d%init: at least 4 points are needed for method ""cubic"" with bc ""not_a_knot""; got 3")
     end subroutine test_interpolate_not_a_knot_too_few_aborts
     !
+    subroutine test_interpolate_linear_too_few_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_linear_too_few", expect_abort=.true., &
+            failure_message="a linear interpolant over one point was expected to error stop", &
+            required_stderr="pf_interp_1d%init: at least 2 points are needed for method ""linear""; got 1")
+    end subroutine test_interpolate_linear_too_few_aborts
+    !
+    subroutine test_interpolate_pchip_too_few_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "interpolate_pchip_too_few", expect_abort=.true., &
+            failure_message="a pchip interpolant over one point was expected to error stop", &
+            required_stderr="pf_interp_1d%init: at least 2 points are needed for method ""pchip""; got 1")
+    end subroutine test_interpolate_pchip_too_few_aborts
+    !
     subroutine test_interpolate_derivative_before_init_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "interpolate_derivative_before_init", expect_abort=.true., &
@@ -21332,6 +21616,30 @@ contains
             required_stderr="pf_sky_polygon%init: vertex 2 must be finite with dec in [-90, 90] (got Infinity, " // &
             "0.0000000E+00)")
     end subroutine test_sphere_polygon_nonfinite_vertex_aborts
+    !
+    !> See scenario_sphere_polygon_nan_vertex.
+    subroutine test_sphere_polygon_nan_vertex_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_nan_vertex", expect_abort=.true., &
+            failure_message="a polygon with a NaN right ascension was expected to abort", &
+            required_stderr="(got NaN, -Infinity)")
+    end subroutine test_sphere_polygon_nan_vertex_aborts
+    !
+    !> See scenario_sphere_polygon_extreme_vertex.
+    subroutine test_sphere_polygon_extreme_vertex_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_extreme_vertex", expect_abort=.true., &
+            failure_message="a polygon with a 1e200 declination was expected to abort", &
+            required_stderr="(got 1.0000000E-200, 1.0000000E+200)")
+    end subroutine test_sphere_polygon_extreme_vertex_aborts
+    !
+    !> See scenario_sphere_polygon_strict_short_way.
+    subroutine test_sphere_polygon_strict_short_way_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_strict_short_way", expect_abort=.true., &
+            failure_message="strict= was expected to refuse a suspected short-way RA band", &
+            required_stderr="degrees of RA in two clusters at the ends of that span, which names the band the")
+    end subroutine test_sphere_polygon_strict_short_way_aborts
     !
     !> See scenario_sphere_polygon_dec_out_of_range.
     subroutine test_sphere_polygon_dec_out_of_range_aborts(error)

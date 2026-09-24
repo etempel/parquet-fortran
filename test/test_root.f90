@@ -411,6 +411,18 @@ contains
                        "DOWN must stop at its lower limit exactly")
             if (allocated(error)) exit run
 
+            ! The limit that IS the root. `step_down` clamps a step that would overshoot onto the
+            ! limit exactly, so the second try lands on -3 and the value there is an exact zero --
+            ! which the widening has to take as the answer rather than press on and report
+            ! NO_BRACKET for having reached its limit. The pair with the case above it is the point:
+            ! a root BELOW the limit is unreachable, a root AT it is not.
+            line%root = -3.0_real64
+            grow = pf_bracket_expansion(mode=PF_EXPAND_DOWN, lower_limit=-3.0_real64)
+            call pf_find_root(line, -1.0_real64, 0.0_real64, x, expand=grow, info=info)
+            call check(error, info%status == PF_ROOT_OK .and. x == -3.0_real64 .and. info%froot == 0.0_real64, &
+                       "an expansion landing exactly on a root at its own limit must report it")
+            if (allocated(error)) exit run
+
             ! BOTH inside [-3, 5] from [0, 1]: each end reaches its limit, and an end at its limit is
             ! never evaluated again, so no point appears twice.
             grow = pf_bracket_expansion(mode=PF_EXPAND_BOTH, lower_limit=-3.0_real64, &
@@ -623,6 +635,17 @@ contains
             call check(error, info%status == PF_ROOT_LIMIT .and. info%nexpand == 3 .and. info%neval == 5 &
                        .and. x == 0.0_real64, &
                        "a budget spent while expanding must report PF_ROOT_LIMIT, not PF_ROOT_NO_BRACKET")
+            if (allocated(error)) exit run
+
+            ! **The budget running out BETWEEN the two ends of one try**, which only BOTH can do: it
+            ! moves the lower end and evaluates it before the upper end, so the budget can be gone by
+            ! the time the upper one comes round. UP and DOWN move one end, so for them the check at
+            ! the top of the try is the only one there is -- and that is the one the case above
+            ! reaches. Three evaluations: the two given ends, then the lower end of the first try.
+            grow%mode = PF_EXPAND_BOTH
+            call pf_find_root(root_gentle, 0.0_real64, 1.0e-3_real64, x, expand=grow, max_neval=3, info=info)
+            call check(error, info%status == PF_ROOT_LIMIT .and. info%nexpand == 1 .and. info%neval == 3, &
+                       "a budget spent between one try's two ends must report PF_ROOT_LIMIT")
 
         end block run
 

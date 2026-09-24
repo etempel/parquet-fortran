@@ -741,6 +741,26 @@ contains
                    "without the extrapolation the partition sum IS the result")
         if (allocated(error)) return
 
+        ! **A partition that outgrows the work arrays' first allocation.** They start at 64
+        ! subintervals and DOUBLE, copying what is already there across -- the record included, in
+        ! three arrays of 21 rows each. A copy that lost or misplaced a column would leave every
+        ! integral right and only this sum wrong, which is the whole reason the check below is a
+        ! weighted sum rather than a length. The count is asserted first as a vacuity guard: below
+        ! 65 subintervals the arrays never grow and this case is the one above it a second time.
+        r = pf_integrate(saw_sqrt, 0.0_real64, 1.0_real64, &
+                         pf_tolerance(rtol=0.0_real64, atol=1.0e-14_real64), info=info, points=pts)
+        call check(error, info%nsub > 64, &
+                   "the growing-partition fixture must pass the work arrays' first allocation of 64")
+        if (allocated(error)) return
+        call check(error, pts%n == ONE_RULE*info%nsub, &
+                   "a record carried through a growth must hold 21 points per subinterval still")
+        if (allocated(error)) return
+        summed = sum(pts%w(1:pts%n)*pts%f(1:pts%n))
+        call check(error, abs(summed - info%partition_integral) &
+                   <= 1.0e-12_real64*abs(info%partition_integral), &
+                   "sum(w*f) must reproduce the partition integral across a work-array growth")
+        if (allocated(error)) return
+
         ! Integrating in log x, where the weight carries the Jacobian and the abscissa does not.
         r = pf_integrate(inv_pow15, 1.0e-3_real64, 1.0e3_real64, 1.0e-10_real64, &
                          log_base=.true., info=info, points=pts)
@@ -1626,7 +1646,7 @@ contains
     subroutine test_non_finite_value_stops_every_path(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: walked, pieced
+        type(pf_integration_info) :: walked, pieced, searched
         real(real64)              :: r, inf
 
         inf = pf_infinity()
@@ -1634,6 +1654,23 @@ contains
         r = pf_integrate(nan_at_half, 0.0_real64, inf, 1.0e-8_real64, info=walked)
         call check(error, walked%status == PF_INT_BAD_VALUE, &
                    "a walk that meets a non-finite value must report PF_INT_BAD_VALUE")
+        if (allocated(error)) return
+
+        ! **The walk's START-PANEL SEARCH is a third exit**, before any panel has been integrated at
+        ! all: it probes for the first panel worth taking, and an integrand that stops answering with
+        ! numbers while it is still probing has to end the walk there rather than hand a panel it
+        ! never accepted to the rest of it. `nan_at_half`'s band lies below every panel such a search
+        ! looks at from a positive lower bound, which is why it takes the exit above and not this
+        ! one; `nan_near_two`'s lies inside the first. No panel was integrated, so none is counted.
+        r = pf_integrate(nan_near_two, 1.0_real64, inf, 1.0e-8_real64, info=searched)
+        call check(error, searched%status == PF_INT_BAD_VALUE, &
+                   "a start-panel search that meets a non-finite value must report PF_INT_BAD_VALUE")
+        if (allocated(error)) return
+        call check(error, .not. searched%converged .and. searched%npanels == 0, &
+                   "and must count no panel: the probes are not panels")
+        if (allocated(error)) return
+        call check(error, searched%non_finite_at >= 1.5_real64 .and. searched%non_finite_at <= 2.5_real64, &
+                   "non_finite_at must be a point inside the band the fixture answers a NaN on")
         if (allocated(error)) return
         call check(error, .not. walked%converged, &
                    "a walk that met a non-finite value must not be reported as converged")

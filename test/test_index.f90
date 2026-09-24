@@ -108,6 +108,8 @@ contains
                          test_index_int32_lists), &
             new_unittest("compact hands out the smallest free index first", test_pool_compact_order), &
             new_unittest("without compact the pool stays LIFO", test_pool_lifo_control), &
+            new_unittest("the scan runs past the top block when the watermark is on a boundary", &
+                test_pool_scan_past_top_block), &
             new_unittest("compact keeps every held index and lowers the watermark", test_pool_compact_state), &
             new_unittest("compact gives storage back", test_pool_compact_shrinks), &
             new_unittest("a sorted map answers get_or_add for a key it holds", &
@@ -2068,6 +2070,39 @@ contains
         idx = p%get_index()
         call check(error, idx == 101_int64, "and only then a new index")
     end subroutine test_pool_compact_order
+
+    !> The free-index scan running OFF the top of the bitmap, which only a watermark sitting exactly
+    !! on a block boundary reaches.
+    !!
+    !! `pool_scan` stops at the first block that is not all ones, and refuses a clear bit found
+    !! ABOVE the watermark by testing the index rather than by masking the top block -- two separate
+    !! exits with two separate cursor updates. Every other pool test here holds 100 indexes, whose
+    !! top block has 28 clear bits above the watermark, so the scan always finds one and takes the
+    !! second exit. At 128 both blocks are all ones, so the walk passes the top block and takes the
+    !! first. The exits are not interchangeable: reaching the end of the bitmap says the watermark
+    !! is the boundary, where a clear bit above it says the block simply extends past it.
+    subroutine test_pool_scan_past_top_block(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        type(pf_index_pool) :: p
+        integer(int64) :: i, idx
+
+        do i = 1_int64, 128_int64
+            idx = p%get_index()
+        end do
+        call p%free_index(10_int64)
+        call p%compact()   ! empties the free list, so the next get_index has to scan
+        idx = p%get_index()
+        call check(error, idx == 10_int64, "the compacted pool must hand back its one free index")
+        if (allocated(error)) return
+        ! Nothing is free now and the cursor sits inside the FIRST block, so the scan walks both
+        ! blocks, finds every bit set, and runs past the top one rather than answering an index.
+        idx = p%get_index()
+        call check(error, idx == 129_int64, "a full pool on a block boundary must grow past the watermark")
+        if (allocated(error)) return
+        call check(error, p%get_max_index() == 129_int64, "and the watermark must follow it")
+        if (allocated(error)) return
+        call check(error, p%get_used_count() == 129_int64, "every index handed out is still held")
+    end subroutine test_pool_scan_past_top_block
 
     !> Without `%compact` the pool is LIFO -- the negative control for the test above.
     !!

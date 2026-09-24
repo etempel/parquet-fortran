@@ -436,7 +436,12 @@ contains
         integer(int64) :: res       !! nanoseconds in one value of that unit.
         select case (unit)
         case (parquet_unit_seconds)
+            ! GCOVR_EXCL_START -- not reachable: `timestamp[s]`/`time[s]` are refused at parse time
+            ! (no Parquet file can store a seconds-resolution TIME or TIMESTAMP), so no parsed column
+            ! carries this unit and `wunit` can never be it. Kept so the mapping is complete against
+            ! `unit_scale`, the copy in src/parquet_temporal.f90 this one mirrors.
             res = parquet_ns_per_sec
+            ! GCOVR_EXCL_STOP
         case (parquet_unit_millis)
             res = parquet_ns_per_sec/1000_int64
         case (parquet_unit_micros)

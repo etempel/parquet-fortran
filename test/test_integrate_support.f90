@@ -32,6 +32,7 @@ module test_integrate_support
     public :: x_squared, zero_integrand, unit_step, unit_step_exact
     public :: compact_bump, compact_bump_exact, far_bump, far_bump_exact
     public :: nan_at_half
+    public :: nan_near_two
     public :: tail_exp, tail_neg_exp, tail_pow2, tail_gauss, tail_osc, tail_osc_exact
     public :: rising_exp, exp_over_x, exp_over_x_exact, exp_cos, exp_cos_exact
     public :: narrow_spike, narrow_spike_exact, sliver_bump, sliver_bump_exact
@@ -487,6 +488,26 @@ contains
         end if
 
     end function nan_at_half
+
+    !> An integrand that returns a NaN over `[1.5, 2.5]` and a finite value everywhere else.
+    !!
+    !! The band is where it is so that a walk out of a POSITIVE lower bound meets it inside the very
+    !! first panel its start-panel search tries: from `1` that panel reaches `e`, whatever the search
+    !! then does with it. `nan_at_half`'s band at `0.5` is below every such panel, so the walk's own
+    !! search cannot reach it and only the panels after the search see a NaN.
+    !!
+    !! The NaN is built with `ieee_value` for the same reason `nan_at_half`'s is.
+    function nan_near_two(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value, NaN on [1.5, 2.5]
+
+        if (x >= 1.5_real64 .and. x <= 2.5_real64) then
+            f = ieee_value(1.0_real64, ieee_quiet_nan)
+        else
+            f = 1.0_real64/(x*x)
+        end if
+
+    end function nan_near_two
 
 
     ! ---- the infinite ranges -------------------------------------------------------------------

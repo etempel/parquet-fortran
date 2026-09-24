@@ -291,4 +291,4 @@ module parquet_root
 
     end interface
 
-end module parquet_root
+end module parquet_root ! GCOVR_EXCL_LINE

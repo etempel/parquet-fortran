@@ -1008,9 +1008,16 @@ contains
         case (5)
             status = PF_INT_DIVERGENT
         case default
+            ! GCOVR_EXCL_START -- not reachable: the engine sets `ier` in 0..6 and nothing else,
+            ! and the one-place shift above maps that onto the six codes with arms. Kept because a
+            ! seventh code added to the engine must stop here rather than be reported as success.
+            ! The continuation line of the call below registers a positive hit while the two lines
+            ! it belongs to register none -- a gcov attribution artifact, not evidence that this
+            ! arm runs.
             status = PF_INT_OK
             call integrate_abort("internal: the engine returned a status this driver does not " &
                                  // "know", context)
+            ! GCOVR_EXCL_STOP
         end select
 
     end function status_from_ier

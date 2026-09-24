@@ -2195,4 +2195,4 @@ contains
         call grp_narrow_scalar(n64, "gather", "count", n)
     end procedure grp_gather_bool_g32
     !
-end submodule parquet_tables_group
+end submodule parquet_tables_group ! GCOVR_EXCL_LINE

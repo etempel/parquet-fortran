@@ -1344,6 +1344,13 @@ contains
         call source%add_field("ts", "timestamp[ns,utc]")
         call source%add_field("tl", "list[timestamp[ms,utc]]")
         call source%add_field("plain", "float64")
+        ! A TIME column is the other half of the family and has its own arm: it carries a unit and
+        ! no timezone, so `time[us]` must come back with the unit and WITHOUT a `,utc` however the
+        ! flag happens to sit. And `timestamp[us]` is the sharp unit to check, because microseconds
+        ! is what a bare `timestamp` re-resolves to -- the one case where dropping the suffix
+        ! entirely would still round-trip to the same parsed column and look correct.
+        call source%add_field("tm", "time[us]")
+        call source%add_field("tus", "timestamp[us]")
 
         ! %get_field must hand back the token a caller could re-declare, not the stored base form.
         call source%get_field("ts", data_type=data_type)
@@ -1357,6 +1364,14 @@ contains
         call source%get_field("plain", data_type=data_type)
         call check(error, data_type == "float64", &
             "the non-temporal control should still return 'float64', got '" // data_type // "'")
+        if (allocated(error)) return
+        call source%get_field("tm", data_type=data_type)
+        call check(error, data_type == "time[us]", &
+            "get_field should return 'time[us]', got '" // data_type // "'")
+        if (allocated(error)) return
+        call source%get_field("tus", data_type=data_type)
+        call check(error, data_type == "timestamp[us]", &
+            "get_field should return 'timestamp[us]', got '" // data_type // "'")
         if (allocated(error)) return
 
         call target%init(table="derived")
@@ -1375,6 +1390,14 @@ contains
         if (allocated(error)) return
         call check(error, trim(target%cinfo%col(3)%data_type) == "float64", &
             "the non-temporal control should copy as float64")
+        if (allocated(error)) return
+        call target%add_field_from(source, "tm")
+        call target%add_field_from(source, "tus")
+        call check(error, target%cinfo%col(4)%time_unit == source%cinfo%col(4)%time_unit, &
+            "add_field_from should copy a time column's unit")
+        if (allocated(error)) return
+        call check(error, target%cinfo%col(5)%time_unit == source%cinfo%col(5)%time_unit, &
+            "add_field_from should copy a microsecond timestamp column's unit")
     end subroutine test_get_field_carries_temporal_unit
 
     !> The ACCEPTANCE side of the list and map columns' col_size:/array_size: rules, mirroring

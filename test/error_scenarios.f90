@@ -200,6 +200,10 @@ program error_scenarios
         call scenario_struct_protected_ok()
     case ("struct_timestamp_precision")
         call scenario_struct_timestamp_precision()
+    case ("map_write_millisecond_precision")
+        call scenario_map_write_millisecond_precision()
+    case ("qc_all_nan_range")
+        call scenario_qc_all_nan_range()
     case ("struct_time_precision")
         call scenario_struct_time_precision()
     case ("struct_temporal_precision_ok")
@@ -320,6 +324,10 @@ program error_scenarios
         call scenario_maml_map_bare_token()
     case ("maml_map_nested_value")
         call scenario_maml_map_nested_value()
+    case ("maml_text_list_bad_element")
+        call scenario_maml_text_list_bad_element()
+    case ("maml_text_map_bad_value")
+        call scenario_maml_text_map_bad_value()
     case ("list_write_type_mismatch")
         call scenario_list_write_type_mismatch()
     case ("list_write_uninitialized")
@@ -422,6 +430,14 @@ program error_scenarios
         call scenario_write_undeclared_column_string()
     case ("write_undeclared_column_string_compact")
         call scenario_write_undeclared_column_string_compact()
+    case ("write_undeclared_column_list")
+        call scenario_write_undeclared_column_list()
+    case ("write_undeclared_column_map")
+        call scenario_write_undeclared_column_map()
+    case ("write_undeclared_column_struct")
+        call scenario_write_undeclared_column_struct()
+    case ("write_map_nested_value")
+        call scenario_write_map_nested_value()
     case ("write_undeclared_column_int32_matrix")
         call scenario_write_undeclared_column_int32_matrix()
     case ("write_undeclared_column_int64_matrix")
@@ -750,6 +766,26 @@ program error_scenarios
         call scenario_row_mask_list_quoted()
     case ("row_mask_temporal_precision")
         call scenario_row_mask_temporal_precision()
+    case ("row_mask_list_column")
+        call scenario_row_mask_list_column()
+    case ("row_mask_map_column")
+        call scenario_row_mask_map_column()
+    case ("row_mask_struct_column")
+        call scenario_row_mask_struct_column()
+    case ("row_mask_quoted_integer")
+        call scenario_row_mask_quoted_integer()
+    case ("row_mask_quoted_real")
+        call scenario_row_mask_quoted_real()
+    case ("row_mask_bad_real")
+        call scenario_row_mask_bad_real()
+    case ("row_mask_quoted_bool")
+        call scenario_row_mask_quoted_bool()
+    case ("row_mask_bad_bool")
+        call scenario_row_mask_bad_bool()
+    case ("row_mask_unquoted_match")
+        call scenario_row_mask_unquoted_match()
+    case ("row_mask_unquoted_temporal")
+        call scenario_row_mask_unquoted_temporal()
     case ("table_filter_rows_shared")
         call scenario_table_filter_rows_shared()
     case ("row_mask_control")
@@ -1484,6 +1520,12 @@ program error_scenarios
         call scenario_sphere_polygon_size_mismatch()
     case ("sphere_polygon_nonfinite_vertex")
         call scenario_sphere_polygon_nonfinite_vertex()
+    case ("sphere_polygon_nan_vertex")
+        call scenario_sphere_polygon_nan_vertex()
+    case ("sphere_polygon_extreme_vertex")
+        call scenario_sphere_polygon_extreme_vertex()
+    case ("sphere_polygon_strict_short_way")
+        call scenario_sphere_polygon_strict_short_way()
     case ("sphere_polygon_dec_out_of_range")
         call scenario_sphere_polygon_dec_out_of_range()
     case ("sphere_polygon_bad_edge_rule")
@@ -3684,6 +3726,18 @@ program error_scenarios
         call scenario_table_group_add_agg_as_two_names()
     case ("table_group_add_agg_nan_to_null_exact")
         call scenario_table_group_add_agg_nan_to_null_exact()
+    case ("table_group_add_agg_weights_exact")
+        call scenario_table_group_add_agg_weights_exact()
+    case ("column_container_wrong_kind")
+        call scenario_column_container_wrong_kind()
+    case ("column_append_row_of_container")
+        call scenario_column_append_row_of_container()
+    case ("filter_set_name_too_long")
+        call scenario_filter_set_name_too_long()
+    case ("filter_bare_at_set_name")
+        call scenario_filter_bare_at_set_name()
+    case ("skycoord_text_long_separator")
+        call scenario_skycoord_text_long_separator()
     case ("table_group_stale_add_agg")
         call scenario_table_group_stale_add_agg()
     case ("table_group_stale_add_size")
@@ -3784,6 +3838,10 @@ program error_scenarios
         call scenario_table_group_agg_infinite_weight()
     case ("filter_temporal_set_mismatch")
         call scenario_filter_temporal_set_mismatch()
+    case ("filter_time_set_on_int")
+        call scenario_filter_time_set_on_int()
+    case ("filter_timestamp_set_on_int")
+        call scenario_filter_timestamp_set_on_int()
     case ("filter_temporal_literal_list")
         call scenario_filter_temporal_literal_list()
     case ("pool_double_free")
@@ -3948,6 +4006,10 @@ program error_scenarios
         call scenario_interpolate_slopes_inf()
     case ("interpolate_not_a_knot_too_few")
         call scenario_interpolate_not_a_knot_too_few()
+    case ("interpolate_linear_too_few")
+        call scenario_interpolate_linear_too_few()
+    case ("interpolate_pchip_too_few")
+        call scenario_interpolate_pchip_too_few()
     case ("interpolate_derivative_before_init")
         call scenario_interpolate_derivative_before_init()
     case ("interpolate_integral_before_init")
@@ -4544,6 +4606,81 @@ contains
         call parquet_write_column(writer, "not_a_real_column", col)
         call parquet_close_writer(writer)
     end subroutine scenario_write_undeclared_column_string_compact
+
+    !> The three CONTAINER write paths carry their own copy of the schema-enforced name check, so
+    !> each needs its own scenario: a list, a map and a struct column written under a name the
+    !> schema never declared.
+    subroutine scenario_write_undeclared_column_list()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_list_column) :: col
+
+        call col%init(PK_INT32)
+        call col%append_row([1_int32, 2_int32])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_list.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", col)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_list
+
+    subroutine scenario_write_undeclared_column_map()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: col
+
+        call col%init(PK_INT32)
+        call col%append_row(["a"], [1_int32])
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_map.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", col)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_map
+
+    subroutine scenario_write_undeclared_column_struct()
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        type(parquet_struct_column) :: col
+
+        call col%init(["v"], [PK_INT32], 1_int64)
+        schema = multitype_vector_schema()
+        call parquet_open_writer(writer, "test_run/error_scenario_undeclared_struct.parquet", schema)
+        call parquet_write_column(writer, "not_a_real_column", col)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_undeclared_column_struct
+
+    !> A map whose VALUE is itself a container. Phase 7 widened `%adopt_*` so such a column can be
+    !> built -- from a file or by hand -- while there is no nested MAML token to declare one with, so
+    !> the refusal is by KIND here rather than by the type-mismatch guard further down: that guard
+    !> would fire too, but its message points at the schema instead of at the real reason.
+    subroutine scenario_write_map_nested_value()
+        type(parquet_writer) :: writer
+        type(parquet_map_column) :: outer
+        type(parquet_list_column) :: inner
+        type(parquet_string_column) :: keys
+        type(parquet_column) :: ipay, kcol, vcol
+        class(parquet_container_column), allocatable :: cc
+        integer(int64), allocatable :: io(:), offs(:)
+        integer :: k
+
+        ! `map<string, list<int32>>`, built the only way there is: no MAML token declares a nested
+        ! container, so %adopt_rows over a value column that already holds one is the whole route.
+        call ipay%init(PK_INT32, nrows=4_int64)
+        do k = 1, 4
+            call ipay%set_at(int(k, int64), int(k, int32))
+        end do
+        io = [0_int64, 2_int64, 4_int64]
+        call inner%adopt_rows(io, ipay)
+        allocate(cc, source=inner)
+        call vcol%adopt_container(cc)
+        call keys%append_string("a")
+        call keys%append_string("b")
+        call kcol%adopt_string_column(keys)
+        offs = [0_int64, 1_int64, 2_int64]
+        call outer%adopt_rows(offs, kcol, vcol)
+        call parquet_open_writer(writer, "test_run/error_scenario_map_nested_value.parquet")
+        call parquet_write_column(writer, "m", outer)
+        call parquet_close_writer(writer)
+    end subroutine scenario_write_map_nested_value
 
     subroutine scenario_write_undeclared_column_int32_matrix()
         type(parquet_schema) :: schema
@@ -10311,6 +10448,128 @@ contains
         call t%row_mask('ts > "2024-01-31T12:30:00.0005"', keep)
         print '(a,i0)', "a sub-millisecond literal was accepted, kept = ", count(keep)
     end subroutine scenario_row_mask_temporal_precision
+
+    !> The three CONTAINER shapes, which the evaluator names from the resident column's kind rather
+    !> than from a schema. A list, a map and a struct each have many values per row, so a clause on
+    !> one has nothing to compare -- the same refusal a vector column gets, in the words
+    !> `parquet_check_set_column_shape` keeps for each shape. Three scenarios rather than one
+    !> because the three words are three separate arms, and a shape that fell through to the
+    !> default would still abort, just with the token instead of the phrase.
+    !>
+    !> Built IN MEMORY, and both halves of that are forced rather than chosen. A top-level struct is
+    !> never enumerated under its own name -- `parquet_get_column_names` expands one into a dotted
+    !> path per leaf -- so no file-backed table ever classifies a struct column at all. And a list
+    !> whose rows all have the same length becomes an ordinary vector column under the default
+    !> `list_columns="auto"`, which would prove the vector arm a second time instead of the list one;
+    !> the rows here are 1, 2 and 3 long so that the column stays a list however it is opened.
+    subroutine row_mask_container_scenario(rule)
+        character(len=*), intent(in) :: rule !! the rule to apply.
+        type(parquet_table) :: t
+        type(parquet_list_column) :: lc
+        type(parquet_map_column) :: mc
+        type(parquet_struct_column) :: sc
+        logical, allocatable :: keep(:)
+        character(len=8) :: fields(1)
+        integer :: kinds(1)
+
+        call lc%init(PK_INT32)
+        call lc%append_row([10_int32])
+        call lc%append_row([20_int32, 30_int32])
+        call lc%append_row([40_int32, 50_int32, 60_int32])
+        call mc%init(PK_INT32)
+        call mc%append_row(["a"], [1_int32])
+        call mc%append_row(["b"], [2_int32])
+        call mc%append_row(["c"], [3_int32])
+        fields(1) = "v"
+        kinds(1) = PK_INT32
+        call sc%init(fields, kinds, 3_int64)
+
+        call parquet_new_table(t)
+        call t%add_column("lst", lc)
+        call t%add_column("mp", mc)
+        call t%add_column("st", sc)
+        allocate(keep(t%nrows()))
+        call t%row_mask(rule, keep)
+        print '(a,i0)', "%row_mask on a container column was accepted, kept = ", count(keep)
+    end subroutine row_mask_container_scenario
+
+    !> A clause on a variable-length LIST column.
+    subroutine scenario_row_mask_list_column()
+        call row_mask_container_scenario("lst > 1")
+    end subroutine scenario_row_mask_list_column
+
+    !> A clause on a MAP column.
+    subroutine scenario_row_mask_map_column()
+        call row_mask_container_scenario("mp > 1")
+    end subroutine scenario_row_mask_map_column
+
+    !> A clause on a STRUCT column.
+    subroutine scenario_row_mask_struct_column()
+        call row_mask_container_scenario("st > 1")
+    end subroutine scenario_row_mask_struct_column
+
+    !> A QUOTED bound against an integer column. The quoting is the whole message: `id == "5"` is a
+    !> caller comparing a number against text, and taking the quotes off silently would make the
+    !> two engines disagree with the C++ one, which reads the same rule as a string comparison.
+    subroutine scenario_row_mask_quoted_integer()
+        call row_mask_scenario("test_run/row_mask_quoted_integer.parquet", 'id == "5"')
+    end subroutine scenario_row_mask_quoted_integer
+
+    !> The same mistake against a floating-point column, which has its own arm and its own wording.
+    subroutine scenario_row_mask_quoted_real()
+        call row_mask_scenario("test_run/row_mask_quoted_real.parquet", 'x == "1.5"')
+    end subroutine scenario_row_mask_quoted_real
+
+    !> An unquoted bound on a float column that is not a number and not a NaN spelling either. The
+    !> NaN spellings get their own message (scenario_row_mask_nan_bound); everything else lands
+    !> here, and the two arms are separate precisely so that `nan` can point at is_nan instead.
+    subroutine scenario_row_mask_bad_real()
+        call row_mask_scenario("test_run/row_mask_bad_real.parquet", "x > abc")
+    end subroutine scenario_row_mask_bad_real
+
+    !> A quoted bound on a BOOLEAN column: true and false are written unquoted, and a quoted one is
+    !> a string comparison against a column that holds no strings.
+    subroutine scenario_row_mask_quoted_bool()
+        call row_mask_scenario("test_run/row_mask_quoted_bool.parquet", 'flag == "true"')
+    end subroutine scenario_row_mask_quoted_bool
+
+    !> An unquoted bound on a boolean column that is not true or false. Accepting a number here (C's
+    !> "nonzero is true") would answer a rule the library never promised to read that way.
+    subroutine scenario_row_mask_bad_bool()
+        call row_mask_scenario("test_run/row_mask_bad_bool.parquet", "flag == 7")
+    end subroutine scenario_row_mask_bad_bool
+
+    !> A matcher's pattern must be double-quoted even on a string column -- `starts_with a` names
+    !> a bare token, and the three matchers share one guard for it.
+    subroutine scenario_row_mask_unquoted_match()
+        call row_mask_scenario("test_run/row_mask_unquoted_match.parquet", "name starts_with a")
+    end subroutine scenario_row_mask_unquoted_match
+
+    !> An UNQUOTED bound against a temporal column. A temporal literal is ISO-8601 text, so the
+    !> refusal names the spelling it wants rather than trying to read 5 as an instant.
+    subroutine scenario_row_mask_unquoted_temporal()
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: schema
+        type(parquet_table) :: t
+        type(parquet_timestamp) :: ts(3)
+        logical, allocatable :: keep(:)
+        integer :: i
+        character(len=*), parameter :: file = "test_run/row_mask_unquoted_temporal.parquet"
+
+        do i = 1, 3
+            call ts(i)%set(2024, 1, 31, 12, 30, i - 1)
+        end do
+        call schema%init("row_mask_unquoted_temporal")
+        call schema%add_field("ts", "timestamp[ms]")
+        call parquet_open_writer(writer, file, schema=schema)
+        call parquet_write_column(writer, "ts", ts)
+        call parquet_close_writer(writer)
+
+        call parquet_open_table(t, file)
+        allocate(keep(t%nrows()))
+        call t%row_mask("ts > 5", keep)
+        print '(a,i0)', "an unquoted temporal bound was accepted, kept = ", count(keep)
+    end subroutine scenario_row_mask_unquoted_temporal
 
     !> %filter_rows is row-structural, so a table shared across threads refuses it -- and the two
     !! EXPRESSION forms have to run that guard themselves, because they build the mask first and
@@ -24131,6 +24390,43 @@ contains
         print '(a,i0)', "unexpectedly built a polygon with an infinite vertex, vertex count ", bad%size()
     end subroutine scenario_sphere_polygon_nonfinite_vertex
 
+    !> The other two non-finite spellings, which the message has to render rather than propagate: a
+    !> NaN right ascension and a MINUS-infinite declination on the same vertex, so one abort prints
+    !> both. `sphere_polygon_nonfinite_vertex` above covers only plus infinity, and a renderer that
+    !> handled that one alone would print a blank or a compiler-dependent word for these.
+    subroutine scenario_sphere_polygon_nan_vertex()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_negative_inf
+        type(pf_sky_polygon) :: bad
+        call bad%init([0.0_real64, ieee_value(0.0_real64, ieee_quiet_nan), 10.0_real64], &
+                      [0.0_real64, ieee_value(0.0_real64, ieee_negative_inf), 10.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly built a polygon with a NaN vertex, vertex count ", bad%size()
+    end subroutine scenario_sphere_polygon_nan_vertex
+
+    !> A vertex whose magnitude leaves the fixed-point range the message prints in. The renderer
+    !> switches to an exponent form beyond 1e100 and below 1e-99, and both ends are on this vertex:
+    !> a right ascension of 1e-200 and a declination of 1e200, which is what makes it out of range.
+    subroutine scenario_sphere_polygon_extreme_vertex()
+        type(pf_sky_polygon) :: bad
+        call bad%init([0.0_real64, 1.0e-200_real64, 10.0_real64], &
+                      [0.0_real64, 1.0e200_real64, 10.0_real64])   ! -> aborts
+        print '(a,i0)', "unexpectedly built a polygon with a 1e200 declination, vertex count ", bad%size()
+    end subroutine scenario_sphere_polygon_extreme_vertex
+
+    !> `strict = .true.` refusing a band written the SHORT way round: an RA extent above 180 degrees
+    !> whose vertices sit in two clusters, one within 90 degrees of each end. Such a polygon names
+    !> the complement of what the caller meant, and the flag exists to say so rather than to measure
+    !> the wrong region in silence. Next to a pole so the extent still fits inside one hemisphere.
+    subroutine scenario_sphere_polygon_strict_short_way()
+        type(pf_sky_polygon) :: taken, refused
+        ! The control: the SAME vertices without strict=, which are taken as written.
+        call taken%init([0.0_real64, 5.0_real64, 205.0_real64, 200.0_real64], &
+                        [84.0_real64, 88.0_real64, 88.0_real64, 84.0_real64])
+        print '(a,es12.4)', "the same vertices without strict= built an area of ", taken%area()
+        call refused%init([0.0_real64, 5.0_real64, 205.0_real64, 200.0_real64], &
+                          [84.0_real64, 88.0_real64, 88.0_real64, 84.0_real64], strict=.true.)   ! -> aborts
+        print '(a,es12.4)', "unexpectedly built a short-way band under strict=, area ", refused%area()
+    end subroutine scenario_sphere_polygon_strict_short_way
+
     !> A declination beyond a pole is refused. The control is the whole sky, both poles included.
     subroutine scenario_sphere_polygon_dec_out_of_range()
         type(pf_sky_polygon) :: whole, bad
@@ -27011,6 +27307,66 @@ contains
         call parquet_close_writer(writer)
     end subroutine scenario_struct_timestamp_precision
 
+    !> The same guard with a MILLISECOND unit, which only a map write can declare.
+    !>
+    !> A struct field's unit cannot be declared at all, so `scenario_struct_timestamp_precision`
+    !> above always measures against microseconds -- the unit a bare `timestamp` resolves to. The
+    !> divisor comes from a per-unit table that is a second copy of `unit_scale`
+    !> (src/parquet_temporal.f90), and only a declared unit tells the two apart: 500 MICROseconds is
+    !> a whole number of microseconds, so it goes through the scenario above and must be refused
+    !> here. The control is the same instant on a whole millisecond, written first.
+    subroutine scenario_map_write_millisecond_precision()
+        type(parquet_writer) :: writer
+        type(parquet_schema) :: sch
+        type(parquet_map_column) :: mc
+        type(parquet_timestamp) :: ts(1)
+
+        call sch%init("map_ms")
+        call sch%add_field("m", "map[timestamp[ms]]")
+        call parquet_parse_maml(sch)
+        call ts(1)%set(2024, 3, 1, 12, 0, 0, 7000000)   ! 7 ms exactly: accepted
+        call mc%init(PK_TIMESTAMP)
+        call mc%append_row(["a"], ts(1:1))
+        call parquet_open_writer(writer, "test_run/error_scenario_map_ms_ok.parquet", sch)
+        call parquet_write_column(writer, "m", mc)
+        call parquet_close_writer(writer)
+        print '(a)', "a whole-millisecond map value was written"
+
+        call ts(1)%set(2024, 3, 1, 12, 0, 0, 500000)    ! 500 us: whole microseconds, not milliseconds
+        call mc%clear()
+        call mc%init(PK_TIMESTAMP)
+        call mc%append_row(["a"], ts(1:1))
+        call parquet_open_writer(writer, "test_run/error_scenario_map_ms_bad.parquet", sch)
+        call parquet_write_column(writer, "m", mc)   ! -> aborts
+        call parquet_close_writer(writer)
+        print '(a)', "unexpectedly wrote a sub-millisecond map value"
+    end subroutine scenario_map_write_millisecond_precision
+
+    !> **Every valid element a NaN, under a declared qc range.** A NaN is already a violation --
+    !> every comparison against one is false -- but it is not a number an observed range can order,
+    !> and it is deliberately kept out of the running min/max: `min`/`max` over a quiet NaN compile
+    !> to `minsd`/`maxsd`, which raise IEEE_INVALID and end the process under nagfor's default
+    !> traps, in an optimised build only. So when nothing else was seen the range has to be
+    !> RECONSTRUCTED from the NaN that was set aside, or the warning would report `[0, 0]` -- a real
+    !> observed range, and the wrong one, for a column that holds no number at all.
+    !>
+    !> A warning, not an abort: the exit status is 0 and the message is the whole assertion.
+    subroutine scenario_qc_all_nan_range()
+        use ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(parquet_schema) :: schema
+        type(parquet_writer) :: writer
+        real(real32) :: v(3)
+
+        v = ieee_value(0.0_real32, ieee_quiet_nan)
+        call schema%init(table="qc_all_nan")
+        call schema%add_field("x", "float32", qc_min="0", qc_max="10")
+        call parquet_parse_maml(schema)
+        call parquet_open_writer(writer, "test_run/error_scenario_qc_all_nan.parquet", schema, qc=.true.)
+        call parquet_write_column(writer, "x", v)
+        call parquet_close_writer(writer)
+        print '(a)', "the all-NaN qc column was written"
+    end subroutine scenario_qc_all_nan_range
+
     !> The same refusal for a struct TIME field, which reaches it by a different route.
     !!
     !! A time field crosses to C++ as canonical nanoseconds-of-day and is refused by
@@ -27782,6 +28138,38 @@ contains
         call schema%add_field("m", "map[list[int32]]")
         call parquet_parse_maml(schema)
     end subroutine scenario_maml_map_nested_value
+
+    !> The same two refusals reached through MAML TEXT rather than through `%add_field`.
+    !>
+    !> `%add_field` validates its token before it writes a single line, so a container token it
+    !> refuses never reaches the line parser at all -- and the line parser has its own arm for one:
+    !> a well-shaped `list[...]`/`map[...]` whose inner type is not a type is stored VERBATIM, so
+    !> that `parquet_validate_maml` can name what was written instead of a canonical form nobody
+    !> asked for. A `.maml` file on disk is exactly this route, which is why the arm exists.
+    subroutine scenario_maml_text_list_bad_element()
+        type(parquet_schema) :: schema
+        schema%maml%name = "text_list_bad.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: text_list_bad", &
+            "fields:", &
+            "- name: l", &
+            "  data_type: list[list[int32]]" ]
+        call parquet_parse_maml(schema)
+        print '(a)', "unexpectedly parsed a list token whose element is a container"
+    end subroutine scenario_maml_text_list_bad_element
+
+    !> The map twin of the scenario above, one level of container up.
+    subroutine scenario_maml_text_map_bad_value()
+        type(parquet_schema) :: schema
+        schema%maml%name = "text_map_bad.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: text_map_bad", &
+            "fields:", &
+            "- name: m", &
+            "  data_type: map[nosuchtype]" ]
+        call parquet_parse_maml(schema)
+        print '(a)', "unexpectedly parsed a map token whose value is not a type"
+    end subroutine scenario_maml_text_map_bad_value
 
     !> Reading a struct column whose field is a LIST. Phase 4 refused this and Phase 7 reads it.
     !!
@@ -32205,6 +32593,96 @@ contains
         call grp%add_agg("key", "sum", kt, "s2", exact=.true., nan_to_null=.true.)
         print '(a,i0)', "unexpectedly accepted nan_to_null= with exact=, cols=", kt%ncols()
     end subroutine scenario_table_group_add_agg_nan_to_null_exact
+
+    !> `%container_ptr` on a column that holds no container. Every caller of it is about to
+    !> dereference what it hands back, so refusing by NAME is the only answer that faults where the
+    !> mistake is; a null pointer would fault somewhere else entirely, in code that is correct.
+    subroutine scenario_column_container_wrong_kind()
+        type(parquet_column) :: col
+        class(parquet_container_column), pointer :: p
+
+        call col%init(PK_INT32, nrows=2_int64)
+        call col%container_ptr(p)   ! an int32 column is not a container -> aborts
+        print '(a,i0)', "unexpectedly aliased a container in an int32 column, rows=", col%length()
+    end subroutine scenario_column_container_wrong_kind
+
+    !> `%append_row_of` from a CONTAINER column. Copying one row of a list, map or struct means
+    !> copying a whole variable-length row into the destination's payload, which this primitive has
+    !> no route for yet -- so it says that, rather than falling through to the message about a
+    !> column with no active storage, which is not what is wrong.
+    subroutine scenario_column_append_row_of_container()
+        type(parquet_column) :: dst, src
+        type(parquet_list_column) :: lsrc, ldst
+        class(parquet_container_column), allocatable :: cc
+
+        ! BOTH columns are lists of the same payload kind, so the kind-agreement guard above the
+        ! storage switch passes and the container arm itself is what refuses.
+        call lsrc%init(PK_INT32)
+        call lsrc%append_row([1_int32, 2_int32])
+        allocate(cc, source=lsrc)
+        call src%adopt_container(cc)
+        call ldst%init(PK_INT32)
+        call ldst%append_row([9_int32])
+        allocate(cc, source=ldst)
+        call dst%adopt_container(cc)
+        call dst%append_row_of(src, 1_int64)   ! -> aborts
+        print '(a,i0)', "unexpectedly appended a container row, rows=", dst%length()
+    end subroutine scenario_column_append_row_of_container
+
+    !> A set name past the 64-character limit. The store keys sets by a fixed-width name, so a
+    !> longer one would be silently truncated onto another set's -- which is why the limit is a
+    !> refusal rather than a trim.
+    subroutine scenario_filter_set_name_too_long()
+        type(parquet_filter) :: filt
+
+        call filt%bind("a_set_name_that_is_deliberately_far_longer_than_the_sixty_four_character_limit", &
+                       [1_int32, 2_int32])   ! -> aborts
+        call filt%add("v in @a_set_name_that_is_deliberately_far_longer_than_the_sixty_four_character_limit")
+        print '(a)', "unexpectedly bound a set under an over-long name"
+    end subroutine scenario_filter_set_name_too_long
+
+    !> A bare `@` with no set name after it. The tokenizer has a separate arm for it because the
+    !> general "not a set" message names the literal the caller wrote, and `@` alone is not a
+    !> literal -- it is a name that was never typed.
+    subroutine scenario_filter_bare_at_set_name()
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int64) :: nrows
+        character(len=*), parameter :: file = "test_run/filter_bare_at.parquet"
+
+        ! `%add` only stores the rule; it is applied that reads it, so the abort comes at open.
+        call write_list_scenario_fixture(file)
+        call filt%add("id in @")
+        call parquet_open_reader(reader, file, filter=filt)   ! -> aborts
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        print '(a,i0)', "unexpectedly parsed a rule whose set name is a bare @, rows=", nrows
+    end subroutine scenario_filter_bare_at_set_name
+
+    !> A separator far longer than any the writers accept. The refusal quotes what it was given, and
+    !> caps that quotation at 100 characters so a caller who passed a whole buffer by mistake gets a
+    !> message rather than the buffer.
+    subroutine scenario_skycoord_text_long_separator()
+        character(len=:), allocatable :: text
+
+        call pf_dec2str(-12.5_real64, text, sep=repeat("x", 150))   ! -> aborts
+        print '(a,a)', "unexpectedly wrote with a 150-character separator: ", text
+    end subroutine scenario_skycoord_text_long_separator
+
+    !> `weights=`/`weight_column=` with `exact=.true.`. The exact int64 family is unweighted by
+    !> definition, so an option it cannot honour is refused rather than ignored -- the twin of
+    !> scenario_table_group_add_agg_nan_to_null_exact, and its own arm of the same guard.
+    subroutine scenario_table_group_add_agg_weights_exact()
+        type(parquet_table) :: t, kt
+        type(parquet_grouping) :: grp
+        call table_group_scenario_fixture(t)
+        call t%group_by("key", grp)
+        call grp%key_table(kt)
+        call grp%add_agg("key", "sum", kt, "s", exact=.true.)
+        print '(a,i0)', "add_agg exact= ran, cols=", kt%ncols()
+        call grp%add_agg("key", "sum", kt, "s2", exact=.true., weight_column="x")
+        print '(a,i0)', "unexpectedly accepted weight_column= with exact=, cols=", kt%ncols()
+    end subroutine scenario_table_group_add_agg_weights_exact
     !
     !> `%add_agg` is a per-group query, so it runs the generation check every other one runs: a
     !! stale grouping would put in-range row numbers' answers onto a summary whose key column
@@ -32912,6 +33390,41 @@ contains
         call parquet_get_nrows(r, n)
         print '(a,i0)', "a date set was applied to a timestamp column, nrows=", n
     end subroutine scenario_filter_temporal_set_mismatch
+    !
+    !> The other two temporal families against a column that is not temporal at all. The refusal
+    !> names the SET's family, and each family has its own word -- so a set whose word was wrong
+    !> would still refuse the clause, with a message pointing at the wrong kind of set.
+    subroutine scenario_filter_time_set_on_int()
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        type(parquet_filter) :: filt
+        type(parquet_time) :: tm(1)
+        integer(int64) :: n
+        call tm(1)%set(12, 30, 0)
+        call parquet_open_writer(w, "test_run/es_filter_time_set_on_int.parquet")
+        call parquet_write_column(w, "v", [1_int32, 2_int32])
+        call parquet_close_writer(w)
+        call filt%add_in("v", tm)
+        call parquet_open_reader(r, "test_run/es_filter_time_set_on_int.parquet", filter=filt)
+        call parquet_get_nrows(r, n)
+        print '(a,i0)', "a time set was applied to an int32 column, nrows=", n
+    end subroutine scenario_filter_time_set_on_int
+    !
+    subroutine scenario_filter_timestamp_set_on_int()
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        type(parquet_filter) :: filt
+        type(parquet_timestamp) :: ts(1)
+        integer(int64) :: n
+        call ts(1)%set(2024, 1, 31, 12, 30, 0)
+        call parquet_open_writer(w, "test_run/es_filter_ts_set_on_int.parquet")
+        call parquet_write_column(w, "v", [1_int32, 2_int32])
+        call parquet_close_writer(w)
+        call filt%add_in("v", ts)
+        call parquet_open_reader(r, "test_run/es_filter_ts_set_on_int.parquet", filter=filt)
+        call parquet_get_nrows(r, n)
+        print '(a,i0)', "a timestamp set was applied to an int32 column, nrows=", n
+    end subroutine scenario_filter_timestamp_set_on_int
     !
     !> A literal list on a temporal column is refused naming the %bind route: a member would need
     !! the column's stored unit to convert, which is the text path's job and not a list's.
@@ -34091,6 +34604,24 @@ contains
         call c%init([1.0_real64, 2.0_real64, 3.0_real64], [1.0_real64, 4.0_real64, 9.0_real64], bc="not_a_knot")
         print '(a, l1)', "accepted three points for bc=""not_a_knot"", built: ", c%is_initialised()
     end subroutine scenario_interpolate_not_a_knot_too_few
+    !
+    !> ONE point for `method="linear"`. Two is the floor for every method but the not-a-knot spline,
+    !> and the message names the method the caller asked for rather than the floor alone -- so each
+    !> method has its own arm, and each arm needs its own scenario to be seen at all.
+    subroutine scenario_interpolate_linear_too_few()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64], [1.0_real64], method="linear")
+        print '(a, l1)', "accepted one point for method=""linear"", built: ", c%is_initialised()
+    end subroutine scenario_interpolate_linear_too_few
+    !
+    !> The same for `method="pchip"`, whose slopes need a segment to be slopes of.
+    subroutine scenario_interpolate_pchip_too_few()
+        type(pf_interp_1d) :: c
+
+        call c%init([1.0_real64], [1.0_real64], method="pchip")
+        print '(a, l1)', "accepted one point for method=""pchip"", built: ", c%is_initialised()
+    end subroutine scenario_interpolate_pchip_too_few
     !
     !> Differentiating an object that was never built. `%derivative` is `pure`, so its result is
     !> printed: an unused pure call may be deleted, and the abort with it.

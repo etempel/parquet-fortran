@@ -541,8 +541,10 @@ contains
         ! Deviation 6: the driver refuses this input before the engine sees it, so reaching it is
         ! a defect in the driver rather than a status a caller should have to read.
         if (epsabs <= 0.0_real64 .and. epsrel < max(50.0_real64*EPMACH, 0.5e-28_real64)) then
+            ! GCOVR_EXCL_START -- not reachable: deviation 6 above, the driver refuses this pair first.
             call integrate_abort("internal: the engine was given a tolerance pair the driver " &
                                  // "should have refused", context)
+            ! GCOVR_EXCL_STOP
         end if
 
         main: block

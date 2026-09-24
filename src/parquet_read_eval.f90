@@ -157,8 +157,15 @@ contains
             return
         end if
         if (type_token == "") then
+            ! GCOVR_EXCL_START -- not reachable, and kept for the direction it fails in.
+            ! parquet_filter_column_tokens leaves the type token empty for exactly the container
+            ! and vector kinds, and gives every one of those a shape other than "scalar" -- so the
+            ! guard above has already returned by the time this could fire. What it protects is a
+            ! kind added to that helper LATER with no token here: this refuses it outright, where
+            ! falling through to the `select case` below would compare it as some guessed type.
             errmsg = "column '" // trim(column) // "' has a type that filtering does not support"
             return
+            ! GCOVR_EXCL_STOP
         end if
 
         ! ---- The two nullness operators: the ONLY ones a Null row can answer true or false for --
@@ -198,8 +205,16 @@ contains
         ! ---- Everything else is a comparison, so resolve the operator once ------------------------
         call parquet_filter_cmp_of(low, cmp)
         if (cmp == 0) then
+            ! GCOVR_EXCL_START -- not reachable through the library, and kept for the same reason
+            ! the tokenizer keeps its own unknown-operator arm. A leaf only ever arrives here from
+            ! parquet_parse_filter_rules, whose tokenizer accepts a closed set of operators: the
+            ! nullness, value-class, set and substring ones are consumed by the branches above, and
+            ! each of the six left ('>', '>=', '<', '<=', '==', '/=') has a CMP_* code. A seventh
+            ! comparison spelling added to that tokenizer and not to parquet_filter_cmp_of would be
+            ! refused by name here rather than compared under whatever CMP_NONE happened to mean.
             errmsg = "unsupported operator '" // trim(op) // "' on column '" // trim(column) // "'"
             return
+            ! GCOVR_EXCL_STOP
         end if
 
         select case (kind)
@@ -293,8 +308,18 @@ contains
             ns_per_unit = parquet_ns_per_sec/unit_scale_for(use_unit)
             call parquet_eval_temporal_leaf(col, kind, nrows, raw, ns_per_unit, use_unit, cmp, out)
         case default
+            ! GCOVR_EXCL_START -- not reachable: the nine kinds with arms above are exactly the nine
+            ! parquet_filter_column_tokens gives a non-empty type token, and any other kind has
+            ! already been refused by the two guards at the top of this procedure. Kept so that a
+            ! tenth scalar kind given a token there but no arm here is refused rather than left
+            ! unanswered.
+            ! The bare `return` below registers a positive hit while the assignment above it -- the
+            ! same never-taken branch -- registers none: a gcov attribution artifact, the epilogue's
+            ! count landing on it, exactly as documented on parquet_tokenize_filter_rule's own
+            ! unknown-operator arm in src/parquet_read.f90.
             errmsg = "column '" // trim(column) // "' has a type that filtering does not support"
             return
+            ! GCOVR_EXCL_STOP
         end select
         ok = .true.
     end procedure parquet_eval_filter_leaf
@@ -420,7 +445,11 @@ contains
         case (">=")
             cmp = CMP_GE
         case default
+            ! GCOVR_EXCL_START -- not reachable: the one caller has already consumed every
+            ! non-comparison operator the tokenizer can produce, so `low` is one of the six
+            ! spellings above. The arm is what makes the caller's own refusal possible at all.
             cmp = CMP_NONE
+            ! GCOVR_EXCL_STOP
         end select
     end subroutine parquet_filter_cmp_of
 

@@ -81,6 +81,10 @@ contains
                          test_polygon_gc_contains), &
             new_unittest("polygon areas match closed forms and decompositions, orientation-free", &
                          test_polygon_area), &
+            new_unittest("a crossing polygon is measured by its even-odd interior under both edge rules", &
+                         test_polygon_self_intersecting), &
+            new_unittest("strict= accepts a polygon that is not a short-way band, under both edge rules", &
+                         test_polygon_strict_accepts), &
             new_unittest("polygon draws are uniform per solid angle and inside, with a chart-uniform control", &
                          test_polygon_random_is_uniform_and_inside), &
             new_unittest("a polygon draw takes 1/%acceptance candidates, and a whole-sky box takes one", &
@@ -726,6 +730,97 @@ contains
         call check(error, abs(poly%area() - rev%area()) <= 1.0e-13_real64 * rev%area(), &
             "a chart polygon shifted by a whole turn in right ascension changes its area")
     end subroutine test_polygon_area
+
+    !> A SELF-INTERSECTING polygon is measured by sampling its even-odd interior, under both edge
+    !! rules, because the signed sum the two exact formulas compute is not that region at all.
+    !!
+    !! The fixture is a bow tie: the four corners of a 20-degree square taken in crossing order, so
+    !! the two diagonals meet in the middle and the interior is the two triangles left and right of
+    !! that meeting point. What it must come to is HALF the simple quadrilateral on the same four
+    !! corners, and that is what makes the assertion evidence: the signed sum over these vertices
+    !! happens to be zero (the two lobes have opposite orientation), so a build that had not
+    !! switched to the sampled measure would abort here rather than answer half.
+    !!
+    !! **Half, but not exactly half, and the tolerance says which parts are which.** The two lobes
+    !! put their width at the middle declination, where `cos(dec)` is largest, so the true ratio is
+    !! 0.5013 rather than 0.5 for this fixture -- and the great-circle rule adds the gnomonic
+    !! projection's own distortion over 20 degrees. The measure itself is a 512 by 512 sweep of the
+    !! bounding region, which carries about one part in a hundred on a boundary this long. 10 per
+    !! cent covers all three together and still separates "half" from the answers a broken measure
+    !! gives: the whole box, nothing, or twice the interior.
+    subroutine test_polygon_self_intersecting(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        !> The square's four corners in CROSSING order: the edges 1-2 and 3-4 are its diagonals.
+        real(real64), parameter :: BRA(4) = [0.0_real64, 20.0_real64, 20.0_real64, 0.0_real64]
+        real(real64), parameter :: BDEC(4) = [0.0_real64, 20.0_real64, 0.0_real64, 20.0_real64]
+        !> The same four corners in order round the square.
+        real(real64), parameter :: SRA(4) = [0.0_real64, 20.0_real64, 20.0_real64, 0.0_real64]
+        real(real64), parameter :: SDEC(4) = [0.0_real64, 0.0_real64, 20.0_real64, 20.0_real64]
+        type(pf_sky_polygon) :: bow, square
+        real(real64) :: ratio
+        integer :: rule
+
+        do rule = 0, 1
+            call bow%clear()
+            call square%clear()
+            call bow%init(BRA, BDEC, rule)
+            call square%init(SRA, SDEC, rule)
+            call check(error, bow%area() > 0.0_real64, &
+                "a crossing polygon must be given the area of its even-odd interior, not the signed sum")
+            if (allocated(error)) return
+            ratio = bow%area() / square%area()
+            call check(error, abs(ratio - 0.5_real64) <= 0.1_real64, &
+                "a bow tie must cover half the square on its own four corners, edge rule " // achar(iachar("0") + rule))
+            if (allocated(error)) return
+        end do
+        call bow%clear()
+        call square%clear()
+    end subroutine test_polygon_self_intersecting
+
+    !> `strict = .true.` is a REFUSAL, and this is the side of it that must go through: a polygon
+    !! that is not a suspected short-way band builds exactly as it does without the flag.
+    !!
+    !! The refusal itself aborts, so it lives in `sphere_polygon_strict_short_way`. What that
+    !! scenario cannot show is where the test stops, and the screen has two separate ways of
+    !! deciding a polygon is innocent -- both of them reached here, because either one failing open
+    !! would turn `strict=` into a flag that refuses ordinary work:
+    !!
+    !!  * an RA extent of 180 degrees or less, which no band written the long way round can have;
+    !!  * an extent above that with a vertex more than 90 degrees from BOTH ends of it, which a band
+    !!    written as two clusters at the ends cannot have.
+    !!
+    !! Both fixtures sit next to a pole so that a wide RA extent still fits inside one hemisphere.
+    subroutine test_polygon_strict_accepts(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        !> A narrow box: 10 degrees of RA, so the extent alone clears it.
+        real(real64), parameter :: NRA(4) = [10.0_real64, 20.0_real64, 20.0_real64, 10.0_real64]
+        real(real64), parameter :: NDEC(4) = [80.0_real64, 80.0_real64, 85.0_real64, 85.0_real64]
+        !> A WIDE one: 200 degrees of RA, with the middle vertex 100 degrees from each end.
+        real(real64), parameter :: WRA(4) = [0.0_real64, 100.0_real64, 200.0_real64, 100.0_real64]
+        real(real64), parameter :: WDEC(4) = [86.0_real64, 84.0_real64, 86.0_real64, 88.0_real64]
+        type(pf_sky_polygon) :: plain, strict
+        integer :: rule
+
+        do rule = 0, 1
+            call plain%clear()
+            call strict%clear()
+            call plain%init(NRA, NDEC, rule)
+            call strict%init(NRA, NDEC, rule, strict=.true.)
+            call check(error, strict%area() == plain%area(), &
+                "strict= changed a narrow polygon's area, edge rule " // achar(iachar("0") + rule))
+            if (allocated(error)) return
+            call plain%clear()
+            call strict%clear()
+            call plain%init(WRA, WDEC, rule)
+            call strict%init(WRA, WDEC, rule, strict=.true.)
+            call check(error, strict%area() == plain%area(), &
+                "strict= refused a wide polygon whose vertices are not clustered at the ends, edge rule " // &
+                achar(iachar("0") + rule))
+            if (allocated(error)) return
+        end do
+        call plain%clear()
+        call strict%clear()
+    end subroutine test_polygon_strict_accepts
 
     !> Chart and great-circle draws: inside, right ascension in `[0, 360)`, and uniform per solid
     !! angle over cells of exactly known area, with a control drawing uniformly in the chart instead.

@@ -3012,8 +3012,9 @@ contains
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
         type(parquet_reader) :: reader
-        type(parquet_filter) :: filt, f32_in, f32_bind, f32_miss
-        integer(int32), allocatable :: from_list(:), from_bind(:), from_r32(:), from_r32_bind(:)
+        type(parquet_filter) :: filt, f32_in, f32_bind, f32_miss, f_masked
+        integer(int32), allocatable :: from_list(:), from_bind(:), from_r32(:), from_r32_bind(:), from_masked(:)
+        real(real64) :: masked_set(3)
         real(real32) :: y(6) = [1.0_real32, 2.5_real32, -4.0_real32, 8.0_real32, 2.5_real32, 0.0_real32]
         integer(int32) :: u(6) = [1, 2, 3, 4, 5, 6]
         integer(int64) :: nrows
@@ -3086,6 +3087,24 @@ contains
         call parquet_close_reader(reader)
         call check(error, nrows == 0, &
             "a real32 member no row holds must select nothing rather than rounding onto one")
+        if (allocated(error)) return
+
+        ! **A NaN member the mask drops is not a member, so it must not be refused.** Binding a real
+        ! set refuses a NaN outright -- it could never match, so it is a mistake in the rule rather
+        ! than a set that selects less -- and that refusal has to skip the elements `is_valid=`
+        ! marks off, or a caller masking a NaN out is aborted for a member they explicitly excluded.
+        ! The surviving two are the same members as the unmasked set above, so the rows must match
+        ! it exactly: the mask drops a member and nothing else.
+        masked_set = [2.5_real64, 0.0_real64, -4.0_real64]
+        masked_set(2) = ieee_value(0.0_real64, ieee_quiet_nan)
+        call f_masked%add_in("y", masked_set, is_valid=[.true., .false., .true.])
+        call parquet_open_reader(reader, file, filter=f_masked)
+        call parquet_get_nrows(reader, nrows)
+        allocate(from_masked(nrows))
+        if (nrows > 0) call parquet_read_column(reader, "u", from_masked)
+        call parquet_close_reader(reader)
+        call check(error, size(from_masked) == size(from_list) .and. all(from_masked == from_list), &
+            "a masked-off NaN member must be dropped, not refused, and must change no row")
     end subroutine test_set_on_float32_column
 
     ! ---- Temporal sets (S7 answer F4) --------------------------------------------------------
@@ -3181,9 +3200,9 @@ contains
     subroutine test_in_timestamp_set_across_units(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader
-        type(parquet_filter) :: filt, f_masked
+        type(parquet_filter) :: filt, f_masked, f_empty, f_empty_not
         type(parquet_timestamp) :: tsset(3)
-        integer(int64) :: nrows
+        integer(int64) :: nrows, all_rows
         character(len=*), parameter :: file = "test_run/filter_in_timestamp_units.parquet"
 
         call write_temporal_fixture(file)   ! ts = 2024-01-31T12:30:00 .. :05 at [ms]
@@ -3201,6 +3220,27 @@ contains
         call parquet_get_nrows(reader, nrows)
         call parquet_close_reader(reader)
         call check(error, nrows == 1, "is_valid= drops a timestamp member")
+        if (allocated(error)) return
+
+        ! Every member masked off: an EMPTY set, which the two-component key store has to build
+        ! without ever asking the scratch map for keys it does not have. An empty set matches no
+        ! row, and `not_in` an empty set matches every row -- the pair is what separates "the set
+        ! is empty" from "the clause was dropped", which would also select nothing on the first
+        ! call and everything on the second only by accident.
+        call parquet_open_reader(reader, file)
+        call parquet_get_nrows(reader, all_rows)
+        call parquet_close_reader(reader)
+        call f_empty%add_in("ts", tsset, is_valid=[.false., .false., .false.])
+        call parquet_open_reader(reader, file, filter=f_empty)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == 0, "an empty timestamp set must match no row")
+        if (allocated(error)) return
+        call f_empty_not%add_in("ts", tsset, is_valid=[.false., .false., .false.], negate=.true.)
+        call parquet_open_reader(reader, file, filter=f_empty_not)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        call check(error, nrows == all_rows, "not_in an empty timestamp set must match every row")
     end subroutine test_in_timestamp_set_across_units
     !
     !> The two engines, one answer: %row_mask over the materialized table selects the rows the

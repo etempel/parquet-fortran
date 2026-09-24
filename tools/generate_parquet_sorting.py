@@ -5798,8 +5798,22 @@ contains
         w("        first_idx = 0_int64")
         w("        want_len = present(run_len)")
         w("        if (want_len) then")
+        if tag == "col":
+            # No caller supplies `run_len` to the type-erased impl: pf_value_counts has a specific
+            # for each element type and for a string column, and the parquet_column form is reached
+            # only by pf_unique_count. The argument is kept so every impl has one signature.
+            w("            ! GCOVR_EXCL_START -- no caller supplies `run_len` to THIS impl.")
+            w("            ! `pf_value_counts` has a specific for each of the nine element types and")
+            w("            ! for a string column, and every one of them asks for the run lengths; the")
+            w("            ! type-erased `parquet_column` form is reached only by `pf_unique_count`,")
+            w("            ! which wants the distinct COUNT and nothing else. The argument is kept so")
+            w("            ! this impl has the same signature as its nine siblings -- a")
+            w("            ! `pf_value_counts` specific over a column would then need no change here")
+            w("            ! -- and the body is kept with it.")
         w("            allocate(run_len(max(n, 1_int64)))")
         w("            run_len = 0_int64")
+        if tag == "col":
+            w("            ! GCOVR_EXCL_STOP")
         w("        end if")
         w("        ndist = 0_int64")
         w("        nnull = 0_int64")

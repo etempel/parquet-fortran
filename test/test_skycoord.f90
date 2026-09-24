@@ -1016,6 +1016,15 @@ contains
             pf_position_angle_deg(10.0_real64, -90.0_real64, 250.0_real64, -90.0_real64) == 0.0_real64, &
             "a coincident pair -- one position written two turns apart, or two labels of one pole -- has an angle")
         if (allocated(error)) return
+        ! The pair that is coincident in the ARITHMETIC but not in the guard above: the two poles.
+        ! Their declinations differ, so the guard does not fire, and the formula then produces an
+        ! exact 0 for both components -- `cos(+/-90)` is exact by construction in skc_dec_sin_cos --
+        ! which the trailing arm has to answer rather than hand to `atan2(0, 0)`. It is the only
+        ! input that reaches that arm: `y` vanishes only at a pole or at `dl` 0 or 180, and `x` then
+        ! vanishes only when BOTH positions are poles.
+        call check(error, pf_position_angle_deg(10.0_real64, -90.0_real64, 250.0_real64, 90.0_real64) &
+            == 0.0_real64, "the angle from one pole to the other is not zero")
+        if (allocated(error)) return
         got = pf_position_angle_deg(0.0_real64, 0.0_real64, 0.0_real64, -1.0_real64)
         call check(error, abs(got - 180.0_real64) <= 1.0e-12_real64, "due south is not position angle 180")
         if (allocated(error)) return
@@ -1372,7 +1381,7 @@ contains
         real(real64), parameter :: TINY_V(3) = [1.0e-300_real64, 0.0_real64, 1.0e-300_real64]
         real(real64), parameter :: HUGE_V(3) = [0.0_real64, 3.0e300_real64, 0.0_real64]
         real(real64), parameter :: ZERO_V(3) = [0.0_real64, 0.0_real64, 0.0_real64]
-        real(real64) :: lon, lat, v(3), nan_v(3), inf_v(3), a, b, worst, nan, pinf
+        real(real64) :: lon, lat, v(3), lat_v(3), nan_v(3), inf_v(3), a, b, worst, nan, pinf
         integer :: i, j
         logical :: saved, raised, can
 
@@ -1412,12 +1421,18 @@ contains
         nan_v = [1.0_real64, nan, 0.5_real64]
         inf_v = [pinf, 0.0_real64, 1.0_real64]
         call pf_radec2unit(nan, 20.0_real64, v)
+        ! A NaN LATITUDE is a second screen, not the same one: the longitude guard above has already
+        ! passed by the time it is reached, so without its own arm the NaN goes on to `sin` -- the
+        ! call ifx vectorises into `__svml_sin2`, which is not quiet on a NaN element. The same
+        ! pairing `test_angdist_deg_total` makes for `pf_angdist_deg`, and for the same reason.
+        call pf_radec2unit(20.0_real64, nan, lat_v)
         call pf_unit2radec(nan_v, a, b)
         if (can) call ieee_get_flag(ieee_invalid, raised)
         if (can) call ieee_set_flag(ieee_invalid, saved .or. raised)
         call check(error, .not. raised, "a NaN through the unit-vector pair raised IEEE_INVALID")
         if (allocated(error)) return
-        call check(error, all(v /= v) .and. a /= a .and. b /= b, "a NaN did not propagate through the pair")
+        call check(error, all(v /= v) .and. all(lat_v /= lat_v) .and. a /= a .and. b /= b, &
+            "a NaN did not propagate through the pair")
         if (allocated(error)) return
         call pf_unit2radec(inf_v, a, b)
         call check(error, a == 0.0_real64 .and. b == 0.0_real64, &

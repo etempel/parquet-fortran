@@ -7422,6 +7422,15 @@ contains
         !
         ! The quickselect arm. Rank 137 of 300 is well inside the array, so the range stays above
         ! the insertion cutoff for several partitions and the forced limit bites on the first one.
+        !
+        ! **The ordering route has to be DECLINED, or this arm does not exist.** `sort_nth_index`
+        ! hands any array of `SORT_NTH_ORDER_MIN` (256) rows or more to the full permutation build
+        ! and returns from it, so at 300 rows with the floor in force neither call below enters the
+        ! quickselect loop at all: both would sort through the INTROSORT, and `heap_nth_forced`
+        ! would count the fallback the two checks above have already proved, from the other copy of
+        ! it. The floor is raised out of reach for exactly these two calls, the same way the radix
+        ! and counting paths are declined for the introsort ones.
+        call parquet_debug_set_sort_nth_order_min(huge(0_int64))
         call parquet_debug_set_sort_depth_limit(-1)
         call pf_nth_element(v, 137_int64, nth_normal)
         heap_nth_normal = parquet_debug_sort_heapsort_calls()
@@ -7429,6 +7438,7 @@ contains
         call pf_nth_element(v, 137_int64, nth_forced)
         heap_nth_forced = parquet_debug_sort_heapsort_calls()
         !
+        call parquet_debug_set_sort_nth_order_min(-1_int64)
         call parquet_debug_set_sort_depth_limit(-1)
         call engine_only_introsort(.false.)
         !

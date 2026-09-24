@@ -1060,6 +1060,20 @@ contains
         if (allocated(error)) return
         call check(error, t%has_column("list_of_struct"), &
             "an unreadable container column still gets a slot rather than blocking the open")
+        if (allocated(error)) return
+        !
+        ! **A struct LEAF whose own type is a map.** `parquet_get_column_names` expands a top-level
+        ! struct into one dotted path per leaf, so this arrives as an ordinary column name -- and
+        ! the map arm classifies it exactly as it classifies a top-level map, through
+        ! `parquet_get_map_value_type` rather than through the type query. It belongs beside the
+        ! four refusals above because it is the case they are most easily confused with: a
+        ! container reached through a dotted path, and the one of that shape that IS supported.
+        call check(error, t%has_column("struct_of_map.attrs"), &
+            "a struct leaf whose own type is a map is enumerated as its own column")
+        if (allocated(error)) return
+        call check(error, t%kind("struct_of_map.attrs") == PK_MAP .and. &
+            t%is_supported("struct_of_map.attrs"), &
+            "and is classified as a map column, by the same arm a top-level map takes")
     end subroutine test_nested_list_is_not_a_table_column
 
     !> **D3.** `%copy_column` with no `to_kind` and `%clone` both claim to carry any column;

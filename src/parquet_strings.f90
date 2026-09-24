@@ -1376,7 +1376,11 @@ contains
     end function length_i64
     !
     !> int32 specific of get; see the get generic.
-    subroutine parquet_string_column_get_i32(self, i, res, null_value, allow_null)
+    !! (Coverage note: this header line never registers as "hit" in gcov although the one-line body
+    !! below it does -- which is what proves the specific runs. The same attribution artifact is
+    !! documented at length above `date_parse` in `src/parquet_temporal.f90`. Excluded as an
+    !! artifact, not as a gap.)
+    subroutine parquet_string_column_get_i32(self, i, res, null_value, allow_null) ! GCOVR_EXCL_LINE -- gcov attribution artifact
         type(parquet_string_column), intent(in) :: self !! the column.
         integer(int32), intent(in) :: i                  !! 1-based element index.
         character(len=:), allocatable, intent(out) :: res !! element i (unallocated if null and allowed).
@@ -4233,7 +4237,13 @@ contains
     !! Parquet writer to consume without materializing strings. The returned pointers are valid
     !! only until the next mutation of the column. `validity_ptr` is C_NULL_PTR when the column has
     !! no nulls; `data_ptr` is C_NULL_PTR when the payload is empty.
-    subroutine parquet_string_column_raw_buffers(self, offsets_ptr, data_ptr, validity_ptr, nrows, nchars, &
+    !!
+    !! (Coverage note: this header line never registers as "hit" in gcov although every line of the
+    !! body does -- the same attribution artifact documented above `date_parse` in
+    !! `src/parquet_temporal.f90`. The marker sits after the continuation ampersand because the
+    !! statement plus a full marker comment would pass 132 columns. Excluded as an artifact, not
+    !! as a gap.)
+    subroutine parquet_string_column_raw_buffers(self, offsets_ptr, data_ptr, validity_ptr, nrows, nchars, & ! GCOVR_EXCL_LINE
         has_validity)
         type(parquet_string_column), intent(in), target :: self  !! the column (must be a target).
         type(c_ptr), intent(out) :: offsets_ptr                  !! -> int64 offsets(0:nrows).

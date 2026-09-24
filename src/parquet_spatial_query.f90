@@ -378,7 +378,10 @@ contains
         ! candidates, so the rank test is switched off here and the rank read inside the accept.
         want_tie = .false.
         if (want_los .and. want_min) then
+            ! GCOVR_EXCL_START -- not reachable today: `los_tiebreak` is never passed. Kept with the
+            ! documented emit-once rule it belongs to, which needs `min_key` and PF_LINK_MAX together.
             if (present(los_tiebreak)) want_tie = los_tiebreak .and. lrule == PF_LINK_MAX
+            ! GCOVR_EXCL_STOP
         end if
         if (want_tie) want_min = .false.
         ntest = 0_int64
@@ -484,8 +487,13 @@ contains
                                     bpj = 0.0_real64
                                     blj = 0.0_real64
                                     if (lrule /= 0) then
+                                        ! GCOVR_EXCL_START -- not reachable today: every spatial_scan call in
+                                        ! parquet_spatial_bulk.f90 passes `los_rule=0`, the searcher's own cylinder, so
+                                        ! the per-candidate bounds are never read. Kept because the interface documents
+                                        ! the PF_LINK_* rules, and all four loops must read them the same way.
                                         bpj = los_bps(t)
                                         blj = los_bls(t)
+                                        ! GCOVR_EXCL_STOP
                                     end if
                                     kj = 0_int64
                                     if (want_tie) kj = keys(t)
@@ -536,8 +544,13 @@ contains
                                     bpj = 0.0_real64
                                     blj = 0.0_real64
                                     if (lrule /= 0) then
+                                        ! GCOVR_EXCL_START -- not reachable today: every spatial_scan call in
+                                        ! parquet_spatial_bulk.f90 passes `los_rule=0`, the searcher's own cylinder, so
+                                        ! the per-candidate bounds are never read. Kept because the interface documents
+                                        ! the PF_LINK_* rules, and all four loops must read them the same way.
                                         bpj = los_bps(t)
                                         blj = los_bls(t)
+                                        ! GCOVR_EXCL_STOP
                                     end if
                                     kj = 0_int64
                                     if (want_tie) kj = keys(t)
@@ -836,7 +849,10 @@ contains
             ! The union's emit-once tiebreak, exactly as `spatial_scan` switches it: the rank no
             ! longer screens, and is read inside the accept instead.
             if (want_min) then
+                ! GCOVR_EXCL_START -- not reachable today: `los_tiebreak` is never passed. Kept with the
+                ! documented emit-once rule it belongs to, which needs `min_key` and PF_LINK_MAX together.
                 if (present(los_tiebreak)) want_tie = los_tiebreak .and. lrule == PF_LINK_MAX
+                ! GCOVR_EXCL_STOP
             end if
             if (want_tie) want_min = .false.
         else if (hasdp .or. hasdl) then
@@ -992,7 +1008,11 @@ contains
                             rad = r1 + tp * dr
                             if (d2 <= rad * rad) then
                                 if (want_min) then
+                                    ! GCOVR_EXCL_START -- not reachable today: `min_key` is passed to spatial_scan only, never
+                                    ! to this axis walk, so `want_min` is always .false. here. Kept so the two walks screen by
+                                    ! rank the same way if a caller ever ranks an axis query.
                                     if (keys(t) <= minkey) cycle
+                                    ! GCOVR_EXCL_STOP
                                 end if
                                 if (want_los) then
                                     ! The exact cylinder criterion, the geometric test above being
@@ -1008,8 +1028,13 @@ contains
                                     bpj = 0.0_real64
                                     blj = 0.0_real64
                                     if (lrule /= 0) then
+                                        ! GCOVR_EXCL_START -- not reachable today: every spatial_scan call in
+                                        ! parquet_spatial_bulk.f90 passes `los_rule=0`, the searcher's own cylinder, so
+                                        ! the per-candidate bounds are never read. Kept because the interface documents
+                                        ! the PF_LINK_* rules, and all four loops must read them the same way.
                                         bpj = los_bps(t)
                                         blj = los_bls(t)
+                                        ! GCOVR_EXCL_STOP
                                     end if
                                     kj = 0_int64
                                     if (want_tie) kj = keys(t)
@@ -1065,7 +1090,11 @@ contains
                             rad = r1 + tp * dr
                             if (d2 <= rad * rad) then
                                 if (want_min) then
+                                    ! GCOVR_EXCL_START -- not reachable today: `min_key` is passed to spatial_scan only, never
+                                    ! to this axis walk, so `want_min` is always .false. here. Kept so the two walks screen by
+                                    ! rank the same way if a caller ever ranks an axis query.
                                     if (keys(t) <= minkey) cycle
+                                    ! GCOVR_EXCL_STOP
                                 end if
                                 if (want_los) then
                                     ! The same call as the direct loop's; see the comment there.
@@ -1077,8 +1106,13 @@ contains
                                     bpj = 0.0_real64
                                     blj = 0.0_real64
                                     if (lrule /= 0) then
+                                        ! GCOVR_EXCL_START -- not reachable today: every spatial_scan call in
+                                        ! parquet_spatial_bulk.f90 passes `los_rule=0`, the searcher's own cylinder, so
+                                        ! the per-candidate bounds are never read. Kept because the interface documents
+                                        ! the PF_LINK_* rules, and all four loops must read them the same way.
                                         bpj = los_bps(t)
                                         blj = los_bls(t)
+                                        ! GCOVR_EXCL_STOP
                                     end if
                                     kj = 0_int64
                                     if (want_tie) kj = keys(t)

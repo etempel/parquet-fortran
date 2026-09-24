@@ -193,13 +193,20 @@ test:
     # MacPorts GCC) and a default `clang++` FPM_CXX would produce gcov data
     # in Clang's format, which plain GNU `gcov`/`gcovr` cannot reliably read
     # -- see CONTRIBUTING.md's coverage section.
-    FPM_CXXFLAGS: "-std=c++20 --coverage"
+    #
+    # -fprofile-update=atomic on this half too, for the reason
+    # tools/coverage_cpp.sh gives at its own FPM_CXXFLAGS line: several threads
+    # run through src/parquet_wrapper.cpp inside one process (test-drive runs a
+    # suite's tests concurrently, and the library's own reads are threaded), so
+    # non-atomic counter updates lose increments and a rarely-hit line is
+    # reported uncovered. It belongs on the compile flags, not the link ones.
+    FPM_CXXFLAGS: "-std=c++20 --coverage -fprofile-update=atomic"
     FPM_LDFLAGS: "-lstdc++ --coverage"
   coverage: /^TOTAL.*\s+(\d+\%)$/
   script:
     # Source is kept within the standard 132-column free-form limit, so no
-    # -ffree-line-length-none override is needed; FPM_FFLAGS only adds the
-    # coverage flag fpm test itself needs.
+    # -ffree-line-length-none override is needed; FPM_FFLAGS carries only the
+    # two flags this job's measurement needs.
     #
     # There is deliberately no -fopenmp here: fpm.toml's `openmp = "*"`
     # metapackage already injects it into both the compile and the link flags,
@@ -212,7 +219,21 @@ test:
     # so this build has no -O, no -g and no -fcheck=bounds -- which is why the
     # spurious-bounds-check bug recorded in CLAUDE.md could never have surfaced
     # in this job. That is unchanged by dropping -fopenmp.
-    - FPM_FFLAGS="--coverage" fpm test --verbose
+    #
+    # -fprofile-update=atomic is NOT optional, for the reason tools/coverage.sh
+    # gives at its own FPM_FFLAGS line: test-drive runs the tests of a suite
+    # concurrently inside ONE process (its own !$omp parallel do), so without
+    # atomic updates two threads incrementing the same gcov counter lose one of
+    # the increments. A line hit only once or twice in the whole run is then
+    # reported UNCOVERED, and this job's `coverage:` regex scrapes a TOTAL that
+    # is quietly too low. Measured on this project by that script: the flag took
+    # the total from 24322/24324 to 24324/24324, and the two lines it recovered
+    # were an ordinary well-tested branch that had been chased as a real gap.
+    # It also removes the one reading under which gcovr's own "suspicious hit"
+    # ceiling below (a count at or above 2**32, GCC PR68080) could be a racing
+    # counter rather than a test doing genuinely that much work. The cost is a
+    # slower instrumented build; the alternative is a report that invents gaps.
+    - FPM_FFLAGS="--coverage -fprofile-update=atomic" fpm test --verbose
     # Runs tools/run_error_scenarios.sh's own scenario list too, so it can't silently drift out
     # of parity with test/error_scenarios.f90's `select case` (see run_error_scenarios.sh's own
     # header comment) -- fpm test above already exercises every scenario via test_errors.f90, but

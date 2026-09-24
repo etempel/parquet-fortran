@@ -796,8 +796,8 @@ contains
     !> below is what makes the restore cover a failed check as well as a passing one.
     subroutine test_spread_at_extreme_scales(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
-        real(real64), allocatable :: x(:), y(:)
-        real(real64) :: sd0, sd1, v0, v1, sc
+        real(real64), allocatable :: x(:), y(:), w(:)
+        real(real64) :: sd0, sd1, v0, v1, sc, vf0, vf1, mv, ms, me
         real(real64), parameter :: SD_SCALES(2) = [1.0e200_real64, 1.0e-200_real64]
         real(real64), parameter :: V_SCALES(2) = [1.0e150_real64, 1.0e-150_real64]
         character(len=200) :: msg
@@ -844,6 +844,47 @@ contains
                 call check(error, ok .and. abs(v1 - v0*sc*sc) <= 1.0e-12_real64*(v0*sc*sc), trim(msg))
                 if (allocated(error)) exit scales
             end do
+
+            ! **The rescaled fallback carries both weight conventions**, and only a population that
+            ! is scaled AND frequency-weighted goes through the frequency one: the plain path's own
+            ! frequency tests never reach the fallback, and every scaled case above is unweighted.
+            ! A fallback that charged `ddof` against Kish's effective size here would disagree with
+            ! `pf_variance`'s plain answer for the same weights, which is the one thing the two
+            ! denominators exist to prevent.
+            allocate(w(size(x)))
+            do i = 1_int64, size(x, kind=int64)
+                w(i) = 1.0_real64 + real(mod(i, 3_int64), real64)
+            end do
+            call pf_variance(x, vf0, weights=w, weight_type="frequency", ok=ok)
+            call check(error, ok .and. vf0 > 0.0_real64, &
+                "control: the unscaled frequency-weighted variance must exist to scale")
+            if (allocated(error)) exit scales
+            ! V_SCALES, not SD_SCALES: a variance is in SQUARED units, so `1e200` puts the answer
+            ! itself past `huge` and the comparison below would be `Infinity` against `Infinity`.
+            sc = V_SCALES(1)
+            do i = 1_int64, size(x, kind=int64)
+                y(i) = x(i)*sc
+            end do
+            call pf_variance(y, vf1, weights=w, weight_type="frequency", ok=ok)
+            write(msg, '(a,es24.17,a,es24.17)') "the scaled frequency-weighted variance is ", vf1, &
+                " against the scaled ", vf0*sc*sc
+            call check(error, ok .and. abs(vf1 - vf0*sc*sc) <= 1.0e-12_real64*(vf0*sc*sc), trim(msg))
+            if (allocated(error)) exit scales
+
+            ! **`pf_moments` asks for the same rescaling and writes THREE of its outputs from it**,
+            ! which no `pf_variance` or `pf_stddev` call can reach: the three come back together or
+            ! not at all, so a fallback wired to two of them leaves the third holding the
+            ! accumulation that was already known not to be trustworthy.
+            call pf_moments(y, variance=mv, stddev=ms, sem=me)
+            call check(error, abs(mv - v0*sc*sc) <= 1.0e-12_real64*(v0*sc*sc), &
+                "pf_moments' variance must survive the scale its own fallback exists for")
+            if (allocated(error)) exit scales
+            call check(error, abs(ms - sd0*sc) <= 1.0e-12_real64*(sd0*sc), &
+                "and its standard deviation with it")
+            if (allocated(error)) exit scales
+            call check(error, abs(me - (sd0*sc)/sqrt(real(size(x), real64))) &
+                <= 1.0e-12_real64*((sd0*sc)/sqrt(real(size(x), real64))), &
+                "and its standard error, which is that standard deviation over sqrt(n)")
         end block scales
 
         if (uf_supported) call ieee_set_flag(ieee_underflow, uf_entry)
@@ -6967,11 +7008,14 @@ contains
     !! identity; `test_cov_identity_survives_inexact_centring` is the fixture for that.
     subroutine test_cov_weight_type(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
-        real(real64) :: x(3), w(3), c, v
+        real(real64) :: x(3), y(3), w(3), xe(4), ye(4), c, v
         integer :: d
 
         x = [10.0_real64, 12.0_real64, 14.0_real64]
+        y = [1.0_real64, 5.0_real64, 6.0_real64]
         w = [1.0_real64, 2.0_real64, 1.0_real64]
+        xe = [10.0_real64, 12.0_real64, 12.0_real64, 14.0_real64]
+        ye = [1.0_real64, 5.0_real64, 5.0_real64, 6.0_real64]
 
         do d = 0, 1
             call pf_cov(x, x, c, weights=w, ddof=d)
@@ -7003,6 +7047,22 @@ contains
         call pf_cov(x, x, c)
         call pf_cov(x, x, v, weight_type="frequency")
         call check(error, c == v, "without weights the two conventions are the same number")
+        if (allocated(error)) return
+
+        ! **The OFF-diagonal pair, which is the only way to the pair walk's own denominator.**
+        ! `pf_cov(x, x, ...)` forks to `pf_variance` before reaching it -- deliberately, so the two
+        ! cannot round apart -- so everything above proves the convention for the DIAGONAL and says
+        ! nothing about the arm a genuine covariance takes. A frequency weight of 2 must agree with
+        ! writing the PAIR out twice, exactly as it does for one sample.
+        call pf_cov(x, y, c, weights=w, weight_type="frequency")
+        call pf_cov(xe, ye, v)
+        call check(error, close_to(c, v), &
+            "a frequency-weighted covariance must equal the expanded pair's covariance")
+        if (allocated(error)) return
+        call pf_cov(x, y, c, weights=w)
+        call pf_cov(x, y, v, weights=w, weight_type="frequency")
+        call check(error, c /= v, &
+            "the two weight conventions must differ off the diagonal too, or the check above proves nothing")
     end subroutine test_cov_weight_type
 
     !> The same identity over populations whose centring does NOT come out exact.

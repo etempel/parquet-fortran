@@ -1663,6 +1663,9 @@ contains
         call unset_env("PARQUET_FORTRAN_TABLE_THREADS")
         call unset_env("PARQUET_FORTRAN_STRING_THREADS")
         call unset_env("PARQUET_FORTRAN_RANDOM_THREADS")
+        call unset_env("PARQUET_FORTRAN_SPATIAL_THREADS")
+        call unset_env("PARQUET_FORTRAN_HEALPIX_THREADS")
+        call unset_env("PARQUET_FORTRAN_INDEX_THREADS")
         call unset_env("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS")
         call unset_env("PARQUET_FORTRAN_SORT_COUNTING_PATH")
         call unset_env("PARQUET_FORTRAN_SORT_RADIX_PATH")
@@ -1677,10 +1680,15 @@ contains
         call unset_env("PARQUET_FORTRAN_FILE_DATE")
     end subroutine unset_all_env
 
-    !> **The bulk test, and the one that catches a crossed pair.** Fourteen variables set to fourteen
-    !> distinguishable values in one call, each read back through its own getter -- so a variable
+    !> **The bulk test, and the one that catches a crossed pair.** Every variable set to its own
+    !> distinguishable value in one call, each read back through its own getter -- so a variable
     !> wired to the wrong setter fails on both knobs at once, and a variable left out of
     !> parquet_settings_from_env's sequence fails on its own (feature_risks.md Risk-44).
+    !>
+    !> Adding a variable to the loader means adding it HERE and to `unset_all_env` as well. The three
+    !> pool knobs added after the first draft -- spatial, HEALPix and index -- were read by the
+    !> loader for some time with no line of this test naming them, which is the exact failure the
+    !> paragraph above says this test exists to prevent.
     !>
     !> Every value differs from the factory default, or the assertion would pass against a call that
     !> did nothing at all.
@@ -1698,6 +1706,9 @@ contains
         call set_env("PARQUET_FORTRAN_TABLE_THREADS", "7")
         call set_env("PARQUET_FORTRAN_STRING_THREADS", "5")
         call set_env("PARQUET_FORTRAN_RANDOM_THREADS", "6")
+        call set_env("PARQUET_FORTRAN_SPATIAL_THREADS", "4")
+        call set_env("PARQUET_FORTRAN_HEALPIX_THREADS", "8")
+        call set_env("PARQUET_FORTRAN_INDEX_THREADS", "9")
         call set_env("PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS", "250")
         call set_env("PARQUET_FORTRAN_SORT_COUNTING_PATH", "false")
         call set_env("PARQUET_FORTRAN_SORT_RADIX_PATH", "false")
@@ -1725,6 +1736,12 @@ contains
             "PARQUET_FORTRAN_STRING_THREADS reaches string_threads")
         if (.not. allocated(error)) call check(error, parquet_get_random_threads() == 6, &
             "PARQUET_FORTRAN_RANDOM_THREADS reaches random_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_spatial_threads() == 4, &
+            "PARQUET_FORTRAN_SPATIAL_THREADS reaches spatial_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_healpix_threads() == 8, &
+            "PARQUET_FORTRAN_HEALPIX_THREADS reaches healpix_threads")
+        if (.not. allocated(error)) call check(error, parquet_get_index_threads() == 9, &
+            "PARQUET_FORTRAN_INDEX_THREADS reaches index_threads")
         if (.not. allocated(error)) call check(error, &
             parquet_get_random_parallel_min_elements() == 250_int64, &
             "PARQUET_FORTRAN_RANDOM_PARALLEL_MIN_ELEMENTS reaches random_parallel_min_elements")

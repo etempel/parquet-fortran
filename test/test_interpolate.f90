@@ -194,6 +194,19 @@ contains
                    "a two-point spline must be the straight line through its points")
         if (allocated(error)) return
 
+        ! Two points under PCHIP, which reaches its own arm: with one segment there is no neighbouring
+        ! secant to weigh a slope against, so both slopes ARE the segment's secant and the curve is
+        ! the same straight line the spline gives. The arm exists because the weighted harmonic mean
+        ! the general case uses has no second slope to take here at all.
+        call fresh%init([0.0_real64, 1.0_real64], [0.0_real64, 2.0_real64], method="pchip")
+        call check(error, abs(fresh%eval(0.5_real64) - 1.0_real64) <= 4.0_real64*epsilon(1.0_real64) .and. &
+                   abs(fresh%eval(0.25_real64) - 0.5_real64) <= 4.0_real64*epsilon(1.0_real64), &
+                   "a two-point pchip curve must be the straight line through its points")
+        if (allocated(error)) return
+        call check(error, abs(fresh%derivative(0.75_real64) - 2.0_real64) <= 4.0_real64*epsilon(1.0_real64), &
+                   "a two-point pchip curve's slope must be the segment's own everywhere on it")
+        if (allocated(error)) return
+
         ! A second %init replaces the table.
         call fresh%init([0.0_real64, 1.0_real64], [0.0_real64, 6.0_real64])
         call check(error, abs(fresh%eval(0.5_real64) - 3.0_real64) <= 1.0e-15_real64, &
@@ -637,6 +650,7 @@ contains
         type(pf_interp_1d)   :: c
         real(real64)         :: below(3), above(3), span, ymax, scale, got(GI_NJ), vb(3), va(3), ve(GI_NO)
         real(real64)         :: flat_in(GI_NJ)
+        real(real64), allocatable :: down_y(:), down_s(:)
         character(len=:), allocatable :: what
         logical              :: can_test, saved, raised
         integer              :: which, v, i, n
@@ -731,6 +745,23 @@ contains
         call check(error, va(1) > huge(1.0_real64), "clamp's integral to +Infinity over a positive end ordinate must be +Infinity")
         if (allocated(error)) return
         call check(error, .not. raised, "an infinite limit beyond a flat end raised IEEE_INVALID")
+        if (allocated(error)) return
+
+        ! The same end turned over. An infinite width times a NEGATIVE ordinate is its own arm --
+        ! neither the positive one above nor the zero one, and none of the three may be reached by
+        ! forming the product, since `Infinity*0` is a NaN that raises IEEE_INVALID. Asserted on the
+        ! flipped fixture rather than on a fixture of its own, so the two signs differ in nothing
+        ! but the sign.
+        down_y = -f%y
+        down_s = -f%slopes
+        call init_variant(c, GI_PCHIP, f%x, down_y, down_s, "clamp")
+        call invalid_begin(can_test, saved)
+        va(1) = c%integral(f%x(n), ieee_value(1.0_real64, ieee_positive_inf))
+        call invalid_end(can_test, saved, raised)
+        call check(error, va(1) < -huge(1.0_real64), &
+                   "clamp's integral to +Infinity over a negative end ordinate must be -Infinity")
+        if (allocated(error)) return
+        call check(error, .not. raised, "a negative flat end out to infinity raised IEEE_INVALID")
 
     end subroutine test_outside_policies
 
@@ -1204,7 +1235,7 @@ contains
         real(real64)                  :: span, nan, inf, jumps(128), alone(128)
         character(len=:), allocatable :: what
         logical                       :: was, even
-        integer                       :: table, v, ip, order, i, n, m, differ
+        integer                       :: table, v, ip, order, i, n, m, differ, pass
 
         nan = nan_value()
         inf = positive_infinity()
@@ -1317,22 +1348,35 @@ contains
 
             if (table == 1) then
                 call init_variant(c, GI_LINEAR, x, y, TEST_SLOPES, "extrapolate")
-                do i = 1, size(jumps)
-                    jumps(i) = up(merge(i, m + 1 - i, mod(i, 2) == 1))
-                    alone(i) = c%eval(jumps(i))
+                ! TWO orders, because the ranks above 1 share one written-out evaluator
+                ! (`interp_1d_value`) while rank 1 carries its own copy of it, and the two are asked
+                ! in the source to be kept in step. Alternating between the ends keeps `near` false
+                ! at every query, so it exercises the COLD bracket only; queries in order are what
+                ! turn `near` on, and the warm bracket is the half of each copy the other order
+                ! never reaches. The reference is the scalar `%eval`, which starts every query cold,
+                ! so the assertion is that warming the search does not move a single bit.
+                do pass = 1, 2
+                    do i = 1, size(jumps)
+                        if (pass == 1) then
+                            jumps(i) = up(merge(i, m + 1 - i, mod(i, 2) == 1))
+                        else
+                            jumps(i) = up(1 + mod(i - 1, m))
+                        end if
+                        alone(i) = c%eval(jumps(i))
+                    end do
+                    differ = count(.not. same_bits(reshape(c%eval(reshape(jumps(:4), [2, 2])), [4]), alone(:4)))
+                    differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:8), [2, 2, 2])), [8]), alone(:8)))
+                    differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:16), [2, 2, 2, 2])), [16]), &
+                                                            alone(:16)))
+                    differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:32), [2, 2, 2, 2, 2])), [32]), &
+                                                            alone(:32)))
+                    differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:64), [2, 2, 2, 2, 2, 2])), [64]), &
+                                                            alone(:64)))
+                    differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps, [2, 2, 2, 2, 2, 2, 2])), [128]), &
+                                                            alone))
+                    call check(error, differ == 0, "an array of rank 2 to 7 answered other bits than each query alone")
+                    if (allocated(error)) return
                 end do
-                differ = count(.not. same_bits(reshape(c%eval(reshape(jumps(:4), [2, 2])), [4]), alone(:4)))
-                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:8), [2, 2, 2])), [8]), alone(:8)))
-                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:16), [2, 2, 2, 2])), [16]), &
-                                                        alone(:16)))
-                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:32), [2, 2, 2, 2, 2])), [32]), &
-                                                        alone(:32)))
-                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps(:64), [2, 2, 2, 2, 2, 2])), [64]), &
-                                                        alone(:64)))
-                differ = differ + count(.not. same_bits(reshape(c%eval(reshape(jumps, [2, 2, 2, 2, 2, 2, 2])), [128]), &
-                                                        alone))
-                call check(error, differ == 0, "an array of rank 2 to 7 answered other bits than each query alone")
-                if (allocated(error)) return
             end if
         end do
         got = c%eval(up(1:0))
@@ -1911,7 +1955,7 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(golden_grid)         :: g
-        type(pf_interp_2d)        :: grid
+        type(pf_interp_2d)        :: grid, spelled
         real(real64), allocatable :: px(:), py(:), want(:), cz(:, :)
         integer                   :: which, i, j
 
@@ -1936,6 +1980,16 @@ contains
         want = (px**3 - 2.0_real64*px)*(py**3 + py)
         call check(error, all(abs(grid%eval(px, py) - want) <= 1.0e-12_real64*max(abs(want), maxval(abs(want)))), &
                    "the not-a-knot bicubic spline did not reproduce (x**3 - 2x)*(y**3 + y)")
+        if (allocated(error)) return
+
+        ! `method="cubic"` WRITTEN OUT is the default, and the two must be one object rather than two
+        ! that happen to agree: the token is resolved in its own arm of the same select the unknown
+        ! ones abort from, so an arm that fell through would leave the method at whatever the field
+        ! was initialised to -- which is cubic, and would therefore look right on every query here.
+        ! Bit-for-bit over every query is what separates those two readings.
+        call spelled%init(g%x, g%y, cz, method="cubic", bc="not_a_knot", outside="extrapolate")
+        call check(error, all(spelled%eval(px, py) == grid%eval(px, py)), &
+                   "an explicit method=""cubic"" answered other bits than the default")
 
     end subroutine test_bicubic_matches_the_model
 

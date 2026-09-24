@@ -625,6 +625,17 @@ contains
         call check(error, col%colwidth() == 1, "a container column has width 1, not a stride")
         if (allocated(error)) return
         call check(error, .not. allocated(cc), "adopt MOVED the container rather than copying it")
+        if (allocated(error)) return
+        ! **A capacity request has to reach the container**, because the `parquet_column` holding it
+        ! has no buffer of its own to size: its scalar arms allocate the storage for the kind they
+        ! carry, and a container kind has none of them. Forwarding is what makes `%reserve` mean the
+        ! same thing whichever face of the column a caller holds; without it the request would be
+        ! either a silent no-op or an abort on a column that is perfectly capable of honouring it.
+        call col%reserve(100_int64)
+        call check(error, col%capacity() >= 100_int64, &
+            "%reserve on an adopted container column must reach the container's own row capacity")
+        if (allocated(error)) return
+        call check(error, col%length() == 2_int64, "and must not change the rows it holds")
     end subroutine test_adopt_container
 
     !> `%reserve` and `%shrink_to_fit` move capacity without touching the rows.

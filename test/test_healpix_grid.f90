@@ -54,6 +54,8 @@ contains
                          test_disc_delegation), &
             new_unittest("the accessors report what init was given", &
                          test_accessors), &
+            new_unittest("init accepts an int32 nside and builds what the int64 kind builds", &
+                         test_init_int32_nside), &
             new_unittest("get_nside and get_npix answer in the caller's kind", &
                          test_kind_matching_accessors), &
             new_unittest("the two frames are mirror images in declination", &
@@ -568,6 +570,53 @@ contains
                    "%max_pixrad disagreed with pf_max_pixrad", thr=0.0_real64)
     end subroutine test_accessors
 
+    !> `%init` in its int32 specific builds exactly what the int64 specific builds.
+    !>
+    !> **This is the one entry point of the type that had never been called successfully.** Every
+    !> other `%init` in this repository passes an `integer(int64)` nside, and the only int32 call
+    !> anywhere is `error_scenarios.f90`'s `healpix_grid_init_nside_int32_ceiling`, which aborts
+    !> inside the shared builder and never returns -- so the int32 specific's widening of `nside`
+    !> was pinned on the refusing side only, and a widening that dropped or sign-extended wrongly
+    !> would have gone unnoticed on every value it accepts.
+    !>
+    !> `8192` is in the sweep deliberately: it is the int32 kind's OWN ceiling, and an int32
+    !> `%init` that forwarded `hpx_nside_max` instead would agree with the int64 kind at 64 and
+    !> differ only at the boundary -- which is also why the int64 grid it is compared against is
+    !> built from the same literal widened here rather than from a separate constant.
+    subroutine test_init_int32_nside(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        type(pf_healpix_grid) :: g32, g64
+        integer(int32), parameter :: cases(4) = [1_int32, 2_int32, 64_int32, 8192_int32]
+        integer(int64) :: n32, n64, p32, p64
+        integer :: c
+
+        do c = 1, size(cases)
+            call g32%init(cases(c), PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
+            call g64%init(int(cases(c), int64), PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
+            call check(error, g32%is_set(), "the int32 %init left the grid unbuilt")
+            if (allocated(error)) return
+            call check(error, g32 == g64, "the int32 %init built a different grid from the int64 one")
+            if (allocated(error)) return
+            call g32%get_nside(n32)
+            call g64%get_nside(n64)
+            call check(error, n32, n64, "the int32 %init recorded a different nside")
+            if (allocated(error)) return
+            call g32%get_npix(p32)
+            call g64%get_npix(p64)
+            call check(error, p32, p64, "the int32 %init recorded a different npix")
+            if (allocated(error)) return
+            call check(error, g32%order(), g64%order(), "the int32 %init recorded a different order")
+            if (allocated(error)) return
+            call check(error, g32%frame(), PF_HP_DEC_SOUTH, "the int32 %init dropped frame=")
+            if (allocated(error)) return
+            call check(error, g32%scheme(), PF_HP_NEST, "the int32 %init dropped the scheme")
+            if (allocated(error)) return
+        end do
+        ! The int32 specific must also accept the ceiling ITSELF, which the sweep above asserts,
+        ! and nothing beyond it -- the refusal is `healpix_grid_init_nside_int32_ceiling`.
+        call check(error, n32, 8192_int64, "the sweep did not finish at the int32 ceiling")
+    end subroutine test_init_int32_nside
+
     !> `%get_nside`/`%get_npix` resolve on the caller's kind and agree across the two.
     !>
     !> The int32 overflow abort itself cannot be asserted in process -- `error stop` kills it -- so
@@ -741,6 +790,21 @@ contains
         call g%pix2vec(0_int64, v)
         call check(error, maxval(abs(v + 999.0_real64)), 0.0_real64, &
                    "%pix2vec on an unbuilt grid was not -999 in every component", thr=0.0_real64)
+        if (allocated(error)) return
+        ! `%pix2vec_offset` carries its own unbuilt arm rather than delegating to `%pix2vec`'s,
+        ! because it converts a RING index to NEST before projecting; both kinds are driven since
+        ! the int32 specific reaches that arm only by forwarding to the int64 one.
+        v = 0.0_real64
+        call g%pix2vec_offset(0_int64, 0.25_real64, 0.75_real64, v)
+        call check(error, maxval(abs(v + 999.0_real64)), 0.0_real64, &
+                   "%pix2vec_offset on an unbuilt grid was not -999 in every component", &
+                   thr=0.0_real64)
+        if (allocated(error)) return
+        v = 0.0_real64
+        call g%pix2vec_offset(0_int32, 0.25_real64, 0.75_real64, v)
+        call check(error, maxval(abs(v + 999.0_real64)), 0.0_real64, &
+                   "%pix2vec_offset int32 on an unbuilt grid was not -999 in every component", &
+                   thr=0.0_real64)
         if (allocated(error)) return
         call g%pix2radec(0_int64, ra, dec)
         call check(error, ra, -999.0_real64, "%pix2radec ra on an unbuilt grid was not -999", &

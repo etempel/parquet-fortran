@@ -102,11 +102,17 @@ contains
         j = int(ceiling(need)) + 1
         need = real(self%nc, real64) + 2.0_real64*real(j, real64)
         if (.not. (need <= cap)) then
+            ! Not reachable: the test above it admitted `2*need + 4 + nc <= cap`, and this length
+            ! is `nc + 2*ceiling(need) + 2`, which is smaller -- `ceiling(need) < need + 1`. The
+            ! two are separate tests because they bound DIFFERENT lengths (the pad's own reach and
+            ! the padded array), and only the third of the three can pass this one and still fail.
+            ! GCOVR_EXCL_START
             if (present(ok)) then
                 ok = .false.
                 return
             end if
             call binned_too_long(self, entry)
+            ! GCOVR_EXCL_STOP
         end if
         self%pad = j
         self%ntr = pf_next_pow2(self%nc + 2*j)
@@ -2793,10 +2799,19 @@ contains
         real(real64) :: target
 
         target = u*total
+        ! Neither end is reachable by drawing, so both bodies are excluded and the two tests above
+        ! them are not: `u` comes from `pf_random_at`, whose value is a multiple of `2**-53` in
+        ! `[0, 1)`, so `u*total` vanishes only for the one draw in `2**53` that is exactly zero,
+        ! and reaches `total` only if the product rounds up at the very top of the range. Both are
+        ! kept because `cells_draw` inverts a distribution function and those are its ends.
         if (.not. (target > 0.0_real64)) then
+            ! GCOVR_EXCL_START
             x = left_end(self)
+            ! GCOVR_EXCL_STOP
         else if (.not. (target < total)) then
+            ! GCOVR_EXCL_START
             x = right_end(self)
+            ! GCOVR_EXCL_STOP
         else
             x = mass_at(self, target)
         end if
@@ -2821,7 +2836,7 @@ contains
             end if
         end do
 
-    end function left_end
+    end function left_end   ! GCOVR_EXCL_LINE
 
     !> Where the accumulated density ends inside the range: `xmax` when the last cell holds
     !! weight, else the centre after the last cell that does; `xmin` when no cell holds any.
@@ -2840,6 +2855,6 @@ contains
             end if
         end do
 
-    end function right_end
+    end function right_end   ! GCOVR_EXCL_LINE
 
 end submodule parquet_kde_grid ! GCOVR_EXCL_LINE

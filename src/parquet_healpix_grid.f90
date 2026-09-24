@@ -548,7 +548,12 @@ contains
     !>
     !> `nside_max` is the ceiling for the kind the caller used, so the message an int32 caller sees
     !> names 8192 rather than 2**29 -- the limit that actually applies to them.
-    subroutine hpx_grid_build(this, nside, nside_max, scheme, what, frame)
+    !>
+    !> The marker on the header line is a gcov attribution artifact, measured rather than assumed:
+    !> the header reports zero hits while every executable line of the body -- with no branch
+    !> between them -- reports the same positive count. `parquet_temporal.f90`'s `impure elemental`
+    !> headers behave the same way, and `.claude/rules/coverage.md` records the shape.
+    subroutine hpx_grid_build(this, nside, nside_max, scheme, what, frame)   ! GCOVR_EXCL_LINE
         class(pf_healpix_grid), intent(out) :: this !! the grid to fill; every field is reset first.
         integer(int64), intent(in) :: nside !! the requested resolution parameter.
         integer(int64), intent(in) :: nside_max !! the ceiling for the caller's integer kind.

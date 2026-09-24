@@ -2441,6 +2441,20 @@ contains
                 test_toml_path_too_long_aborts), &
             new_unittest("a fatal parquet_toml report aborts", &
                 test_toml_report_fatal_aborts), &
+            new_unittest("a config list of the wrong element type aborts, one text per type", &
+                test_toml_list_element_type_aborts), &
+            new_unittest("pf_toml_require names every missing key and then aborts", &
+                test_toml_require_missing_aborts), &
+            new_unittest("reading from a handle that was never opened aborts", &
+                test_toml_handle_never_opened_aborts), &
+            new_unittest("pf_toml_save from a section handle aborts", &
+                test_toml_save_not_owner_aborts), &
+            new_unittest("a config file that cannot be written aborts", &
+                test_toml_save_write_error_aborts), &
+            new_unittest("an over-long default config string aborts rather than clipping", &
+                test_toml_default_string_too_long_aborts), &
+            new_unittest("a required [[name]] the file has no entries of aborts", &
+                test_toml_no_entries_at_all_aborts), &
             new_unittest("every legal parquet_toml path completes", &
                 test_toml_control_completes) &
             ]
@@ -3874,7 +3888,31 @@ contains
             new_unittest("pf_kde%fit refuses a pilot built under another boundary correction", &
                 test_kde_fit_pilot_boundary_aborts), &
             new_unittest("pf_kde%fit refuses a pilot built over another support", &
-                test_kde_fit_pilot_support_aborts) &
+                test_kde_fit_pilot_support_aborts), &
+            new_unittest("pf_kde%fit refuses a pilot bounded on another side", &
+                test_kde_fit_pilot_support_side_aborts), &
+            new_unittest("pf_kde%fit refuses a pilot built to another upper bound", &
+                test_kde_fit_pilot_upper_aborts), &
+            new_unittest("pf_kde%fit refuses a spread_max that is not finite", &
+                test_kde_spread_max_not_finite_aborts), &
+            new_unittest("pf_kde%curve refuses one end that collapses the range", &
+                test_kde_curve_one_end_collapses_aborts), &
+            new_unittest("pf_kde%curve names what collapsed when the caller passed no ends", &
+                test_kde_curve_default_range_collapses_aborts), &
+            new_unittest("pf_kde_grid%init refuses a cell width that underflowed to zero", &
+                test_kde_grid_cell_width_underflow_aborts), &
+            new_unittest("pf_kde_grid%init applies R1 at the upper bound", &
+                test_kde_grid_linear_range_not_at_upper_aborts), &
+            new_unittest("pf_kde_grid%init refuses a spread_max that is not a number", &
+                test_kde_grid_spread_max_not_finite_aborts), &
+            new_unittest("pf_kde_grid%init refuses a spread_max below one", &
+                test_kde_grid_spread_max_below_one_aborts), &
+            new_unittest("the clamped cell count is advised and the fit still answers", &
+                test_kde_fit_cells_clamped_advice), &
+            new_unittest("the zone advice writes a tiny bound in the exponent form", &
+                test_kde_zone_advice_tiny_support), &
+            new_unittest("pf_kde_grid%init refuses a transform whose rounded length is too long", &
+                test_kde_grid_binned_transform_length_aborts) &
             ]
         testsuite = [p1, p2, p13, p14, p15, p16, p3, p4, p20, p5, p6, p7, p22, p8, p9, p10, p11, p12, p17, p18, &
             p19, p21, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36, p37, p38, &
@@ -18659,6 +18697,92 @@ contains
             required_stderr="nproc must be at least ten")
     end subroutine test_toml_report_fatal_aborts
 
+    !> A list of the wrong ELEMENT type aborts, and each of the four wordings is asserted.
+    !!
+    !! One scenario per distinct `expected` text rather than one per getter: `fail_value`'s own
+    !! doc-comment in `src/parquet_toml.f90` records that trade and what it gives up. The four
+    !! `required_stderr` strings below are the whole point -- a caller told a list "is not a list
+    !! of numbers" when it is a list of STRINGS that is wanted looks in the wrong place.
+    subroutine test_toml_list_element_type_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_list_not_whole_numbers", &
+            expect_abort=.true., &
+            failure_message="a list of reals read as whole numbers was expected to abort", &
+            required_stderr="is not a list of whole numbers")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "toml_list_not_numbers", &
+            expect_abort=.true., &
+            failure_message="a list of strings read as numbers was expected to abort", &
+            required_stderr="is not a list of numbers")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "toml_list_not_logicals", &
+            expect_abort=.true., &
+            failure_message="a list of integers read as true/false was expected to abort", &
+            required_stderr="is not a list of true/false values")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "toml_list_not_strings", &
+            expect_abort=.true., &
+            failure_message="a list of integers read as strings was expected to abort", &
+            required_stderr="is not a list of strings")
+    end subroutine test_toml_list_element_type_aborts
+
+    !> `pf_toml_require` reports EVERY missing key, and the count, before it stops.
+    !!
+    !! The count is what the assertion is on: a version that stopped at the first missing key
+    !! would still abort, still name a key, and still pass a test that only looked for the abort.
+    subroutine test_toml_require_missing_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_require_missing", &
+            expect_abort=.true., &
+            failure_message="two absent required config keys were expected to abort", &
+            required_stderr="2 required key(s) missing")
+    end subroutine test_toml_require_missing_aborts
+
+    !> A handle nothing has opened is refused with the advice to open one.
+    subroutine test_toml_handle_never_opened_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_handle_never_opened", &
+            expect_abort=.true., &
+            failure_message="reading from an unopened config handle was expected to abort", &
+            required_stderr="this handle has not been opened")
+    end subroutine test_toml_handle_never_opened_aborts
+
+    !> `pf_toml_save` names ITSELF when refused a section handle, not `pf_toml_dump`.
+    subroutine test_toml_save_not_owner_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_save_not_owner", &
+            expect_abort=.true., &
+            failure_message="pf_toml_save from a section handle was expected to abort", &
+            required_stderr="pf_toml_save: not the document handle")
+    end subroutine test_toml_save_not_owner_aborts
+
+    !> A configuration file that cannot be written is fatal and names the path.
+    subroutine test_toml_save_write_error_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_save_write_error", &
+            expect_abort=.true., &
+            failure_message="saving a config file to an unwritable path was expected to abort", &
+            required_stderr="cannot write configuration file")
+    end subroutine test_toml_save_write_error_aborts
+
+    !> An over-long `default =` element aborts, exactly as an over-long file value does.
+    subroutine test_toml_default_string_too_long_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_default_string_too_long", &
+            expect_abort=.true., &
+            failure_message="an over-long default config string was expected to abort", &
+            required_stderr="config list entry is too long")
+    end subroutine test_toml_default_string_too_long_aborts
+
+    !> The `[[name]]` wording, which is the half `toml_missing_section` does not reach.
+    subroutine test_toml_no_entries_at_all_aborts(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        call check_scenario_exit_status_and_stderr(error, "toml_no_entries_at_all", &
+            expect_abort=.true., &
+            failure_message="a required [[name]] with no entries was expected to abort", &
+            required_stderr="has no [[")
+    end subroutine test_toml_no_entries_at_all_aborts
+
     !> THE NEGATIVE CONTROL for all of the above: the same setup, every legal path, exit 0.
     !!
     !! Without it, each scenario above could be aborting in its shared preamble rather than at the
@@ -22426,6 +22550,86 @@ contains
         call check_kde_scenario(error, "kde_fit_pilot_support", &
             "pf_kde%fit: the pilot must have the same support as this fit")
     end subroutine test_kde_fit_pilot_support_aborts
+    !
+    subroutine test_kde_fit_pilot_support_side_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_pilot_support_side", &
+            "pf_kde%fit: the pilot must have the same support as this fit")
+    end subroutine test_kde_fit_pilot_support_side_aborts
+    !
+    subroutine test_kde_fit_pilot_upper_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_fit_pilot_upper", &
+            "pf_kde%fit: the pilot must have the same support as this fit")
+    end subroutine test_kde_fit_pilot_upper_aborts
+    !
+    subroutine test_kde_spread_max_not_finite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_spread_max_not_finite", &
+            "pf_kde%fit: spread_max must be a finite number of at least 1")
+    end subroutine test_kde_spread_max_not_finite_aborts
+    !
+    subroutine test_kde_curve_one_end_collapses_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_one_end_collapses", &
+            "pf_kde%curve: xmin must be below xmax")
+    end subroutine test_kde_curve_one_end_collapses_aborts
+    !
+    subroutine test_kde_curve_default_range_collapses_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_curve_default_range_collapses", &
+            "pf_kde%curve: the default range has collapsed to one point")
+    end subroutine test_kde_curve_default_range_collapses_aborts
+    !
+    subroutine test_kde_grid_cell_width_underflow_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_cell_width_underflow", &
+            "pf_kde_grid%init: the cell width (xmax - xmin)/ncells must be a finite, positive number")
+    end subroutine test_kde_grid_cell_width_underflow_aborts
+    !
+    subroutine test_kde_grid_linear_range_not_at_upper_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_linear_range_not_at_upper", &
+            "the grid's range must start at lower and end at upper")
+    end subroutine test_kde_grid_linear_range_not_at_upper_aborts
+    !
+    subroutine test_kde_grid_spread_max_not_finite_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_spread_max_not_finite", &
+            "pf_kde_grid%init: spread_max must be a finite number of at least 1")
+    end subroutine test_kde_grid_spread_max_not_finite_aborts
+    !
+    subroutine test_kde_grid_spread_max_below_one_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_spread_max_below_one", &
+            "pf_kde_grid%init: spread_max must be a finite number of at least 1")
+    end subroutine test_kde_grid_spread_max_below_one_aborts
+    !
+    !> A `method = "binned"` fit whose narrowest kernel asks for more cells than the grid may hold
+    !> says so and still answers: the count is clamped, not refused.
+    subroutine test_kde_fit_cells_clamped_advice(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "kde_fit_cells_clamped_advice", &
+            expect_abort=.false., &
+            failure_message="the clamped-cells scenario was not expected to abort", &
+            required_stderr="is held to 65536")
+    end subroutine test_kde_fit_cells_clamped_advice
+    !
+    !> The zone advice renders a bound outside the range a fixed rendering reads back in the
+    !> exponent form, with three exponent digits, whose spelling is the same under every compiler.
+    subroutine test_kde_zone_advice_tiny_support(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "kde_zone_advice_tiny_support", &
+            expect_abort=.false., &
+            failure_message="the tiny-support zone advice scenario was not expected to abort", &
+            required_stderr="at bandwidth=1.429E-007 or below")
+    end subroutine test_kde_zone_advice_tiny_support
+    !
+    subroutine test_kde_grid_binned_transform_length_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_binned_transform_length", &
+            'pf_kde_grid%init: method="binned" needs a transform longer than 7 cells can carry')
+    end subroutine test_kde_grid_binned_transform_length_aborts
     !
     !> R3 leaves the grid undefined quietly and says so. The message's CLASS is the assertion:
     !> a finding about the caller's DATA goes through `parquet_emit_warning`, so `"silent"` leaves

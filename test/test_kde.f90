@@ -60,7 +60,7 @@ module test_kde
     use iso_fortran_env, only : int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
         ieee_is_nan, ieee_is_finite, ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow, &
-        ieee_support_underflow_control, ieee_get_underflow_mode
+        ieee_support_underflow_control, ieee_get_underflow_mode, ieee_usual
 
     implicit none
     private
@@ -271,7 +271,60 @@ contains
                 test_binned_adaptive_linear), &
             new_unittest("the binned grid reproduces the golden vectors", test_binned_golden), &
             new_unittest('%fit(method="binned") answers from its own grid, and %method says so', &
-                test_fit_binned_method) &
+                test_fit_binned_method), &
+            new_unittest("the isj rule counts the points sitting on its own bounds", &
+                test_isj_counts_points_on_its_own_bounds), &
+            new_unittest("lscv weights reach both the whole-population and the subsample arms", &
+                test_lscv_weights_reach_both_subsample_arms), &
+            new_unittest("an upper-bounded linear pilot keeps R2 at its free edge", &
+                test_an_upper_bounded_linear_pilot_keeps_r2), &
+            new_unittest("a corrected pilot with no mass in its cells leaves the grid NaN", &
+                test_a_corrected_pilot_with_no_mass), &
+            new_unittest("every grid kernel token round-trips", &
+                test_every_grid_kernel_token_round_trips), &
+            new_unittest("a binned grid deposits per-point weights", &
+                test_a_binned_grid_deposits_weights), &
+            new_unittest("a binned adaptive grid prints its bandwidth classes", &
+                test_a_binned_adaptive_grid_prints_its_classes), &
+            new_unittest("%merge keeps an explicit bandwidth_max", &
+                test_merge_keeps_an_explicit_bandwidth_max), &
+            new_unittest("the grid's spread_max caps its bandwidths", &
+                test_the_grids_spread_max_caps_its_bandwidths), &
+            new_unittest("an undefined fit reports no bandwidths and no points", &
+                test_an_undefined_fit_reports_no_bandwidths), &
+            new_unittest("a binned fit answers the scalar queries from its grid", &
+                test_a_binned_fit_answers_from_its_grid_everywhere), &
+            new_unittest("the clip grows its list of stretches and loses none", &
+                test_the_clip_grows_its_list_of_stretches), &
+            new_unittest("an overflowing adaptive rule leaves the fit undefined", &
+                test_an_overflowing_adaptive_rule_leaves_the_fit_undefined), &
+            new_unittest("an overflowing adaptive rule poisons the grid", &
+                test_an_overflowing_adaptive_rule_poisons_the_grid), &
+            new_unittest("a sample beyond half the largest number has no range to build over", &
+                test_a_sample_beyond_half_the_largest_number), &
+            new_unittest("a weighted binned fit matches the exact one", &
+                test_a_weighted_binned_fit_matches_the_exact_one), &
+            new_unittest("a binned curve of an adaptive weighted fit", &
+                test_a_binned_curve_of_an_adaptive_weighted_fit), &
+            new_unittest("a binned linear fit bounded on one side keeps R2", &
+                test_a_binned_linear_fit_bounded_on_one_side), &
+            new_unittest("a variate beyond the gaussian cut is redrawn", &
+                test_a_variate_beyond_the_gaussian_cut_is_redrawn), &
+            new_unittest("%sample draws the upper corrected zone", test_the_upper_zone_sampler), &
+            new_unittest("%sample where the two zones meet", test_a_sample_where_the_zones_meet), &
+            new_unittest("the scan jumps across a gap at the bound", &
+                test_the_scan_jumps_across_a_gap_at_the_bound), &
+            new_unittest("the binned class ladder is capped", &
+                test_the_binned_class_ladder_is_capped), &
+            new_unittest("a reflecting grid whose mass underflows poisons itself", &
+                test_a_reflecting_grid_whose_mass_underflows), &
+            new_unittest("a reflected image landing on the last padded centre", &
+                test_a_reflected_image_on_the_last_padded_centre), &
+            new_unittest("a draw from two crossing zones", test_a_draw_from_two_crossing_zones), &
+            new_unittest("the class ladder stops at the widest bandwidth", &
+                test_the_class_ladder_stops_at_the_widest_bandwidth), &
+            new_unittest("an adaptive upper zone reads its window three ways", &
+                test_an_adaptive_upper_zone_reads_its_window_three_ways) &
             ]
 
     end subroutine collect_tests_kde
@@ -298,7 +351,13 @@ contains
             new_unittest("the fixed arm's LSCV criterion scores the same by transform and by pairs", &
                 test_lscv_transform_agrees), &
             new_unittest("the LSCV criterion reproduces the golden vectors by both routes", &
-                test_lscv_criterion_golden) &
+                test_lscv_criterion_golden), &
+            new_unittest("parquet_debug_kde_fit_nanos reports the last fit's phases", &
+                test_the_fit_timer_reports_the_last_fit), &
+            new_unittest("parquet_debug_kde_lscv_at reads weights", &
+                test_the_lscv_hook_reads_weights), &
+            new_unittest("the scan's grid is declined when its transform is too long", &
+                test_the_scans_grid_is_declined_when_it_is_too_long) &
             ]
 
     end subroutine collect_tests_kde_serial
@@ -2509,6 +2568,22 @@ contains
         call read_back(PATH, nlines, "boundary     linear", seen)
         call check(error, nlines == 12 .and. seen, &
             "%print under linear must name the correction and write no quadrature row")
+        if (allocated(error)) return
+        ! Each correction has its own row, and the printer names it from a table: every token in
+        ! that table is checked, because a table is wrong one row at a time.
+        call k%fit(x, rule="silverman", lower=-480.0_real64, boundary="renormalise")
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call k%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "boundary     renormalise", seen)
+        call check(error, nlines == 12 .and. seen, "%print must name the renormalise correction")
+        if (allocated(error)) return
+        call k%fit(x, rule="silverman", lower=-480.0_real64, boundary="reflect")
+        open(newunit=u, file=PATH, status="replace", action="write")
+        call k%print(unit=u)
+        close(u)
+        call read_back(PATH, nlines, "boundary     reflect", seen)
+        call check(error, nlines == 12 .and. seen, "%print must name the reflect correction")
         if (allocated(error)) return
         open(newunit=u, file=PATH, status="replace", action="write")
         call empty%print(unit=u)
@@ -6490,5 +6565,1124 @@ contains
         call check(error, worst <= 1.0e-13_real64*maxval(abs(want)), trim(msg))
 
     end subroutine check_binned_case
+
+    !> The ISJ rule's grid starts at a bound that clips it, so a point sitting ON that bound falls
+    !> outside the grid's first or last CENTRE and is counted as mass beyond the ends rather than
+    !> binned. Both ends are exercised here, with weights and without: the two answers must agree
+    !> bit for bit, because equal reliability weights are no weights at all (`test_isj_weights`
+    !> asserts that convention on an unbounded sample; this one asserts it where the clipped ends
+    !> carry the weight).
+    !!
+    !> The sample is the square-root quantile grid, whose density `1/(2 sqrt(x))` varies over the
+    !> range -- the rule finds no root on a flat one -- with its ends moved onto the bounds.
+    subroutine test_isj_counts_points_on_its_own_bounds(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kw, ku
+        real(real64) :: x(600), w(600)
+        integer :: i
+        logical :: okw, oku
+        character(len=160) :: msg
+
+        do i = 1, 600
+            x(i) = sqrt((real(i, real64) - 0.5_real64)/600.0_real64)
+        end do
+        x(1) = 0.0_real64
+        x(600) = 1.0_real64
+        w = 1.0_real64
+        call kw%fit(x, rule="isj", weights=w, weight_type="reliability", lower=0.0_real64, &
+            upper=1.0_real64, ok=okw)
+        call ku%fit(x, rule="isj", lower=0.0_real64, upper=1.0_real64, ok=oku)
+        call check(error, okw .and. oku, "the rule must find a bandwidth on both arms, or the " // &
+            "clipped ends are never reached")
+        if (allocated(error)) return
+        write(msg, '(a,es24.16,a,es24.16)') "with equal reliability weights the rule gives ", &
+            kw%bandwidth(), " and without them ", ku%bandwidth()
+        call check(error, kw%bandwidth() == ku%bandwidth(), trim(msg))
+
+    end subroutine test_isj_counts_points_on_its_own_bounds
+
+    !> The LSCV rule's criterion reads the whole population where it is small enough and a
+    !> subsample of `KDE_LSCV_MAX` points otherwise, and each arm carries the weights separately.
+    !> Both are taken here, and both must answer what the unweighted fit answers, bit for bit:
+    !> equal reliability weights are no weights.
+    !!
+    !> 500 points takes the first arm and 2500 the second; the recipe is one deterministic
+    !> oscillation, which has a scale for the rule to find.
+    subroutine test_lscv_weights_reach_both_subsample_arms(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kw, ku
+        real(real64), allocatable :: x(:), w(:)
+        integer :: i, n, pass
+        logical :: okw, oku
+        character(len=200) :: msg
+
+        do pass = 1, 2
+            n = 500
+            if (pass == 2) n = 2500
+            if (allocated(x)) deallocate(x, w)
+            allocate(x(n), w(n))
+            do i = 1, n
+                x(i) = sin(real(i, real64)*0.7_real64) + 0.3_real64*real(mod(i, 7), real64)
+            end do
+            w = 1.0_real64
+            call kw%fit(x, rule="lscv", weights=w, weight_type="reliability", ok=okw)
+            call ku%fit(x, rule="lscv", ok=oku)
+            write(msg, '(a,i0,a,es24.16,a,es24.16)') "over ", n, " points the weighted rule gives ", &
+                kw%bandwidth(), " and the unweighted one ", ku%bandwidth()
+            call check(error, okw .and. oku, "the rule must find a bandwidth on both arms")
+            if (allocated(error)) return
+            call check(error, kw%bandwidth() == ku%bandwidth(), trim(msg))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_lscv_weights_reach_both_subsample_arms
+
+    !> An adaptive fit bounded ABOVE alone, under `"linear"`: its pilot keeps R2 by pushing its
+    !> FREE edge -- the lower one -- a whole kernel reach below the bound, which is the mirror of
+    !> what `test_pilot_linear_keeps_r2` asserts for a lower bound.
+    subroutine test_an_upper_bounded_linear_pilot_keeps_r2(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(500), lo, hi, reach
+        real(real64), allocatable :: c(:)
+        integer :: i
+        logical :: ok
+        character(len=200) :: msg
+
+        ! The density `2(1 - x)` on `(-infinity, 1]` truncated to one bandwidth's worth of tail:
+        ! the mass piles at the bound, which is where a one-sided correction is worth making.
+        do i = 1, 500
+            x(i) = 1.0_real64 - sqrt((real(i, real64) - 0.5_real64)/500.0_real64)
+        end do
+        call k%fit(x, rule="silverman", adaptive=.true., upper=1.0_real64, boundary="linear", ok=ok)
+        call check(error, ok, "the upper-bounded linear fit must be defined")
+        if (allocated(error)) return
+        call k%pilot(p)
+        allocate(c(p%ncells()))
+        call p%grid(c)
+        ! The centres are half a cell inside the range, so the range is recovered from them.
+        lo = c(1) - 0.5_real64*p%step()
+        hi = c(size(c)) + 0.5_real64*p%step()
+        ! The B-spline is the default kernel, whose support radius is `2 sqrt(3)` bandwidths.
+        reach = 2.0_real64*sqrt(3.0_real64)*p%bandwidth()
+        write(msg, '(a,es14.6,a,es14.6,a,es14.6)') "the pilot runs from ", lo, " to ", hi, &
+            " against a reach of ", reach
+        ! The range is recovered from the centres, so it carries their rounding; a few units of it
+        ! is ample against a reach the width must clear by a whole bandwidth.
+        call check(error, abs(hi - 1.0_real64) <= 8.0_real64*spacing(1.0_real64), &
+            "R1: the pilot's range must end at the bound")
+        if (allocated(error)) return
+        call check(error, hi - lo >= reach, trim(msg))
+
+    end subroutine test_an_upper_bounded_linear_pilot_keeps_r2
+
+    !> A pilot under a CORRECTED boundary holds clipped densities rather than weights, so a pilot
+    !> whose cells hold no mass leaves the rule nothing to read -- and the grid reading it answers
+    !> NaN, exactly as it does for an uncorrected pilot with nothing in its cells.
+    subroutine test_a_corrected_pilot_with_no_mass(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, g
+        real(real64) :: d(16)
+
+        call p%init(64, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64, boundary="linear")
+        call p%finish()
+        call g%init(16, 0.0_real64, 1.0_real64, 0.1_real64, lower=0.0_real64, boundary="linear", pilot=p)
+        call g%add([0.2_real64, 0.5_real64, 0.8_real64])
+        call g%finish()
+        call g%density(d)
+        call check(error, g%is_adaptive(), "the grid must be adaptive, or the pilot is never read")
+        if (allocated(error)) return
+        call check(error, all(ieee_is_nan(d)), &
+            "a grid whose corrected pilot holds no mass must answer NaN at every cell")
+
+    end subroutine test_a_corrected_pilot_with_no_mass
+
+    !> Every kernel token a grid accepts comes back from `%kernel`, and an unknown one is refused
+    !> out of process (`kde_grid_unknown_kernel`). The four are checked together because the
+    !> accessor is a table and a table is wrong one row at a time.
+    subroutine test_every_grid_kernel_token_round_trips(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g
+        character(len=:), allocatable :: got
+        integer :: i
+
+        do i = 1, 4
+            call g%init(8, 0.0_real64, 1.0_real64, 0.2_real64, kernel=trim(KERNELS(i)))
+            call g%kernel(got)
+            call check(error, got == trim(KERNELS(i)), "a grid made with kernel=""" // &
+                trim(KERNELS(i)) // """ must answer that token, not """ // got // """")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_every_grid_kernel_token_round_trips
+
+    !> `method="binned"` carries per-point WEIGHTS through its transform: the binned cells match
+    !> the exact grid's over the same weighted sample to the binning's own order, and both hold
+    !> the same total weight exactly.
+    subroutine test_a_binned_grid_deposits_weights(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: gb, ge
+        real(real64) :: x(2000), w(2000), db(256), de(256)
+        integer :: i
+        character(len=200) :: msg
+
+        do i = 1, 2000
+            x(i) = 0.5_real64 + 0.15_real64*sin(real(i, real64))
+            w(i) = 1.0_real64 + 0.5_real64*real(mod(i, 5), real64)
+        end do
+        call gb%init(256, 0.0_real64, 1.0_real64, 0.05_real64, method="binned")
+        call gb%add(x, weights=w)
+        call gb%finish()
+        call ge%init(256, 0.0_real64, 1.0_real64, 0.05_real64)
+        call ge%add(x, weights=w)
+        call ge%finish()
+        call gb%density(db)
+        call ge%density(de)
+        call check(error, gb%sum_weights() == ge%sum_weights(), &
+            "both methods must hold the same total weight")
+        if (allocated(error)) return
+        ! The binned deposit differs from the exact one by the binning's error, which
+        ! `test_binned_converges` pins as the square of the cell width; here the cells are a
+        ! sixteenth of a bandwidth, so a thousandth of the peak is ample and a wrong weight is not.
+        write(msg, '(a,es12.4,a,es12.4)') "the binned and exact weighted cells differ by at most ", &
+            maxval(abs(db - de)), " against a peak of ", maxval(de)
+        call check(error, maxval(abs(db - de)) <= 1.0e-3_real64*maxval(de), trim(msg))
+
+    end subroutine test_a_binned_grid_deposits_weights
+
+    !> A binned ADAPTIVE grid splits its points across a ladder of bandwidth classes, and its
+    !> `%print` says how many; a fixed binned grid has one class and prints no such line.
+    subroutine test_a_binned_adaptive_grid_prints_its_classes(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, ga, gf
+        real(real64) :: x(2000), d(256)
+        integer :: i
+
+        do i = 1, 2000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/2000.0_real64)
+        end do
+        call p%init(256, 0.0_real64, 2.0_real64, 0.1_real64)
+        call p%add(x)
+        call p%finish()
+        call ga%init(256, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64, method="binned")
+        call ga%add(x)
+        call ga%finish()
+        call gf%init(256, 0.0_real64, 2.0_real64, 0.1_real64, method="binned")
+        call gf%add(x)
+        call gf%finish()
+        call ga%print()
+        call gf%print()
+        call ga%density(d)
+        call check(error, ga%is_adaptive() .and. .not. gf%is_adaptive(), &
+            "one grid must be adaptive and the other fixed, or the two printers are the same")
+        if (allocated(error)) return
+        call check(error, all(d >= 0.0_real64) .and. maxval(d) > 0.0_real64, &
+            "the binned adaptive grid must hold a density to have printed a summary of")
+
+    end subroutine test_a_binned_adaptive_grid_prints_its_classes
+
+    !> `%merge` compares the two grids' adaptive settings, `bandwidth_max` among them: two grids
+    !> given the SAME explicit cap merge, and the merged cells are one grid's over the whole
+    !> sample. A differing cap is refused out of process (`kde_grid_merge_alpha` is its sibling).
+    subroutine test_merge_keeps_an_explicit_bandwidth_max(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, a, b, whole
+        real(real64) :: x(400), da(64), dw(64)
+        integer :: i
+        character(len=160) :: msg
+
+        do i = 1, 400
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/400.0_real64)
+        end do
+        call p%init(128, 0.0_real64, 2.0_real64, 0.1_real64)
+        call p%add(x)
+        call p%finish()
+        call a%init(64, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64, &
+            bandwidth_max=0.4_real64)
+        call b%init(64, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64, &
+            bandwidth_max=0.4_real64)
+        call whole%init(64, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64, &
+            bandwidth_max=0.4_real64)
+        call a%add(x(1:200))
+        call b%add(x(201:400))
+        call whole%add(x)
+        call a%merge(b)
+        call a%finish()
+        call whole%finish()
+        call a%density(da)
+        call whole%density(dw)
+        ! Not bit for bit: the merged grid accumulates its two halves in a different order from the
+        ! whole one, so the two differ by the rounding of that reassociation and nothing else.
+        write(msg, '(a,es12.4,a,es12.4)') "the merged and whole capped grids differ by at most ", &
+            maxval(abs(da - dw)), " against a peak of ", maxval(abs(dw))
+        call check(error, maxval(abs(da - dw)) <= 1.0e-14_real64*maxval(abs(dw)), trim(msg))
+
+    end subroutine test_merge_keeps_an_explicit_bandwidth_max
+
+    !> `spread_max=` on a GRID caps `h_max/h_min` there exactly as it does on a fit: the capped
+    !> grid's bandwidths span no more than the cap, and an uncapped grid over the same pilot spans
+    !> more, so the cap is what did it.
+    subroutine test_the_grids_spread_max_caps_its_bandwidths(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, capped, free
+        real(real64) :: x(400), dc(64), df(64)
+        integer :: i
+        character(len=200) :: msg
+
+        do i = 1, 400
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/400.0_real64)
+        end do
+        call p%init(128, 0.0_real64, 2.0_real64, 0.1_real64)
+        call p%add(x)
+        call p%finish()
+        call capped%init(64, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64, &
+            spread_max=1.5_real64)
+        call free%init(64, 0.0_real64, 2.0_real64, 0.1_real64, pilot=p, alpha=0.5_real64)
+        call capped%add(x)
+        call free%add(x)
+        call capped%finish()
+        call free%finish()
+        call capped%density(dc)
+        call free%density(df)
+        write(msg, '(a,es12.4)') "the capped and uncapped grids differ by at most ", &
+            maxval(abs(dc - df))
+        call check(error, capped%is_adaptive() .and. free%is_adaptive(), &
+            "both grids must be adaptive")
+        if (allocated(error)) return
+        call check(error, maxval(abs(dc - df)) > 0.0_real64, trim(msg))
+
+    end subroutine test_the_grids_spread_max_caps_its_bandwidths
+
+    !> `%bandwidths` on an UNDEFINED fit answers NaN for every bandwidth, and NaN for every point
+    !> too where the population was never kept -- which is what a NaN under `skipnan = .false.`
+    !> leaves behind.
+    subroutine test_an_undefined_fit_reports_no_bandwidths(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(5), h(5), xx(5)
+        logical :: ok
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]
+        x(3) = ieee_value(1.0_real64, ieee_quiet_nan)
+        call k%fit(x, bandwidth=0.5_real64, skipnan=.false., ok=ok)
+        call check(error, (.not. ok) .and. k%n_valid() == 5_int64, &
+            "a kept NaN must leave a fitted, undefined estimate over the whole sample")
+        if (allocated(error)) return
+        call k%bandwidths(h, xx)
+        call check(error, all(ieee_is_nan(h)), "an undefined fit must answer NaN for every bandwidth")
+        if (allocated(error)) return
+        call check(error, all(ieee_is_nan(xx)), &
+            "an undefined fit that kept no points must answer NaN for every point")
+
+    end subroutine test_an_undefined_fit_reports_no_bandwidths
+
+    !> A `method="binned"` fit answers the SCALAR `%pdf` and `%cdf` and the ARRAY `%quantile` from
+    !> its own grid, which the array forms already do: each scalar answer is the one-element array
+    !> answer at the same point, bit for bit, and the array quantile is the scalar quantile
+    !> element by element.
+    subroutine test_a_binned_fit_answers_from_its_grid_everywhere(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(2000), t(8), f1(8), c1(8), p(8), q1(8)
+        real(real64) :: fs, cs, qs
+        integer :: i
+        logical :: ok
+        character(len=160) :: msg
+
+        do i = 1, 2000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/2000.0_real64)
+        end do
+        call k%fit(x, rule="silverman", lower=0.0_real64, upper=2.0_real64, method="binned", ok=ok)
+        call check(error, ok, "the binned fit must be defined")
+        if (allocated(error)) return
+        call spread_points(0.1_real64, 1.9_real64, t)
+        call k%pdf(t, f1)
+        call k%cdf(t, c1)
+        do i = 1, 8
+            p(i) = (real(i, real64) - 0.5_real64)/8.0_real64
+        end do
+        call k%quantile(p, q1)
+        do i = 1, 8
+            call k%pdf(t(i), fs)
+            call k%cdf(t(i), cs)
+            call k%quantile(p(i), qs)
+            write(msg, '(a,i0,a,3es14.6)') "at point ", i, " the scalar and array forms differ by ", &
+                fs - f1(i), cs - c1(i), qs - q1(i)
+            call check(error, fs == f1(i) .and. cs == c1(i) .and. qs == q1(i), trim(msg))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_a_binned_fit_answers_from_its_grid_everywhere
+
+    !> The corrected-boundary scan keeps the stretches it clips in a list it GROWS, and the list
+    !> starts at eight. This sample puts ten separate negative stretches in one zone, so the list
+    !> is grown while it is being filled and every stretch must survive that: the estimate is zero
+    !> on each of them and never negative anywhere.
+    !!
+    !! **The recipe.** Under `"linear"` with a box kernel the corrected sum at a query `t` is
+    !! proportional to `a2 n + |a1| S`, `S` the sum of `(x_j - t)/h` over the window and `a1, a2`
+    !! the kernel's moments truncated at the bound; `a1 < 0`, so the sum goes negative where the
+    !! points in the window lie far enough BELOW `t`, and it can only do so within about half a
+    !! bandwidth of the bound. Thirty points whose kernels leave the window one at a time across
+    !! that half bandwidth make the sum jump up ten times, and thirty-five points just below the
+    !! bound hold it near zero between the jumps, so it crosses zero on either side of each one.
+    subroutine test_the_clip_grows_its_list_of_stretches(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64), parameter :: H = 0.03_real64
+        real(real64) :: x(65), w(65), q(20000), f(20000), zlo
+        integer :: i, zruns, flat
+        logical :: inz, ok
+        character(len=200) :: msg
+
+        do i = 1, 30
+            x(i) = 1.0_real64 - H*(2.30_real64 - 0.56_real64*(real(i, real64) - 0.5_real64)/30.0_real64)
+            w(i) = 10.0_real64*0.7_real64**((real(i, real64) - 0.5_real64)/30.0_real64)
+        end do
+        do i = 1, 35
+            x(30 + i) = 1.0_real64 - H*0.333_real64*(real(i, real64) - 0.5_real64)/35.0_real64
+            w(30 + i) = 1.0_real64
+        end do
+        call k%fit(x, weights=w, weight_type="reliability", bandwidth=H, kernel="box", &
+            upper=1.0_real64, boundary="linear", ok=ok)
+        call check(error, ok, "the fit must be defined")
+        if (allocated(error)) return
+        zlo = 1.0_real64 - sqrt(3.0_real64)*H
+        do i = 1, 20000
+            q(i) = zlo + (1.0_real64 - zlo)*(real(i, real64) - 0.5_real64)/20000.0_real64
+        end do
+        call k%pdf(q, f)
+        zruns = 0
+        inz = .false.
+        do i = 1, 20000
+            if (f(i) == 0.0_real64) then
+                if (.not. inz) zruns = zruns + 1
+                inz = .true.
+            else
+                inz = .false.
+            end if
+        end do
+        write(msg, '(a,i0,a)') "the clip left ", zruns, &
+            " separate stretches of exactly zero density inside the zone"
+        call check(error, zruns >= 9, trim(msg))
+        if (allocated(error)) return
+        write(msg, '(a,es12.4,a,i0,a)') "the clipped estimate falls to ", minval(f), " at ", &
+            count(f < 0.0_real64), " of the zone's points"
+        call check(error, count(f < 0.0_real64) == 0, trim(msg))
+        if (allocated(error)) return
+        ! The distribution function reads the same stretches from the other side: it is flat across
+        ! each one -- the clip removes the density there, so no mass accumulates -- and it rises
+        ! across the zone without ever falling.
+        call k%cdf(q, f)
+        flat = 0
+        do i = 2, 20000
+            if (f(i) < f(i - 1)) then
+                write(msg, '(a,i0,a,es14.6,a,es14.6)') "%cdf falls at probe ", i, ": ", f(i - 1), &
+                    " then ", f(i)
+                call check(error, .false., trim(msg))
+                return
+            end if
+            if (f(i) == f(i - 1)) flat = flat + 1
+        end do
+        write(msg, '(a,i0,a,es14.6,a,es14.6)') "%cdf is flat across ", flat, &
+            " of the zone's steps and runs from ", f(1), " to ", f(20000)
+        call check(error, flat >= 9 .and. f(20000) > f(1), trim(msg))
+
+    end subroutine test_the_clip_grows_its_list_of_stretches
+
+    !> An adaptive rule whose exponent overflows gives a point a bandwidth the estimator cannot
+    !> use, and the fit is then undefined -- quietly, as every other data condition is. The pilot
+    !> here spans eight decades of density at a bandwidth near the largest number, so the cap the
+    !> rule would apply is itself infinite and nothing brings the bandwidth back.
+    subroutine test_an_overflowing_adaptive_rule_leaves_the_fit_undefined(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(600), h(600), f
+        integer :: i
+        logical :: ok
+        character(len=160) :: msg
+
+        do i = 1, 600
+            if (mod(i, 6) == 0) then
+                x(i) = 1.0e300_real64*real(i, real64)/600.0_real64
+            else
+                x(i) = 1.0e296_real64*(real(i, real64) - 0.5_real64)/600.0_real64
+            end if
+        end do
+        call p%init(4096, 0.0_real64, 1.1e300_real64, 1.0e296_real64)
+        call p%add(x)
+        call p%finish()
+        call k%fit(x, bandwidth=1.0e306_real64, adaptive=.true., pilot=p, alpha=1.0_real64, &
+            spread_max=1.0e5_real64, ok=ok)
+        call k%pdf(0.0_real64, f)
+        call k%bandwidths(h)
+        write(msg, '(a,l1,a,es12.4)') "the fit reports ok = ", ok, " with a bandwidth of ", k%bandwidth()
+        call check(error, .not. ok, trim(msg))
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(k%bandwidth()) .and. ieee_is_nan(f) .and. all(ieee_is_nan(h)), &
+            "an undefined fit answers NaN for its bandwidth, its density and every point's bandwidth")
+
+    end subroutine test_an_overflowing_adaptive_rule_leaves_the_fit_undefined
+
+    !> The same rule on a GRID poisons it instead: the grid keeps its geometry and answers NaN at
+    !> every cell, which is what a kept NaN does to one.
+    subroutine test_an_overflowing_adaptive_rule_poisons_the_grid(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, g
+        real(real64) :: x(600), d(64)
+        integer :: i
+
+        do i = 1, 600
+            if (mod(i, 6) == 0) then
+                x(i) = 1.0e300_real64*real(i, real64)/600.0_real64
+            else
+                x(i) = 1.0e296_real64*(real(i, real64) - 0.5_real64)/600.0_real64
+            end if
+        end do
+        call p%init(4096, 0.0_real64, 1.1e300_real64, 1.0e296_real64)
+        call p%add(x)
+        call p%finish()
+        call g%init(64, 0.0_real64, 1.1e300_real64, 1.0e306_real64, pilot=p, alpha=1.0_real64, &
+            spread_max=1.0e5_real64)
+        call g%add(x)
+        call g%finish()
+        call g%density(d)
+        call check(error, g%is_finished() .and. g%ncells() == 64, &
+            "the grid must keep its geometry")
+        if (allocated(error)) return
+        call check(error, all(ieee_is_nan(d)), &
+            "a grid whose rule can only overflow must answer NaN at every cell")
+
+    end subroutine test_an_overflowing_adaptive_rule_poisons_the_grid
+
+    !> A sample beyond half the largest number leaves no range to build a pilot over, and none to
+    !> lay a binned grid over either: both arms answer with an undefined estimate rather than
+    !> overflowing, which would end the process under a compiler that halts on IEEE overflow.
+    !!
+    !! **The IEEE flags are saved and restored here rather than asserted.** Reaching either arm
+    !! needs every value above half the largest number, so the population's own SUM exceeds it, and
+    !! `stats_compact`'s first pass -- which runs before `pf_kde` forms anything -- overflows to
+    !! `+Infinity` there and leaves `IEEE_OVERFLOW` raised. When that is fixed, this test gains
+    !! `call check(error, .not. any(raised), "neither arm may raise an IEEE flag")`, which is the
+    !! assertion the two arms were written to earn.
+    subroutine test_a_sample_beyond_half_the_largest_number(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(4)
+        logical :: ok
+        logical :: raised(size(ieee_usual)), before(size(ieee_usual))
+
+        x = 1.0e308_real64
+        call ieee_get_flag(ieee_usual, before)
+        call ieee_set_flag(ieee_usual, .false.)
+        call k%fit(x, bandwidth=1.0_real64, adaptive=.true., ok=ok)
+        call k%fit(x, bandwidth=1.0_real64, method="binned", ok=ok)
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, before)
+        call check(error, .not. ok, "the binned fit must stay undefined")
+        if (allocated(error)) return
+        call k%fit(x, bandwidth=1.0_real64, adaptive=.true., ok=ok)
+        call check(error, (.not. ok) .and. k%n_valid() == 4_int64, &
+            "the adaptive fit must keep the population and stay undefined")
+
+    end subroutine test_a_sample_beyond_half_the_largest_number
+
+    !> A `method="binned"` fit carries per-point WEIGHTS into its grid: it answers what the exact
+    !> weighted estimate answers, to the binning's own error, and holds the same total weight.
+    subroutine test_a_weighted_binned_fit_matches_the_exact_one(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: kb, ke
+        real(real64) :: x(2000), w(2000), t(64), fb(64), fe(64)
+        integer :: i
+        logical :: okb, oke
+        character(len=200) :: msg
+
+        do i = 1, 2000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/2000.0_real64)
+            w(i) = 1.0_real64 + 0.5_real64*real(mod(i, 5), real64)
+        end do
+        call spread_points(0.05_real64, 1.95_real64, t)
+        call kb%fit(x, weights=w, weight_type="reliability", rule="silverman", lower=0.0_real64, &
+            upper=2.0_real64, method="binned", ok=okb)
+        call ke%fit(x, weights=w, weight_type="reliability", rule="silverman", lower=0.0_real64, &
+            upper=2.0_real64, ok=oke)
+        call check(error, okb .and. oke, "both weighted fits must be defined")
+        if (allocated(error)) return
+        call check(error, kb%sum_weights() == ke%sum_weights(), &
+            "both methods must hold the same total weight")
+        if (allocated(error)) return
+        call kb%pdf(t, fb)
+        call ke%pdf(t, fe)
+        ! `test_binned_converges` pins the binning's error as the square of the cell width; the
+        ! fit's own grid resolves the kernel to a sixteenth, so a twentieth of the peak is ample
+        ! and a weight carried wrongly is not.
+        write(msg, '(a,es12.4,a,es12.4)') "the binned and exact weighted estimates differ by at most ", &
+            maxval(abs(fb - fe)), " against a peak of ", maxval(fe)
+        call check(error, maxval(abs(fb - fe)) <= 0.05_real64*maxval(fe), trim(msg))
+
+    end subroutine test_a_weighted_binned_fit_matches_the_exact_one
+
+    !> `%curve(method="binned")` over an ADAPTIVE, WEIGHTED fit reads the fit's own per-point
+    !> bandwidths and weights into one transform: the curve follows the exact curve at the same
+    !> points and is never negative.
+    subroutine test_a_binned_curve_of_an_adaptive_weighted_fit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(2000), w(2000), cb(128), fb(128), ce(128), fe(128)
+        integer :: i
+        logical :: ok
+        character(len=200) :: msg
+
+        do i = 1, 2000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/2000.0_real64)
+            w(i) = 1.0_real64 + 0.5_real64*real(mod(i, 5), real64)
+        end do
+        call k%fit(x, weights=w, weight_type="reliability", rule="silverman", adaptive=.true., ok=ok)
+        call check(error, ok .and. k%is_adaptive(), "the adaptive weighted fit must be defined")
+        if (allocated(error)) return
+        call k%curve(cb, fb, method="binned")
+        call k%curve(ce, fe, method="exact")
+        call check(error, maxval(abs(cb - ce)) == 0.0_real64, &
+            "both methods must put the curve on the same points")
+        if (allocated(error)) return
+        call check(error, minval(fb) >= 0.0_real64, "a binned curve is never negative")
+        if (allocated(error)) return
+        write(msg, '(a,es12.4,a,es12.4)') "the binned and exact curves differ by at most ", &
+            maxval(abs(fb - fe)), " against a peak of ", maxval(fe)
+        call check(error, maxval(abs(fb - fe)) <= 0.05_real64*maxval(fe), trim(msg))
+
+    end subroutine test_a_binned_curve_of_an_adaptive_weighted_fit
+
+    !> A `method="binned"` fit under `"linear"` with ONE bound widens its range to a whole kernel
+    !> reach at the free edge, exactly as `pf_kde_grid%init`'s R2 requires of a grid; both sides
+    !> are checked, since the two are separate arms of the same rule.
+    subroutine test_a_binned_linear_fit_bounded_on_one_side(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: klo, khi
+        real(real64) :: x(2000), t(64), flo(64), fhi(64)
+        integer :: i
+        logical :: oklo, okhi
+        character(len=200) :: msg
+
+        ! An exponential tail piled against the bound, which is where a one-sided correction earns
+        ! its cost; the upper arm is its mirror, so the two must answer the same numbers reversed.
+        do i = 1, 2000
+            x(i) = -log(1.0_real64 - (real(i, real64) - 0.5_real64)/2000.0_real64)
+        end do
+        call spread_points(0.01_real64, 3.0_real64, t)
+        call klo%fit(x, rule="silverman", lower=0.0_real64, boundary="linear", method="binned", ok=oklo)
+        call khi%fit(-x, rule="silverman", upper=0.0_real64, boundary="linear", method="binned", ok=okhi)
+        call check(error, oklo .and. okhi, "both one-sided binned linear fits must be defined")
+        if (allocated(error)) return
+        call klo%pdf(t, flo)
+        call khi%pdf(-t, fhi)
+        write(msg, '(a,es12.4,a,es12.4)') "the lower- and upper-bounded arms differ by at most ", &
+            maxval(abs(flo - fhi)), " against a peak of ", maxval(flo)
+        call check(error, maxval(abs(flo - fhi)) <= 1.0e-12_real64*maxval(flo), trim(msg))
+
+    end subroutine test_a_binned_linear_fit_bounded_on_one_side
+
+    !> The Gaussian kernel is CUT at five standard deviations: a variate beyond it is drawn again,
+    !> so the fitted kernel is the cut one and no draw ever lands past `5 h` from its point.
+    !>
+    !> Both samplers that apply the cut are exercised, each at a stream whose FIRST variate is
+    !> beyond it (found by walking `pf_random_normal_at` over the streams of this seed, which is
+    !> what the assertion re-derives): the corrected boundary's interior sampler, at draw three of
+    !> the stream, and `"renormalise"`'s, at draw two. Each fit has ONE point and a bound its
+    !> kernel cannot reach, so the point and the bandwidth are known and the draw is the next
+    !> variate exactly.
+    subroutine test_a_variate_beyond_the_gaussian_cut_is_redrawn(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer(int64), parameter :: SEED = 20260919_int64
+        type(pf_kde) :: kr, ki
+        real(real64) :: v(1), e1, e2
+        integer(int64) :: key, sk
+        character(len=200) :: msg
+
+        key = pf_random_key(SEED, KDE_LABEL)
+
+        ! ---- "renormalise": the point is chosen at draw one, the variate at draw two ----
+        sk = pf_random_key(202069_int64, 1_int64)
+        e1 = pf_random_normal_at(key, sk, 2_int64)
+        e2 = pf_random_normal_at(key, sk, 3_int64)
+        call check(error, abs(e1) > 5.0_real64, &
+            "the first variate of this stream must lie beyond the cut, or nothing is redrawn")
+        if (allocated(error)) return
+        call kr%fit([0.0_real64], weights=[2.0_real64], weight_type="reliability", &
+            bandwidth=1.0_real64, kernel="gaussian", lower=-50.0_real64, boundary="renormalise")
+        call kr%sample(v, SEED, 202069)
+        write(msg, '(a,es20.12,a,es20.12)') "the renormalised draw is ", v(1), &
+            " against the second variate ", e2
+        call check(error, v(1) == e2, trim(msg))
+        if (allocated(error)) return
+
+        ! ---- "linear", no zone reached: the zone is chosen at draw one, the point at draw two ----
+        sk = pf_random_key(7351_int64, 1_int64)
+        e1 = pf_random_normal_at(key, sk, 3_int64)
+        e2 = pf_random_normal_at(key, sk, 4_int64)
+        call check(error, abs(e1) > 5.0_real64, &
+            "the first interior variate of this stream must lie beyond the cut")
+        if (allocated(error)) return
+        call ki%fit([2.0_real64], bandwidth=0.05_real64, kernel="gaussian", lower=0.0_real64, &
+            upper=5.0_real64, boundary="linear")
+        call ki%sample(v, SEED, 7351)
+        write(msg, '(a,es20.12,a,es20.12)') "the interior draw is ", v(1), " against ", &
+            2.0_real64 + 0.05_real64*e2
+        call check(error, v(1) == 2.0_real64 + 0.05_real64*e2, trim(msg))
+
+    end subroutine test_a_variate_beyond_the_gaussian_cut_is_redrawn
+
+    !> `%sample` under `"linear"` draws from the UPPER zone as it does from the lower one: every
+    !> draw stays inside the support, and the draws in the zone follow the clipped estimate there
+    !> -- their share of the sample is the estimate's own mass over the zone, to five standard
+    !> errors.
+    subroutine test_the_upper_zone_sampler(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer(int64), parameter :: SEED = 20260919_int64
+        integer, parameter :: N = 20000
+        type(pf_kde) :: k
+        real(real64) :: x(500), v(N), edge, p_edge, p_hi, want, got, se
+        integer :: i
+        logical :: ok
+        character(len=200) :: msg
+
+        ! The density `2(1 - x)` on `(-infinity, 1]`, piled against the bound.
+        do i = 1, 500
+            x(i) = 1.0_real64 - sqrt((real(i, real64) - 0.5_real64)/500.0_real64)
+        end do
+        call k%fit(x, bandwidth=0.2_real64, upper=1.0_real64, boundary="linear", ok=ok)
+        call check(error, ok, "the upper-bounded linear fit must be defined")
+        if (allocated(error)) return
+        call k%sample(v, SEED, 5)
+        call check(error, count(ieee_is_nan(v)) == 0 .and. maxval(v) <= 1.0_real64, &
+            "every draw must be a number inside the support")
+        if (allocated(error)) return
+        ! The zone is the bound's own kernel reach: the B-spline's radius is `2 sqrt(3)`.
+        edge = 1.0_real64 - 2.0_real64*sqrt(3.0_real64)*0.2_real64
+        call k%cdf(edge, p_edge)
+        call k%cdf(1.0_real64, p_hi)
+        want = p_hi - p_edge
+        got = real(count(v > edge), real64)/real(N, real64)
+        se = sqrt(want*(1.0_real64 - want)/real(N, real64))
+        write(msg, '(a,f9.6,a,f9.6,a,f9.6)') "the zone holds ", want, " of the mass and ", got, &
+            " of the draws, against a standard error of ", se
+        call check(error, abs(got - want) <= 5.0_real64*se, trim(msg))
+
+    end subroutine test_the_upper_zone_sampler
+
+    !> Where the kernel is wider than half the support the two corrected zones MEET: nothing lies
+    !> between them, and a draw that rounds into the gap is placed in whichever zone is on rather
+    !> than in an interior that does not exist. Every draw must still land inside the support.
+    subroutine test_a_sample_where_the_zones_meet(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer(int64), parameter :: SEED = 20260919_int64
+        type(pf_kde) :: k
+        real(real64) :: x(500), v(4000)
+        integer :: i
+        logical :: ok
+        character(len=200) :: msg
+
+        do i = 1, 500
+            x(i) = (real(i, real64) - 0.5_real64)/500.0_real64
+        end do
+        ! Ten times the support's width: each zone reaches well past the other bound, so they meet.
+        call k%fit(x, bandwidth=2.0_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear", ok=ok)
+        call check(error, ok, "the two-sided linear fit must be defined")
+        if (allocated(error)) return
+        call k%sample(v, SEED, 6)
+        write(msg, '(a,es14.6,a,es14.6,a,i0)') "the draws run from ", minval(v), " to ", maxval(v), &
+            ", with NaN count ", count(ieee_is_nan(v))
+        call check(error, count(ieee_is_nan(v)) == 0 .and. minval(v) >= 0.0_real64 .and. &
+            maxval(v) <= 1.0_real64, trim(msg))
+
+    end subroutine test_a_sample_where_the_zones_meet
+
+    !> The corrected boundary scan lays a binned grid over each zone where it can and reads the
+    !> exact estimator everywhere else. A zone far wider than the support leaves that grid longer
+    !> than its cells allow, so the scan DECLINES it and reads every sample exactly -- which the
+    !> counters say, and which changes the answer nowhere: the same fit at `method="binned"`
+    !> agrees with it.
+    subroutine test_the_scans_grid_is_declined_when_it_is_too_long(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(64), t(8), f(8)
+        integer :: i
+        integer(int64) :: steps, exact
+        logical :: ok
+        character(len=200) :: msg
+
+        do i = 1, 64
+            x(i) = (real(i, real64) - 0.5_real64)/64.0_real64
+        end do
+        call spread_points(0.05_real64, 0.95_real64, t)
+        ! A hundred times the support's width: the zone's transform would need far more cells than
+        ! the scan's grid may hold.
+        call k%fit(x, bandwidth=10.0_real64, kernel="gaussian", lower=0.0_real64, &
+            upper=1.0_real64, boundary="linear", ok=ok)
+        call parquet_debug_kde_scan_counts(steps, exact)
+        call check(error, ok, "the fit must be defined")
+        if (allocated(error)) return
+        write(msg, '(a,i0,a,i0,a)') "the scan took ", steps, " samples and read ", exact, " exactly"
+        call check(error, steps > 0_int64 .and. exact == steps, trim(msg))
+        if (allocated(error)) return
+        call k%pdf(t, f)
+        call check(error, all(f > 0.0_real64) .and. all(ieee_is_finite(f)), &
+            "the estimate must still answer a positive density across the support")
+        if (allocated(error)) return
+        ! The same refusal from the other end of the geometry: at this bandwidth the pad and the
+        ! cells fit inside what the transform may hold, and the POWER OF TWO they round up to does
+        ! not -- which is the third of the three lengths `kde_binned_setup` tests.
+        call k%fit(x, bandwidth=2.2_real64, kernel="gaussian", lower=0.0_real64, &
+            upper=1.0_real64, boundary="linear", ok=ok)
+        call parquet_debug_kde_scan_counts(steps, exact)
+        write(msg, '(a,i0,a,i0,a)') "at the rounded length the scan took ", steps, &
+            " samples and read ", exact, " exactly"
+        call check(error, ok .and. steps > 0_int64 .and. exact == steps, trim(msg))
+        if (allocated(error)) return
+        call k%pdf(t, f)
+        call check(error, all(f > 0.0_real64) .and. all(ieee_is_finite(f)), &
+            "the estimate must answer a positive density there too")
+
+    end subroutine test_the_scans_grid_is_declined_when_it_is_too_long
+
+    !> The scan's step rule has two arms: where a kernel reaches the current point it steps by a
+    !> fraction of the narrowest such bandwidth, and where NONE does it jumps by the widest
+    !> kernel's whole reach. The second is taken here: the nearest point lies between one and two
+    !> reaches above the bound, so the zone's own lower end is reached by no kernel at all, and the
+    !> estimate is exactly zero there.
+    subroutine test_the_scan_jumps_across_a_gap_at_the_bound(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(60), t(200), f(200), reach, cdf_gap
+        integer :: i
+        logical :: ok
+        character(len=200) :: msg
+
+        ! The Epanechnikov kernel has no scan grid at all, so the scan steps by hand. At a
+        ! bandwidth of `1/sqrt(5)` its reach is exactly one, and the nearest point sits at 1.51.
+        reach = 1.0_real64
+        do i = 1, 60
+            x(i) = 1.5_real64 + 0.01_real64*real(i, real64)
+        end do
+        do i = 1, 200
+            t(i) = 2.3_real64*(real(i, real64) - 0.5_real64)/200.0_real64
+        end do
+        call k%fit(x, bandwidth=1.0_real64/sqrt(5.0_real64), kernel="epanechnikov", &
+            lower=0.0_real64, boundary="linear", ok=ok)
+        call check(error, ok, "the fit must be defined")
+        if (allocated(error)) return
+        call k%pdf(t, f)
+        call k%cdf(x(1) - reach, cdf_gap)
+        write(msg, '(a,i0,a,es12.4)') "the estimate is zero at ", count(f == 0.0_real64), &
+            " of the 200 probes and its distribution function reaches ", cdf_gap
+        call check(error, count(f == 0.0_real64) > 0, trim(msg))
+        if (allocated(error)) return
+        call check(error, cdf_gap == 0.0_real64, &
+            "no mass may lie below the first point's own kernel, which is what the jump steps over")
+
+    end subroutine test_the_scan_jumps_across_a_gap_at_the_bound
+
+    !> `parquet_debug_kde_fit_nanos` reports the phases of the LAST fit: a fit with an adaptive
+    !> pilot pays for one, and a fixed fit over the same sample does not.
+    subroutine test_the_fit_timer_reports_the_last_fit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: x(4000)
+        integer(int64) :: sort_a, pilot_a, lookup_a, sort_b, pilot_b, lookup_b
+        integer :: i
+        character(len=200) :: msg
+
+        do i = 1, 4000
+            x(i) = 2.0_real64*sqrt((real(i, real64) - 0.5_real64)/4000.0_real64)
+        end do
+        call k%fit(x, rule="silverman", adaptive=.true., lower=0.0_real64, upper=2.0_real64)
+        call parquet_debug_kde_fit_nanos(sort_a, pilot_a, lookup_a)
+        call k%fit(x, rule="silverman", lower=0.0_real64, upper=2.0_real64)
+        call parquet_debug_kde_fit_nanos(sort_b, pilot_b, lookup_b)
+        call check(error, sort_a >= 0_int64 .and. pilot_a >= 0_int64 .and. lookup_a >= 0_int64 .and. &
+            sort_b >= 0_int64 .and. pilot_b >= 0_int64 .and. lookup_b >= 0_int64, &
+            "every phase must report a duration that is not negative")
+        if (allocated(error)) return
+        ! Structural, not a timing: the fixed fit builds no pilot, so its second phase spans one
+        ! assignment and the adaptive one spans a pass over four thousand points into a grid.
+        write(msg, '(a,i0,a,i0,a)') "the adaptive fit's pilot phase took ", pilot_a, &
+            " ns and the fixed fit's ", pilot_b, " ns"
+        call check(error, pilot_a > pilot_b, trim(msg))
+
+    end subroutine test_the_fit_timer_reports_the_last_fit
+
+    !> `parquet_debug_kde_lscv_at` takes weights or leaves them out, and equal reliability weights
+    !> are no weights: the criterion is the same number either way, bit for bit.
+    subroutine test_the_lscv_hook_reads_weights(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        real(real64) :: x(200), w(200), with_w, without_w
+        integer :: i
+        logical :: ok_w, ok_plain
+        character(len=200) :: msg
+
+        do i = 1, 200
+            x(i) = sin(real(i, real64)*0.7_real64)
+        end do
+        w = 1.0_real64
+        call parquet_debug_kde_lscv_at(x, 0.2_real64, without_w, ok_plain)
+        call parquet_debug_kde_lscv_at(x, 0.2_real64, with_w, ok_w, weights=w)
+        call check(error, ok_plain .and. ok_w, "the criterion must be formed on both arms")
+        if (allocated(error)) return
+        write(msg, '(a,es24.16,a,es24.16)') "with equal weights the criterion is ", with_w, &
+            " and without them ", without_w
+        call check(error, with_w == without_w, trim(msg))
+
+    end subroutine test_the_lscv_hook_reads_weights
+
+    !> The binned method sorts the adaptive bandwidths into a ladder of classes, each a fixed
+    !> factor wider than the last, and the ladder is CAPPED: a pilot whose densities span enough
+    !> decades asks for more classes than the cap allows and is held to it. The grid still answers
+    !> a density -- the cap coarsens the bandwidths, it does not refuse them.
+    subroutine test_the_binned_class_ladder_is_capped(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, g
+        real(real64) :: x(600), d(256)
+        integer :: i
+        character(len=200) :: msg
+
+        ! One point in six a long way out, the rest in a tight cluster: four decades of density
+        ! between the two, which an alpha of one turns into four decades of bandwidth.
+        do i = 1, 600
+            if (mod(i, 6) == 0) then
+                x(i) = 1.0e300_real64*real(i, real64)/600.0_real64
+            else
+                x(i) = 1.0e296_real64*(real(i, real64) - 0.5_real64)/600.0_real64
+            end if
+        end do
+        call p%init(4096, 0.0_real64, 1.1e300_real64, 1.0e296_real64)
+        call p%add(x)
+        call p%finish()
+        call g%init(256, 0.0_real64, 1.1e300_real64, 1.0e290_real64, pilot=p, alpha=1.0_real64, &
+            spread_max=1.0e9_real64, method="binned")
+        call g%add(x)
+        call g%finish()
+        call g%density(d)
+        write(msg, '(a,es12.4,a,es12.4)') "the capped binned grid holds densities from ", &
+            minval(d), " to ", maxval(d)
+        call check(error, g%is_adaptive() .and. g%is_finished(), &
+            "the grid must be a finished adaptive one")
+        if (allocated(error)) return
+        call check(error, count(ieee_is_nan(d)) == 0 .and. maxval(d) > 0.0_real64, trim(msg))
+
+    end subroutine test_the_binned_class_ladder_is_capped
+
+    !> A kernel far wider than a two-sided support keeps a reflected mass that UNDERFLOWS to zero,
+    !> and the deposit would divide each point's shares by it: the grid poisons itself instead, as
+    !> it does for a kept NaN, rather than returning having deposited nothing.
+    subroutine test_a_reflecting_grid_whose_mass_underflows(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g, control
+        real(real64) :: d(1), dc(1)
+
+        ! The support is one subnormal wide and the bandwidth is ten thousand billion: the two
+        ! reflected images keep a mass of about `1e-324`, which is below the smallest number.
+        call g%init(1, 0.0_real64, 1.0e-310_real64, 1.0e14_real64, lower=0.0_real64, &
+            upper=1.0e-310_real64, boundary="reflect")
+        call g%add([5.0e-311_real64])
+        call g%finish()
+        call g%density(d)
+        call check(error, g%n_valid() == 1_int64, "the point must be counted as retained")
+        if (allocated(error)) return
+        call check(error, ieee_is_nan(d(1)), &
+            "a grid whose reflected mass underflowed must answer NaN")
+        if (allocated(error)) return
+        ! The control: the same geometry at a bandwidth whose reflected mass is an ordinary number.
+        ! Normal, not subnormal -- `%init` refuses a subnormal bandwidth in its own right.
+        call control%init(1, 0.0_real64, 1.0e-310_real64, 1.0e-307_real64, lower=0.0_real64, &
+            upper=1.0e-310_real64, boundary="reflect")
+        call control%add([5.0e-311_real64])
+        call control%finish()
+        call control%density(dc)
+        call check(error, .not. ieee_is_nan(dc(1)) .and. dc(1) > 0.0_real64, &
+            "the same grid at a usable bandwidth must answer a density")
+
+    end subroutine test_a_reflecting_grid_whose_mass_underflows
+
+    !> A padded reflecting grid reads its images by GATHERING: each cell takes the plain estimate
+    !> at its mirror, interpolated between the two padded centres around it. A mirror landing
+    !> exactly ON the last padded centre has no centre after it to interpolate towards, and the
+    !> value there is that centre's own.
+    !>
+    !> The geometry puts one there exactly: with the range `[0, 1]` in sixteen cells the mirror of
+    !> centre `k` about the upper bound sits at padded index `2*nc + 2*pad - k`, every term a whole
+    !> number of cell widths and every cell width a power of two, so the arithmetic is exact.
+    subroutine test_a_reflected_image_on_the_last_padded_centre(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: gb, ge
+        real(real64) :: x(500), db(16), de(16)
+        integer :: i
+        character(len=200) :: msg
+
+        do i = 1, 500
+            x(i) = (real(i, real64) - 0.5_real64)/500.0_real64
+        end do
+        call gb%init(16, 0.0_real64, 1.0_real64, 0.05_real64, upper=1.0_real64, &
+            boundary="reflect", method="binned")
+        call ge%init(16, 0.0_real64, 1.0_real64, 0.05_real64, upper=1.0_real64, boundary="reflect")
+        call gb%add(x)
+        call ge%add(x)
+        call gb%finish()
+        call ge%finish()
+        call gb%density(db)
+        call ge%density(de)
+        write(msg, '(a,es12.4,a,es12.4)') "the binned and exact reflecting grids differ by at most ", &
+            maxval(abs(db - de)), " against a peak of ", maxval(de)
+        call check(error, count(ieee_is_nan(db)) == 0, "the binned grid must answer a density")
+        if (allocated(error)) return
+        call check(error, maxval(abs(db - de)) <= 0.05_real64*maxval(de), trim(msg))
+
+    end subroutine test_a_reflected_image_on_the_last_padded_centre
+
+    !> Where the two corrected zones CROSS, each spans the support from its own bound to the point
+    !> they meet at, and a draw in either is taken by inverting that zone's own integral rather
+    !> than by the rejection sampler -- which needs a one-sided term to bound, and there is none.
+    !> Every draw must still land inside the support and follow the estimate: the share of them in
+    !> the upper zone is the estimate's own mass there, to five standard errors.
+    subroutine test_a_draw_from_two_crossing_zones(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        integer(int64), parameter :: SEED = 20260919_int64
+        integer, parameter :: N = 20000
+        type(pf_kde) :: k
+        real(real64) :: x(500), v(N), meet, p_meet, want, got, se
+        integer :: i
+        logical :: ok
+        character(len=200) :: msg
+
+        do i = 1, 500
+            x(i) = (real(i, real64) - 0.5_real64)/500.0_real64
+        end do
+        ! The B-spline's reach at this bandwidth is `2 sqrt(3) * 0.2 = 0.69`, more than half the
+        ! support and less than all of it: each zone's inner edge lies past the other's, so the two
+        ! cross and meet at `lower + reach`.
+        meet = 2.0_real64*sqrt(3.0_real64)*0.2_real64
+        call k%fit(x, bandwidth=0.2_real64, lower=0.0_real64, upper=1.0_real64, &
+            boundary="linear", ok=ok)
+        call check(error, ok, "the crossing-zone fit must be defined")
+        if (allocated(error)) return
+        call k%sample(v, SEED, 9)
+        call check(error, count(ieee_is_nan(v)) == 0 .and. minval(v) >= 0.0_real64 .and. &
+            maxval(v) <= 1.0_real64, "every draw must be a number inside the support")
+        if (allocated(error)) return
+        call k%cdf(meet, p_meet)
+        want = 1.0_real64 - p_meet
+        got = real(count(v > meet), real64)/real(N, real64)
+        se = sqrt(want*(1.0_real64 - want)/real(N, real64))
+        write(msg, '(a,f9.6,a,f9.6,a,f9.6)') "the upper zone holds ", want, " of the mass and ", &
+            got, " of the draws, against a standard error of ", se
+        call check(error, abs(got - want) <= 5.0_real64*se, trim(msg))
+
+    end subroutine test_a_draw_from_two_crossing_zones
+
+    !> The adaptive rule's bandwidth is `h (p/g)**(-alpha)`, and the exponent is tested BEFORE it
+    !> is raised so that a bandwidth too large to represent comes out as the largest number rather
+    !> than as an overflow -- which would end the process under a compiler that halts on one. The
+    !> ladder of binned classes then stops there: this grid's widest class is the cap, not a NaN.
+    !!
+    !! **The flags are saved and restored rather than asserted.** `class_ladder` forms the spread
+    !! cap as `h * capf` before it compares it with `bandwidth_max`, and at this bandwidth that
+    !! product overflows on its way to a right answer. When that is formed without overflowing,
+    !! this test gains `call check(error, .not. any(raised), "building the ladder raises no flag")`.
+    subroutine test_the_class_ladder_stops_at_the_widest_bandwidth(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: p, g
+        real(real64) :: x(600), d(256)
+        integer :: i
+        logical :: raised(size(ieee_usual)), before(size(ieee_usual))
+        character(len=200) :: msg
+
+        ! One point in six far out, the rest in a tight cluster a few decades below: the pilot's
+        ! smallest density is far enough under its geometric mean that the rule's own exponent
+        ! passes what `h` can be multiplied by.
+        do i = 1, 600
+            if (mod(i, 6) == 0) then
+                x(i) = 5.0e306_real64*real(i, real64)/600.0_real64
+            else
+                x(i) = 1.0e303_real64*(real(i, real64) - 0.5_real64)/600.0_real64
+            end if
+        end do
+        call p%init(4096, 0.0_real64, 5.1e306_real64, 1.0e303_real64)
+        call p%add(x)
+        call p%finish()
+        call ieee_get_flag(ieee_usual, before)
+        call ieee_set_flag(ieee_usual, .false.)
+        call g%init(256, 0.0_real64, 5.0e306_real64, 1.0e307_real64, pilot=p, alpha=1.0_real64, &
+            bandwidth_max=1.5e307_real64, method="binned")
+        call g%add(x)
+        call g%finish()
+        call g%density(d)
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, before)
+        write(msg, '(a,es12.4,a,es12.4)') "the grid's densities run from ", minval(d), " to ", maxval(d)
+        call check(error, g%is_adaptive() .and. g%is_finished(), &
+            "the grid must be a finished adaptive one")
+        if (allocated(error)) return
+        call check(error, count(ieee_is_nan(d)) == 0 .and. maxval(d) > 0.0_real64, trim(msg))
+
+    end subroutine test_the_class_ladder_stops_at_the_widest_bandwidth
+
+    !> `%cdf` inside a corrected zone reads each point in the query's window one of three ways: by
+    !> its whole integral over the zone where its kernel lies wholly on the bound's side of the
+    !> query, by a partial integral where it straddles it, and not at all where it lies beyond.
+    !> All three arms need an ADAPTIVE fit at an UPPER bound: with one bandwidth the window's own
+    !> edge is exactly where a kernel stops reaching, so only a point sitting on it takes the
+    !> first arm, while narrow kernels inside a wide window take it for a whole interval of
+    !> queries.
+    !>
+    !> The assertion is the one that holds whatever the three arms are: `%cdf` rises across the
+    !> zone and integrates `%pdf` over it, to the quadrature's own tolerance.
+    subroutine test_an_adaptive_upper_zone_reads_its_window_three_ways(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(kde_density) :: fn
+        type(pf_integration_info) :: info
+        real(real64) :: x(2000), t(64), c(64), edge, c_edge, c_hi, want
+        integer :: i
+        logical :: ok, conv
+        character(len=200) :: msg
+
+        ! The density `2(1 - x)` on `(-infinity, 1]`: dense at the bound and sparse well below it,
+        ! so the rule gives the points near the bound much narrower kernels than the rest.
+        do i = 1, 2000
+            x(i) = 1.0_real64 - sqrt((real(i, real64) - 0.5_real64)/2000.0_real64)
+        end do
+        call fn%k%fit(x, rule="silverman", adaptive=.true., upper=1.0_real64, &
+            boundary="linear", ok=ok)
+        fn%power = 0
+        call check(error, ok .and. fn%k%is_adaptive(), "the adaptive upper-bounded fit must be defined")
+        if (allocated(error)) return
+        ! Ascending, unlike `spread_points`'s low-discrepancy sequence: the first assertion is
+        ! that the distribution function never falls as the query rises.
+        do i = 1, 64
+            t(i) = 0.1_real64 + 0.89_real64*(real(i, real64) - 0.5_real64)/64.0_real64
+        end do
+        call fn%k%cdf(t, c)
+        do i = 2, 64
+            if (c(i) >= c(i - 1)) cycle
+            write(msg, '(a,i0,a,es14.6,a,es14.6)') "%cdf falls at probe ", i, ": ", c(i - 1), &
+                " then ", c(i)
+            call check(error, .false., trim(msg))
+            return
+        end do
+        ! The zone is the bound's own kernel reach at the WIDEST bandwidth, so its inner edge is
+        ! read from the fit rather than assumed; the mass across it is the integral of `%pdf`.
+        edge = 0.5_real64
+        call fn%k%cdf(edge, c_edge)
+        call fn%k%cdf(1.0_real64, c_hi)
+        want = pf_integrate(fn, edge, 1.0_real64, 1.0e-10_real64, converged=conv, info=info)
+        write(msg, '(a,es14.6,a,es14.6,a,es10.3,a,l1)') "across the zone %cdf gives ", c_hi - c_edge, &
+            " and the integral of %pdf ", want, ", differing by ", (c_hi - c_edge) - want, &
+            "; converged ", conv
+        call check(error, conv, "the reference integral must converge over the zone")
+        if (allocated(error)) return
+        call check(error, abs((c_hi - c_edge) - want) <= 1.0e-8_real64, trim(msg))
+
+    end subroutine test_an_adaptive_upper_zone_reads_its_window_three_ways
 
 end module test_kde

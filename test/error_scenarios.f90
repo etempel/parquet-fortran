@@ -3358,6 +3358,26 @@ program error_scenarios
         call scenario_toml_report_fatal()
     case ("toml_bad_severity")
         call scenario_toml_bad_severity()
+    case ("toml_list_not_whole_numbers")
+        call scenario_toml_list_not_whole_numbers()
+    case ("toml_list_not_numbers")
+        call scenario_toml_list_not_numbers()
+    case ("toml_list_not_logicals")
+        call scenario_toml_list_not_logicals()
+    case ("toml_list_not_strings")
+        call scenario_toml_list_not_strings()
+    case ("toml_require_missing")
+        call scenario_toml_require_missing()
+    case ("toml_handle_never_opened")
+        call scenario_toml_handle_never_opened()
+    case ("toml_save_not_owner")
+        call scenario_toml_save_not_owner()
+    case ("toml_save_write_error")
+        call scenario_toml_save_write_error()
+    case ("toml_default_string_too_long")
+        call scenario_toml_default_string_too_long()
+    case ("toml_no_entries_at_all")
+        call scenario_toml_no_entries_at_all()
     case ("toml_control")
         call scenario_toml_control()
     case ("index_build_duplicate_direct")
@@ -4382,6 +4402,30 @@ program error_scenarios
         call scenario_kde_fit_pilot_boundary()
     case ("kde_fit_pilot_support")
         call scenario_kde_fit_pilot_support()
+    case ("kde_fit_pilot_support_side")
+        call scenario_kde_fit_pilot_support_side()
+    case ("kde_fit_pilot_upper")
+        call scenario_kde_fit_pilot_upper()
+    case ("kde_spread_max_not_finite")
+        call scenario_kde_spread_max_not_finite()
+    case ("kde_curve_one_end_collapses")
+        call scenario_kde_curve_one_end_collapses()
+    case ("kde_curve_default_range_collapses")
+        call scenario_kde_curve_default_range_collapses()
+    case ("kde_grid_cell_width_underflow")
+        call scenario_kde_grid_cell_width_underflow()
+    case ("kde_grid_linear_range_not_at_upper")
+        call scenario_kde_grid_linear_range_not_at_upper()
+    case ("kde_grid_spread_max_not_finite")
+        call scenario_kde_grid_spread_max_not_finite()
+    case ("kde_grid_spread_max_below_one")
+        call scenario_kde_grid_spread_max_below_one()
+    case ("kde_fit_cells_clamped_advice")
+        call scenario_kde_fit_cells_clamped_advice()
+    case ("kde_zone_advice_tiny_support")
+        call scenario_kde_zone_advice_tiny_support()
+    case ("kde_grid_binned_transform_length")
+        call scenario_kde_grid_binned_transform_length()
     case ("kde_overreach_warning")
         call scenario_kde_overreach_warning("normal")
     case ("kde_overreach_warning_silent")
@@ -29396,6 +29440,194 @@ contains
         print '(a)', "scenario_toml_bad_severity: an unknown severity should have aborted"
     end subroutine scenario_toml_bad_severity
 
+    !> The document the four list-element scenarios read: one list of each TOML element type.
+    !!
+    !! Separate from `toml_sample` because what these need is a list of every type, to read a list
+    !! of the WRONG type out of; the shared document has no reason to carry one.
+    subroutine toml_lists(text)
+        character(len=:), allocatable, intent(out) :: text  !! Receives the TOML document.
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        text = 'ints = [1, 2]' // nl // &
+               'reals = [1.5, 2.5]' // nl // &
+               'words = ["x", "y"]' // nl // &
+               'flags = [true, false]' // nl
+    end subroutine toml_lists
+
+    !> A list whose ELEMENTS are of the wrong type aborts, as a wrong-typed scalar does.
+    !!
+    !! **The list path is not the scalar path with a loop around it**: it opens the value as an
+    !! array, reads it into a temporary and then checks that the temporary came back allocated, so
+    !! a list `toml-f` refuses leaves a different trail from a scalar it refuses. These four
+    !! scenarios pin the four things this module can say about a list; every other site that says
+    !! one of them is marked `GCOVR_EXCL_LINE`, and `fail_value`'s own doc-comment says why.
+    !!
+    !! Each reads a list that really IS of its type first, so a failure in the setup cannot be
+    !! mistaken for the abort under test.
+    subroutine scenario_toml_list_not_whole_numbers()
+        type(pf_toml) :: conf
+        character(len=:), allocatable :: text
+        integer :: v(2)
+
+        call toml_lists(text)
+        call pf_toml_loads(conf, text)
+        v = 0
+        call pf_toml_get(conf, "ints", v)      ! control: a list that really is whole numbers
+        print '(a,i0)', "control: the integer list read gave v(1)=", v(1)
+        call pf_toml_get(conf, "reals", v)     ! -> aborts: 1.5 is not a whole number
+        print '(a,i0)', "a list of reals was accepted as whole numbers, v(1)=", v(1)
+    end subroutine scenario_toml_list_not_whole_numbers
+
+    !> A list of strings read as a list of numbers aborts. See `scenario_toml_list_not_whole_numbers`.
+    subroutine scenario_toml_list_not_numbers()
+        type(pf_toml) :: conf
+        character(len=:), allocatable :: text
+        real(real64) :: v(2)
+
+        call toml_lists(text)
+        call pf_toml_loads(conf, text)
+        v = 0.0_real64
+        call pf_toml_get(conf, "reals", v)     ! control: a list that really is numbers
+        print '(a,f6.3)', "control: the real list read gave v(1)=", v(1)
+        call pf_toml_get(conf, "words", v)     ! -> aborts: "x" is not a number
+        print '(a,f6.3)', "a list of strings was accepted as numbers, v(1)=", v(1)
+    end subroutine scenario_toml_list_not_numbers
+
+    !> A list of integers read as a list of true/false values aborts.
+    subroutine scenario_toml_list_not_logicals()
+        type(pf_toml) :: conf
+        character(len=:), allocatable :: text
+        logical :: v(2)
+
+        call toml_lists(text)
+        call pf_toml_loads(conf, text)
+        v = .false.
+        call pf_toml_get(conf, "flags", v)     ! control: a list that really is true/false
+        print '(a,l1)', "control: the logical list read gave v(1)=", v(1)
+        call pf_toml_get(conf, "ints", v)      ! -> aborts: 1 is not true/false
+        print '(a,l1)', "a list of integers was accepted as true/false, v(1)=", v(1)
+    end subroutine scenario_toml_list_not_logicals
+
+    !> A list of integers read as a list of strings aborts.
+    subroutine scenario_toml_list_not_strings()
+        type(pf_toml) :: conf
+        character(len=:), allocatable :: text
+        character(len=8) :: v(2)
+
+        call toml_lists(text)
+        call pf_toml_loads(conf, text)
+        v = ""
+        call pf_toml_get(conf, "words", v)     ! control: a list that really is strings
+        print '(a,a)', "control: the string list read gave v(1)=", trim(v(1))
+        call pf_toml_get(conf, "ints", v)      ! -> aborts: 1 is not a string
+        print '(a,a)', "a list of integers was accepted as strings, v(1)=", trim(v(1))
+    end subroutine scenario_toml_list_not_strings
+
+    !> `pf_toml_require` names EVERY missing key, then stops -- it does not stop at the first.
+    !!
+    !! Two absent keys, because the loop counts them and the summary line reports that count: a
+    !! version that stopped at the first would pass a one-key test and silently lose the second
+    !! name, which is the whole reason this procedure exists rather than a `pf_toml_get` each.
+    subroutine scenario_toml_require_missing()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_require(gen, "nproc")        ! control: a key the file does set
+        print '(a)', "control: a key that is set passed pf_toml_require"
+        call pf_toml_require(gen, "alpha;beta")   ! -> aborts, naming both
+        print '(a)', "scenario_toml_require_missing: two absent required keys should have aborted"
+    end subroutine scenario_toml_require_missing
+
+    !> A handle no `pf_toml_load`, `pf_toml_loads` or `pf_toml_new` has ever filled aborts.
+    !!
+    !! Distinct from `toml_closed_handle`, and the difference is the advice: that one has a
+    !! document and merely failed to find its section, so it is told about `pf_toml_is_open`; this
+    !! one has no document at all and is told to open one. `require_open` picks the arm by whether
+    !! `%doc` is associated, so only a handle that was never opened reaches this text.
+    subroutine scenario_toml_handle_never_opened()
+        type(pf_toml) :: never
+        integer :: n
+
+        n = -1
+        call pf_toml_get(never, "anything", n)
+        print '(a,i0)', "an unopened handle was read from, n=", n
+    end subroutine scenario_toml_handle_never_opened
+
+    !> `pf_toml_save` writes the WHOLE configuration, so a section handle is refused.
+    !!
+    !! The twin of `toml_dump_not_owner`, and not a duplicate of it: the two name themselves in
+    !! their own messages, and they write different documents (the effective one against the
+    !! parsed one), so a caller handed the wrong refusal is being told to fix the wrong call.
+    subroutine scenario_toml_save_not_owner()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        call pf_toml_save(gen, "test_run/toml_save_not_owner.toml")
+        print '(a)', "scenario_toml_save_not_owner: saving from a section should have aborted"
+    end subroutine scenario_toml_save_not_owner
+
+    !> A write that fails is FATAL and names the file, rather than being reported through a status.
+    !!
+    !! A configuration written back is usually the record of what a run actually used, so a save
+    !! that quietly did nothing would leave that record missing exactly when it is wanted.
+    !! `pf_toml_dump`'s identical three lines are marked `GCOVR_EXCL_START` rather than given a
+    !! scenario of their own; the note there says why.
+    subroutine scenario_toml_save_write_error()
+        type(pf_toml) :: conf
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_save(conf, "test_run/no_such_directory_for_toml/out.toml")
+        print '(a)', "scenario_toml_save_write_error: an unwritable path should have aborted"
+    end subroutine scenario_toml_save_write_error
+
+    !> An over-long element of a `default =` list is refused exactly as one read from the file is.
+    !!
+    !! `toml_string_too_long` is the file half. This is the other half of what
+    !! `pf_toml_get_str_arr` promises, and it is the half the CALLER owns entirely: a default
+    !! quietly clipped to the caller's own element length is a value nothing in the file explains,
+    !! and nothing in the program says either.
+    subroutine scenario_toml_default_string_too_long()
+        type(pf_toml) :: conf, gen
+        character(len=:), allocatable :: text
+        character(len=4) :: got(2)
+        character(len=16) :: dflt(2)
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "general", gen)
+        dflt = [character(len=16) :: "ok", "far too long"]
+        got = ""
+        call pf_toml_get(gen, "absent_list", got, default = dflt)
+        print '(a,a)', "an over-long default element was accepted, got(2)=", trim(got(2))
+    end subroutine scenario_toml_default_string_too_long
+
+    !> A required `[[name]]` the file has no entries of at all aborts, in the `[[...]]` wording.
+    !!
+    !! `toml_missing_section` is the `[name]` half. The two share one helper and differ only in the
+    !! headline it builds, so the wording is exactly what this pins -- a reader told the file has
+    !! no `[region]` section when it is `[[region]]` entries that are wanted looks for the wrong
+    !! thing.
+    subroutine scenario_toml_no_entries_at_all()
+        type(pf_toml) :: conf, ent
+        character(len=:), allocatable :: text
+
+        call toml_sample(text)
+        call pf_toml_loads(conf, text)
+        call pf_toml_section(conf, "region", 1, ent)   ! control: [[region]] does have an entry
+        print '(a,l1)', "control: the existing entry opened, is_open=", pf_toml_is_open(ent)
+        call pf_toml_section(conf, "no_such_entries", 1, ent, required = .true.)
+        print '(a,l1)', "an absent [[name]] was accepted, is_open=", pf_toml_is_open(ent)
+    end subroutine scenario_toml_no_entries_at_all
+
     !> NEGATIVE CONTROL for the whole group: the same setup, every legal path, exit 0.
     !!
     !! Without this, a scenario above could be aborting in `toml_sample` or `pf_toml_loads` rather
@@ -36435,6 +36667,205 @@ contains
         call k%fit(x, adaptive=.true., pilot=p, lower=0.5_real64, boundary="reflect")
         print '(a)', "accepted a pilot built over another support"
     end subroutine scenario_kde_fit_pilot_support
+    !
+    !> Proves that pf_kde%fit refuses a pilot bounded on a DIFFERENT SIDE from the fit, having
+    !> accepted the same pilot where the two agree. `kde_fit_pilot_support` is its sibling: there
+    !> the two agree on which sides are bounded and differ in the lower bound's VALUE.
+    subroutine scenario_kde_fit_pilot_support_side()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(6)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        call p%init(16, 0.0_real64, 7.0_real64, 0.5_real64, lower=0.0_real64, boundary="reflect")
+        call p%add(x)
+        call p%finish()
+        call k%fit(x, adaptive=.true., pilot=p, lower=0.0_real64, boundary="reflect")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, adaptive=.true., pilot=p, lower=0.0_real64, upper=7.0_real64, boundary="reflect")
+        print '(a)', "accepted a pilot bounded on one side by a fit bounded on both"
+    end subroutine scenario_kde_fit_pilot_support_side
+    !
+    !> Proves that pf_kde%fit refuses a pilot whose UPPER bound differs from the fit's, having
+    !> accepted the same pilot where the two agree. `kde_fit_pilot_support` covers the lower one.
+    subroutine scenario_kde_fit_pilot_upper()
+        type(pf_kde) :: k
+        type(pf_kde_grid) :: p
+        real(real64) :: x(6)
+
+        x = [1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64, 6.0_real64]
+        call p%init(16, 0.0_real64, 7.0_real64, 0.5_real64, upper=7.0_real64, boundary="reflect")
+        call p%add(x)
+        call p%finish()
+        call k%fit(x, adaptive=.true., pilot=p, upper=7.0_real64, boundary="reflect")
+        print '(a, es22.15)', "kde control fitted: ", k%bandwidth()
+        call k%fit(x, adaptive=.true., pilot=p, upper=6.5_real64, boundary="reflect")
+        print '(a)', "accepted a pilot built to another upper bound"
+    end subroutine scenario_kde_fit_pilot_upper
+    !
+    !> Proves that pf_kde%fit refuses a spread_max that is not finite, having accepted a finite one
+    !> above 1. `kde_spread_max_below_one` covers the other half of the same rule.
+    subroutine scenario_kde_spread_max_not_finite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_positive_inf
+        type(pf_kde) :: k
+
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., spread_max=2.0_real64)
+        print '(a, l1)', "kde control fitted: ", k%is_adaptive()
+        call k%fit([0.1_real64, 0.2_real64, 0.3_real64, 0.4_real64], bandwidth=0.1_real64, &
+            adaptive=.true., spread_max=ieee_value(1.0_real64, ieee_positive_inf))
+        print '(a)', "accepted an infinite spread_max"
+    end subroutine scenario_kde_spread_max_not_finite
+    !
+    !> Proves that pf_kde%curve refuses an xmax BELOW the default range's own start, which leaves
+    !> no range although the caller passed only one end; the control passes an xmax above it.
+    !> `kde_curve_reversed_range` is the sibling where the caller passed both ends.
+    subroutine scenario_kde_curve_one_end_collapses()
+        type(pf_kde) :: k
+        real(real64) :: g(8), f(8)
+
+        call k%fit([1.0_real64, 2.0_real64, 3.0_real64], bandwidth=0.5_real64)
+        call k%curve(g, f, xmax=5.0_real64)
+        print '(a, es22.15)', "kde control curved: ", g(1)
+        call k%curve(g, f, xmax=-100.0_real64)
+        print '(a)', "accepted an xmax below the default range's start"
+    end subroutine scenario_kde_curve_one_end_collapses
+    !
+    !> Proves that pf_kde%curve refuses a DEFAULT range that collapses to one point -- a sample of
+    !> one value at cut=0 -- with the other of the binding's two texts, which names what actually
+    !> collapsed rather than the ends the caller did not pass. The control is the same sample at a
+    !> cut that leaves a range.
+    subroutine scenario_kde_curve_default_range_collapses()
+        type(pf_kde) :: k
+        real(real64) :: g(8), f(8)
+
+        call k%fit([3.0_real64, 3.0_real64, 3.0_real64], bandwidth=0.5_real64)
+        call k%curve(g, f, cut=1.0_real64)
+        print '(a, es22.15)', "kde control curved: ", g(1)
+        call k%curve(g, f, cut=0.0_real64)
+        print '(a)', "accepted a default range that collapsed to one point"
+    end subroutine scenario_kde_curve_default_range_collapses
+    !
+    !> Proves that pf_kde_grid%init refuses a cell width that UNDERFLOWS to zero, which the range
+    !> check before it cannot see: the range is the smallest subnormal and is positive, and one
+    !> cell holds it, but two do not. `kde_grid_cell_width` is the sibling at the other end, where
+    !> the range is wider than the largest number.
+    subroutine scenario_kde_grid_cell_width_underflow()
+        type(pf_kde_grid) :: g
+
+        call g%init(1, 0.0_real64, tiny(1.0_real64)*epsilon(1.0_real64), 1.0_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%step()
+        call g%init(2, 0.0_real64, tiny(1.0_real64)*epsilon(1.0_real64), 1.0_real64)
+        print '(a)', "accepted a cell width that underflowed to zero"
+    end subroutine scenario_kde_grid_cell_width_underflow
+    !
+    !> Proves that pf_kde_grid%init applies R1 at the UPPER bound too: the range must END at it,
+    !> having accepted the same grid whose range does. `kde_grid_linear_range_not_at_bound` is the
+    !> lower half of the same rule.
+    subroutine scenario_kde_grid_linear_range_not_at_upper()
+        type(pf_kde_grid) :: g
+
+        call g%init(4, 0.0_real64, 3.0_real64, 0.1_real64, upper=3.0_real64, boundary="linear")
+        print '(a, es22.15)', "kde control initialised: ", g%step()
+        call g%init(4, 0.0_real64, 2.5_real64, 0.1_real64, upper=3.0_real64, boundary="linear")
+        print '(a)', "accepted a linear grid ending below its upper bound"
+    end subroutine scenario_kde_grid_linear_range_not_at_upper
+    !
+    !> Proves that pf_kde_grid%init refuses a spread_max that is not a number, having accepted a
+    !> finite one above 1; `kde_grid_spread_max_below_one` covers the rule's other half. The fit's
+    !> own siblings are `kde_spread_max_not_finite` and `kde_spread_max_below_one`.
+    subroutine scenario_kde_grid_spread_max_not_finite()
+        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        type(pf_kde_grid) :: p, g
+
+        call spread_max_pilot(p)
+        call g%init(16, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, spread_max=2.0_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(16, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, &
+            spread_max=ieee_value(1.0_real64, ieee_quiet_nan))
+        print '(a)', "accepted a NaN spread_max"
+    end subroutine scenario_kde_grid_spread_max_not_finite
+    !
+    !> Proves that pf_kde_grid%init refuses a spread_max below one -- a widest kernel narrower than
+    !> the narrowest, which is a contradiction and not a cap -- having accepted one above it.
+    subroutine scenario_kde_grid_spread_max_below_one()
+        type(pf_kde_grid) :: p, g
+
+        call spread_max_pilot(p)
+        call g%init(16, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, spread_max=2.0_real64)
+        print '(a, es22.15)', "kde control initialised: ", g%bandwidth()
+        call g%init(16, 0.0_real64, 1.0_real64, 0.1_real64, pilot=p, spread_max=0.5_real64)
+        print '(a)', "accepted a spread_max below one"
+    end subroutine scenario_kde_grid_spread_max_below_one
+    !
+    !> The finished pilot both grid spread_max scenarios read: a uniform sample over the unit
+    !> interval, which is all `%init` needs to accept `spread_max=` at all.
+    subroutine spread_max_pilot(p)
+        type(pf_kde_grid), intent(out) :: p !! the finished pilot
+        real(real64) :: x(64)
+        integer :: i
+
+        do i = 1, 64
+            x(i) = (real(i, real64) - 0.5_real64)/64.0_real64
+        end do
+        call p%init(32, 0.0_real64, 1.0_real64, 0.1_real64)
+        call p%add(x)
+        call p%finish()
+    end subroutine spread_max_pilot
+    !
+    !> Says that a `method = "binned"` fit took fewer cells than its narrowest kernel asked for.
+    !>
+    !> Exits 0 -- a clamped cell count is a remark about the configuration, not an abort. A
+    !> scenario rather than an assertion in the suite for the reason the other advice scenarios
+    !> give: an advice goes to the message stream of a whole process. Four thousand points one
+    !> apart at a thousandth of a bandwidth ask for about 64 million cells against a cap of 65536.
+    subroutine scenario_kde_fit_cells_clamped_advice()
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:)
+        integer :: i
+        logical :: ok
+
+        allocate(x(4000))
+        do i = 1, 4000
+            x(i) = real(i, real64)
+        end do
+        call k%fit(x, bandwidth=1.0e-3_real64, method="binned", ok=ok)
+        print '(a, l1)', "kde binned fit clamped: ", ok
+    end subroutine scenario_kde_fit_cells_clamped_advice
+    !
+    !> The zone advice on a support so narrow that the bandwidth it names falls outside the range a
+    !> fixed rendering reads back, so the advice writes it in the exponent form instead.
+    !>
+    !> Exits 0, as the other zone advice scenarios do: the fit is right, only far dearer than its
+    !> arguments suggest.
+    subroutine scenario_kde_zone_advice_tiny_support()
+        type(pf_kde) :: k
+        real(real64) :: x(64)
+        integer :: i
+        logical :: ok
+
+        do i = 1, 64
+            x(i) = 1.0e-6_real64*(real(i, real64) - 0.5_real64)/64.0_real64
+        end do
+        call k%fit(x, bandwidth=1.0e-3_real64, lower=0.0_real64, upper=1.0e-6_real64, &
+            boundary="linear", ok=ok)
+        print '(a, l1)', "kde tiny-support fit: ", ok
+    end subroutine scenario_kde_zone_advice_tiny_support
+    !
+    !> Proves that pf_kde_grid%init refuses a binned geometry whose transform length, ROUNDED UP to
+    !> a power of two, passes what its cells may carry -- the third of the three lengths
+    !> `kde_binned_setup` tests, where the pad and the cells themselves both fit. Seven cells over
+    !> the unit interval want 61 pad cells at this bandwidth: 129 in all, which rounds to 256
+    !> against a ceiling of 224. The control is the same grid at a bandwidth whose rounded length
+    !> is 128.
+    subroutine scenario_kde_grid_binned_transform_length()
+        type(pf_kde_grid) :: g
+
+        call g%init(7, 0.0_real64, 1.0_real64, 2.0_real64, method="binned")
+        print '(a, i0)', "kde control initialised: ", g%ncells()
+        call g%init(7, 0.0_real64, 1.0_real64, 2.45_real64, method="binned")
+        print '(a)', "accepted a transform whose rounded length passes the cells' ceiling"
+    end subroutine scenario_kde_grid_binned_transform_length
     !
     !> Emits R3's WARNING at a chosen verbosity, so the wrapper can assert the CLASS: a finding
     !> about the caller's data survives `"silent"` and goes quiet only at `"errors_only"`, unlike

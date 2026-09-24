@@ -438,8 +438,14 @@ contains
                 ! The clipped estimate holding no mass leaves nothing to normalise by: a data
                 ! condition, answered as every other undefined estimate is.
                 if (.not. (self%znorm > 0.0_real64 .and. self%znorm <= huge(1.0_real64))) then
+                    ! Not reachable: a local-polynomial correction preserves the sample's whole
+                    ! mass, so the RAW estimate integrates to one and is positive somewhere; the
+                    ! clip only removes, so `Z` lies in `(0, 1]`. Kept as the same admission the
+                    ! per-point divisor gets above, applied to the one this correction divides by.
+                    ! GCOVR_EXCL_START
                     self%h = ieee_value(1.0_real64, ieee_quiet_nan)
                     return
+                    ! GCOVR_EXCL_STOP
                 end if
             end if
         end if
@@ -1511,7 +1517,12 @@ contains
             if (self%has_upper) then
                 s_hi = images_cdf(self, j, self%hi, r)
             else
+                ! Not reachable: `need_mass` is `has_lower .and. has_upper`, and the loop only
+                ! reaches this line by passing `if (.not. need_mass) cycle` above it, so the upper
+                ! bound is always there. Kept as the whole mass the identity takes without one.
+                ! GCOVR_EXCL_START
                 s_hi = 1.0_real64
+                ! GCOVR_EXCL_STOP
             end if
             self%mass(j) = s_hi - s_lo
             ! A kernel far wider than a two-sided support keeps a mass that underflows to zero,
@@ -2281,7 +2292,9 @@ contains
 
         ok = .false.
         m = size(self%x, kind=int64)
-        if (m < 1_int64) return
+        ! Not reachable: `kde_fit_core` returns on an empty population before it allocates `%x`, so
+        ! a grid is only ever asked for over a sample with points in it.
+        if (m < 1_int64) return   ! GCOVR_EXCL_LINE
         ! The range: the extent the kernels reach, held inside half the largest number at either end
         ! so that its width is finite, then clipped to the support. Every bound is tested before it
         ! is formed, as `kde_build_pilot` tests its own: the overflow itself would stop a program
@@ -2972,9 +2985,15 @@ contains
         end do
         band = KDE_SCAN_GRID_BAND*peak
         if (.not. (peak > 0.0_real64)) then
+            ! Not reachable: a zone exists only because some point's own correction edge pushed its
+            ! inner end past the bound, and that point's kernel therefore covers part of the zone,
+            ! so at least one cell of this grid holds weight. Kept because a band formed from a
+            ! zero peak would trust the grid everywhere, which is the one thing it must not do.
+            ! GCOVR_EXCL_START
             ok = .false.
             nc = 0
             dx = 0.0_real64
+            ! GCOVR_EXCL_STOP
         end if
 
     end subroutine zone_grid
@@ -3402,10 +3421,17 @@ contains
         end if
         n = z%j2 - z%j1 + 1_int64
         if (n < 1_int64) then
+            ! Not reachable: a zone exists only because some point's own correction edge pushed its
+            ! inner end past the bound, and that point lies within one reach of the edge -- it is
+            ! `x(j) < lo + 2 R h_j` that put the edge at `lo + R h_j`, and `R h_j <= reach` -- so
+            ! the window `[j1, j2]` always holds at least that point. Kept as the empty tables a
+            ! zone with nothing to read would need.
+            ! GCOVR_EXCL_START
             z%j1 = 1_int64
             z%j2 = 0_int64
             allocate(z%val(0), z%cum(0))
             return
+            ! GCOVR_EXCL_STOP
         end if
         allocate(z%val(n), z%cum(n))
         do k = 1_int64, n
@@ -3733,8 +3759,13 @@ contains
         hi_b = b1
         y = a1 + 0.5_real64*(b1 - a1)
         if (.not. (b1 > a1)) then
+            ! Not reachable: the only caller draws its point in proportion to the magnitude that
+            ! point's term holds over the zone, so a point with no interval there is never chosen.
+            ! Kept as the answer a degenerate interval has.
+            ! GCOVR_EXCL_START
             y = a1
             return
+            ! GCOVR_EXCL_STOP
         end if
         do it = 1, MAX_STEPS
             v = term_integral(self, j, a1, y, .true., 0.0_real64, .false.)
@@ -3937,12 +3968,18 @@ contains
             iz = KDE_ZONE_HI
         else if (.not. (mmid > 0.0_real64)) then
             ! Nothing lies between the zones -- they meet, or one of them holds everything -- so the
-            ! rounding that put the draw here decides nothing.
+            ! rounding that put the draw here decides nothing. Not reachable other than by that
+            ! rounding, which is why the bodies are excluded and the test above them is not: with
+            ! both zones on and nothing between them the two tests above already partition every
+            ! draw at `mlo`, and with one zone on its own mass IS the whole, so a draw can only
+            ! land here when the masses and `Z` were summed in different orders.
+            ! GCOVR_EXCL_START
             if (self%zones(KDE_ZONE_LO)%on) then
                 iz = KDE_ZONE_LO
             else if (self%zones(KDE_ZONE_HI)%on) then
                 iz = KDE_ZONE_HI
             end if
+            ! GCOVR_EXCL_STOP
         end if
         if (iz == 0) then
             y = draw_interior(self, key, sk, d)

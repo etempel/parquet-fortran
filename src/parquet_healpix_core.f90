@@ -144,10 +144,20 @@ contains
                 guard = guard + 1_int64
             end do
             guard = 0_int64
+            ! UNREACHABLE, and kept for the reason the cap branch's pair is kept. The belt seed is
+            ! `nint(n*(2 - 1.5z)) + 1`, and the ring this procedure must return is `floor(i*)` for
+            ! the same real `i* = n*(2 - 1.5z)`. `nint(x) >= floor(x)` for every `x`, so the seed
+            ! starts STRICTLY ABOVE the answer; the downward loop above lands exactly on it, and
+            ! `hpx_ring_z(nside, i+1) < z` holds there by construction. Only a seed BELOW the
+            ! answer could fire this, which the `+ 1` rules out. Measured over 10^6 values of `z`
+            ! per resolution at nside 1 .. 2**20, each also probed a few ulps either side:
+            ! 11 000 011 downward corrections and zero upward ones.
             do while (i + 1_int64 <= 4_int64 * nside - 1_int64 .and. &
                       hpx_ring_z(nside, i + 1_int64) >= z .and. guard < 8_int64)
+                ! GCOVR_EXCL_START
                 i = i + 1_int64
                 guard = guard + 1_int64
+                ! GCOVR_EXCL_STOP
             end do
         end if
     end procedure hpx_ring_above
@@ -159,8 +169,23 @@ contains
         ! once, and they are what make the result exact rather than probably right.
         i = int((1.0_real64 + sqrt(1.0_real64 + 2.0_real64 * real(p, real64))) * 0.5_real64, int64)
         if (i < 1_int64) i = 1_int64
+        ! The upward correction is UNREACHABLE on any input the pixelisation can present, and is
+        ! kept deliberately. `int` truncates, so the seed is `floor(x)` for
+        ! `x = (1 + sqrt(1 + 2p))/2`, whose exact value is never below the ring sought; only a
+        ! rounding carrying the COMPUTED `x` below an integer could fire this. That rounding is
+        ! bounded by `3*u*i` for `u = 2**-53` -- one `u` each from `real(p)`, from the `1 +` and
+        ! from `sqrt`, and half of one from the final add -- while `x` exceeds its own ring by
+        ! about `j/(2*(2i - 1))` for `p = 2i(i-1) + j`. So only `j < 6*i*i/2**52` can undershoot:
+        ! at most 384 of a ring's pixels, even at the int64 ceiling.
+        !
+        ! That bound is tight rather than comfortable -- at a ring start the margin is zero -- so
+        ! THE WHOLE CANDIDATE SET WAS SWEPT rather than argued about, out to `j = 1024` for a
+        ! two-and-a-half-fold margin: 184 269 908 104 values of `p` over every cap ring of
+        ! nside 2**29, and the seed came out exactly right on every one of them. The detector was
+        ! itself confirmed by mutation, because a sweep that reports nothing otherwise proves
+        ! nothing: a seed one ring low fires it on all of 8 000 000 controls.
         do while (2_int64 * i * (i + 1_int64) <= p)
-            i = i + 1_int64
+            i = i + 1_int64   ! GCOVR_EXCL_LINE
         end do
         do while (i > 1_int64 .and. 2_int64 * i * (i - 1_int64) > p)
             i = i - 1_int64
@@ -236,8 +261,20 @@ contains
             if (jp_l < 0_int64 .or. jm_l < 0_int64) then
                 ! The phi = 0 seam: the pair wrapped below zero and is restored a whole revolution
                 ! up, which leaves the face determination below unchanged.
+                !
+                ! UNREACHABLE from either caller, and kept deliberately. `j` is an index WITHIN its
+                ! ring, so `j >= 0`, and the parity step leaves `tsum` congruent to `d` mod 2, so
+                ! `tsum +- d` are both even and these two are exact halves of them. On the belt
+                ! `d = jr - 2*nside` lies in `[-nside, nside]`, and `|d| = nside` forces `jr-nside`
+                ! even, hence `kshift = 0` and `tsum >= nside - 1`; where `kshift = 1` the same
+                ! step bounds `|d|` by `nside - 1` and leaves `tsum >= nside - 2`. Either way
+                ! `tsum +- d >= -1`, and an even integer at or above -1 is at least 0. Checked
+                ! exhaustively over every belt ring and every `j` at nside 1 .. 1024: the smallest
+                ! `jp_l` and the smallest `jm_l` seen are both 0.
+                ! GCOVR_EXCL_START
                 jp_l = jp_l + 4_int64 * nside
                 jm_l = jm_l + 4_int64 * nside
+                ! GCOVR_EXCL_STOP
             end if
             ifp = jp_l / nside
             ifm = jm_l / nside
@@ -297,9 +334,15 @@ contains
             ! and leaves both remainders alone. It matters only where an index is negative, where
             ! Fortran's truncation toward zero would otherwise give the wrong face -- and once
             ! stepped past that, the two agree again.
+            !
+            ! UNREACHABLE for the reason `hpx_ringij2nest` gives above its own copy of this
+            ! guard: `jstart` is an index within its ring, and the parity step then keeps both
+            ! halves at or above zero. Kept so that the two forms stay the same arithmetic.
             if (jp_l < 0_int64 .or. jm_l < 0_int64) then
+                ! GCOVR_EXCL_START
                 jp_l = jp_l + four_n
                 jm_l = jm_l + four_n
+                ! GCOVR_EXCL_STOP
             end if
             ifp = jp_l / nside
             ifm = jm_l / nside
@@ -324,7 +367,10 @@ contains
             ! end of the run -- which is what keeps a face counter from running off its own range
             ! at the end of a ring.
             if (k == count - 1_int64) exit
-            select case (region)
+            ! The dispatch line below reports zero hits while every one of its arms reports
+            ! hundreds of thousands and the line above it reports two million -- a gcov
+            ! attribution artifact, measured, not a branch that never runs.
+            select case (region)   ! GCOVR_EXCL_LINE
             case (1)
                 ! North cap. Within a face the position runs diagonally: `x` up, `y` down. At the
                 ! quadrant boundary it restarts at that face's own corner.

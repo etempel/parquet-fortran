@@ -1538,8 +1538,16 @@ contains
     !! and `..._alloc` has two paths of its own beneath that: a REPLAY of the recorded runs, and a
     !! second full walk for a disc whose runs overflowed the recording buffer. The replay writes
     !! through an int32 output that nothing else reaches. Both paths are driven here -- a small
-    !! disc for the replay, and the whole sphere for the fallback, which is the same shape
-    !! `test_disc_alloc_run_overflow` uses for the int64 kind.
+    !! disc and the whole sphere for the replay, a seam-centred disc for the fallback.
+    !!
+    !! **The whole sphere is NOT the fallback, although it reads like one.** Every ring of an
+    !! all-sky disc lies wholly inside it, so the walk emits ONE run per ring: 1023 runs at
+    !! nside 256, one short of the 1024-column record. The int64 twin
+    !! `test_disc_alloc_run_overflow` gets away with that shape only because it works at nside 512,
+    !! where there are 2047 rings. So each case below reads the true run count back from
+    !! `pf_query_disc_runs` and fails if it is on the wrong side of the boundary, rather than
+    !! leaving the claim to this comment -- a version of this test where both cases replay would
+    !! otherwise still pass while covering half of what it says it covers.
     !!
     !! Both schemes, because the replay converts RING runs to NEST indices on the way out and the
     !! int32 arm of that conversion is its own line.
@@ -1551,8 +1559,16 @@ contains
         integer(int64) :: n64, npix, k
         integer(int32), allocatable :: got32(:)
         integer(int64), allocatable :: got64(:)
+        integer(int64), allocatable :: buf(:)
         real(real64), parameter :: V(3) = [0.6_real64, -0.3_real64, 0.7416198487095663_real64]
         real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+        !> A centre on the `phi = 0` seam, which is what makes a disc's run count high for its
+        !! pixel count: nearly every ring's arc wraps through the seam and so arrives as two runs
+        !! rather than one. Measured on the disc below: 1586 runs for 250 724 pixels.
+        real(real64), parameter :: SEAM(3) = [1.0_real64, 0.0_real64, 0.0_real64]
+        !> The record's column count, `hpx_alloc_runs_max`, which is private to the module.
+        integer(int64), parameter :: RUNS_MAX = 1024_int64
+        integer(int64) :: nruns, probe(2, 4)
         integer :: isch, scheme
         logical :: ok
 
@@ -1581,9 +1597,36 @@ contains
             if (allocated(error)) return
         end do
 
-        ! The fallback path: a disc past pi/2 overflows the run buffer, so the answer is built by
-        ! a second walk rather than a replay. Asserted in RING, where the whole sphere comes back
-        ! in ascending pixel order and any gap is visible.
+        ! ---- The fallback path: the runs overflow the record and the walk is repeated ----
+        !
+        ! `pf_query_disc_runs` reports the TRUE run count whatever buffer it is handed, so a
+        ! four-column probe is enough to read it and pin which path the call below takes.
+        call pf_query_disc_runs(NS64, SEAM, 1.2_real64, probe, nruns)
+        call check(error, nruns > RUNS_MAX, &
+                   "the seam fixture no longer overflows the run record, so the second-walk " // &
+                   "path of the int32 self-sizing form goes unexercised")
+        if (allocated(error)) return
+        call pf_query_disc_count(NS64, SEAM, 1.2_real64, n64)
+        allocate (buf(n64))
+        call pf_query_disc(NS64, SEAM, 1.2_real64, buf, n64)
+        call pf_query_disc_alloc(NS32, SEAM, 1.2_real64, got32, n32)
+        call check(error, int(n32, int64), n64, &
+                   "the int32 second walk returned a different count from pf_query_disc")
+        if (allocated(error)) return
+        call check(error, int(size(got32), int64), n64, &
+                   "the int32 second walk allocated to something other than nlist")
+        if (allocated(error)) return
+        call check(error, all(int(got32, int64) == buf), &
+                   "the int32 second walk returned different pixels from pf_query_disc")
+        if (allocated(error)) return
+        deallocate (buf)
+
+        ! ---- The replay path at its own boundary: the whole sphere, one run short of the record ----
+        call pf_query_disc_runs(NS64, NORTH, 4.0_real64, probe, nruns)
+        call check(error, nruns <= RUNS_MAX, &
+                   "the whole-sphere fixture now overflows the run record too, so both cases " // &
+                   "here take the second walk and the replay goes unexercised")
+        if (allocated(error)) return
         npix = 12_int64 * NS64 * NS64
         call pf_query_disc_alloc(NS32, NORTH, 4.0_real64, got32, n32)
         call check(error, int(n32, int64), npix, &
@@ -1599,6 +1642,8 @@ contains
             end if
         end do
         call check(error, ok, "the whole-sphere int32 disc did not come back in ascending order")
+        call check(error, nruns, 4_int64 * NS64 - 1_int64, &
+                   "an all-sky disc must emit exactly one run per ring")
     end subroutine test_query_disc_int32_kind
 
     !> `pf_angdist` is exact at the two ends of its range and stable just inside them.

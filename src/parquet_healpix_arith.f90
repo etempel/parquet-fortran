@@ -269,6 +269,10 @@ contains
         ! `huge` there. So no caller can present a well-formed count this clause would reject.
         ! It stays because it is the only thing that would still hold if a ceiling ever moved, and
         ! removing it would make that change silently wrong rather than loudly so.
+        !
+        ! The excluded statement is a one-line `if`, so gcov counts the line as hit whenever the
+        ! CONDITION is evaluated -- which is on every call. A gcov attribution artifact, not a
+        ! stale exclusion; the assignment itself never runs.
         ! GCOVR_EXCL_START
         if (nside > limit) nside = -1_int64
         ! GCOVR_EXCL_STOP

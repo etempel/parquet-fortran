@@ -334,8 +334,23 @@ contains
                 d = d + hpx_twopi
                 if (d < 0.0_real64) d = modulo(d, hpx_twopi)
             else if (d >= hpx_twopi) then
+                ! UNREACHABLE, and kept so that the wrap is unconditional rather than resting on a
+                ! bound. `d` here is `(j + half)*w - phi0 + pi` for a `j` the trim tests, and the
+                ! largest such `j` is the arc's own `jhi = ceiling(B) + 1`, for
+                ! `B = (phi0 + dphi)*winv - half`; that gives `d = pi + dphi + w*(1 + f)` with
+                ! `f = ceiling(B) - B` in [0, 1), so reaching `2*pi` needs
+                ! `dphi*nr/pi >= nr - 2 - 2f`. But the window is recentred and clamped to one
+                ! revolution as soon as `ceiling(B) - floor(A) + 3 >= nr`, whose left side is
+                ! `dphi*nr/pi + f + a + 3` for `a = A - floor(A)` in [0, 1) -- and under that same
+                ! premise it is at least `nr + 1 - f`, which exceeds `nr`. So every arc wide enough
+                ! to reach here is recentred first, and a recentred window's largest `d` is
+                ! `e + 2*pi - w` for `|e| <= w/2`, half a pixel short. Measured on 1.69e10 `in_disc`
+                ! evaluations over nside 1 .. 64, 61 latitudes, 41 longitudes and 400 radii in both
+                ! modes: the largest `d` reached was 6.2706 against `2*pi` = 6.2832.
+                ! GCOVR_EXCL_START
                 d = d - hpx_twopi
                 if (d >= hpx_twopi) d = modulo(d, hpx_twopi)
+                ! GCOVR_EXCL_STOP
             end if
             d = d - hpx_pi
             inside = abs(d) <= dphi

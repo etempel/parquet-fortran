@@ -868,8 +868,16 @@ contains
         end do
         h = 0.5_real64*(a + b)
         if (.not. kde_positive_finite(h)) then
+            ! Not reachable from a bandwidth the criterion can score: `a` and `b` are positive and
+            ! finite on entry (`b > a` was tested), the section only shrinks them, and `lscv_at`
+            ! stops answering far below where their sum could overflow -- the per-pair width
+            ! `sqrt(h_i**2 + h_j**2)` overflows first, as the window's own note says. Measured on
+            ! a sample scaled towards the largest number: the rule refuses at a Silverman
+            ! bandwidth near `1.9e307`, while `0.5*(a + b)` needs one above `3.2e307`.
+            ! GCOVR_EXCL_START
             h = ieee_value(1.0_real64, ieee_quiet_nan)
             return
+            ! GCOVR_EXCL_STOP
         end if
         found = .true.
 
@@ -1122,8 +1130,14 @@ contains
         if (.not. (cells <= real(KDE_LSCV_GRID_MAX, real64))) return
         nl = pf_next_pow2(max(4, int(ceiling(cells))))
         if (nl > KDE_LSCV_GRID_MAX) then
+            ! Not reachable: `cells` was held at or below `KDE_LSCV_GRID_MAX` on the line above,
+            ! that bound is itself a power of two, and `pf_next_pow2` answers the smallest power of
+            ! two AT OR ABOVE its argument -- so `nl` cannot pass it. Kept as the guard on the
+            ! length the transform is allocated at, beside the one on the quotient that produced it.
+            ! GCOVR_EXCL_START
             nl = 0
             return
+            ! GCOVR_EXCL_STOP
         end if
         allocate(bw(nl), bhat(nl))
         bw = 0.0_real64
@@ -1507,8 +1521,14 @@ contains
             cand(nc) = fn%hi - rad*fn%hj
         end if
         if (has_sigma) then
+            ! Not reachable from inside the library: every call of `kde_term_integral` passes
+            ! `has_sigma = .false.`, `solve_term_mass`'s `absolute` call included, so the
+            ! magnitude's own sign change is never offered as a breakpoint. Kept because the sign
+            ! change is part of that integral's published contract.
+            ! GCOVR_EXCL_START
             nc = nc + 1
             cand(nc) = sigma
+            ! GCOVR_EXCL_STOP
         end if
         ! Strictly inside the piece, made distinct, then insertion-sorted: the distinctness test
         ! comes first, because a repeat found after the shift would leave the list holding it twice.

@@ -203,6 +203,8 @@ contains
                 test_linear_tied_values_and_knots), &
             new_unittest("the guide's rising-density table is what the estimator answers", &
                 test_guide_boundary_table), &
+            new_unittest("the guide's bandwidth conversions reach the kernel's own half-width", &
+                test_guide_bandwidth_conversions), &
             new_unittest("the grid converges to the exact estimate as step**2", test_grid_converges), &
             new_unittest("the grid deposits exactly w/step per point", test_grid_deposits_exact_mass), &
             new_unittest("the grid counts the weight beyond its range at each end", &
@@ -3161,6 +3163,69 @@ contains
         call check(error, all(abs(got - LIN) <= 5.0e-4_real64), "the page's linear column")
 
     end subroutine test_guide_boundary_table
+
+    !> The conversions in doc/pages/utilities/kernel-density.md, "Two other conventions for the word
+    !! bandwidth", and the support column of the kernel table above them. A compact kernel's own
+    !! scale parameter is the half-width of its support, so a ONE-POINT fit at the converted
+    !! bandwidth must reach exactly that far -- and `%quantile(0)` and `%quantile(1)` answer the
+    !! estimate's ends, `x_j -+ R h_j`, which is where the half-width is observable. The page's
+    !! arithmetic is mirrored here by hand; an editor changing either keeps the two in step.
+    !!
+    !! `"box"` and `"bspline"` are deliberately fitted at the SAME bandwidth, `c/sqrt(3)`, so an
+    !! extent that ignored the kernel would have to answer one of their two reaches wrongly; the
+    !! page separates them by the factor two between `sqrt(3)` and `2 sqrt(3)`. The second half
+    !! asserts that the page's two B-spline conventions agree to a few percent, which is the check
+    !! the page's earlier `a*sqrt(3)` failed by a factor of three.
+    !!
+    !! Not exact equality: the fixture divides by `sqrt(5)` or `sqrt(3)` and the library multiplies
+    !! the same constant back, so two roundings separate the answer from the half-width, and under
+    !! ifx's default fp model the division may be a reciprocal multiply instead. Eight ulp leaves
+    !! room for that and is still far below any error of the kind this pins.
+    subroutine test_guide_bandwidth_conversions(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k
+        real(real64) :: one(1), hi, lo, tol, by_variance, by_peak
+        character(len=200) :: msg
+        integer :: i
+        ! The page's half-width `c` for the two compact kernels, its knot spacing `a` for the
+        ! B-spline, and the bandwidth itself for the Gaussian, which needs no conversion: one
+        ! number serves all four so that the box and B-spline fits take the same bandwidth.
+        real(real64), parameter :: C = 0.7_real64
+        real(real64), parameter :: R5 = sqrt(5.0_real64), R3 = sqrt(3.0_real64)
+        character(len=12), parameter :: TOKEN(4) = &
+            ["gaussian    ", "epanechnikov", "bspline     ", "box         "]
+        real(real64), parameter :: BW(4) = [C, C/R5, C/R3, C/R3]
+        real(real64), parameter :: REACH(4) = [5.0_real64*C, C, 2.0_real64*C, C]
+
+        one = [0.0_real64]
+        do i = 1, 4
+            call k%fit(one, bandwidth=BW(i), kernel=trim(TOKEN(i)))
+            call k%quantile(1.0_real64, hi)
+            call k%quantile(0.0_real64, lo)
+            tol = 8.0_real64*spacing(REACH(i))
+            write(msg, '(3a,es22.15,a,es22.15)') 'the page says kernel="', trim(TOKEN(i)), &
+                '" reaches ', REACH(i), " above its point; it reaches ", hi
+            call check(error, abs(hi - REACH(i)) <= tol, trim(msg))
+            if (allocated(error)) return
+            write(msg, '(3a,es22.15,a,es22.15)') 'the page says kernel="', trim(TOKEN(i)), &
+                '" reaches -', REACH(i), " below its point; it reaches ", lo
+            call check(error, abs(lo + REACH(i)) <= tol, trim(msg))
+            if (allocated(error)) return
+        end do
+        ! The page offers a second B-spline convention, `bandwidth = a*0.5984`, matched to a
+        ! Gaussian by peak height rather than by variance. Two conventions offered as alternatives
+        ! in one sentence have to be close, and four percent is the margin that admits the 3.6%
+        ! between these two while refusing an error of the factor-of-three kind. Read back through
+        ! `%bandwidth()` so that the page's two numbers are compared as the library received them.
+        call k%fit(one, bandwidth=C/R3, kernel="bspline")
+        by_variance = k%bandwidth()
+        call k%fit(one, bandwidth=C*0.5984_real64, kernel="bspline")
+        by_peak = k%bandwidth()
+        write(msg, '(a,es22.15,a)') "the page's two B-spline conventions must agree within four " // &
+            "percent; a*0.5984 over a/sqrt(3) is ", by_peak/by_variance, " times"
+        call check(error, abs(by_peak/by_variance - 1.0_real64) <= 0.04_real64, trim(msg))
+
+    end subroutine test_guide_bandwidth_conversions
 
     ! ==========================================================================================
     ! pf_kde_grid

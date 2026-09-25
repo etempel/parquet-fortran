@@ -1074,6 +1074,8 @@ contains
             call scenario_kde_grid_merge_support()
         case ("kde_grid_merge_boundary")
             call scenario_kde_grid_merge_boundary()
+        case ("kde_grid_merge_method")
+            call scenario_kde_grid_merge_method()
         case ("kde_alpha_without_adaptive")
             call scenario_kde_alpha_without_adaptive()
         case ("kde_bandwidth_max_without_adaptive")
@@ -7960,6 +7962,29 @@ contains
         call g%merge(other)
         print '(a)', "merged grids with a different boundary correction"
     end subroutine scenario_kde_grid_merge_boundary
+    !
+    !> Proves that pf_kde_grid%merge refuses a grid filled by another method.
+    !!
+    !! The control is deliberately stronger than its siblings' above: both grids carry points, so it
+    !! asserts that a merge which PASSES the guard adds the counts (3 + 4 = 7) rather than merely
+    !! returning. The method guard is the one whose failure would mix a binned grid's bins into an
+    !! exact grid's cells, so the merge it admits has to be shown to move the data.
+    subroutine scenario_kde_grid_merge_method()
+        type(pf_kde_grid) :: g, same, other
+
+        call g%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call g%add([0.1_real64, 0.2_real64, 0.3_real64])
+        call same%init(4, 0.0_real64, 1.0_real64, 0.1_real64)
+        call same%add([0.4_real64, 0.5_real64, 0.6_real64, 0.7_real64])
+        call g%merge(same)
+        print '(a, i0)', "kde control merged: ", g%n()
+        ! `g` took the default method, which is `"exact"`; `other` names the other one, so that the
+        ! two differ however the default moves. Nothing `kde_binned_setup` fixes is read by a guard
+        ! ahead of the method's, so this pair reaches that guard and no earlier one.
+        call other%init(4, 0.0_real64, 1.0_real64, 0.1_real64, method="binned")
+        call g%merge(other)
+        print '(a)', "merged a binned grid into an exact one"
+    end subroutine scenario_kde_grid_merge_method
     !
     ! ---- parquet_kde: the adaptive kernel's caller contracts, in both forms ----------------
     !

@@ -107,7 +107,9 @@ contains
             new_unittest("NaN starts are counted and skipped, and the best finite start wins", &
                          test_multistart_some_nan_starts), &
             new_unittest("DE accepts an explicit f_weight, rtol and max_neval and honours each", &
-                         test_de_explicit_knobs) &
+                         test_de_explicit_knobs), &
+            new_unittest("the guide's overshoot bounds hold for all three engines, and bind", &
+                         test_guide_budget_overshoot_bounds) &
             ]
 
     end subroutine collect_tests_optimize
@@ -1538,5 +1540,89 @@ contains
                    "and the restored point must still be the box's own")
 
     end subroutine test_de_explicit_knobs
+
+    !> The three `parquet_optimize` rows of the overshoot column in
+    !! doc/pages/utilities/solvers.md, "The budget: max_neval": `pf_minimize_scalar` never,
+    !! `pf_minimize_simplex` by one simplex step (`n+2` evaluations), `pf_minimize_de` by one
+    !! generation (`np`). `pf_minimize_multistart` is not here because it takes no `max_neval` at
+    !! all -- which is the page's own exception and is asserted by the compiler, since a call
+    !! passing one would not build.
+    !!
+    !! **Where each bound comes from.** `pf_minimize_scalar` tests `neval >= budget` at the head of
+    !! its Brent loop, before the single evaluation that loop makes
+    !! (`src/parquet_optimize_scalar.f90`), so it stops AT the cap -- never is the right word, and
+    !! the page said "by one Brent iteration" until this test was written. The simplex tests its
+    !! budget once per step and a step may evaluate the whole reflected simplex, `n+2` points. DE
+    !! tests once per generation and a generation evaluates `np` trial vectors.
+    !!
+    !! **Two negative controls per engine.** Each case asserts the run evaluated at least its
+    !! unavoidable minimum, so doing nothing cannot pass a bound; and each engine must somewhere in
+    !! the sweep actually reach its cap, counted through `PF_OPT_LIMIT` and required non-zero.
+    subroutine test_guide_budget_overshoot_bounds(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        !> The fixture's dimension, and with it the simplex's `n+2`.
+        integer, parameter :: N_DIM = 3
+        !> DE's population, and so its one generation.
+        integer, parameter :: DE_NP = 8
+        type(pf_optimize_info) :: info
+        real(real64) :: x1, fmin, x(N_DIM), step(N_DIM), lo(N_DIM), hi(N_DIM)
+        integer :: budget, seen_scalar, seen_simplex, seen_de
+        character(len=190) :: msg
+
+        seen_scalar = 0
+        seen_simplex = 0
+        seen_de = 0
+        lo = -2.0_real64
+        hi = 2.0_real64
+
+        do budget = 2, 300, 3
+            ! ---- pf_minimize_scalar: never past the cap ---------------------------------
+            call pf_minimize_scalar(rastrigin, -2.0_real64, 2.0_real64, x1, fmin, &
+                                    atol=1.0e-15_real64, max_neval=budget, info=info)
+            write(msg, '(a, i0, a, i0)') "pf_minimize_scalar must never exceed max_neval ", &
+                budget, "; neval is ", info%neval
+            call check(error, info%neval <= budget, trim(msg))
+            if (allocated(error)) return
+            call check(error, info%neval >= 1, "the scalar run must have evaluated something")
+            if (allocated(error)) return
+            if (info%status == PF_OPT_LIMIT) seen_scalar = seen_scalar + 1
+
+            ! ---- pf_minimize_simplex: by at most one step, n+2 --------------------------
+            x = 0.5_real64
+            step = 0.3_real64
+            call pf_minimize_simplex(rastrigin, x, fmin, step, 1.0e-14_real64, &
+                                     max_neval=budget, info=info)
+            write(msg, '(a, i0, a, i0, a, i0)') "pf_minimize_simplex may exceed max_neval ", &
+                budget, " by ", N_DIM + 2, "; neval is ", info%neval
+            call check(error, info%neval <= budget + N_DIM + 2, trim(msg))
+            if (allocated(error)) return
+            write(msg, '(a, i0, a, i0)') "the starting simplex is unavoidable, so neval must be " // &
+                "at least ", N_DIM + 1, "; it is ", info%neval
+            call check(error, info%neval >= N_DIM + 1, trim(msg))
+            if (allocated(error)) return
+            if (info%status == PF_OPT_LIMIT) seen_simplex = seen_simplex + 1
+
+            ! ---- pf_minimize_de: by at most one generation, np --------------------------
+            call pf_minimize_de(rastrigin, lo, hi, 11_int64, x, fmin, np=DE_NP, &
+                                max_neval=budget, info=info)
+            write(msg, '(a, i0, a, i0, a, i0)') "pf_minimize_de may exceed max_neval ", budget, &
+                " by one generation of ", DE_NP, "; neval is ", info%neval
+            call check(error, info%neval <= budget + DE_NP, trim(msg))
+            if (allocated(error)) return
+            write(msg, '(a, i0, a, i0)') "the initial population is unavoidable, so neval must " // &
+                "be at least ", DE_NP, "; it is ", info%neval
+            call check(error, info%neval >= DE_NP, trim(msg))
+            if (allocated(error)) return
+            if (info%status == PF_OPT_LIMIT) seen_de = seen_de + 1
+        end do
+
+        ! The vacuity guard: an engine whose cap never bound in the sweep had its bound asserted
+        ! over runs that never tried to exceed anything.
+        write(msg, '(a, 3(1x, i0))') "each engine's budget must bind somewhere in the sweep; " // &
+            "(scalar, simplex, de) bound:", seen_scalar, seen_simplex, seen_de
+        call check(error, seen_scalar > 0 .and. seen_simplex > 0 .and. seen_de > 0, trim(msg))
+
+    end subroutine test_guide_budget_overshoot_bounds
 
 end module test_optimize

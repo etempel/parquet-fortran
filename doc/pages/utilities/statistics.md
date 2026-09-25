@@ -213,6 +213,8 @@ can be charged against two different counts, so `weight_type` names which you me
   is `sum(w)`, the variance divisor is `sum(w) - ddof`, and the answer is exactly what you would
   get by writing the value out three times.
 
+Both tokens are matched case-insensitively; any other token **aborts**, naming both.
+
 Both are written out, with the higher moments, under [The formulas](#the-formulas) below.
 
 With every weight equal the two agree with each other and with the unweighted answer, which is why

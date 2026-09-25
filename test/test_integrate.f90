@@ -120,7 +120,9 @@ contains
             new_unittest("a walk and a piece list both stop at a non-finite value", &
                          test_non_finite_value_stops_every_path), &
             new_unittest("the default panel cap clears an algebraic tail at the tightest tolerance", &
-                         test_default_panel_cap_clears_an_algebraic_tail) &
+                         test_default_panel_cap_clears_an_algebraic_tail), &
+            new_unittest("the guide's overshoot bounds hold, and max_neval binds", &
+                         test_guide_budget_overshoot_bounds) &
             ]
 
     end subroutine collect_tests_integrate
@@ -1785,5 +1787,100 @@ contains
                    "a walk stopped by its panel cap must say so")
 
     end subroutine test_default_panel_cap_clears_an_algebraic_tail
+
+    !> The `pf_integrate` row of the overshoot column in doc/pages/utilities/solvers.md,
+    !! "The budget: max_neval": how far past `max_neval` a call may go, on each of the three shapes
+    !! of range, and that `max_neval` binds at all.
+    !!
+    !! **Where the numbers come from, so that none of them is a recorded output.** A panel's
+    !! subinterval cap is `(max(budget - neval, 0) + ONE_RULE)/BISECTION` floored at 1
+    !! (`run_panel`, `src/parquet_integrate_driver.f90`), so a panel still costs one rule
+    !! application with nothing left of the budget; the walk tests the budget before every panel
+    !! after the first. On an infinite range `find_start_panel` spends one rule application of its
+    !! own before that first panel, and neither it nor the first panel sits behind a budget test --
+    !! so an outward walk costs `2*ONE_RULE` whatever `max_neval` says, and can exceed a budget it
+    !! has already spent by that much. `(-inf, +inf)` is TWO walks, split at zero
+    !! (`integrate_infinite`), and the second is entered whatever the first spent: the first
+    !! overshoots by at most its last panel, `ONE_RULE`, and the second then pays its whole
+    !! `2*ONE_RULE`. A finite range has no walk and no start probe, so once the budget covers the
+    !! one unavoidable rule application it is never exceeded.
+    !!
+    !! **Two negative controls, because the bound alone is satisfied by doing nothing.** Every case
+    !! also asserts the MINIMUM cost the same mechanism forces -- one rule application on a finite
+    !! range, two per walk on an infinite one -- so a call that returned at once fails. And each
+    !! shape must somewhere in the sweep actually pass its budget (`neval >= budget`), counted and
+    !! required non-zero, or the bound was asserted over runs that never tried to exceed anything.
+    !!
+    !! **`PF_INT_LIMIT` is NOT the discriminator for "the budget bound"**, which is why the counts
+    !! key on `neval` instead: `walk_outward` reports `LIMIT` whenever it did not show the tail was
+    !! small, which includes stopping on `max_panels` or on the abscissa ceiling with evaluations
+    !! still unspent. Measured: a two-sided run at `max_neval = 343` ends `LIMIT` with `neval` 336.
+    subroutine test_guide_budget_overshoot_bounds(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integrate_info) :: info
+        real(real64) :: r, inf
+        integer :: budget, seen_finite, seen_one, seen_two
+        character(len=190) :: msg
+        !> A one-sided infinite range may exceed `max_neval` by one rule application.
+        integer, parameter :: ONE_SIDED_OVER = ONE_RULE
+        !> `(-inf, +inf)` may exceed it by the first walk's last panel plus the second walk's
+        !! two unavoidable rule applications.
+        integer, parameter :: TWO_SIDED_OVER = ONE_RULE + 2*ONE_RULE
+        !> What a walk cannot avoid spending: the start probe and the first panel.
+        integer, parameter :: PER_WALK_MIN = 2*ONE_RULE
+
+        inf = pf_infinity()
+        seen_finite = 0
+        seen_one = 0
+        seen_two = 0
+
+        do budget = ONE_RULE, 400, 7
+            ! ---- a finite range: never past the cap -------------------------------------
+            r = pf_integrate(osc_a, 0.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=budget, &
+                             info=info)
+            write(msg, '(a, i0, a, i0)') "finite: max_neval ", budget, " was exceeded, neval ", &
+                info%neval
+            call check(error, info%neval <= budget, trim(msg))
+            if (allocated(error)) return
+            write(msg, '(a, i0, a, i0)') "finite: one rule application is unavoidable, so neval " // &
+                "must be at least ", ONE_RULE, "; it is ", info%neval
+            call check(error, info%neval >= ONE_RULE, trim(msg))
+            if (allocated(error)) return
+            if (info%neval >= budget) seen_finite = seen_finite + 1
+
+            ! ---- one-sided infinite: one rule application past the cap ------------------
+            r = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-13_real64, max_neval=budget, &
+                             info=info)
+            write(msg, '(a, i0, a, i0, a, i0)') "one-sided: max_neval ", budget, &
+                " may be exceeded by ", ONE_SIDED_OVER, ", neval ", info%neval
+            call check(error, info%neval <= budget + ONE_SIDED_OVER, trim(msg))
+            if (allocated(error)) return
+            write(msg, '(a, i0, a, i0)') "one-sided: a walk cannot spend less than ", &
+                PER_WALK_MIN, "; neval is ", info%neval
+            call check(error, info%neval >= PER_WALK_MIN, trim(msg))
+            if (allocated(error)) return
+            if (info%neval >= budget) seen_one = seen_one + 1
+
+            ! ---- two-sided infinite: three, because the second walk pays in full --------
+            r = pf_integrate(tail_gauss, -inf, inf, 1.0e-13_real64, max_neval=budget, info=info)
+            write(msg, '(a, i0, a, i0, a, i0)') "two-sided: max_neval ", budget, &
+                " may be exceeded by ", TWO_SIDED_OVER, ", neval ", info%neval
+            call check(error, info%neval <= budget + TWO_SIDED_OVER, trim(msg))
+            if (allocated(error)) return
+            write(msg, '(a, i0, a, i0)') "two-sided: two walks cannot spend less than ", &
+                2*PER_WALK_MIN, "; neval is ", info%neval
+            call check(error, info%neval >= 2*PER_WALK_MIN, trim(msg))
+            if (allocated(error)) return
+            if (info%neval >= budget) seen_two = seen_two + 1
+        end do
+
+        ! The vacuity guard: each shape must have reached its budget somewhere in the sweep, or its
+        ! bound above was asserted over runs that never tried to exceed anything.
+        write(msg, '(a, 3(1x, i0))') "the budget must bind somewhere in the sweep; neval reached " // &
+            "it (finite, one-sided, two-sided) times:", seen_finite, seen_one, seen_two
+        call check(error, seen_finite > 0 .and. seen_one > 0 .and. seen_two > 0, trim(msg))
+
+    end subroutine test_guide_budget_overshoot_bounds
 
 end module test_integrate

@@ -298,6 +298,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`weight_type=` is matched without regard to case** throughout the `pf_*` statistics family, as
+  every other token in the library already was. `weight_type="Frequency"` and `"FREQUENCY"` now
+  mean `"frequency"`; every spelling accepted before is accepted still, and an unrecognised token
+  aborts as before. See
+  [Array statistics](doc/pages/utilities/statistics.md#what-values-may-be).
 - **`%pairs_within_los` sweeps in one pass** and returns the same pairs in the same order, several
   times faster. **A 3D index whose points fill part of their bounding box gets a finer grid**: the
   cells-per-point ceiling counts occupied cells (0.3 per point), with 4 cells of the bounding box

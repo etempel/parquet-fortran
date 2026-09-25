@@ -240,10 +240,14 @@ contains
     !> Resolves `weight_type` to the one bit the formulas actually branch on.
     module procedure stats_weight_kind
         integer, parameter :: ECHO = 60                  !! cap the echoed token; see below.
+        character(len=:), allocatable :: folded          !! the token, case folded for matching.
 
         freq = .false.
         if (.not. present(weight_type)) return
-        select case (trim(adjustl(weight_type)))
+        ! Folded before matching, so that this token behaves as every other token in the library
+        ! does. The message below still echoes what the caller WROTE, not the folded form.
+        call pf_to_lower(trim(adjustl(weight_type)), folded)
+        select case (folded)
         case ("reliability")
             freq = .false.
         case ("frequency")

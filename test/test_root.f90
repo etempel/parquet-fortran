@@ -96,7 +96,9 @@ contains
             new_unittest("a pole is converged on and exposed through info%froot", &
                          test_root_pole_is_reported_through_froot), &
             new_unittest("extreme but legal calls raise no overflow, invalid or divide-by-zero", &
-                         test_root_extreme_calls_raise_no_flag) &
+                         test_root_extreme_calls_raise_no_flag), &
+            new_unittest("the guide's overshoot bound holds, and max_neval binds", &
+                         test_guide_budget_overshoot_bound) &
             ]
 
     end subroutine collect_tests_root
@@ -981,5 +983,56 @@ contains
 
     end function traps_can_be_held
 #endif
+
+    !> The `pf_find_root` row of the overshoot column in doc/pages/utilities/solvers.md,
+    !! "The budget: max_neval": the page says NEVER, and this is what holds it there.
+    !!
+    !! **Why never is the right word.** Every evaluation goes through one site
+    !! (`src/parquet_root_solve.f90`, the single `outcome%neval = outcome%neval + 1`), and each of
+    !! the four places that can reach it tests `outcome%neval >= budget` first -- the expansion
+    !! probe, the two bracket ends and the Brent step. A test that PRECEDES the work it guards is
+    !! the whole of the claim, so `neval` reaches `max_neval` and stops there.
+    !!
+    !! **Two negative controls.** The bound alone is met by a call that does nothing, so each
+    !! iteration also asserts the run evaluated at all; and the sweep must somewhere actually spend
+    !! its budget -- `PF_ROOT_LIMIT`, which in this module means exactly "`max_neval` was spent
+    !! first" -- counted and required non-zero. Without that count the bound is asserted over runs
+    !! that converged long before the cap and never tested it.
+    subroutine test_guide_budget_overshoot_bound(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_root_info) :: info
+        real(real64) :: x
+        integer :: budget, seen_limit
+        character(len=190) :: msg
+
+        seen_limit = 0
+        do budget = 1, 200
+            ! A root that needs real work to find: `cos(x) - x` on a wide bracket, at the
+            ! tightest tolerance the module will take, so a small budget genuinely runs out.
+            call pf_find_root(root_cos_minus_x, -5.0_real64, 5.0_real64, x, &
+                              rtol=4.0_real64*epsilon(1.0_real64), max_neval=budget, info=info)
+            write(msg, '(a, i0, a, i0)') "pf_find_root must never exceed max_neval ", budget, &
+                "; neval is ", info%neval
+            call check(error, info%neval <= budget, trim(msg))
+            if (allocated(error)) return
+            write(msg, '(a, i0, a)') "at max_neval ", budget, &
+                " the run must have evaluated something"
+            call check(error, info%neval >= 1, trim(msg))
+            if (allocated(error)) return
+            if (info%status == PF_ROOT_LIMIT) then
+                seen_limit = seen_limit + 1
+                write(msg, '(a, i0, a, i0)') "PF_ROOT_LIMIT at max_neval ", budget, &
+                    " means the budget was spent, so neval must equal it; it is ", info%neval
+                call check(error, info%neval == budget, trim(msg))
+                if (allocated(error)) return
+            end if
+        end do
+
+        write(msg, '(a, i0, a)') "the budget must bind somewhere in the sweep; it bound ", &
+            seen_limit, " times"
+        call check(error, seen_limit > 0, trim(msg))
+
+    end subroutine test_guide_budget_overshoot_bound
 
 end module test_root

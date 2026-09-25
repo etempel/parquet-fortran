@@ -10,7 +10,9 @@ examples and its own tables. This page states once what all four share, so that 
 learned one has learned the shape of the others.
 
 Signatures on these pages show optional arguments in square brackets, with the comma outside the
-bracket.
+bracket. The optional outputs come in one order wherever they appear: `converged`, then `info`,
+then the record (`history=`, or `points=` where it is a quadrature rule), then anything the engine
+alone has — and `context` is always the last argument.
 
 ## The function you supply
 
@@ -28,6 +30,50 @@ the same intent.
 | [`parquet_root`](root-finding.html) | `pf_rootfun` | `pf_rootfun_eval(self, x) result(f)` | `pf_rootfun_func(x) result(f)` | scalar |
 | [`parquet_optimize`](optimization.html), [`parquet_prima`](prima.html) | `pf_objective`; for COBYLA, `pf_constrained_objective`, which adds `n_constraints(self)` and `constraints(self, x, c)` | `pf_objective_eval(self, x) result(f)` | `pf_objective_func(x) result(f)` | rank 1 |
 
+The object form in full, for [`parquet_root`](root-finding.html); the other three differ only in
+the type extended and the interface implemented. The counter is there to show why the passed
+object is `intent(inout)`.
+
+```fortran
+module my_model
+    use iso_fortran_env, only : real64
+    use parquet_root, only : pf_rootfun
+    implicit none
+
+    type, extends(pf_rootfun) :: shifted_square
+        real(real64) :: c = 2.0_real64 ! the constant to subtract
+        integer      :: calls = 0      ! how many times eval ran
+    contains
+        procedure :: eval => shifted_square_eval ! f at one point
+    end type shifted_square
+
+contains
+
+    ! f at one point, counting the call
+    function shifted_square_eval(self, x) result(f)
+        class(shifted_square), intent(inout) :: self ! the function object
+        real(real64), intent(in)             :: x    ! where to evaluate
+        real(real64)                         :: f    ! f(x)
+
+        self%calls = self%calls + 1
+        f = x*x - self%c
+    end function shifted_square_eval
+
+end module my_model
+```
+
+Using it is then a few lines, and `fn` carries its parameter in and its count out:
+
+```fortran
+type(shifted_square) :: fn
+real(real64) :: x
+
+fn%c = 2.0_real64
+call pf_find_root(fn, 0.0_real64, 2.0_real64, x)
+print '(a, f0.15)', "root     = ", x         ! root     = 1.414213562373095
+print '(a, i0)',    "eval ran = ", fn%calls  ! eval ran = 10
+```
+
 ### The names an extension repeats
 
 **An extension must give its dummies the same names as the interface it overrides**, so those
@@ -38,7 +84,11 @@ to match the corresponding argument of the overridden procedure", and nagfor say
 overriding type-bound procedure EVAL of type EXT is called SELF instead of THIS".
 
 The same holds for `pf_local_run(self, f, x, fmin, lower, upper, info)`, the binding a caller
-implements to give [`pf_minimize_multistart`](optimization.html) a local engine of its own.
+implements to give [`pf_minimize_multistart`](optimization.html) a local engine of its own. A type
+carrying that binding is a **solver object**: it extends `pf_local_solver` and holds the engine's
+options as components. Two come with the library — `pf_simplex_solver`
+([`parquet_optimize`](optimization.html)) and `pf_bobyqa_solver` ([`parquet_prima`](prima.html)) —
+and they are what the `max_neval = 0` rule below is about.
 
 ### A module procedure, never an internal one
 
@@ -71,7 +121,9 @@ the argument list and a run stops when EITHER is met.
 | [`pf_minimize_de`](optimization.html) | default `1e-6` | default 0 | the spread of the population's values; `ftarget` can stop it first |
 | [BOBYQA, LINCOA, COBYLA](prima.html) | none | none | `rhoend`, the final trust-region radius; `ctol` decides feasibility; `ftarget` can stop it first |
 
-Where an engine takes both, at least one must be positive.
+Where an engine takes both, at least one must be positive — except
+[`pf_find_root`](root-finding.html), whose `rtol` is raised to its floor of `4*epsilon`, so there
+is always a live test and `rtol = atol = 0` is accepted.
 
 **A tolerance that is not a stopping test on the answer keeps a name of its own**: `ctol` for
 feasibility, `rhobeg` and `rhoend` for the trust-region radii, `ftarget` for a value to stop at,
@@ -81,14 +133,17 @@ two results as one minimum. Only the stopping tolerances are `rtol` and `atol`.
 ## The budget: max_neval
 
 `max_neval` is the cap on evaluations of your function, an optional default `integer` on every
-entry point. Reaching it is the module's `LIMIT` status and never an abort; a value below 1 is
-refused everywhere.
+entry point that runs the engine itself. Reaching it is the module's `LIMIT` status and never an
+abort; a value below 1 is refused everywhere.
+[`pf_minimize_multistart`](optimization.html) is the exception and takes no `max_neval`: it runs
+local solves rather than evaluating your function directly, and each start is capped by its own
+solver.
 
 | Entry point | default | Can the run overshoot it? |
 |---|---|---|
-| [`pf_integrate`](integration.html) | 100000 | never on a finite range; by at most one rule application (21 evaluations) on an infinite one |
+| [`pf_integrate`](integration.html) | 100000 | never on a finite range, once `max_neval` covers the one rule application (21 evaluations) no range can avoid; by at most one rule application on a one-sided infinite range, and by three on `(-inf, +inf)`, which is split at zero and walked both ways |
 | [`pf_find_root`](root-finding.html) | 200 | never |
-| [`pf_minimize_scalar`](optimization.html) | 500 | by one Brent iteration |
+| [`pf_minimize_scalar`](optimization.html) | 500 | never |
 | [`pf_minimize_simplex`](optimization.html) | 5000 | by one simplex step, `n+2` evaluations |
 | [`pf_minimize_de`](optimization.html) | `np*(max_gen + 1)` | by one generation |
 | [BOBYQA, LINCOA, COBYLA](prima.html) | `500*n` | never |
@@ -108,6 +163,10 @@ are always `status` and `converged`, and which always carries `neval`. `converge
 `info%converged` on every path and is set whether or not `info` was asked for.
 
 Nothing is printed on any of these paths, and running out of budget is not an error.
+
+**`converged` is not a test for `status == OK`.** Reaching `ftarget` is a stopping rule like any
+other, so [`pf_minimize_de`](optimization.html) and [BOBYQA, LINCOA, COBYLA](prima.html) report
+`converged` with `status` set to `PF_OPT_TARGET`. Read `status` where the reason matters.
 
 Each module keeps its own prefix and its own full table: `PF_INT_` on
 [the integration page](integration.html#budget-and-outcome), `PF_ROOT_` on

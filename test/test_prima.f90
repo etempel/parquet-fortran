@@ -122,7 +122,9 @@ contains
             new_unittest("COBYLA honours every budget it is given, whatever the search was doing", &
                          test_cobyla_honours_every_budget), &
             new_unittest("LINCOA minimises a strongly non-quadratic objective under a constraint", &
-                         test_lincoa_non_quadratic)]
+                         test_lincoa_non_quadratic), &
+            new_unittest("the guide's overshoot bound holds for all three engines, and binds", &
+                         test_guide_budget_overshoot_bounds)]
 
     end subroutine collect_tests_prima
 
@@ -1853,5 +1855,79 @@ contains
         call check(error, info%neval > 0, "the run must have evaluated the objective")
 
     end subroutine test_lincoa_non_quadratic
+
+    !> The `BOBYQA, LINCOA, COBYLA` row of the overshoot column in
+    !! doc/pages/utilities/solvers.md, "The budget: max_neval": the page says NEVER, for all three.
+    !!
+    !! **Why never is the right word here.** Every PRIMA evaluation goes through `evaluate` or
+    !! `evaluate_fc` (`src/parquet_prima_common.f90`), and the engines test the spent count against
+    !! the budget before asking for another point; a vendored driver that wanted one more would get
+    !! the `MAXFUN_REACHED` return instead. The three share that machinery, which is why one test
+    !! covers all three rather than one per engine.
+    !!
+    !! **Two negative controls.** Each case asserts the run evaluated its unavoidable start, so a
+    !! call that returned at once cannot pass the bound; and each engine must somewhere in the
+    !! sweep actually reach its cap, counted through `PF_OPT_LIMIT` and required non-zero.
+    subroutine test_guide_budget_overshoot_bounds(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        !> The fixture's dimension.
+        integer, parameter :: N_DIM = 3
+        type(pf_optimize_info) :: info
+        !> COBYLA's fixture is a CONSTRAINED objective, so it needs an object and its own
+        !! dimension: `unit_disc` is the squared distance from `(1, 2)` inside the unit disc.
+        type(unit_disc) :: disc
+        real(real64) :: x(N_DIM), lo(N_DIM), hi(N_DIM), fmin, x2(2), lo2(2), hi2(2)
+        integer :: budget, seen_bob, seen_lin, seen_cob
+        character(len=190) :: msg
+
+        seen_bob = 0
+        seen_lin = 0
+        seen_cob = 0
+        lo = -2.0_real64
+        hi = 2.0_real64
+        lo2 = -2.0_real64
+        hi2 = 2.0_real64
+
+        do budget = 4, 300, 3
+            x = 0.5_real64
+            call pf_minimize_bobyqa(rastrigin, x, fmin, lower=lo, upper=hi, max_neval=budget, &
+                                    info=info)
+            write(msg, '(a, i0, a, i0)') "BOBYQA must never exceed max_neval ", budget, &
+                "; neval is ", info%neval
+            call check(error, info%neval <= budget, trim(msg))
+            if (allocated(error)) return
+            call check(error, info%neval >= 1, "the BOBYQA run must have evaluated something")
+            if (allocated(error)) return
+            if (info%status == PF_OPT_LIMIT) seen_bob = seen_bob + 1
+
+            x = 0.5_real64
+            call pf_minimize_lincoa(rastrigin, x, fmin, lower=lo, upper=hi, max_neval=budget, &
+                                    info=info)
+            write(msg, '(a, i0, a, i0)') "LINCOA must never exceed max_neval ", budget, &
+                "; neval is ", info%neval
+            call check(error, info%neval <= budget, trim(msg))
+            if (allocated(error)) return
+            call check(error, info%neval >= 1, "the LINCOA run must have evaluated something")
+            if (allocated(error)) return
+            if (info%status == PF_OPT_LIMIT) seen_lin = seen_lin + 1
+
+            x2 = 0.5_real64
+            call pf_minimize_cobyla(disc, x2, fmin, lower=lo2, upper=hi2, max_neval=budget, &
+                                    info=info)
+            write(msg, '(a, i0, a, i0)') "COBYLA must never exceed max_neval ", budget, &
+                "; neval is ", info%neval
+            call check(error, info%neval <= budget, trim(msg))
+            if (allocated(error)) return
+            call check(error, info%neval >= 1, "the COBYLA run must have evaluated something")
+            if (allocated(error)) return
+            if (info%status == PF_OPT_LIMIT) seen_cob = seen_cob + 1
+        end do
+
+        write(msg, '(a, 3(1x, i0))') "each engine's budget must bind somewhere in the sweep; " // &
+            "(bobyqa, lincoa, cobyla) bound:", seen_bob, seen_lin, seen_cob
+        call check(error, seen_bob > 0 .and. seen_lin > 0 .and. seen_cob > 0, trim(msg))
+
+    end subroutine test_guide_budget_overshoot_bounds
 
 end module test_prima

@@ -2030,6 +2030,7 @@ scenarios=(
     "kde_grid_merge_kernel:1"
     "kde_grid_merge_support:1"
     "kde_grid_merge_boundary:1"
+    "kde_grid_merge_method:1"
     "kde_alpha_without_adaptive:1"
     "kde_bandwidth_max_without_adaptive:1"
     "kde_alpha_above_one:1"

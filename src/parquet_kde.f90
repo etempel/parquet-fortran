@@ -983,16 +983,17 @@ module parquet_kde
     interface
 
         !> Fits the estimate to a `real64` sample: `call k%fit(x, [bandwidth], [rule], [adjust],
-        !! [kernel], [adaptive], [alpha], [bandwidth_max], [spread_max], [lower], [upper],
+        !! [kernel], [adaptive], [pilot], [alpha], [bandwidth_max], [spread_max], [lower], [upper],
         !! [boundary], [is_valid], [weights], [weight_type], [skipnan], [n_null], [n_nan],
         !! [n_outside], [ok], [threads], [method])`.
         !!
         !! `x` is the sample, retained as a sorted copy of its population. `bandwidth` is the
         !! kernel's standard deviation, a finite positive number; without it the bandwidth comes
-        !! from `rule`, `"isj"` (the default: the Improved Sheather-Jones rule), `"silverman"` or
-        !! `"scott"`, and the two cannot both be given. When the rule is not named and the ISJ rule
-        !! finds no bandwidth at its grid's resolution, Silverman's rule gives it instead, and
-        !! `%rule` says so; when `rule = "isj"` is named, the estimate is then undefined.
+        !! from `rule`, `"isj"` (the default: the Improved Sheather-Jones rule), `"lscv"`,
+        !! `"silverman"` or `"scott"`, and the two cannot both be given. When the rule is not
+        !! named and the ISJ rule finds no bandwidth at its grid's resolution, Silverman's rule
+        !! gives it instead, and `%rule` says so; when `rule = "isj"` is named, the estimate is
+        !! then undefined.
         !! `adjust` multiplies the bandwidth however it was chosen (default 1). `kernel` is
         !! `"bspline"` (the default), `"gaussian"`, `"epanechnikov"` or `"box"`. `adaptive =
         !! .true.` gives each point its own bandwidth, `h * (p(x_j)/g)**(-alpha)`, from a pilot
@@ -1053,7 +1054,7 @@ module parquet_kde
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real64), intent(in)               :: x(:)          !! the sample
             real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"lscv"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
@@ -1092,7 +1093,7 @@ module parquet_kde
             real(real64), intent(in)               :: x(:)          !! the sample
             logical, intent(in)                    :: bandwidth_only !! stop once the bandwidth is known
             real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"lscv"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
@@ -1122,7 +1123,7 @@ module parquet_kde
             implicit none
             real(real64), intent(in)               :: x(:)        !! the sample
             real(real64), intent(out)              :: h           !! the bandwidth; NaN where no rule found one
-            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"lscv"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
             logical, intent(in), optional          :: adaptive    !! the number is for an adaptive estimate
             real(real64), intent(in), optional     :: alpha       !! the adaptive rule's sensitivity
@@ -1146,7 +1147,7 @@ module parquet_kde
             implicit none
             real(real32), intent(in)               :: x(:)        !! the sample
             real(real64), intent(out)              :: h           !! the bandwidth; NaN where no rule found one
-            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"lscv"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
             logical, intent(in), optional          :: adaptive    !! the number is for an adaptive estimate
             real(real64), intent(in), optional     :: alpha       !! the adaptive rule's sensitivity
@@ -1171,7 +1172,7 @@ module parquet_kde
             implicit none
             type(parquet_column), intent(in)       :: x           !! the sample, one numeric column
             real(real64), intent(out)              :: h           !! the bandwidth; NaN where no rule found one
-            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule        !! `"isj"`, `"lscv"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust      !! a factor on the bandwidth
             logical, intent(in), optional          :: adaptive    !! the number is for an adaptive estimate
             real(real64), intent(in), optional     :: alpha       !! the adaptive rule's sensitivity
@@ -1198,7 +1199,7 @@ module parquet_kde
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             real(real32), intent(in)               :: x(:)          !! the sample
             real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"lscv"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
@@ -1232,7 +1233,7 @@ module parquet_kde
             class(pf_kde), intent(inout)           :: self          !! the estimate; refitted
             type(parquet_column), intent(in)       :: x             !! the sample, one numeric column
             real(real64), intent(in), optional     :: bandwidth     !! the kernel's standard deviation
-            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"silverman"` or `"scott"`
+            character(len=*), intent(in), optional :: rule          !! `"isj"`, `"lscv"`, `"silverman"` or `"scott"`
             real(real64), intent(in), optional     :: adjust        !! a factor on the bandwidth
             character(len=*), intent(in), optional :: kernel        !! the kernel's token
             logical, intent(in), optional          :: adaptive      !! each point takes its own bandwidth
@@ -1448,10 +1449,10 @@ module parquet_kde
         end subroutine kde_kernel_name
 
         !> How the bandwidth was chosen, as a token: `call k%rule(name)` answers the rule that gave
-        !! it, `"isj"`, `"silverman"` or `"scott"`, or `"explicit"` when `bandwidth=` was given as a
-        !! number. Under the default it answers `"silverman"` when the ISJ rule found no bandwidth
-        !! and Silverman's rule gave it instead, and `"none"` on an undefined estimate, where no
-        !! rule produced a bandwidth at all.
+        !! it, `"isj"`, `"lscv"`, `"silverman"` or `"scott"`, or `"explicit"` when `bandwidth=` was
+        !! given as a number. Under the default it answers `"silverman"` when the ISJ rule found no
+        !! bandwidth and Silverman's rule gave it instead, and `"none"` on an undefined estimate,
+        !! where no rule produced a bandwidth at all.
         module subroutine kde_rule_name(self, name)
             implicit none
             class(pf_kde), intent(in)                  :: self !! the fitted estimate
@@ -1763,9 +1764,9 @@ module parquet_kde
             character(len=*), intent(in)       :: entry !! the binding, for the message
             real(real64), intent(in), optional :: hlo   !! the narrowest bandwidth, when known
             real(real64), intent(in), optional :: hhi   !! the widest, when known
-            logical, intent(out), optional     :: ok    !! present: `.false.` where the transform would
-                                                        !! be too long, instead of aborting. For a
-                                                        !! caller with somewhere else to go; absent,
+            logical, intent(out), optional     :: ok    !! when present, `.false.` where the transform
+                                                        !! would be too long, instead of aborting. For
+                                                        !! a caller with somewhere else to go; absent,
                                                         !! the call aborts as a caller's mistake
         end subroutine kde_binned_setup
 

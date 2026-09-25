@@ -17,15 +17,35 @@ Arrow stack. `use parquet` brings it in too. See
 ## Quick example
 
 ```fortran
-use parquet_kde
-use iso_fortran_env, only : real64
-type(pf_kde) :: k
-real(real64) :: xg(200), fg(200)
+program kde_example
+    use parquet_kde
+    use iso_fortran_env, only : real64
+    implicit none
 
-call k%fit(mag)                    ! the ISJ rule, cubic B-spline kernel: the defaults
-call k%curve(xg, fg)               ! the density on 200 points across the data
-print '(a, f8.4)', 'bandwidth = ', k%bandwidth()
+    type(pf_kde) :: k
+    real(real64) :: mag(400), xg(200), fg(200), f(3), med
+    integer :: i
+
+    ! Two clusters, laid down evenly so the example reproduces exactly: 200 points across
+    ! [17, 19], where the true density is 0.25, and 200 across [20.5, 21.5], where it is 0.5.
+    do i = 1, 200
+        mag(i)       = 17.0_real64 + 2.0_real64*(real(i, real64) - 0.5_real64)/200.0_real64
+        mag(200 + i) = 20.5_real64 + 1.0_real64*(real(i, real64) - 0.5_real64)/200.0_real64
+    end do
+
+    call k%fit(mag)                  ! the ISJ rule, cubic B-spline kernel: the defaults
+    call k%curve(xg, fg)             ! the density on 200 points across the data, for plotting
+    call k%pdf([18.0_real64, 19.75_real64, 21.0_real64], f)
+    call k%quantile(0.5_real64, med)
+
+    print '(a, f9.5)',  'bandwidth   = ', k%bandwidth()        ! 0.13174
+    print '(a, 3f9.4)', 'density at 18, 19.75, 21 =', f        ! 0.2500  0.0000  0.5000
+    print '(a, f9.5)',  'median      = ', med                  ! 19.45119
+end program kde_example
 ```
+
+The two densities come back exactly right and the gap between the clusters comes back empty,
+which is the ISJ rule reading the clusters' own width rather than the sample's overall spread.
 
 Signatures on this page show optional arguments in square brackets, with the comma outside the
 bracket:
@@ -53,10 +73,10 @@ call pf_kde_bandwidth(x, h, [rule], [adjust], [adaptive], [alpha], [lower], [upp
 `x` in `%fit` is a `real64` or `real32` array, or a `parquet_column` of kind `int32`, `int64`,
 `float32` or `float64`; anything but a `real64` array is widened before anything else happens to
 it. A column's own validity is its null mask, so `is_valid=` cannot be given beside one, and a
-column of any other kind aborts, naming it. `%pdf`, `%cdf`, `%quantile` and `%bandwidth_at` each take a scalar or a rank-1
-array, and every result is `real64`; `threads=` belongs to the array forms, `%curve` and
-`%sample` (see [Thread safety](#thread-safety)). Every token (`rule`, `kernel`, `boundary`) is
-matched without regard to case.
+column of any other kind aborts, naming it. `%pdf`, `%cdf`, `%quantile` and `%bandwidth_at` each
+take a scalar or a rank-1 array, and every result is `real64`; `threads=` belongs to the array
+forms, `%curve` and `%sample` (see [Thread safety](#thread-safety)). Every token (`rule`,
+`kernel`, `boundary`, `method`, `weight_type`) is matched without regard to case.
 
 ## The estimate
 
@@ -144,17 +164,18 @@ Each is rescaled to unit variance before the bandwidth is applied. What each is 
 - **Cubic B-spline**: the default. Twice continuously differentiable, compact, and close in shape
   to the Gaussian -- so it smooths much as the Gaussian does, while its support ends at
   `2 sqrt(3)` standard deviations rather than five. The shorter reach is what makes a bounded,
-  adaptive fit cheaper: every corrected zone is `KDE_RADIUS*h_max` wide.
+  adaptive fit cheaper: every corrected zone is `R h_max` wide, `R` being the kernel's reach from
+  the table above.
 - **Box**: the moving count; the estimate is a step function.
 
 **Two other conventions for the word "bandwidth" are in common use, and converting from either is
 one line.** A bandwidth given as a *multiplier on the sample's own standard deviation* `s` is
 `bandwidth = f*s`. A bandwidth given as *the kernel's own scale parameter* -- the half-width of a
 compact kernel's support -- converts as `bandwidth = c/sqrt(5)` for an Epanechnikov half-width
-`c`, `bandwidth = c/sqrt(3)` for a box half-width `c`, and `bandwidth = a*sqrt(3)` for a cubic
-B-spline of scale `a` (a B-spline matched to a Gaussian by its peak height instead has
-`bandwidth = a*0.5984`). For the Gaussian the scale parameter is the standard deviation, so it needs
-no conversion under either.
+`c`, `bandwidth = c/sqrt(3)` for a box half-width `c`, and `bandwidth = a/sqrt(3)` for a cubic
+B-spline of knot spacing `a`, whose support reaches `2a` either side (a B-spline matched to a
+Gaussian by its peak height instead has `bandwidth = a*0.5984`). For the Gaussian the scale
+parameter is the standard deviation, so it needs no conversion under either.
 
 ## Choosing a bandwidth
 
@@ -173,8 +194,9 @@ smoothing the norm of the one above makes optimal, from the seventh derivative d
 The answer is the smallest solution no narrower than one cell.
 
 - **It follows a multimodal sample.** Two narrow clusters far apart have a large standard
-  deviation, which a rule of thumb reads as the sample's scale, smoothing both clusters into broad
-  bumps; the ISJ rule reads the clusters' own width, and its bandwidth can be a tenth of Silverman's.
+  deviation, which a rule of thumb reads as the sample's scale, smoothing both clusters into
+  broad bumps; the ISJ rule reads the clusters' own width, and its bandwidth can be a tenth of
+  Silverman's.
 - **On a normal sample it agrees with the rules of thumb** to a few per cent: it seeks the same
   optimum without assuming the shape.
 - **Where it finds no bandwidth, Silverman's rule gives one**, and `%rule(name)` answers
@@ -228,8 +250,8 @@ same weights and `weight_type`.
 - **A sample more than half of whose values tie** has an interquartile range of zero, and a rule
   of thumb then uses `s` alone rather than a bandwidth of zero.
 - **One point, or a constant sample, has no scale**, so no rule can give it a bandwidth: the fit
-  is undefined (`ok = .false.`, every answer NaN). The same sample with an explicit `bandwidth=` is a
-  valid estimate, one bump per point.
+  is undefined (`ok = .false.`, every answer NaN). The same sample with an explicit `bandwidth=`
+  is a valid estimate, one bump per point.
 - **The rules of thumb are derived for a Gaussian kernel and a unimodal density.** Under the
   standard-deviation convention they serve the other three kernels within about one per cent of
   each kernel's own optimal scaling. A multimodal sample is oversmoothed by both.
@@ -310,9 +332,9 @@ without assuming anything about the density.
   binned once and each candidate costs one filtered transform rather than a pass over every pair.
   For the ADAPTIVE kernel the widths depend on the pair, which no single convolution gives, and the
   criterion is summed over the pairs within five bandwidths of each other. Either way it is
-  evaluated, above a few thousand points, over a subsample drawn at a fixed seed, which bounds the
-  cost whatever the sample's size; the answer is then reproducible but is not a function of every
-  point.
+  evaluated, above two thousand points, over a subsample of that size drawn at a fixed seed, which
+  bounds the cost whatever the sample's size; the answer is then reproducible but is not a function
+  of every point.
 - **It is a high-variance criterion.** That is its known weakness, and the price of assuming
   nothing: on one sample its bandwidth can sit some tens of per cent from the one that minimises
   the true error, in either direction. The ISJ rule is the better default and remains it. The
@@ -392,11 +414,11 @@ under `"linear"` and under `"renormalise"` alike, the two sharing that machinery
 about what it costs under `"reflect"`, which needs no integral at all and is the reason it is the
 default. The integrals are a fixed Gauss-Legendre rule over pieces the kernel's own knots and the
 correction's edges cut, so their cost is known before a query starts and no tolerance governs it.
-`bench/benchmark_kde.sh` measures all of it (`MODE=boundary`). For many draws from a density whose mass sits near a bound, accumulate the
-estimate into a `pf_kde_grid` and sample that instead, which costs one quadratic solve per draw
-under every correction. Under the adaptive kernel a far tail's wide kernels widen the zone the
-correction acts in; `spread_max` bounds that automatically and `bandwidth_max` is the explicit
-remedy.
+`bench/benchmark_kde.sh` measures all of it (`MODE=boundary`). For many draws from a density whose
+mass sits near a bound, accumulate the estimate into a `pf_kde_grid` and sample that instead, which
+costs one quadratic solve per draw under every correction. Under the adaptive kernel a far tail's
+wide kernels widen the zone the correction acts in; `spread_max` bounds that automatically and
+`bandwidth_max` is the explicit remedy.
 
 **What the clip can miss.** The stretches where the raw estimate is negative are found at `%fit` by
 a scan about a sixty-fourth of the NARROWEST kernel apart -- of the narrowest, so that the spacing
@@ -710,8 +732,9 @@ Reading it:
   `%density` costs one pass over the cells and `%pdf`, `%cdf` and `%quantile` cost a segment
   look-up and a few operations each -- independent of the cell count, apart from `%quantile`'s
   binary search over it. Nothing a query does grows with the number of points the grid has seen.
-- **`%pdf(x, f, [threads])`**: linear between neighbouring centres, constant over the outer half of the first
-  and the last cell, zero outside `[xmin, xmax]`; at a centre it is `%density` exactly.
+- **`%pdf(x, f, [threads])`**: linear between neighbouring centres, constant over the outer half
+  of the first and the last cell, zero outside `[xmin, xmax]`; at a centre it is `%density`
+  exactly.
 - **`%cdf(x, p)`**: the integral of `%pdf` from `xmin`, plus the share counted below `xmin`. Below
   `xmin` it is that share and above `xmax` one less the share counted above; it is exactly 0 at and
   below a lower bound and exactly 1 at and above an upper one.
@@ -720,9 +743,9 @@ Reading it:
   answers `xmin`, one only the share above `xmax` reaches answers `xmax`, and `p = 0` and `p = 1`
   answer where the accumulated density starts and ends inside the range.
 - `%grid(x)` fills the centres, `%ncells()` and `%step()` answer the geometry, and `%bandwidth()`,
-  `%kernel(name)`, `%method(name)` and `%bounds(lo, hi)` the settings; `%is_finished()` says whether
-  the queries are open. `%clear()` empties the grid and keeps its
-  geometry and settings; `%print([unit])` writes all of it as one block.
+  `%kernel(name)`, `%method(name)` and `%bounds(lo, hi)` the settings; `%is_initialised()` says
+  whether `%init` has run and `%is_finished()` whether the queries are open. `%clear()` empties the
+  grid and keeps its geometry and settings; `%print([unit])` writes all of it as one block.
 
 ### Two ways to fill a grid
 
@@ -849,11 +872,13 @@ call dens%density(f, x=zc)
   the grid built on it answer NaN, as any other data condition does.
 
 **One grid per thread, merged at the end, is the parallel form.** `%merge(other)` adds another
-grid's cells and counts to this one, and refuses a grid that differs in its cells, range,
-bandwidth, kernel, support, boundary correction or pilot (the same pilot cell for cell, with the
-same `alpha` and `bandwidth_max`). Hold the per-thread grids in an array made before the region,
-not in a `block` or a `private` copy inside it: a grid owns an allocatable array, and a derived
-type that does is not reliably copied or created per thread on every compiler.
+grid's cells and counts to this one, and refuses a grid that differs in its `cells`, `range`,
+`bandwidth`, `kernel`, `support`, `boundary`, `method` or `pilot` — the words the refusal itself
+uses (the same pilot cell for
+cell, with the same `alpha` and `bandwidth_max`). Hold the per-thread grids in an array made
+before the region, not in a `block` or a `private` copy inside it: a grid owns an allocatable
+array, and a derived type that does is not reliably copied or created per thread on every
+compiler.
 
 ```fortran
 program grid_per_thread
@@ -1027,6 +1052,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `xmin` or `xmax` infinite or NaN | `pf_kde%curve: xmin and xmax must be finite` |
 | `xmin >= xmax` | `pf_kde%curve: xmin must be below xmax` |
 | `cut` negative or NaN | `pf_kde%curve: cut must not be negative` |
+| a DEFAULT range that has collapsed to one point (a sample with no spread at `cut = 0`, or a support clipping both ends onto one point) | `pf_kde%curve: the default range has collapsed to one point; the sample has no spread at this cut=, so give xmin= and xmax=` |
 | `alpha=`, `bandwidth_max=` or `spread_max=` without `adaptive=.true.` | `pf_kde%fit: alpha=, bandwidth_max= and spread_max= need adaptive=.true.` |
 | `spread_max` NaN, infinite or `< 1` | `pf_kde%fit: spread_max must be a finite number of at least 1` |
 | `alpha` outside `[0, 1]`, or NaN | `pf_kde%fit: alpha must lie in [0, 1]` |
@@ -1056,7 +1082,7 @@ Every abort is a caller contract that was broken, and names the binding it came 
 | `is_valid` or `weights` of the wrong size, a bad weight, `threads <= 0`, a column of another kind, `is_valid=` beside a column | `%fit`'s texts, naming `pf_kde_grid%add` (`pf_kde_grid%sample` for its `threads`) |
 | a query, accessor, `%add` or `%merge` before `%init` | `pf_kde_grid%pdf: the grid has not been initialised` |
 | `%merge` with a grid never initialised | `pf_kde_grid%merge: the other grid has not been initialised` |
-| `%merge` with a grid set up differently | `pf_kde_grid%merge: the two grids differ in cells` (or `range`, `bandwidth`, `kernel`, `support`, `boundary`, `pilot`) |
+| `%merge` with a grid set up differently | `pf_kde_grid%merge: the two grids differ in cells` (or `range`, `bandwidth`, `kernel`, `support`, `boundary`, `method`, `pilot`) |
 | `%density` or `%grid` with an output of the wrong size | `pf_kde_grid%density: f must have one element per cell` (`x must have ...` for the centres) |
 | `%pdf`, `%cdf` or `%quantile` with an output of the wrong size, or `p` outside `[0, 1]` | `pf_kde`'s texts, naming `pf_kde_grid` |
 
@@ -1079,6 +1105,13 @@ per thread merged at the end is how several threads accumulate one estimate.
   thousand draws, stay on the calling thread whatever `threads=` asks.
 - Inside your own parallel region every one of them stands down to one thread unless given
   explicitly. An abort inside a parallel region is taken by one thread.
+
+**Without `threads=`, the sorting knob decides.** The module has no thread knob of its own: every
+automatic team above is resolved by the same rule `pf_argsort` uses, so
+`parquet_set_sort_threads(n)` caps it, `pf_sort_threads()` reports what it will be, and an
+affinity notice raised from a `pf_kde` call names the area `sorting`. `parquet_kde` does not
+re-export that knob — reach it through `use parquet_sorting` or `use parquet`, or pass `threads=`,
+which is honoured whatever the knob says.
 
 ## What it costs to import
 

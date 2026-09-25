@@ -1017,6 +1017,8 @@ contains
                 test_kde_grid_merge_support_aborts), &
             new_unittest("pf_kde_grid%merge refuses a different boundary correction", &
                 test_kde_grid_merge_boundary_aborts), &
+            new_unittest("pf_kde_grid%merge refuses a grid filled by another method", &
+                test_kde_grid_merge_method_aborts), &
             new_unittest("pf_kde%fit refuses alpha= without adaptive=.true.", &
                 test_kde_alpha_without_adaptive_aborts), &
             new_unittest("pf_kde%fit refuses bandwidth_max= with adaptive=.false.", &
@@ -4631,10 +4633,13 @@ contains
     !! its control call succeeded first (the "kde control" line), and the abort carried the
     !! library's own message, binding and all. The control is what makes the abort evidence that
     !! the guard refuses the bad value rather than the whole call.
-    subroutine check_kde_scenario(error, scenario, required)
+    subroutine check_kde_scenario(error, scenario, required, control)
         type(error_type), allocatable, intent(out) :: error    !! test-drive's error handle
         character(len=*), intent(in)               :: scenario !! the scenario's name
         character(len=*), intent(in)               :: required !! the message, from the binding's name
+        character(len=*), intent(in), optional     :: control  !! the control's line in full, where the
+                                                               !! control asserts a VALUE and not only
+                                                               !! that it ran; absent, the marker alone
         character(len=:), allocatable :: out_file, err_file
         integer :: exitstat, cmdstat
         logical :: found
@@ -4650,8 +4655,13 @@ contains
         if (allocated(error)) return
         call check(error, exitstat /= 0, "scenario "//scenario//" was expected to abort")
         if (allocated(error)) return
-        call scenario_capture_contains(out_file, err_file, "kde control", found)
-        call check(error, found, scenario//": the control call must succeed first, or the abort proves nothing")
+        if (present(control)) then
+            call scenario_capture_contains(out_file, err_file, control, found)
+            call check(error, found, scenario//": the control call must succeed first and print '"//control//"'")
+        else
+            call scenario_capture_contains(out_file, err_file, "kde control", found)
+            call check(error, found, scenario//": the control call must succeed first, or the abort proves nothing")
+        end if
         if (allocated(error)) return
         call scenario_capture_contains(out_file, err_file, required, found)
         call check(error, found, scenario//": expected the message '"//required//"'")
@@ -5098,6 +5108,15 @@ contains
         call check_kde_scenario(error, "kde_grid_merge_boundary", &
             "pf_kde_grid%merge: the two grids differ in boundary")
     end subroutine test_kde_grid_merge_boundary_aborts
+    !
+    !> The eighth of `%merge`'s eight refusals. `control=` in full, not the bare marker: this
+    !> scenario's control merges two grids that BOTH carry points, so the line it prints is the sum
+    !> and a merge which passed the guard without moving the other grid's counts fails here.
+    subroutine test_kde_grid_merge_method_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_kde_scenario(error, "kde_grid_merge_method", &
+            "pf_kde_grid%merge: the two grids differ in method", control="kde control merged: 7")
+    end subroutine test_kde_grid_merge_method_aborts
     !
     !
     !> Every one of the adaptive kernel's refusals, in both forms, asserted by the exact text the

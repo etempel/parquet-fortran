@@ -64,15 +64,19 @@ module parquet_stats
     ! `ieee_arithmetic` and nothing else, no module of this library -- so the edge costs
     ! `tools/module_footprints.txt` exactly one file and adds nothing beneath it, and
     ! `check_parquet_stats_stays_arrow_free` is untouched because no Arrow is reachable from it.
-    ! `only:` rather than bare, unlike `parquet_sorting` above: two names are needed, and a
+    ! `only:` rather than bare, unlike `parquet_sorting` above: three names are needed, and a
     ! consumer who wants the normal family itself should say `use parquet_utils` and get all four
     ! of them rather than the specifics this module happens to need.
+    !
+    ! `pf_to_lower` folds `weight_type`'s token, so that the family matches it the way every other
+    ! token in the library is matched. The shared helper rather than a fold written out here: a
+    ! second spelling of case folding is exactly the shape that comes apart later.
     !
     ! `pf_norm_cdf` is the return leg of `pf_probit_mean`, which averages on the probit scale and
     ! maps back -- and it must be the LIBRARY's `Phi`, not `0.5*erfc(-z/sqrt(2))` written out
     ! again here, or the round trip `pf_norm_cdf(pf_probit(p)) == p` would hold for the kernel and
     ! not for this module.
-    use parquet_utils, only : pf_probit, pf_norm_cdf
+    use parquet_utils, only : pf_probit, pf_norm_cdf, pf_to_lower
     ! `parquet_sorting` imports these with an `only:` list and does not re-export them, so this
     ! module names them itself. Nothing new enters the dependency graph: `parquet_columns` is
     ! already in it, through `parquet_sorting`'s own `pf_argsort` over a column.
@@ -2080,7 +2084,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -2119,7 +2124,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -2161,7 +2167,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -2205,7 +2212,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -2245,7 +2253,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -2303,7 +2312,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -2373,7 +2383,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -2441,7 +2452,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -2496,7 +2508,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -2545,7 +2558,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -2780,7 +2794,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -2833,7 +2848,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -2985,7 +3001,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -3818,7 +3835,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -3851,7 +3869,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -3884,7 +3903,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -3917,7 +3937,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -3948,7 +3969,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -3993,7 +4015,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -4042,7 +4065,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -4082,7 +4106,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -4123,7 +4148,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -4161,7 +4187,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -4312,7 +4339,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -4351,7 +4379,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(out), optional :: ok
             !! .false. when the object describes a population with no defined moments -- one that
             !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
@@ -4388,7 +4417,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -4944,7 +4974,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -4982,7 +5013,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -5020,7 +5052,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -5058,7 +5091,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -5094,7 +5128,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -5144,7 +5179,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -5198,7 +5234,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -5243,7 +5280,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -5289,7 +5327,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -5332,7 +5371,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -5503,7 +5543,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -5547,7 +5588,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(out), optional :: ok
             !! .false. when the object describes a population with no defined moments -- one that
             !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
@@ -5584,7 +5626,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -6140,7 +6183,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -6179,7 +6223,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -6218,7 +6263,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -6257,7 +6303,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -6294,7 +6341,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -6345,7 +6393,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -6401,7 +6450,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -6448,7 +6498,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -6495,7 +6546,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -6540,7 +6592,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -6716,7 +6769,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -6761,7 +6815,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -6802,7 +6857,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -7419,7 +7475,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -7455,7 +7512,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -7491,7 +7549,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -7527,7 +7586,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -7561,7 +7621,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -7609,7 +7670,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -7661,7 +7723,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -7704,7 +7767,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -7748,7 +7812,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -7789,7 +7854,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -7952,7 +8018,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             character(len=*), intent(in), optional :: method
             !! how a fractional position between two order statistics is resolved, in numpy's
             !! spelling: "linear" (the default -- Hyndman-Fan type 7, what numpy and pandas do),
@@ -7994,7 +8061,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(out), optional :: ok
             !! .false. when the object describes a population with no defined moments -- one that
             !! is empty after the exclusions, or that kept a NaN under `skipnan = .false.` In
@@ -8031,7 +8099,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -8605,7 +8674,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -8651,7 +8721,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -8697,7 +8768,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -8743,7 +8815,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -8787,7 +8860,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: bias
             !! .false. by default: the bias-CORRECTED G1/G2, which is what pandas returns.
             !! .true. gives the uncorrected g1/g2, which is what scipy returns by default.
@@ -8845,7 +8919,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -8908,7 +8983,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -8962,7 +9038,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -9016,7 +9093,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -9068,7 +9146,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -9272,7 +9351,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -9324,7 +9404,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -9365,7 +9446,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: ddof
             !! delta degrees of freedom; **1 by default** -- the sample variance, as pandas
             !! returns. numpy's default is 0, so pass `ddof=0` to reproduce `np.var`/`np.std`.
@@ -9861,7 +9943,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `sort_threads` setting, capped by the processors actually available and
@@ -9906,7 +9989,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `sort_threads` setting, capped by the processors actually available and
@@ -9946,7 +10030,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -9993,7 +10078,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             integer, intent(in), optional :: threads
             !! how many threads the central-moment pass may use. Absent takes the automatic rule:
             !! the `sort_threads` setting, capped by the processors actually available and
@@ -10040,7 +10126,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -10093,7 +10180,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in
@@ -10125,7 +10213,8 @@ module parquet_stats
             !! unequal: a FREQUENCY weight of 3 says the value occurred three times, so the count
             !! `ddof` is charged against is `sum(weights)`; a RELIABILITY weight says the value is
             !! that much more precise, so the count is Kish's effective size
-            !! `sum(weights)**2 / sum(weights**2)`. Any other token aborts, listing both.
+            !! `sum(weights)**2 / sum(weights**2)`. Matched without regard to case, as every token
+            !! in the library is. Any other token aborts, listing both.
             logical, intent(in), optional :: skipnan
             !! .true. (the default) excludes a NaN from the population, as a null is excluded and
             !! as `pf_minmax` has always done; .false. restores numpy's propagating behaviour, in

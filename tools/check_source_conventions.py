@@ -3867,6 +3867,102 @@ def check_stats_weights_documented():
     return problems
 
 
+def check_kde_merge_refusals_documented():
+    """The guide's two `%merge` refusal lists must name exactly what `%merge` refuses.
+
+    `pf_kde_grid%merge` refuses another grid that differs in any of a fixed set of settings, one
+    `kde_abort` per difference in `src/parquet_kde_grid.f90`. `doc/pages/utilities/kernel-density.md`
+    writes that set out TWICE -- once in the "One grid per thread" prose bullet and once in the
+    "What aborts" table's `%merge` row -- and both read as exhaustive.
+
+    **Why this is worth a check.** The set grows whenever a grid gains a setting, and that is
+    exactly how it drifted: `method` was added to the grid, `%merge` learned to refuse a differing
+    one, and NEITHER list was updated. The page carried seven of the eight differences for as long
+    as the binned method has existed, in two places, with nothing comparing either to the source.
+    CLAUDE.md, "A static check that enumerates names goes stale silently".
+
+    **Membership, not order.** The source tests the differences in a fixed sequence, but a reader
+    uses the lists to answer "will this merge be refused?", which is a set question.
+
+    **The narrowest part of the page that carries the claim**, per the campaign's SD9: the prose
+    sentence is read only as far as its first parenthesis, because the parenthetical that follows
+    legitimately names `alpha` and `bandwidth_max` -- settings a differing pilot is detected
+    THROUGH, not differences `%merge` reports by name. Reading the whole sentence would make the
+    page contradict itself. The table row is read as its message plus the `(or ...)` parenthetical
+    that continues it, and nothing else in the row.
+
+    **Verify this check by breaking it, not by watching it pass**: delete a token from either list
+    and confirm it fails before trusting a green run. It refuses to pass when either anchor stops
+    matching, when either list comes back empty, or when the page or the source is missing, since
+    all of those mean it has gone blind rather than that the page is clean.
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "kernel-density.md"
+    src = SRC / "parquet_kde_grid.f90"
+    for f in (page, src):
+        if not f.is_file():
+            return ["check_kde_merge_refusals_documented: %s is missing -- this check has gone "
+                    "blind" % f.name]
+
+    want = set(re.findall(r'"the two grids differ in ([a-z_]+)"', src.read_text()))
+    if not want:
+        return ["check_kde_merge_refusals_documented: found no \"the two grids differ in ...\" "
+                "aborts in %s -- this check has gone blind" % src.name]
+
+    text = page.read_text()
+    problems = []
+
+    # -- site 1: the prose bullet, read only as far as its first parenthesis ----------------------
+    lead = "refuses a grid that differs in its"
+    if lead not in text:
+        problems.append("doc/pages/utilities/kernel-density.md: the sentence %r is gone, so this "
+                        "check can no longer find the prose list. Restore it or update this "
+                        "check." % lead)
+    else:
+        start = text.index(lead)
+        stop = text.find("(", start)
+        prose = text[start:stop if stop != -1 else start + 400]
+        got = set(re.findall(r"`([a-z_]+)`", prose))
+        if not got:
+            problems.append("doc/pages/utilities/kernel-density.md: the `%merge` prose list came "
+                            "back empty -- this check has gone blind")
+        else:
+            problems += _kde_merge_diff("the prose bullet", got, want)
+
+    # -- site 2: the abort table's %merge row ----------------------------------------------------
+    row = None
+    for line in text.splitlines():
+        if line.startswith("|") and "the two grids differ in" in line:
+            row = line
+            break
+    if row is None:
+        problems.append("doc/pages/utilities/kernel-density.md: the `%merge` row of the aborts "
+                        "table is gone, so this check can no longer find the table list. Restore "
+                        "it or update this check.")
+    else:
+        # the token inside the quoted message, plus every code span of the "(or ...)" tail
+        got = set(re.findall(r"the two grids differ in ([a-z_]+)", row))
+        got |= set(re.findall(r"`([a-z_]+)`", row[row.find("(or "):] if "(or " in row else ""))
+        if not got:
+            problems.append("doc/pages/utilities/kernel-density.md: the `%merge` table list came "
+                            "back empty -- this check has gone blind")
+        else:
+            problems += _kde_merge_diff("the aborts table row", got, want)
+
+    return problems
+
+
+def _kde_merge_diff(where, got, want):
+    """One side's disagreement with the source, reported in both directions."""
+    extra = sorted(got - want)
+    missing = sorted(want - got)
+    if not extra and not missing:
+        return []
+    return ["doc/pages/utilities/kernel-density.md: %s disagrees with src/parquet_kde_grid.f90 "
+            "about what `%%merge` refuses.\n    on the page and not refused by the source: %s\n"
+            "    refused by the source and not on the page: %s"
+            % (where, ", ".join(extra) or "-", ", ".join(missing) or "-")]
+
+
 def check_facade_inventory_matches_its_use_lines():
     """`src/parquet.f90`'s doc-comment inventory must name every module it bare-`use`s.
 
@@ -8518,7 +8614,9 @@ def check_no_doc_block_opens_with_a_ford_metadata_key():
     # because FORD is not a dependency of the lint stage; re-check it against a new FORD release.
     meta_re = re.compile(r"^[ ]{0,3}(?P<key>[A-Za-z0-9_-]+):")
     doc_re = re.compile(r"^\s*!([!>])(.*)$")
-    trailing_doc_re = re.compile(r"^\s*[^!\s].*!([!>])")
+    # Captures the doc text as well as the marker, because a trailing `!!` OPENS the block it
+    # belongs to rather than merely preceding one -- see the loop below.
+    trailing_doc_re = re.compile(r"^\s*[^!\s].*!([!>])(.*)$")
 
     problems, blocks_seen = [], 0
     for path in sorted((REPO_ROOT / "src").glob("*.f90")):
@@ -8556,7 +8654,20 @@ def check_no_doc_block_opens_with_a_ford_metadata_key():
                 continue
             close(block, start)
             block = []
-            prev_was_doc = bool(trailing_doc_re.match(raw))
+            tm = trailing_doc_re.match(raw)
+            prev_was_doc = bool(tm)
+            if tm:
+                # **A trailing `!!` on a code line OPENS the block it belongs to.** FORD reads a
+                # declaration's documentation from here, so THIS text is the block's first line
+                # and is where a bare `word:` does its damage. Treating the line as merely
+                # preceding a block -- which is what setting the flag alone did -- made the check
+                # read from the SECOND line, so it could not see the opener at all: that is how
+                # `src/parquet_kde.f90`'s `ok` argument kept a `present:` first line, and with it
+                # the campaign's one standing FORD warning, while this check passed.
+                blocks_seen += 1
+                body = tm.group(2)
+                block = [body[1:] if body.startswith(" ") else body]
+                start = n
         close(block, start)
 
     if blocks_seen == 0:
@@ -9562,6 +9673,8 @@ CHECKS = (
     ("the guide's canonical optional-argument order matches the checker's",
      check_stats_optional_order_documented),
     ("the guide's two `weights` lists match the source", check_stats_weights_documented),
+    ("the guide's two `pf_kde_grid%merge` refusal lists match the source",
+     check_kde_merge_refusals_documented),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),

@@ -66,7 +66,7 @@ contains
     !> Registers this module's tests with test-drive.
     subroutine collect_tests_parquet_stats(testsuite)
         type(unittest_type), allocatable, intent(out) :: testsuite(:) !! the suite to fill.
-        type(unittest_type), allocatable :: general(:), linear(:), extremes(:)
+        type(unittest_type), allocatable :: general(:), order(:), linear(:), extremes(:)
 
         general = [ &
             new_unittest("pf_count_valid counts every element of a clean array", test_plain_count), &
@@ -86,6 +86,8 @@ contains
                 test_spread_at_extreme_scales), &
             new_unittest("pf_moments matches the oracle under both weight_type conventions", &
                 test_golden_weighted), &
+            new_unittest("weight_type is matched without regard to case", &
+                test_weight_type_folds_case), &
             new_unittest("pf_moments matches the oracle with nulls and NaNs excluded", &
                 test_golden_exclusions), &
             new_unittest("pf_moments answers NaN, not an abort, on every degenerate population", &
@@ -139,7 +141,13 @@ contains
             new_unittest("threading the central-moment pass changes not one bit of any answer", &
                 test_threading_changes_no_bit), &
             new_unittest("the work floor declines a team that would not pay, and lets one through", &
-                test_the_work_floor_decides), &
+                test_the_work_floor_decides) &
+            ]
+        ! A second constructor, for the same reason `extremes` below is one: a statement may carry
+        ! at most 255 continuation lines (nagfor enforces it; `check_statement_continuation_lines`).
+        ! The split falls where the accumulator's threading tests end and the order statistics
+        ! begin. Add a further part rather than growing either.
+        order = [ &
             new_unittest("four order statistics off one accumulator cost ONE ordering", &
                 test_order_cache_costs_one_sort), &
             new_unittest("%update drops the order cache, and the next median is recomputed", &
@@ -362,7 +370,7 @@ contains
             new_unittest("pf_bin_linear accounts for every element exactly once", &
                 test_bin_linear_accounts_for_every_element) &
             ]
-        testsuite = [general, extremes, linear]
+        testsuite = [general, order, extremes, linear]
     end subroutine collect_tests_parquet_stats
 
     !> Deferring pass one's compaction changes no answer, wherever the first exclusion falls.
@@ -959,6 +967,60 @@ contains
         call run_case(error, "WVARF", G_WVARF, G_WVARF_DEF, G_WVARF_N, x, weights=w, &
             weight_type="frequency", tol=TOL)
     end subroutine test_golden_weighted
+
+    !> `weight_type` is matched without regard to case, as every other token in the library is.
+    !!
+    !! The fixture's weights are UNEQUAL on purpose, which is the negative control: the two
+    !! conventions charge `ddof` against different counts only then, so the first assertion below
+    !! establishes that they disagree here. Without it every later assertion would hold just as
+    !! well for an implementation that ignored `weight_type` altogether, or that folded every
+    !! unrecognised token onto the default -- which is exactly how a case fix can pass while
+    !! doing nothing.
+    subroutine test_weight_type_folds_case(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        !! Four spellings of one token: the library's own lower case, two shouted forms and one
+        !! padded, since the resolver trims and left-adjusts before it folds.
+        character(len=13), parameter :: FREQ(4) = &
+            ["frequency    ", "Frequency    ", "FREQUENCY    ", "  fReQuEnCy  "]
+        character(len=13), parameter :: REL(3) = &
+            ["reliability  ", "Reliability  ", "RELIABILITY  "]
+        real(real64) :: x(6), w(6), as_rel, as_freq, got
+        character(len=200) :: msg
+        logical :: ok
+        integer :: i
+
+        x = [1.0_real64, 2.0_real64, 4.0_real64, 8.0_real64, 16.0_real64, 32.0_real64]
+        w = [1.0_real64, 5.0_real64, 1.0_real64, 1.0_real64, 5.0_real64, 1.0_real64]
+
+        call pf_variance(x, as_rel, weights=w, weight_type="reliability", ok=ok)
+        call check(error, ok, "control: the reliability arm must be defined on this fixture")
+        if (allocated(error)) return
+        call pf_variance(x, as_freq, weights=w, weight_type="frequency", ok=ok)
+        call check(error, ok, "control: the frequency arm must be defined on this fixture")
+        if (allocated(error)) return
+
+        ! THE NEGATIVE CONTROL. Unequal weights, so `sum(w)` and Kish's effective size differ and
+        ! the two conventions cannot agree. If they ever do, every assertion below is vacuous.
+        write(msg, '(a,es24.17,a,es24.17)') "control: the two conventions must differ on this " // &
+            "fixture; reliability is ", as_rel, " and frequency ", as_freq
+        call check(error, as_rel /= as_freq, trim(msg))
+        if (allocated(error)) return
+
+        do i = 1, size(FREQ)
+            call pf_variance(x, got, weights=w, weight_type=FREQ(i), ok=ok)
+            write(msg, '(a)') "weight_type=""" // trim(FREQ(i)) // """ must reach the frequency arm"
+            call check(error, ok .and. got == as_freq, trim(msg))
+            if (allocated(error)) return
+        end do
+
+        do i = 1, size(REL)
+            call pf_variance(x, got, weights=w, weight_type=REL(i), ok=ok)
+            write(msg, '(a)') "weight_type=""" // trim(REL(i)) // """ must reach the reliability arm"
+            call check(error, ok .and. got == as_rel, trim(msg))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_weight_type_folds_case
 
     !> Nulls and NaNs, including the case that pins the exclusion ORDER.
     subroutine test_golden_exclusions(error)

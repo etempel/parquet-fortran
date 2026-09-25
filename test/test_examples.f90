@@ -103,7 +103,9 @@ contains
                 test_three_ways_example), &
             new_unittest("doc/pages/operating/error-handling.md found_or_abort example", &
                 test_found_or_abort_example), &
-            new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer) &
+            new_unittest("use parquet alone reaches every layer of the library", test_facade_covers_every_layer), &
+            new_unittest("doc/pages/utilities/solvers.md: the three status sets share their spelling", &
+                test_solver_status_spelling_is_shared) &
             ]
     end subroutine collect_tests_parquet_examples
 
@@ -1936,5 +1938,75 @@ contains
         y = 2.0_real64 - x*x
 
     end function facade_two_less_square
+
+    !> The bold claim in doc/pages/utilities/solvers.md, "The outcome: converged, info and the
+    !! status codes": each solver module keeps its own prefix, and "what is shared is the spelling:
+    !! `OK = 0` and `LIMIT = 1` in all three sets, one spelling for round-off ... and one for a
+    !! non-finite value".
+    !!
+    !! **Reached through the facade, which is why this test lives here.** The three sets are
+    !! declared in three modules, and `test/test_module_surface.f90` -- where a reader might look
+    !! for a cross-module assertion -- holds one SINGLE-import module per tier and may never gain a
+    !! second library `use` (`.claude/rules/module-structure.md`). `use parquet` brings all three
+    !! in one import, and this file already exists to catch a guide claim that the library stopped
+    !! honouring.
+    !!
+    !! **The negative control is the distinctness assertion.** Three sets collapsed to all-zero
+    !! would satisfy every equality above, so each set is also required to hold six, two and two
+    !! DIFFERENT values. Without it the test passes on a library that lost its status codes
+    !! entirely.
+    subroutine test_solver_status_spelling_is_shared(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle
+
+        ! `OK = 0` and `LIMIT = 1` in all three sets, which is what the page puts in bold.
+        call check(error, PF_INT_OK == 0 .and. PF_ROOT_OK == 0 .and. PF_OPT_OK == 0, &
+            "the page says OK = 0 in all three sets")
+        if (allocated(error)) return
+        call check(error, PF_INT_LIMIT == 1 .and. PF_ROOT_LIMIT == 1 .and. PF_OPT_LIMIT == 1, &
+            "the page says LIMIT = 1 in all three sets")
+        if (allocated(error)) return
+
+        ! One spelling for a cause two modules share. These are separate constants of separate
+        ! modules and their VALUES are each module's own; what the page promises is the NAME, so
+        ! referencing them here is the assertion -- a rename breaks this file at compile time.
+        call check(error, PF_INT_ROUNDOFF /= PF_INT_OK .and. PF_OPT_ROUNDOFF /= PF_OPT_OK, &
+            "the page names PF_INT_ROUNDOFF and PF_OPT_ROUNDOFF as the one round-off spelling")
+        if (allocated(error)) return
+        call check(error, PF_INT_NONFINITE /= PF_INT_OK .and. PF_OPT_NONFINITE /= PF_OPT_OK, &
+            "the page names PF_INT_NONFINITE and PF_OPT_NONFINITE as the one non-finite spelling")
+        if (allocated(error)) return
+
+        ! The negative control: a set collapsed to a single value would pass everything above.
+        call check(error, distinct_count([PF_INT_OK, PF_INT_LIMIT, PF_INT_ROUNDOFF, &
+            PF_INT_BAD_INTEGRAND, PF_INT_NO_CONVERGENCE, PF_INT_DIVERGENT, PF_INT_NONFINITE]) == 7, &
+            "the seven PF_INT_ codes must be distinct, or the equalities above are vacuous")
+        if (allocated(error)) return
+        call check(error, distinct_count([PF_ROOT_OK, PF_ROOT_LIMIT, PF_ROOT_NO_BRACKET]) == 3, &
+            "the three PF_ROOT_ codes must be distinct")
+        if (allocated(error)) return
+        call check(error, distinct_count([PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET, &
+            PF_OPT_NONFINITE, PF_OPT_ROUNDOFF, PF_OPT_INFEASIBLE]) == 6, &
+            "the six PF_OPT_ codes must be distinct")
+
+    end subroutine test_solver_status_spelling_is_shared
+
+    !> How many different values a short list holds; the negative control above needs it.
+    pure function distinct_count(v) result(n)
+        integer, intent(in) :: v(:) !! the values
+        integer             :: n    !! how many are different
+
+        integer :: i, j
+        logical :: seen
+
+        n = 0
+        do i = 1, size(v)
+            seen = .false.
+            do j = 1, i - 1
+                if (v(j) == v(i)) seen = .true.
+            end do
+            if (.not. seen) n = n + 1
+        end do
+
+    end function distinct_count
 
 end module test_examples

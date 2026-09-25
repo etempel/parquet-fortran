@@ -39,18 +39,18 @@ module benchmark_optimize_kernels
 contains
 
     !> Calls the wrapped objective.
-    function boxed_eval(this, x) result(f)
-        class(boxed_objective), intent(inout) :: this !! the wrapper
+    function boxed_eval(self, x) result(f)
+        class(boxed_objective), intent(inout) :: self !! the wrapper
         real(real64), intent(in)              :: x(:) !! the point
         real(real64)                          :: f    !! objective value at `x`
 
-        f = this%fun(x)
+        f = self%fun(x)
 
     end function boxed_eval
 
     !> How many constraint values `constraints` fills: none.
-    function boxed_count(this) result(m)
-        class(boxed_objective), intent(in) :: this !! the wrapper
+    function boxed_count(self) result(m)
+        class(boxed_objective), intent(in) :: self !! the wrapper
         integer                            :: m    !! zero
 
         m = 0
@@ -58,8 +58,8 @@ contains
     end function boxed_count
 
     !> Never called, because `n_constraints` answers zero.
-    subroutine boxed_constraints(this, x, c)
-        class(boxed_objective), intent(inout) :: this !! the wrapper
+    subroutine boxed_constraints(self, x, c)
+        class(boxed_objective), intent(inout) :: self !! the wrapper
         real(real64), intent(in)              :: x(:) !! the point
         real(real64), intent(out)             :: c(:) !! a zero-length array
 
@@ -513,7 +513,7 @@ contains
             lower = [-3.0_real64, -2.0_real64]
             upper = [3.0_real64, 2.0_real64]
             call pf_minimize_multistart(camel, lower, upper, 42_int64, x, fmin, nstart=ns, &
-                                        xtol=1.0e-2_real64, info=info)
+                                        merge_tol=1.0e-2_real64, info=info)
             print '(a12,i9,i10,i9,i11,f11.5)', "camel", ns, info%nminima, info%nlimit, &
                 info%neval, fmin
             ns = 2*ns
@@ -524,7 +524,7 @@ contains
             lower = -5.12_real64
             upper = 5.12_real64
             call pf_minimize_multistart(rastrigin, lower, upper, 42_int64, x, fmin, nstart=ns, &
-                                        xtol=1.0e-2_real64, info=info)
+                                        merge_tol=1.0e-2_real64, info=info)
             print '(a12,i9,i10,i9,i11,f11.5)', "rastrigin", ns, info%nminima, info%nlimit, &
                 info%neval, fmin
             ns = 2*ns

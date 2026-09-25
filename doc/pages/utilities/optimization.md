@@ -46,13 +46,15 @@ Signatures on this page show optional arguments in square brackets, with the com
 bracket:
 
 ```fortran
-call pf_minimize_scalar(f, a, b, x, fmin, [tol], [max_neval], [info], [history], [context])
-call pf_minimize_simplex(f, x, fmin, step, ftol, [atol], [max_neval], [info], [history], [context])
-call pf_minimize_de(f, lower, upper, seed, x, fmin, [np], [f_weight], [cr], [ftol], [atol], &
-                    [ftarget], [max_gen], [max_neval], [threads], [polish], [info], [history], &
-                    [population], [context])
-call pf_minimize_multistart(f, lower, upper, seed, x, fmin, [nstart], [solver], [xtol], &
-                            [threads], [info], [history], [context])
+call pf_minimize_scalar(f, a, b, x, fmin, [atol], [max_neval], [converged], [info], [history], &
+                        [context])
+call pf_minimize_simplex(f, x, fmin, step, rtol, [atol], [max_neval], [converged], [info], &
+                         [history], [context])
+call pf_minimize_de(f, lower, upper, seed, x, fmin, [np], [f_weight], [cr], [rtol], [atol], &
+                    [ftarget], [max_gen], [max_neval], [threads], [polish], [converged], &
+                    [info], [history], [population], [context])
+call pf_minimize_multistart(f, lower, upper, seed, x, fmin, [nstart], [solver], [merge_tol], &
+                            [threads], [converged], [info], [history], [context])
 ```
 
 ## Supplying the objective
@@ -80,35 +82,33 @@ contains
     procedure :: eval => line_fit_eval
 end type line_fit
 
-function line_fit_eval(this, x) result(f)
-    class(line_fit), intent(inout) :: this
+function line_fit_eval(self, x) result(f)
+    class(line_fit), intent(inout) :: self
     real(real64), intent(in)       :: x(:)
     real(real64)                   :: f
-    f = sum((this%yd - (x(1)*this%xd + x(2)))**2)
-    this%ncall = this%ncall + 1
+    f = sum((self%yd - (x(1)*self%xd + x(2)))**2)
+    self%ncall = self%ncall + 1
 end function line_fit_eval
 ```
 
-Three things to know about either form:
+Where the objective must live, and what `eval` may do to its own object, are stated once for all
+four solver modules in [Solver conventions](solvers.html#the-function-you-supply). One thing is
+this tier's own:
 
-- **The objective must live in a module**, plain function and objective type alike. An internal
-  procedure of the main program cannot be passed as an actual argument under every compiler this
-  library supports, and a type-bound procedure has to bind to a module procedure in any case.
-- **`eval` may modify its own object, and you may read it afterwards.** The passed-object dummy is
-  `intent(inout)`, so a counter or a cache works, and an extension must declare the same intent.
 - **The objective is evaluated at an array**, even in `pf_minimize_scalar`, where that array has
   one element. One objective then serves both engines.
 
 ## One variable on a bracket
 
 ```fortran
-call pf_minimize_scalar(f, a, b, x, fmin, [tol], [max_neval], [info], [history], [context])
+call pf_minimize_scalar(f, a, b, x, fmin, [atol], [max_neval], [converged], [info], [history], &
+                        [context])
 ```
 
 `a` and `b` are the bracket, finite with `a < b` and with a finite width; `x` and `fmin` come back
-as the minimiser found and its value. `tol` is an absolute tolerance on `x`, defaulting to `0`,
+as the minimiser found and its value. `atol` is an absolute tolerance on `x`, defaulting to `0`,
 which does not mean "no tolerance": the effective tolerance is
-`tol/3 + sqrt(epsilon)*abs(x) + epsilon*(b - a)`, so `0` asks for as much accuracy as the
+`atol/3 + sqrt(epsilon)*abs(x) + epsilon*(b - a)`, so `0` asks for as much accuracy as the
 arithmetic allows. The last term matters only where the other two vanish, which is a minimiser at
 or very near zero: without it the stopping test there recedes as fast as the bracket narrows and
 the run spends its whole budget on an answer it reached early. `max_neval` defaults to 500.
@@ -120,7 +120,8 @@ the best point it saw, which will be on that end.
 ## Many variables from a start point
 
 ```fortran
-call pf_minimize_simplex(f, x, fmin, step, ftol, [atol], [max_neval], [info], [history], [context])
+call pf_minimize_simplex(f, x, fmin, step, rtol, [atol], [max_neval], [converged], [info], &
+                         [history], [context])
 ```
 
 `x` is the start point going in and the best point found coming out; `step` gives the offset per
@@ -128,7 +129,7 @@ coordinate that builds the starting simplex, so vertex `i+1` is `x` with `step(i
 coordinate `i`. No element of `step` may be zero — two vertices would sit on top of each other and
 that coordinate could never move — and none may be NaN.
 
-`ftol` is required. It is the fractional tolerance on the spread of the values at the simplex
+`rtol` is required. It is the fractional tolerance on the spread of the values at the simplex
 vertices; `atol`, optional and zero by default, is the absolute one. At least one of the two must
 be positive, or no convergence test could ever fire and the run could only end by exhausting its
 budget. `max_neval` defaults to 5000.
@@ -136,9 +137,9 @@ budget. `max_neval` defaults to 5000.
 ## A whole box, with no start point
 
 ```fortran
-call pf_minimize_de(f, lower, upper, seed, x, fmin, [np], [f_weight], [cr], [ftol], [atol], &
-                    [ftarget], [max_gen], [max_neval], [threads], [polish], [info], [history], &
-                    [population], [context])
+call pf_minimize_de(f, lower, upper, seed, x, fmin, [np], [f_weight], [cr], [rtol], [atol], &
+                    [ftarget], [max_gen], [max_neval], [threads], [polish], [converged], &
+                    [info], [history], [population], [context])
 ```
 
 Differential evolution keeps a population of points spread over the box and improves it a
@@ -161,7 +162,7 @@ parent in one or two coordinates and is what gets DE through a very rugged objec
 Rastrigin in five variables it is worth roughly a factor of three in evaluations.
 
 The run stops on the first of: `ftarget` reached (`PF_OPT_TARGET`), the population's value spread
-inside `ftol`/`atol` (`PF_OPT_OK`), `max_gen` generations, or `max_neval` evaluations (both
+inside `rtol`/`atol` (`PF_OPT_OK`), `max_gen` generations, or `max_neval` evaluations (both
 `PF_OPT_LIMIT`). `max_gen` defaults to 1000 and `max_neval` to `np*(max_gen + 1)`, so by default
 the generation budget is the binding one.
 
@@ -193,8 +194,8 @@ comparison is safe), and `converged` is false.
 ## Many starts, one local engine
 
 ```fortran
-call pf_minimize_multistart(f, lower, upper, seed, x, fmin, [nstart], [solver], [xtol], &
-                            [threads], [info], [history], [context])
+call pf_minimize_multistart(f, lower, upper, seed, x, fmin, [nstart], [solver], [merge_tol], &
+                            [threads], [converged], [info], [history], [context])
 ```
 
 A local engine converges to whichever basin it starts in and reports success for doing so. Run it
@@ -209,8 +210,10 @@ basins and their results are comparable.
 
 `solver` is the local engine and its options, as an object: `pf_simplex_solver` ships here, and
 `pf_bobyqa_solver` will come from `parquet_prima`. Set a component to configure it; the default is
-a fresh `pf_simplex_solver()`, whose own defaults (`ftol = 0`, `atol = 1e-10`, `max_neval = 5000`,
-`step_fraction = 0.1`) are a valid pair as they stand.
+a fresh `pf_simplex_solver()`, whose own defaults (`rtol = 0`, `atol = 1e-10`, `max_neval = 0`,
+`step_fraction = 0.1`) are a valid pair as they stand. In the solver object `max_neval = 0` means
+the engine's own default, which for the simplex is 5000, and a negative value is refused; `0`
+passed as an ARGUMENT to `pf_minimize_simplex` is still refused, because the rule is the object's.
 
 ```fortran
 type(pf_simplex_solver) :: solver
@@ -224,9 +227,10 @@ call pf_minimize_multistart(camel, lower, upper, 42_int64, x, fmin, nstart=20, s
 the box on its way to a minimum; a bounded solver would not. Which one you have decides whether a
 result outside the box is possible.
 
-`xtol` decides what counts as one minimum: two results within `xtol*(upper - lower)` of each other
-in **every** coordinate are merged, walking the starts in index order. It defaults to `1e-3`.
-`info%nminima` counts basins only while `xtol` sits between the local solver's own accuracy
+`merge_tol` decides what counts as one minimum: two results within `merge_tol*(upper - lower)` of
+each other in **every** coordinate are merged, walking the starts in index order. It defaults to
+`1e-3`.
+`info%nminima` counts basins only while `merge_tol` sits between the local solver's own accuracy
 relative to the box — about `1e-5` for the simplex — and the distance between two genuine minima:
 tighter, and one basin reached by several starts is counted several times; wider, and two basins
 are counted once. Set it to the scale you care about, and read `history` when the count has to be
@@ -287,7 +291,7 @@ across a toolchain change bit for bit.
 `pf_minimize_simplex` stops when the values at its vertices agree, and `pf_minimize_de` when the
 values across its population do, by the same pair of tests:
 
-- the **fractional** test, `2*abs(fhi - flo)/(abs(fhi) + abs(flo)) < ftol`, which compares the
+- the **fractional** test, `2*abs(fhi - flo)/(abs(fhi) + abs(flo)) < rtol`, which compares the
   spread with the size of the values themselves;
 - the **absolute** test, `abs(fhi - flo) < atol`, which compares it with a number you choose.
 
@@ -295,13 +299,13 @@ Which one to reach for follows from the objective. A fractional tolerance is sca
 what you want when the minimum value is some distance from zero. **It cannot converge on an
 objective whose minimum value is zero**: a fractional spread over values that are all nearly zero
 stays around 1 however tight the simplex gets. A least-squares fit that can reach a perfect fit is
-exactly that case, and `ftol = 0.0` with a positive `atol` is the pair for it.
+exactly that case, and `rtol = 0.0` with a positive `atol` is the pair for it.
 
 `info%spread` reports the spread the run ended on, so you can see which test fired and by how much.
 
-`pf_minimize_de` defaults to `ftol = 1e-6` and `atol = 0`, which is why an objective whose minimum
+`pf_minimize_de` defaults to `rtol = 1e-6` and `atol = 0`, which is why an objective whose minimum
 is zero usually wants `ftarget=` or a positive `atol` there too: without one such a run ends on its
-generation budget rather than on a convergence test. `pf_minimize_simplex` has no `ftol` default at
+generation budget rather than on a convergence test. `pf_minimize_simplex` has no `rtol` default at
 all: it is a required argument, so the "at least one of the two must be positive" refusal cannot be
 reached by leaving an argument out.
 
@@ -314,6 +318,10 @@ has to be evaluated before the budget can be tested for the first time. Running 
 not an error: `info%status` is `PF_OPT_LIMIT`, `info%converged` is false, `x` and `fmin` hold the
 best point seen, and nothing is printed. `pf_minimize_multistart` has no `max_neval` of its own —
 the budget belongs to the solver object, and `info%nlimit` counts the runs that spent it.
+
+`converged=` is the short answer, and every engine answers it: an optional `logical`,
+`intent(out)`, set on every path whether or not `info` was asked for, and always equal to
+`info%converged`.
 
 `info` is a `pf_optimize_info`. Every engine fills `status` (one of the `PF_OPT_*` codes),
 `converged`, `neval` and `niter`; `niter` is simplex iterations, Brent iterations, DE generations
@@ -386,7 +394,7 @@ best individual to the simplex, or DE followed by your own local run from the po
   or whose bounds are not finite and ordered, a bracket or a box whose WIDTH is not finite
   (`+/-1e308` is two finite bounds and an infinite width), `np` below 4, `f_weight` outside
   `(0, 2]`, `cr`
-  outside `[0, 1]`, a `max_gen` or `nstart` below 1, a negative `xtol`, and a `threads` below 1.
+  outside `[0, 1]`, a `max_gen` or `nstart` below 1, a negative `merge_tol`, and a `threads` below 1.
   Failure to converge is **not** one of these — it is reported through `info`. `context=` adds your
   own text to any such message, capped at 100 characters.
 - **Nothing here is process-global.** No entry point reads a setting, and no call holds state
@@ -400,14 +408,14 @@ The simplex is a port, and the mapping is mechanical:
 | qfeet | parquet-fortran |
 |---|---|
 | `use minimization` | `use parquet_optimize` |
-| `objective_type`, `eval(f, x)` | `pf_objective`, `eval(this, x)` with `intent(inout)` on the object |
+| `objective_type`, `eval(f, x)` | `pf_objective`, `eval(self, x)` with `intent(inout)` on the object |
 | `minimize_func` | `pf_objective_func` |
-| `call minimize(func, x, fmin, step, ftol, nfeval, atol=, max_nfeval=, converged=)` | `call pf_minimize_simplex(func, x, fmin, step, ftol, atol=, max_neval=, info=)`; then `info%neval` and `info%converged` |
+| `call minimize(func, x, fmin, step, ftol, nfeval, atol=, max_nfeval=, converged=)` | `call pf_minimize_simplex(func, x, fmin, step, rtol, atol=, max_neval=, converged=, info=)`; then `info%neval` |
 | `call minimize(func, points, fvalues, ...)` (full simplex) | not carried; use the start-and-step form, with `history=` when you want the search path |
 | a logged warning on running out of budget | `info%status == PF_OPT_LIMIT`, silent |
 | `mlog_init` before use | nothing |
 
-`ftol` keeps its position, so only the trailing arguments move. The algorithm is unchanged step for
+`rtol` keeps its position, so only the trailing arguments move. The algorithm is unchanged step for
 step, so a migrated call reaches the same minimum by the same path — under a value-safe
 floating-point model, which every profile this library builds selects, and not under a model that
 reassociates arithmetic, where the two can part at one accept/reject decision and thereafter

@@ -140,7 +140,7 @@ contains
         ! The nonlinear half comes from the engine's own `constr`, whose tail is `c(x)` at the
         ! returned point and is already in the caller's units -- the objective is only ever
         ! evaluated at `scale*y`.
-        call finish_run(prima_info, st, n, info, history, &
+        call finish_run(prima_info, st, n, converged=converged, info=info, history=history, &
                         cstrv=caller_violation(x, lower, upper, a_ineq, b_ineq, a_eq, b_eq, &
                                                constr(m_lcon + 1:m_lcon + m_nlcon)), &
                         ctol=ctol_use)

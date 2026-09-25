@@ -79,7 +79,7 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(exp_profile)         :: prof
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: got(CASES), want(CASES), p
         integer                   :: counted(CASES), evals(CASES), i, bad
         logical :: uf_ok, uf_was
@@ -143,7 +143,7 @@ contains
     subroutine test_plain_function_is_reentrant(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: serial, got(CASES)
         integer                   :: serial_neval, evals(CASES), i, bad
 

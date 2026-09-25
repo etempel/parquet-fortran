@@ -628,28 +628,29 @@ contains
 
     module procedure kde_isj_eval
 
-        real(real64) :: f, log_n
+        real(real64) :: norm, log_n
         integer :: s
 
         ! The first stage reads the norm of the highest derivative at `t` itself; each later one at
         ! the time the norm above it makes optimal, formed through logarithms so that no quotient
         ! or power can overflow whatever the sample size and the norm.
-        f = isj_norm(this, KDE_ISJ_STAGES, x)
-        log_n = log(this%n_eff)
+        norm = isj_norm(self, KDE_ISJ_STAGES, x)
+        log_n = log(self%n_eff)
         do s = KDE_ISJ_STAGES - 1, 2, -1
             ! A norm this small puts the next time beyond every term, and every later norm at zero:
             ! the function's limit there is minus infinity, and `-huge` has its sign.
-            if (.not. (f >= tiny(f))) then
-                y = -huge(1.0_real64)
+            if (.not. (norm >= tiny(norm))) then
+                f = -huge(1.0_real64)
                 return
             end if
-            f = isj_norm(this, s, exp((2.0_real64/real(3 + 2*s, real64))*(KDE_ISJ_LOG_C(s) - log_n - log(f))))
+            norm = isj_norm(self, s, &
+                            exp((2.0_real64/real(3 + 2*s, real64))*(KDE_ISJ_LOG_C(s) - log_n - log(norm))))
         end do
-        if (.not. (f >= tiny(f))) then
-            y = -huge(1.0_real64)
+        if (.not. (norm >= tiny(norm))) then
+            f = -huge(1.0_real64)
             return
         end if
-        y = x - exp(-0.4_real64*(KDE_ISJ_LOG_2SQRTPI + log_n + log(f)))
+        f = x - exp(-0.4_real64*(KDE_ISJ_LOG_2SQRTPI + log_n + log(norm)))
 
     end procedure kde_isj_eval
 

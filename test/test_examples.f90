@@ -36,8 +36,8 @@ module test_examples
 contains
     !
     !> `(x - 2)**2`.
-    function facade_capped_eval(this, x) result(f)
-        class(facade_capped_square), intent(inout) :: this !! the objective
+    function facade_capped_eval(self, x) result(f)
+        class(facade_capped_square), intent(inout) :: self !! the objective
         real(real64), intent(in)                   :: x(:) !! the point
         real(real64)                               :: f    !! the objective value
 
@@ -46,8 +46,8 @@ contains
     end function facade_capped_eval
     !
     !> How many constraint values `constraints` fills.
-    function facade_capped_count(this) result(m)
-        class(facade_capped_square), intent(in) :: this !! the objective
+    function facade_capped_count(self) result(m)
+        class(facade_capped_square), intent(in) :: self !! the objective
         integer                                 :: m    !! one
 
         m = 1
@@ -55,8 +55,8 @@ contains
     end function facade_capped_count
     !
     !> `x - 1 <= 0`.
-    subroutine facade_capped_constr(this, x, c)
-        class(facade_capped_square), intent(inout) :: this !! the objective
+    subroutine facade_capped_constr(self, x, c)
+        class(facade_capped_square), intent(inout) :: self !! the objective
         real(real64), intent(in)                   :: x(:) !! the point
         real(real64), intent(out)                  :: c(:) !! exactly `n_constraints()` values
 
@@ -273,7 +273,7 @@ contains
     !> parquet_columns (PK_FLOAT64/parquet_kind_name),
     !> parquet_strings (parquet_string_column), parquet_temporal (parquet_timestamp),
     !> parquet_sorting (pf_argsort), parquet_healpix (pf_ang2pix_ring),
-    !> parquet_integrate (pf_integrate/pf_integration_info/PF_INT_OK),
+    !> parquet_integrate (pf_integrate/pf_integrate_info/PF_INT_OK),
     !> parquet_root (pf_find_root/pf_bracket_expansion/pf_root_info/PF_ROOT_OK),
     !> parquet_transform (pf_dct/pf_is_pow2),
     !> parquet_kde (pf_kde/pf_kde_grid),
@@ -493,7 +493,7 @@ contains
 
         ! parquet_integrate: the quadrature generic and its record types.
         block
-            type(pf_integration_info) :: qinfo
+            type(pf_integrate_info) :: qinfo
             real(real64) :: quad
             quad = pf_integrate(facade_square, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=qinfo)
             call check(error, abs(quad - 1.0_real64/3.0_real64) <= 1.0e-12_real64 .and. &

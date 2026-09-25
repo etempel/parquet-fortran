@@ -28,7 +28,7 @@ module test_root_support
     public :: root_cubic, root_exp_minus_2, root_log_plus_x, root_x_minus_tanh
     public :: root_neg_inf_tail, root_inf_step, root_inf_both_tails, root_tiny_line, root_huge_line
     public :: root_pole
-    public :: root_tiny_root, root_steep, root_nan_beyond_two
+    public :: root_tiny_root, root_cube, root_steep, root_nan_beyond_two
     public :: shifted_line, counted_sq2, shaped_root
     public :: TINY_ROOT, CUBIC_ROOT, OMEGA, TANH_ROOT, DOTTIE
 
@@ -249,6 +249,17 @@ contains
 
     end function root_tiny_root
 
+    !> `x**3`: a TRIPLE root at exactly zero, where no relative tolerance on `x` can ever be met --
+    !! the bracket cannot become narrow relative to `|x|` when `x` is zero -- and the interpolation
+    !! does not land on it, so the search bisects until `atol` stops it or the budget runs out.
+    function root_cube(x) result(y)
+        real(real64), intent(in) :: x !! where to evaluate
+        real(real64)             :: y !! the value there
+
+        y = x*x*x
+
+    end function root_cube
+
     !> `sinh(700*(x - 0.3))` on `[0, 1]`: a root at 0.3 with values from `-1e91` to `+1e212` either
     !! side of it, so the ratios the inverse quadratic step forms span the whole exponent range.
     function root_steep(x) result(y)
@@ -274,56 +285,56 @@ contains
     end function root_nan_beyond_two
 
     !> Evaluates `x - root` and counts the call.
-    function shifted_line_eval(this, x) result(y)
-        class(shifted_line), intent(inout) :: this !! the line, whose counter is updated
+    function shifted_line_eval(self, x) result(f)
+        class(shifted_line), intent(inout) :: self !! the line, whose counter is updated
         real(real64), intent(in)           :: x    !! where to evaluate
-        real(real64)                       :: y    !! the value there
+        real(real64)                       :: f    !! the value there
 
-        this%calls = this%calls + 1
-        y = x - this%root
+        self%calls = self%calls + 1
+        f = x - self%root
 
     end function shifted_line_eval
 
     !> Evaluates `x*x - 2` through `root_sq2` and counts the call.
-    function counted_sq2_eval(this, x) result(y)
-        class(counted_sq2), intent(inout) :: this !! the object, whose counter is updated
+    function counted_sq2_eval(self, x) result(f)
+        class(counted_sq2), intent(inout) :: self !! the object, whose counter is updated
         real(real64), intent(in)          :: x    !! where to evaluate
-        real(real64)                      :: y    !! the value there
+        real(real64)                      :: f    !! the value there
 
-        this%calls = this%calls + 1
-        y = root_sq2(x)
+        self%calls = self%calls + 1
+        f = root_sq2(x)
 
     end function counted_sq2_eval
 
     !> Evaluates the shape `kind` names; see `shaped_root`.
-    function shaped_root_eval(this, x) result(y)
-        class(shaped_root), intent(inout) :: this !! the shape
+    function shaped_root_eval(self, x) result(f)
+        class(shaped_root), intent(inout) :: self !! the shape
         real(real64), intent(in)          :: x    !! where to evaluate
-        real(real64)                      :: y    !! the value there
+        real(real64)                      :: f    !! the value there
 
         real(real64) :: half_dist
 
-        half_dist = (0.5_real64*x) - (0.5_real64*this%root)
-        select case (this%kind)
+        half_dist = (0.5_real64*x) - (0.5_real64*self%root)
+        select case (self%kind)
         case (1)
-            y = this%scale*half_dist
+            f = self%scale*half_dist
         case (2)
-            y = merge(1.0_real64, -1.0_real64, x > this%root)
+            f = merge(1.0_real64, -1.0_real64, x > self%root)
         case (3)
-            y = merge(ieee_value(1.0_real64, ieee_positive_inf), &
-                      ieee_value(1.0_real64, ieee_negative_inf), x > this%root)
+            f = merge(ieee_value(1.0_real64, ieee_positive_inf), &
+                      ieee_value(1.0_real64, ieee_negative_inf), x > self%root)
         case (4)
             half_dist = half_dist/huge(1.0_real64)
-            y = half_dist*half_dist*half_dist
+            f = half_dist*half_dist*half_dist
         case (5)
-            y = merge(1.0e300_real64, -1.0e-300_real64, x > this%root)
+            f = merge(1.0e300_real64, -1.0e-300_real64, x > self%root)
         case default
             ! Compared in halves: doubling the clamped root could overflow on the arm the
             ! clamp does not take, if an optimiser formed both.
-            y = this%scale*half_dist
-            if (this%root > 0.0_real64) then
-                if (0.5_real64*x > min(this%root, 0.25_real64*huge(1.0_real64))) &
-                    y = ieee_value(1.0_real64, ieee_negative_inf)
+            f = self%scale*half_dist
+            if (self%root > 0.0_real64) then
+                if (0.5_real64*x > min(self%root, 0.25_real64*huge(1.0_real64))) &
+                    f = ieee_value(1.0_real64, ieee_negative_inf)
             end if
         end select
 

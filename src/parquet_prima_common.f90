@@ -35,7 +35,7 @@ module parquet_prima_common
     use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
     use parquet_optimize, only : pf_objective, pf_constrained_objective, pf_optimize_history, &
         pf_optimize_info, &
-        PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET, PF_OPT_ROUNDING, PF_OPT_INFEASIBLE
+        PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET, PF_OPT_ROUNDOFF, PF_OPT_INFEASIBLE
     use parquet_prima_linalg, only : sum, ZERO, HALF, QUART, INFO_DFT, NAN_INF_X, NAN_INF_F, &
         FTARGET_ACHIEVED, MAXFUN_REACHED, TENTH, prima_abort, is_nan, is_inf, is_posinf, &
         is_neginf, is_finite, REALMAX, BOUNDMAX, ONE, TWO, TEN, EPS, inprod, matprod, outprod, &
@@ -132,7 +132,7 @@ contains
             call state_abort(st, "the objective returned a non-finite value")
         end if
 
-        if (st%want_history) call st%record%append(x, f)
+        if (st%want_history) call st%record%add(x, f)
 
     end subroutine evaluate
 
@@ -173,7 +173,7 @@ contains
             end if
         end if
 
-        if (st%want_history) call st%record%append(x, f)
+        if (st%want_history) call st%record%add(x, f)
 
     end subroutine evaluate_fc
 
@@ -1117,7 +1117,7 @@ contains
     !! **This procedure is this library's, not upstream's.** The mapping of 5.6 lives here once
     !! rather than three times: `SMALL_TR_RADIUS` is `PF_OPT_OK`, `FTARGET_ACHIEVED` is
     !! `PF_OPT_TARGET`, `MAXFUN_REACHED` and `MAXTR_REACHED` are `PF_OPT_LIMIT`, and everything
-    !! else -- `TRSUBP_FAILED`, `DAMAGING_ROUNDING`, `NAN_INF_MODEL` -- is `PF_OPT_ROUNDING`.
+    !! else -- `TRSUBP_FAILED`, `DAMAGING_ROUNDING`, `NAN_INF_MODEL` -- is `PF_OPT_ROUNDOFF`.
     !! `NAN_INF_X`, `NAN_INF_F` and `NO_SPACE_BETWEEN_BOUNDS` cannot arrive: a non-finite value
     !! aborts in `evaluate` and the bounds are refused before the engine sees them. They land in
     !! the default arm rather than one of their own so that `status` is defined whatever the
@@ -1135,10 +1135,11 @@ contains
     !! here rather than there (`feature_optimizer.md` 8, last entry). The test
     !! `a bound-active scaled problem comes back feasible in the caller's units`
     !! (`test/test_prima.f90`) is what holds it.
-    subroutine finish_run(prima_info, st, n, info, history, cstrv, ctol)
+    subroutine finish_run(prima_info, st, n, converged, info, history, cstrv, ctol)
         integer, intent(in)              :: prima_info !! PRIMA's exit code
         type(prima_state), intent(in)    :: st         !! the run's radius, count and record
         integer, intent(in)              :: n          !! how many variables
+        logical, intent(out), optional                   :: converged !! the run's own rule fired
         type(pf_optimize_info), intent(out), optional    :: info    !! what happened
         type(pf_optimize_history), intent(out), optional :: history !! every evaluation
         real(real64), intent(in), optional :: cstrv    !! violation in the caller's units
@@ -1154,13 +1155,16 @@ contains
         case (MAXFUN_REACHED, MAXTR_REACHED)
             status = PF_OPT_LIMIT
         case default
-            status = PF_OPT_ROUNDING
+            status = PF_OPT_ROUNDOFF
         end select
 
         if (present(cstrv) .and. present(ctol)) then
             if (cstrv > ctol) status = PF_OPT_INFEASIBLE
         end if
 
+        ! `converged` and `info%converged` are ONE expression, so the short answer and the long one
+        ! cannot drift apart, and the flag is set whether or not `info` was asked for.
+        if (present(converged)) converged = (status == PF_OPT_OK .or. status == PF_OPT_TARGET)
         if (present(info)) then
             info%status = status
             info%converged = (status == PF_OPT_OK .or. status == PF_OPT_TARGET)

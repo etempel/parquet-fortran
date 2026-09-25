@@ -76,7 +76,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 47 pages, in reading order. (This list, each group's own page list and the
+All 48 pages, in reading order. (This list, each group's own page list and the
 `ordered_subpage:` frontmatter are kept consistent by
 `tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
 
@@ -117,6 +117,7 @@ All 47 pages, in reading order. (This list, each group's own page list and the
 - [Sorting, ranking and selection](utilities/sorting.html)
 - [Array statistics with the `pf_` reduction family](utilities/statistics.html)
 - [Kernel density estimation with `parquet_kde`](utilities/kernel-density.html)
+- [Solver conventions: callbacks, tolerances, budgets and outcomes](utilities/solvers.html)
 - [Numerical integration with pf_integrate](utilities/integration.html)
 - [Interpolation of tabulated data with parquet_interpolate](utilities/interpolation.html)
 - [Distances and times in an expanding universe with parquet_cosmology](utilities/cosmology.html)

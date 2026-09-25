@@ -18,7 +18,7 @@ the full list of changes.
 use parquet_integrate
 use iso_fortran_env, only : real64
 
-type(pf_integration_info) :: info
+type(pf_integrate_info) :: info
 real(real64) :: r
 
 r = pf_integrate(gaussian, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info)
@@ -39,10 +39,8 @@ Signatures on this page show optional arguments in square brackets, with the com
 bracket:
 
 ```fortran
-res = pf_integrate(f, a, b, rtol, [max_neval], [converged], [info], [points], [context], &
-                   [log_base], [extrapolate], [max_panels], [breakpoints])
-res = pf_integrate(f, a, b, tol,  [max_neval], [converged], [info], [points], [context], &
-                   [log_base], [extrapolate], [max_panels], [breakpoints])
+res = pf_integrate(f, a, b, rtol, [atol], [max_neval], [log_base], [extrapolate], &
+                   [max_panels], [breakpoints], [converged], [info], [points], [context])
 ```
 
 ## The integrand
@@ -64,12 +62,12 @@ contains
     procedure :: eval => exp_profile_eval
 end type exp_profile
 
-function exp_profile_eval(this, x) result(f)
-    class(exp_profile), intent(inout) :: this
+function exp_profile_eval(self, x) result(f)
+    class(exp_profile), intent(inout) :: self
     real(real64), intent(in)          :: x
     real(real64)                      :: f
-    this%calls = this%calls + 1
-    f = this%amp*exp(-x/this%scale)
+    self%calls = self%calls + 1
+    f = self%amp*exp(-x/self%scale)
 end function exp_profile_eval
 ```
 
@@ -83,14 +81,9 @@ p%scale = 3.0_real64
 r = pf_integrate(p, 0.0_real64, 10.0_real64, 1.0e-10_real64)
 ```
 
-**The callback must be a module procedure or a type-bound procedure, never an internal one.** An
-internal procedure passed as an actual argument is a hard crash under one of this project's
-compilers and makes the binary demand an executable stack under another. An object is the
-supported way to carry context; a module variable is the other.
-
-**One object per thread.** `eval` may update the object, so two threads sharing one race. Give
-each thread its own and concurrent integrations are independent — nothing else in this module
-holds state between calls.
+**The callback must be a module procedure or a type-bound procedure, never an internal one**, and
+one object per thread — see [Solver conventions](solvers.html#the-function-you-supply), which
+states both rules once for all four solver modules.
 
 ## Ranges
 
@@ -142,8 +135,7 @@ own, by the path its own bounds select. The results, the error estimates and the
 concatenated in order.
 
 ```fortran
-r = pf_integrate(bump_at_40, 0.0_real64, 1000.0_real64, &
-                 pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), &
+r = pf_integrate(bump_at_40, 0.0_real64, 1000.0_real64, 1.0e-8_real64, atol=1.0e-14_real64, &
                  breakpoints=[30.0_real64, 50.0_real64])
 ```
 
@@ -180,8 +172,8 @@ from one piece to the next, so `max_neval` still bounds the call rather than eac
 
 ## Tolerances
 
-Pass either a bare `rtol`, or a `pf_tolerance` carrying `rtol` and `atol` together. At least one
-of the two must be positive. Convergence is QUADPACK's own test:
+`rtol` is the required fourth argument and `atol` an optional one after it. At least one of the
+two must be positive. Convergence is QUADPACK's own test:
 
 ```
 estimated error <= max(atol, rtol*abs(result))
@@ -192,7 +184,7 @@ tolerance on a result of `1e-30` asks for an accuracy no arithmetic can deliver.
 `atol` is for:
 
 ```fortran
-r = pf_integrate(f, a, b, pf_tolerance(rtol=0.0_real64, atol=1.0e-10_real64))
+r = pf_integrate(f, a, b, rtol=0.0_real64, atol=1.0e-10_real64)
 ```
 
 **There is a floor.** An `rtol` below `50*epsilon(1.0_real64)` with no positive `atol` is refused,
@@ -213,7 +205,7 @@ search accepted; it defaults to 100, and reaching it is `PF_INT_LIMIT` in the sa
 only to an infinite range — passing it with two finite bounds aborts — and on `(-inf, +inf)`,
 which is two walks, it caps each of them.
 
-`converged=` is the short answer. `info=` is the long one, a `pf_integration_info` carrying:
+`converged=` is the short answer. `info=` is the long one, a `pf_integrate_info` carrying:
 
 | Component | What it says |
 |---|---|
@@ -225,9 +217,9 @@ which is two walks, it caps each of them.
 | `neval` | integrand evaluations, counted |
 | `nsub` | subintervals in the final partition, summed over the walk's panels and the pieces |
 | `npanels` | 1 per finite range or piece; the panels the walk used, both halves counted, on an infinite one |
-| `non_finite_at` | the point the integrand returned a NaN or an infinity at; meaningful only when `status` is `PF_INT_BAD_VALUE` |
+| `nonfinite_at` | the point the integrand returned a NaN or an infinity at; meaningful only when `status` is `PF_INT_NONFINITE` |
 
-`non_finite_at` is zero on every other status, and zero is a point like any other — read it only
+`nonfinite_at` is zero on every other status, and zero is a point like any other — read it only
 after checking `status`, never as a test for whether anything went wrong.
 
 **Nothing is ever printed.** This module reads no verbosity setting and has no message stream; it
@@ -241,26 +233,26 @@ reports through these values, and speaks only by aborting when a caller contract
 | `PF_INT_BAD_INTEGRAND` | the integrand behaves extremely badly somewhere | split the range at the offending point |
 | `PF_INT_NO_CONVERGENCE` | the extrapolation table stopped making progress | loosen the tolerance, split the range at whatever the table could not accelerate, or pass `extrapolate=.false.` |
 | `PF_INT_DIVERGENT` | the integral is probably divergent or very slowly convergent | check that the integral exists; the returned number is finite but is not an integral |
-| `PF_INT_BAD_VALUE` | your integrand returned a NaN or an infinity | read `info%non_finite_at` for the point, and fix the integrand or keep that point out of the range |
+| `PF_INT_NONFINITE` | your integrand returned a NaN or an infinity | read `info%nonfinite_at` for the point, and fix the integrand or keep that point out of the range |
 
 A non-`PF_INT_OK` status still returns the engine's best estimate, and it is often a good one: a
 discontinuity inside the range reports `PF_INT_BAD_INTEGRAND` while returning an answer accurate
 to many digits. Read `abserr` rather than assuming the worst.
 
-`PF_INT_BAD_VALUE` is the exception to that: the partition it stopped on is a partition of
+`PF_INT_NONFINITE` is the exception to that: the partition it stopped on is a partition of
 whatever your integrand answered before it stopped answering numbers, so the returned value and
 `abserr` are both worth nothing. It is also the one outcome here that is about your code rather
 than about the integral, which is why it is a status and not an abort — a sweep over a parameter
-grid survives one bad parameter, and `non_finite_at` says which point to look at.
+grid survives one bad parameter, and `nonfinite_at` says which point to look at.
 
 ## The evaluation record
 
-Pass `points=` and you get back a `pf_integration_points`: every abscissa, weight and value of the
+Pass `points=` and you get back a `pf_integrate_points`: every abscissa, weight and value of the
 **final partition**, with `n` saying how many are in use.
 
 ```fortran
-type(pf_integration_points) :: pts
-type(pf_integration_info) :: info
+type(pf_integrate_points) :: pts
+type(pf_integrate_info) :: info
 real(real64) :: r, again
 
 r = pf_integrate(f, a, b, 1.0e-10_real64, info=info, points=pts)
@@ -313,7 +305,7 @@ tolerances.
 
 It also earns two of the status codes. A divergent integral is reported as `PF_INT_DIVERGENT` in
 a couple of hundred evaluations, where the bisection alone would keep drilling towards the
-singularity until the integrand overflows and the answer becomes `PF_INT_BAD_VALUE` instead. A jump inside the
+singularity until the integrand overflows and the answer becomes `PF_INT_NONFINITE` instead. A jump inside the
 range — which the table cannot accelerate, because the sequence it is handed was never
 converging — is reported as `PF_INT_NO_CONVERGENCE`.
 
@@ -411,8 +403,8 @@ Every abort is taken under a named `critical`, so one thread aborts rather than 
 exit status stays meaningful when the call was inside a parallel region.
 
 **What your INTEGRAND does is not on this list.** An integrand that returns a NaN or an infinity
-ends the integration, not the process: `PF_INT_BAD_VALUE`, `converged` false, and
-`info%non_finite_at` carrying the point. It is worth planning for — an interior singularity that
+ends the integration, not the process: `PF_INT_NONFINITE`, `converged` false, and
+`info%nonfinite_at` carrying the point. It is worth planning for — an interior singularity that
 happens to land exactly on an abscissa reaches it, and `1/sqrt(abs(x - 0.5))` on `[0, 1]` puts the
 centre point of the first rule application on one. Split the range at the singularity with
 `breakpoints=`, which is also QUADPACK's own advice; an *endpoint* singularity needs nothing,

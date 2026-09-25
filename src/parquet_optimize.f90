@@ -74,7 +74,7 @@ module parquet_optimize
     public :: pf_minimize_de, pf_minimize_multistart
     public :: parquet_debug_optimize_threads_used
     public :: PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET
-    public :: PF_OPT_NONFINITE, PF_OPT_ROUNDING, PF_OPT_INFEASIBLE
+    public :: PF_OPT_NONFINITE, PF_OPT_ROUNDOFF, PF_OPT_INFEASIBLE
     !
     ! ---- Re-exported from parquet_settings_base ----
     !
@@ -92,13 +92,13 @@ module parquet_optimize
     ! Declared ABOVE pf_optimize_info because that type's `status` component initialises from
     ! PF_OPT_OK: a named constant in an initialisation expression must already be declared, and
     ! the reverse order is a compile error rather than a forward reference. The same order is why
-    ! src/parquet_integrate.f90 carries its PF_INT_* block above pf_integration_info.
+    ! src/parquet_integrate.f90 carries its PF_INT_* block above pf_integrate_info.
 
     integer, parameter :: PF_OPT_OK = 0          !! the engine's own convergence test was met
     integer, parameter :: PF_OPT_LIMIT = 1       !! `max_neval`, `max_gen` or `max_iter` came first
     integer, parameter :: PF_OPT_TARGET = 2      !! `ftarget` reached (the population tier)
     integer, parameter :: PF_OPT_NONFINITE = 3   !! no finite value anywhere (the population tier)
-    integer, parameter :: PF_OPT_ROUNDING = 4    !! rounding blocks any further model improvement
+    integer, parameter :: PF_OPT_ROUNDOFF = 4    !! rounding blocks any further model improvement
     integer, parameter :: PF_OPT_INFEASIBLE = 5  !! `cstrv > ctol` at the returned point
 
     !> Longest caller `context=` text carried into an abort message before it is cut.
@@ -124,7 +124,7 @@ module parquet_optimize
     real(real64), parameter :: DE_CR = 0.9_real64
 
     !> Default fractional tolerance on the population's value spread.
-    real(real64), parameter :: DE_FTOL = 1.0e-6_real64
+    real(real64), parameter :: DE_RTOL = 1.0e-6_real64
 
     !> Step `polish=` gives the simplex, as a fraction of each coordinate's width.
     real(real64), parameter :: DE_POLISH_STEP = 1.0e-3_real64
@@ -135,7 +135,7 @@ module parquet_optimize
     !! `nminima` a count of BASINS: two starts that reached the same minimum agree to about `1e-5`
     !! of the box, so a radius tighter than that counts them twice and the number becomes a count
     !! of starts wearing the name of a count of minima.
-    real(real64), parameter :: MULTISTART_XTOL = 1.0e-3_real64
+    real(real64), parameter :: MULTISTART_MERGE_TOL = 1.0e-3_real64
 
     ! ---- the objective ------------------------------------------------------------------------
 
@@ -155,10 +155,10 @@ module parquet_optimize
         !!
         !! The object is `intent(inout)` so an extension may keep a counter or a cache. A local
         !! engine aborts on a NaN or an infinity returned here rather than comparing it.
-        function pf_objective_eval(this, x) result(f)
+        function pf_objective_eval(self, x) result(f)
             import :: pf_objective, real64
             implicit none
-            class(pf_objective), intent(inout) :: this !! the objective object
+            class(pf_objective), intent(inout) :: self !! the objective object
             real(real64), intent(in)           :: x(:) !! the point
             real(real64)                       :: f    !! objective value at `x`
         end function pf_objective_eval
@@ -193,10 +193,10 @@ module parquet_optimize
     abstract interface
 
         !> How many constraint values the object fills; read once per call.
-        function pf_constraint_count(this) result(m)
+        function pf_constraint_count(self) result(m)
             import :: pf_constrained_objective
             implicit none
-            class(pf_constrained_objective), intent(in) :: this !! the objective
+            class(pf_constrained_objective), intent(in) :: self !! the objective
             integer                                     :: m    !! the number of constraints
         end function pf_constraint_count
 
@@ -215,10 +215,10 @@ module parquet_optimize
         !! `COBYLA answers on the constraint boundary, and the sign decides which side`
         !! (`test/test_prima.f90`) minimises over the OUTSIDE of a disc, where the two conventions
         !! give answers of `1` and `0` rather than answers a tolerance could confuse.
-        subroutine pf_constraint_eval(this, x, c)
+        subroutine pf_constraint_eval(self, x, c)
             import :: pf_constrained_objective, real64
             implicit none
-            class(pf_constrained_objective), intent(inout) :: this !! the objective
+            class(pf_constrained_objective), intent(inout) :: self !! the objective
             real(real64), intent(in)                       :: x(:) !! the point
             real(real64), intent(out)                      :: c(:) !! exactly `n_constraints()` values
         end subroutine pf_constraint_eval
@@ -247,7 +247,7 @@ module parquet_optimize
     !> A record of evaluations: every one for a local engine, the best of each generation for DE,
     !! every local minimum before deduplication for the multistart driver.
     !!
-    !! Grown geometrically and **trimmed to `n` on output**, as `pf_integration_points` is, so a
+    !! Grown geometrically and **trimmed to `n` on output**, as `pf_integrate_points` is, so a
     !! caller reads `x(:, 1:n)` and `f(1:n)` without knowing how it was filled. Costs memory only
     !! when the caller asks for it.
     type :: pf_optimize_history
@@ -255,7 +255,7 @@ module parquet_optimize
         real(real64), allocatable :: x(:,:) !! points, one per column
         real(real64), allocatable :: f(:)   !! objective values
     contains
-        procedure :: append => history_append !! Appends one record, growing geometrically.
+        procedure :: add => history_add !! Adds one record, growing geometrically.
     end type pf_optimize_history
 
     ! ---- the local solver the multistart driver runs ------------------------------------------
@@ -277,11 +277,11 @@ module parquet_optimize
         !!
         !! `lower`/`upper` are the driver's box, which a bounded engine honours and an unbounded
         !! one treats as the start region only.
-        subroutine pf_local_run(this, obj, x, fmin, lower, upper, info)
+        subroutine pf_local_run(self, f, x, fmin, lower, upper, info)
             import :: pf_local_solver, pf_objective, pf_optimize_info, real64
             implicit none
-            class(pf_local_solver), intent(in)  :: this     !! the solver and its options
-            class(pf_objective), intent(inout)  :: obj      !! the objective (this thread's clone)
+            class(pf_local_solver), intent(in)  :: self     !! the solver and its options
+            class(pf_objective), intent(inout)  :: f        !! the objective (this thread's clone)
             real(real64), intent(inout)         :: x(:)     !! start in, minimum out
             real(real64), intent(out)           :: fmin     !! value at `x`
             real(real64), intent(in)            :: lower(:) !! the driver's box
@@ -294,14 +294,20 @@ module parquet_optimize
     !> Nelder-Mead as a local solver for the multistart driver.
     !!
     !! The defaults are a valid pair as they stand (`atol` positive), which the entry point's own
-    !! bare form is not: `pf_minimize_simplex` requires `ftol` positionally, exactly as qfeet's
-    !! `minimize` does, so that "at least one of ftol and atol must be positive" cannot be reached
+    !! bare form is not: `pf_minimize_simplex` requires `rtol` positionally, exactly as qfeet's
+    !! `minimize` does, so that "at least one of rtol and atol must be positive" cannot be reached
     !! by omitting an argument.
+    !!
+    !! **`max_neval = 0` means the engine's own default**, which is what the component means in
+    !! `pf_bobyqa_solver` too, and a NEGATIVE value is refused in both rather than silently read as
+    !! the default. `0` passed as an ARGUMENT to `pf_minimize_simplex` is still refused: the rule is
+    !! the object's, not the entry point's.
     type, extends(pf_local_solver) :: pf_simplex_solver
         real(real64) :: step_fraction = 0.1_real64 !! `step = step_fraction*(upper - lower)`
-        real(real64) :: ftol = 0.0_real64          !! as `pf_minimize_simplex`, which requires it
+        real(real64) :: rtol = 0.0_real64          !! as `pf_minimize_simplex`, which requires it
         real(real64) :: atol = 1.0e-10_real64      !! as `pf_minimize_simplex`
-        integer      :: max_neval = 5000           !! as `pf_minimize_simplex`
+        integer      :: max_neval = 0              !! `0` means the simplex's own 5000;
+                                                   !! a negative value is refused
     contains
         procedure :: run => simplex_solver_run !! Calls `pf_minimize_simplex` with these options.
     end type pf_simplex_solver
@@ -347,37 +353,39 @@ module parquet_optimize
     !! or a plain `procedure(pf_objective_func)`; either is evaluated at a one-element array.
     !!
     !! Arguments: `f` the objective; `a` and `b` the bracket ends, finite with `a < b`; `x` the
-    !! minimiser and `fmin` its value, both `intent(out)` scalars; `tol` the absolute tolerance on
+    !! minimiser and `fmin` its value, both `intent(out)` scalars; `atol` the absolute tolerance on
     !! `x`, default `0` meaning "as accurately as the arithmetic allows"; `max_neval` the
     !! evaluation budget, default 500; `info` the outcome; `history` every `(x, f)` in order; and
     !! `context` text appended to any abort message.
     interface pf_minimize_scalar
 
         !> Brent's method with the objective as an object.
-        module subroutine minimize_scalar_obj(f, a, b, x, fmin, tol, max_neval, info, history, context)
+        module subroutine minimize_scalar_obj(f, a, b, x, fmin, atol, max_neval, converged, info, history, context)
             implicit none
             class(pf_objective), intent(inout)                 :: f         !! the objective
             real(real64), intent(in)                           :: a         !! bracket, lower end
             real(real64), intent(in)                           :: b         !! bracket, upper end
             real(real64), intent(out)                          :: x         !! the minimiser found
             real(real64), intent(out)                          :: fmin      !! value at `x`
-            real(real64), intent(in), optional                 :: tol       !! tolerance on `x`
-            integer, intent(in), optional                      :: max_neval !! evaluation budget
+            real(real64), intent(in), optional                 :: atol      !! tolerance on `x`
+            integer, intent(in), optional                      :: max_neval !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                     :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional      :: info      !! what happened
             type(pf_optimize_history), intent(out), optional   :: history   !! every evaluation
             character(len=*), intent(in), optional             :: context   !! call-site text
         end subroutine minimize_scalar_obj
 
         !> Brent's method with the objective as a plain module procedure.
-        module subroutine minimize_scalar_func(f, a, b, x, fmin, tol, max_neval, info, history, context)
+        module subroutine minimize_scalar_func(f, a, b, x, fmin, atol, max_neval, converged, info, history, context)
             implicit none
             procedure(pf_objective_func)                       :: f         !! the objective
             real(real64), intent(in)                           :: a         !! bracket, lower end
             real(real64), intent(in)                           :: b         !! bracket, upper end
             real(real64), intent(out)                          :: x         !! the minimiser found
             real(real64), intent(out)                          :: fmin      !! value at `x`
-            real(real64), intent(in), optional                 :: tol       !! tolerance on `x`
-            integer, intent(in), optional                      :: max_neval !! evaluation budget
+            real(real64), intent(in), optional                 :: atol      !! tolerance on `x`
+            integer, intent(in), optional                      :: max_neval !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                     :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional      :: info      !! what happened
             type(pf_optimize_history), intent(out), optional   :: history   !! every evaluation
             character(len=*), intent(in), optional             :: context   !! call-site text
@@ -394,39 +402,41 @@ module parquet_optimize
     !! with `step(i)` added to coordinate `i`.
     !!
     !! Arguments: `f` the objective; `x` the start point in and the best point out; `fmin` its
-    !! value; `step` the per-coordinate offset, no element zero or NaN; `ftol` the fractional
+    !! value; `step` the per-coordinate offset, no element zero or NaN; `rtol` the fractional
     !! tolerance on the value spread, REQUIRED as qfeet has it; `atol` the absolute tolerance,
     !! default `0`, at least one of the two positive; `max_neval` the budget, default 5000; then
     !! `info`, `history` and `context`.
     interface pf_minimize_simplex
 
         !> Nelder-Mead with the objective as an object.
-        module subroutine minimize_simplex_obj(f, x, fmin, step, ftol, atol, max_neval, info, &
+        module subroutine minimize_simplex_obj(f, x, fmin, step, rtol, atol, max_neval, converged, info, &
                                                history, context)
             implicit none
             class(pf_objective), intent(inout)               :: f         !! the objective
             real(real64), intent(inout)                      :: x(:)      !! start in, minimum out
             real(real64), intent(out)                        :: fmin      !! value at `x`
             real(real64), intent(in)                         :: step(:)   !! offset per coordinate
-            real(real64), intent(in)                         :: ftol      !! fractional tolerance
+            real(real64), intent(in)                         :: rtol      !! fractional tolerance
             real(real64), intent(in), optional               :: atol      !! absolute tolerance
-            integer, intent(in), optional                    :: max_neval !! evaluation budget
+            integer, intent(in), optional                    :: max_neval !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info      !! what happened
             type(pf_optimize_history), intent(out), optional :: history   !! every evaluation
             character(len=*), intent(in), optional           :: context   !! call-site text
         end subroutine minimize_simplex_obj
 
         !> Nelder-Mead with the objective as a plain module procedure.
-        module subroutine minimize_simplex_func(f, x, fmin, step, ftol, atol, max_neval, info, &
+        module subroutine minimize_simplex_func(f, x, fmin, step, rtol, atol, max_neval, converged, info, &
                                                 history, context)
             implicit none
             procedure(pf_objective_func)                     :: f         !! the objective
             real(real64), intent(inout)                      :: x(:)      !! start in, minimum out
             real(real64), intent(out)                        :: fmin      !! value at `x`
             real(real64), intent(in)                         :: step(:)   !! offset per coordinate
-            real(real64), intent(in)                         :: ftol      !! fractional tolerance
+            real(real64), intent(in)                         :: rtol      !! fractional tolerance
             real(real64), intent(in), optional               :: atol      !! absolute tolerance
-            integer, intent(in), optional                    :: max_neval !! evaluation budget
+            integer, intent(in), optional                    :: max_neval !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info      !! what happened
             type(pf_optimize_history), intent(out), optional :: history   !! every evaluation
             character(len=*), intent(in), optional           :: context   !! call-site text
@@ -451,7 +461,7 @@ module parquet_optimize
     !! every coordinate; `seed` the run's seed; `x` the best point found and `fmin` its value, both
     !! `intent(out)`; `np` the population size, default `max(20, 10n)` and at least 4; `f_weight`
     !! the differential weight, default `0.8`, in `(0, 2]`; `cr` the crossover probability, default
-    !! `0.9`, in `[0, 1]`; `ftol` and `atol` the fractional and absolute tolerances on the
+    !! `0.9`, in `[0, 1]`; `rtol` and `atol` the fractional and absolute tolerances on the
     !! population's value spread, default `1e-6` and `0`, at least one positive -- **the fractional
     !! test cannot fire on a minimum of exactly zero**, where `atol` or `ftarget` is what ends the
     !! run; `ftarget` a value to stop at, and the argument to reach for when the minimum's value is
@@ -467,9 +477,9 @@ module parquet_optimize
     interface pf_minimize_de
 
         !> Differential evolution with the objective as an object.
-        module subroutine minimize_de_obj(f, lower, upper, seed, x, fmin, np, f_weight, cr, ftol, &
+        module subroutine minimize_de_obj(f, lower, upper, seed, x, fmin, np, f_weight, cr, rtol, &
                                           atol, ftarget, max_gen, max_neval, threads, polish, &
-                                          info, history, population, context)
+                                          converged, info, history, population, context)
             implicit none
             class(pf_objective), intent(inout)               :: f          !! the objective
             real(real64), intent(in)                         :: lower(:)   !! the box, lower corner
@@ -480,13 +490,14 @@ module parquet_optimize
             integer, intent(in), optional                    :: np         !! population size
             real(real64), intent(in), optional               :: f_weight   !! differential weight
             real(real64), intent(in), optional               :: cr         !! crossover probability
-            real(real64), intent(in), optional               :: ftol       !! fractional tolerance
+            real(real64), intent(in), optional               :: rtol       !! fractional tolerance
             real(real64), intent(in), optional               :: atol       !! absolute tolerance
             real(real64), intent(in), optional               :: ftarget    !! stop at this value
             integer, intent(in), optional                    :: max_gen    !! generation budget
-            integer, intent(in), optional                    :: max_neval  !! evaluation budget
+            integer, intent(in), optional                    :: max_neval  !! evaluation budget; at most huge(1)/2
             integer, intent(in), optional                    :: threads    !! evaluation team size
             logical, intent(in), optional                    :: polish     !! finish with a simplex
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info       !! what happened
             type(pf_optimize_history), intent(out), optional :: history    !! best of each generation
             real(real64), allocatable, intent(out), optional :: population(:,:) !! final population
@@ -494,9 +505,9 @@ module parquet_optimize
         end subroutine minimize_de_obj
 
         !> Differential evolution with the objective as a plain module procedure.
-        module subroutine minimize_de_func(f, lower, upper, seed, x, fmin, np, f_weight, cr, ftol, &
+        module subroutine minimize_de_func(f, lower, upper, seed, x, fmin, np, f_weight, cr, rtol, &
                                            atol, ftarget, max_gen, max_neval, threads, polish, &
-                                           info, history, population, context)
+                                           converged, info, history, population, context)
             implicit none
             procedure(pf_objective_func)                     :: f          !! the objective
             real(real64), intent(in)                         :: lower(:)   !! the box, lower corner
@@ -507,13 +518,14 @@ module parquet_optimize
             integer, intent(in), optional                    :: np         !! population size
             real(real64), intent(in), optional               :: f_weight   !! differential weight
             real(real64), intent(in), optional               :: cr         !! crossover probability
-            real(real64), intent(in), optional               :: ftol       !! fractional tolerance
+            real(real64), intent(in), optional               :: rtol       !! fractional tolerance
             real(real64), intent(in), optional               :: atol       !! absolute tolerance
             real(real64), intent(in), optional               :: ftarget    !! stop at this value
             integer, intent(in), optional                    :: max_gen    !! generation budget
-            integer, intent(in), optional                    :: max_neval  !! evaluation budget
+            integer, intent(in), optional                    :: max_neval  !! evaluation budget; at most huge(1)/2
             integer, intent(in), optional                    :: threads    !! evaluation team size
             logical, intent(in), optional                    :: polish     !! finish with a simplex
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info       !! what happened
             type(pf_optimize_history), intent(out), optional :: history    !! best of each generation
             real(real64), allocatable, intent(out), optional :: population(:,:) !! final population
@@ -537,12 +549,12 @@ module parquet_optimize
     !! Arguments: `f` the objective; `lower` and `upper` the box; `seed` the run's seed; `x` the
     !! best point found and `fmin` its value, both `intent(out)`; `nstart` the number of starts,
     !! default `max(10, 2n)`; `solver` the local engine and its options, default
-    !! `pf_simplex_solver()`; `xtol` the merge radius as a fraction of each coordinate's width,
+    !! `pf_simplex_solver()`; `merge_tol` the merge radius as a fraction of each coordinate's width,
     !! default `1e-3`; `threads` the team the starts run on, default 1; then `info` (whose
     !! `nminima` counts the distinct minima and whose `nlimit` counts the runs that ran out of
     !! budget), `history` (every start's own minimum, before merging) and `context`.
     !!
-    !! **`nminima` counts basins only while `xtol` exceeds the local solver's own accuracy** as a
+    !! **`nminima` counts basins only while `merge_tol` exceeds the local solver's own accuracy** as a
     !! fraction of the box: below that, two starts that reached the same minimum are counted twice,
     !! and above the distance between two genuine minima, two basins are counted once. The default
     !! suits a solver converging to about `1e-5` of the box; `history` carries every start's own
@@ -551,7 +563,7 @@ module parquet_optimize
 
         !> The multistart driver with the objective as an object.
         module subroutine minimize_multistart_obj(f, lower, upper, seed, x, fmin, nstart, solver, &
-                                                  xtol, threads, info, history, context)
+                                                  merge_tol, threads, converged, info, history, context)
             implicit none
             class(pf_objective), intent(inout)               :: f        !! the objective
             real(real64), intent(in)                         :: lower(:) !! the box, lower corner
@@ -561,8 +573,9 @@ module parquet_optimize
             real(real64), intent(out)                        :: fmin     !! value at `x`
             integer, intent(in), optional                    :: nstart   !! how many starts
             class(pf_local_solver), intent(in), optional     :: solver   !! the local engine
-            real(real64), intent(in), optional               :: xtol     !! merge radius, as a fraction
+            real(real64), intent(in), optional               :: merge_tol     !! merge radius, as a fraction
             integer, intent(in), optional                    :: threads  !! team the starts run on
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info     !! what happened
             type(pf_optimize_history), intent(out), optional :: history  !! every start's minimum
             character(len=*), intent(in), optional           :: context  !! call-site text
@@ -570,7 +583,7 @@ module parquet_optimize
 
         !> The multistart driver with the objective as a plain module procedure.
         module subroutine minimize_multistart_func(f, lower, upper, seed, x, fmin, nstart, solver, &
-                                                   xtol, threads, info, history, context)
+                                                   merge_tol, threads, converged, info, history, context)
             implicit none
             procedure(pf_objective_func)                     :: f        !! the objective
             real(real64), intent(in)                         :: lower(:) !! the box, lower corner
@@ -580,8 +593,9 @@ module parquet_optimize
             real(real64), intent(out)                        :: fmin     !! value at `x`
             integer, intent(in), optional                    :: nstart   !! how many starts
             class(pf_local_solver), intent(in), optional     :: solver   !! the local engine
-            real(real64), intent(in), optional               :: xtol     !! merge radius, as a fraction
+            real(real64), intent(in), optional               :: merge_tol     !! merge radius, as a fraction
             integer, intent(in), optional                    :: threads  !! team the starts run on
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info     !! what happened
             type(pf_optimize_history), intent(out), optional :: history  !! every start's minimum
             character(len=*), intent(in), optional           :: context  !! call-site text
@@ -652,23 +666,23 @@ module parquet_optimize
         end subroutine validate_budget
 
         !> Appends one record to a history, growing it geometrically.
-        module subroutine history_append(this, x, f)
+        module subroutine history_add(this, x, f)
             implicit none
             class(pf_optimize_history), intent(inout) :: this !! the record to extend
             real(real64), intent(in)                  :: x(:) !! the point
             real(real64), intent(in)                  :: f    !! objective value at `x`
-        end subroutine history_append
+        end subroutine history_add
 
-        !> Trims a history to the records actually in use, as `pf_integration_points` is trimmed.
+        !> Trims a history to the records actually in use, as `pf_integrate_points` is trimmed.
         module subroutine history_trim(this)
             implicit none
             type(pf_optimize_history), intent(inout) :: this !! the record to trim
         end subroutine history_trim
 
         !> Calls the wrapped plain function.
-        module function func_objective_eval(this, x) result(f)
+        module function func_objective_eval(self, x) result(f)
             implicit none
-            class(func_objective), intent(inout) :: this !! the wrapper
+            class(func_objective), intent(inout) :: self !! the wrapper
             real(real64), intent(in)             :: x(:) !! the point
             real(real64)                         :: f    !! objective value at `x`
         end function func_objective_eval
@@ -763,10 +777,10 @@ module parquet_optimize
     interface
 
         !> `pf_simplex_solver%run`: derives `step` from the box and calls `pf_minimize_simplex`.
-        module subroutine simplex_solver_run(this, obj, x, fmin, lower, upper, info)
+        module subroutine simplex_solver_run(self, f, x, fmin, lower, upper, info)
             implicit none
-            class(pf_simplex_solver), intent(in) :: this     !! the solver and its options
-            class(pf_objective), intent(inout)   :: obj      !! the objective
+            class(pf_simplex_solver), intent(in) :: self     !! the solver and its options
+            class(pf_objective), intent(inout)   :: f        !! the objective
             real(real64), intent(inout)          :: x(:)     !! start in, minimum out
             real(real64), intent(out)            :: fmin     !! value at `x`
             real(real64), intent(in)             :: lower(:) !! the driver's box

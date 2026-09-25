@@ -51,7 +51,7 @@
 !! 5. Every evaluation is screened for a non-finite value. The first one is recorded in a
 !!    `bad_value` carried through the rule and the driver in place of upstream's nothing, and the
 !!    routines here stop at their next check rather than letting a NaN into the partition; the
-!!    driver turns it into `PF_INT_BAD_VALUE`. The screen is why `qk21` needs no `context`: it
+!!    driver turns it into `PF_INT_NONFINITE`. The screen is why `qk21` needs no `context`: it
 !!    reports rather than aborts. The rule itself consumes a zero in place of every non-finite
 !!    value, so no arithmetic here ever raises on one.
 !! 6. `ier` is returned RAW: QUADPACK's `if (ier > 2) ier = ier - 1` shift is applied once, by the
@@ -241,7 +241,7 @@ contains
         ! The rule goes on combining this point with its neighbours after the screen has fired --
         ! `Inf - Inf` in its error estimate, `min` and ordered comparisons over a NaN -- and each
         ! raises IEEE_INVALID, which under unmasked traps ends the process the status exists to
-        ! keep alive. What the rule then returns is discarded: on `PF_INT_BAD_VALUE` the result is
+        ! keep alive. What the rule then returns is discarded: on `PF_INT_NONFINITE` the result is
         ! worth nothing by contract (`test_status_divergent`, `test_non_finite_value_is_reported`).
         if (is_bad) then
             fval = 0.0_real64

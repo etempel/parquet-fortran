@@ -59,10 +59,12 @@ contains
                          test_log_base_over_decades), &
             new_unittest("the six reference integrands meet their tolerance and their budget", &
                          test_six_reference_integrands), &
-            new_unittest("all four specifics agree bit for bit and the object counts its calls", &
+            new_unittest("both specifics agree bit for bit and the object counts its calls", &
                          test_entry_forms_agree), &
             new_unittest("an atol-only tolerance converges where a relative one cannot", &
                          test_atol_only_tolerance), &
+            new_unittest("an atol-only call converges on an integral that is zero", &
+                         test_atol_only_on_a_zero_integral), &
             new_unittest("a zero-width range returns zero without evaluating anything", &
                          test_zero_width_range), &
             new_unittest("an identically zero integrand costs exactly one rule application", &
@@ -173,7 +175,7 @@ contains
     subroutine test_log_base_over_decades(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: with_log, without_log
+        type(pf_integrate_info) :: with_log, without_log
         real(real64)              :: r, want
         real(real64), parameter   :: LO = 1.0e-3_real64, HI = 1.0e3_real64
 
@@ -241,7 +243,7 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         real(real64), intent(in)                   :: rtol  !! tolerance to ask for
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
         character(len=16)         :: at
 
@@ -267,7 +269,7 @@ contains
         integer, intent(in)                        :: measured !! count when this was written
         character(len=*), intent(in)               :: what     !! names the case in a message
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(fn, a, pf_infinity(), rtol, info=info)
@@ -290,7 +292,7 @@ contains
         integer, intent(in)                        :: measured !! count when this was written
         character(len=*), intent(in)               :: what     !! names the case in a message
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(fn, 0.0_real64, 1.0_real64, rtol, info=info)
@@ -304,39 +306,41 @@ contains
 
     end subroutine one_reference
 
-    !> Asserts that the four specifics are four spellings of one computation.
+    !> Asserts that the two specifics are two spellings of one computation, and that omitting
+    !! `atol` is the same call as passing its default of zero.
     subroutine test_entry_forms_agree(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(scaled_runge) :: obj
-        real(real64)       :: v_func_rtol, v_func_tol, v_obj_rtol, v_obj_tol
+        real(real64)       :: v_func, v_func_atol, v_obj, v_obj_atol
 
-        v_func_rtol = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64)
-        v_func_tol = pf_integrate(runge, 0.0_real64, 1.0_real64, &
-                                  pf_tolerance(rtol=1.0e-10_real64))
-        call check(error, v_func_rtol == v_func_tol, &
-                   "the bare rtol and the pf_tolerance forms must agree bit for bit")
+        v_func = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64)
+        v_func_atol = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
+                                   atol=0.0_real64)
+        call check(error, v_func == v_func_atol, &
+                   "an absent atol must be the same call as atol=0, bit for bit")
         if (allocated(error)) return
 
         obj%amp = 1.0_real64
-        v_obj_rtol = pf_integrate(obj, 0.0_real64, 1.0_real64, 1.0e-10_real64)
-        call check(error, v_obj_rtol == v_func_rtol, &
+        v_obj = pf_integrate(obj, 0.0_real64, 1.0_real64, 1.0e-10_real64)
+        call check(error, v_obj == v_func, &
                    "the object form must agree with the plain-function form bit for bit")
         if (allocated(error)) return
         call check(error, obj%calls > 0, "the object must have seen every evaluation itself")
         if (allocated(error)) return
 
         obj%calls = 0
-        v_obj_tol = pf_integrate(obj, 0.0_real64, 1.0_real64, pf_tolerance(rtol=1.0e-10_real64))
-        call check(error, v_obj_tol == v_func_rtol, &
-                   "the object plus pf_tolerance form must agree with the other three")
+        v_obj_atol = pf_integrate(obj, 0.0_real64, 1.0_real64, rtol=1.0e-10_real64, &
+                                  atol=0.0_real64)
+        call check(error, v_obj_atol == v_func, &
+                   "the object form with both tolerances by keyword must agree with the rest")
         if (allocated(error)) return
 
         ! An amplitude is linear in the integrand, so it is linear in the integral, and the two
         ! runs differ only by a factor the arithmetic reproduces exactly.
         obj%amp = 3.0_real64
         call check(error, abs(pf_integrate(obj, 0.0_real64, 1.0_real64, 1.0e-10_real64) &
-                              - 3.0_real64*v_func_rtol) <= 1.0e-15_real64*abs(v_func_rtol), &
+                              - 3.0_real64*v_func) <= 1.0e-15_real64*abs(v_func), &
                    "an object carrying an amplitude must scale the integral by it")
 
     end subroutine test_entry_forms_agree
@@ -345,11 +349,11 @@ contains
     subroutine test_atol_only_tolerance(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(runge, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=0.0_real64, atol=1.0e-10_real64), info=info)
+                         rtol=0.0_real64, atol=1.0e-10_real64, info=info)
         call check(error, info%converged, "an atol-only tolerance must be accepted and converge")
         if (allocated(error)) return
         call check(error, abs(r - runge_exact()) <= 1.0e-10_real64, &
@@ -357,12 +361,43 @@ contains
 
     end subroutine test_atol_only_tolerance
 
+    !> Asserts that an `atol`-only call converges on an integral whose true value is exactly zero.
+    !!
+    !! **This is the case `rtol` alone cannot state.** `sin` is odd, so its integral over a range
+    !! symmetric about the origin is exactly zero, and the convergence test
+    !! `abserr <= max(atol, rtol*abs(result))` then reduces to `abserr <= atol`: with `atol = 0`
+    !! there is no tolerance any arithmetic could meet, and the run would spend its budget. So the
+    !! assertion is that `atol` alone both reaches the engine and decides the outcome.
+    !!
+    !! Mutation proved: make the engine receive `atol = 0` -- drop the `if (present(atol))` in
+    !! `tolerance_of` (`src/parquet_integrate_driver.f90`) -- and this test fails, because the
+    !! call is then refused for having no positive tolerance at all.
+    subroutine test_atol_only_on_a_zero_integral(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        real(real64), parameter :: PI = acos(-1.0_real64) !! the half-turn, for a symmetric range
+
+        type(pf_integrate_info) :: info
+        real(real64)              :: r
+
+        r = pf_integrate(sine, -PI, PI, rtol=0.0_real64, atol=1.0e-10_real64, info=info)
+        call check(error, info%converged, &
+                   "an atol-only call must converge on an integral that is zero")
+        if (allocated(error)) return
+        call check(error, info%status == PF_INT_OK, &
+                   "an atol-only call on a zero integral must report PF_INT_OK")
+        if (allocated(error)) return
+        call check(error, abs(r) <= 1.0e-10_real64, &
+                   "the integral of an odd function over a symmetric range must be zero to atol")
+
+    end subroutine test_atol_only_on_a_zero_integral
+
     !> Asserts the zero-width range: zero, no evaluation, and an allocated but empty record.
     subroutine test_zero_width_range(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info)   :: info
-        type(pf_integration_points) :: pts
+        type(pf_integrate_info)   :: info
+        type(pf_integrate_points) :: pts
         real(real64)                :: r
 
         r = pf_integrate(runge, 0.5_real64, 0.5_real64, 1.0e-10_real64, info=info, points=pts)
@@ -391,7 +426,7 @@ contains
     subroutine test_zero_integrand_costs_one_rule(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(zero_integrand, 0.0_real64, 1.0_real64, 1.0e-8_real64, info=info)
@@ -415,7 +450,7 @@ contains
     subroutine test_infinite_tails(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r, negated, inf
 
         inf = pf_infinity()
@@ -530,7 +565,7 @@ contains
         real(real64), intent(in)                   :: thr   !! relative threshold to assert
         character(len=*), intent(in)               :: what  !! names the case in a message
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(fn, a, pf_infinity(), 1.0e-10_real64, info=info)
@@ -551,7 +586,7 @@ contains
     subroutine test_integral_inf_oscillatory(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: loose, tight, plain
+        type(pf_integrate_info) :: loose, tight, plain
         real(real64)              :: r, r_plain, want, inf
 
         inf = pf_infinity()
@@ -609,7 +644,7 @@ contains
     subroutine test_infinite_ranges_are_consistent(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: whole, half
+        type(pf_integrate_info) :: whole, half
         real(real64)              :: r, r_half, inf, sqrt_pi
 
         inf = pf_infinity()
@@ -653,7 +688,7 @@ contains
     subroutine test_max_panels_caps_the_walk(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: capped, budgeted
+        type(pf_integrate_info) :: capped, budgeted
         real(real64)              :: r, inf
 
         inf = pf_infinity()
@@ -685,7 +720,7 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
         type(exp_profile)         :: profile
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r_func, r_obj, r_tol, inf
 
         inf = pf_infinity()
@@ -701,13 +736,13 @@ contains
                    "the object must have been called once per counted evaluation")
         if (allocated(error)) return
 
-        ! The plain-function form and the pf_tolerance form must agree bit for bit with each
-        ! other on the same range.
+        ! Passing `atol` explicitly at its default must be the same call, bit for bit, on an
+        ! infinite range as on a finite one.
         r_func = pf_integrate(tail_exp, 1.0_real64, inf, 1.0e-10_real64)
         r_tol = pf_integrate(tail_exp, 1.0_real64, inf, &
-                             pf_tolerance(rtol=1.0e-10_real64, atol=0.0_real64))
+                             rtol=1.0e-10_real64, atol=0.0_real64)
         call check(error, r_func == r_tol, &
-                   "the rtol and pf_tolerance forms must agree bit for bit on a tail")
+                   "an absent atol must be the same call as atol=0 on a tail, bit for bit")
 
     end subroutine test_infinite_entry_forms
 
@@ -722,8 +757,8 @@ contains
     subroutine test_points_reproduce_the_partition_integral(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info)   :: info
-        type(pf_integration_points) :: pts
+        type(pf_integrate_info)   :: info
+        type(pf_integrate_points) :: pts
         real(real64)                :: r, summed
 
         ! Plain range.
@@ -748,7 +783,7 @@ contains
         ! weighted sum rather than a length. The count is asserted first as a vacuity guard: below
         ! 65 subintervals the arrays never grow and this case is the one above it a second time.
         r = pf_integrate(saw_sqrt, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=0.0_real64, atol=1.0e-14_real64), info=info, points=pts)
+                         rtol=0.0_real64, atol=1.0e-14_real64, info=info, points=pts)
         call check(error, info%nsub > 64, &
                    "the growing-partition fixture must pass the work arrays' first allocation of 64")
         if (allocated(error)) return
@@ -853,8 +888,8 @@ contains
     subroutine test_points_absent_records_nothing(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info)   :: bare, recorded
-        type(pf_integration_points) :: pts
+        type(pf_integrate_info)   :: bare, recorded
+        type(pf_integrate_points) :: pts
         real(real64)                :: r_bare, r_recorded
 
         r_bare = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=bare)
@@ -875,7 +910,7 @@ contains
     subroutine test_points_append_adds_up(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_points) :: left, right
+        type(pf_integrate_points) :: left, right
         real(real64)                :: r_left, r_right, summed
 
         r_left = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64, points=left)
@@ -901,7 +936,7 @@ contains
     subroutine test_neval_matches_the_rule_formula(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(runge, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info)
@@ -925,7 +960,7 @@ contains
     subroutine test_status_limit_and_converged_agree(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
         integer, parameter        :: BUDGET = 105 ! 42*3 - 21: three subintervals exactly
         logical :: uf_ok, uf_was
@@ -970,11 +1005,11 @@ contains
     subroutine test_status_roundoff(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(x_squared, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=1.0e-16_real64, atol=1.0e-300_real64), info=info)
+                         rtol=1.0e-16_real64, atol=1.0e-300_real64, info=info)
         call check(error, info%status == PF_INT_ROUNDOFF, &
                    "a tolerance below the round-off floor must report PF_INT_ROUNDOFF")
         if (allocated(error)) return
@@ -993,13 +1028,13 @@ contains
     subroutine test_status_on_a_discontinuity(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         ! The plain bisection's own verdict: it keeps halving towards the jump until QUADPACK's
         ! "bad behaviour at a point" test fires.
         r = pf_integrate(unit_step, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=1.0e-15_real64, atol=1.0e-16_real64), info=info, &
+                         rtol=1.0e-15_real64, atol=1.0e-16_real64, info=info, &
                          extrapolate=.false.)
         call check(error, info%status == PF_INT_BAD_INTEGRAND, &
                    "drilling into a discontinuity must report PF_INT_BAD_INTEGRAND")
@@ -1015,7 +1050,7 @@ contains
         ! not a singularity the epsilon table can accelerate, so the table itself stops making
         ! progress and reports it: `PF_INT_NO_CONVERGENCE`, the one code only stage 2 can reach.
         r = pf_integrate(unit_step, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=1.0e-15_real64, atol=1.0e-16_real64), info=info)
+                         rtol=1.0e-15_real64, atol=1.0e-16_real64, info=info)
         call check(error, info%status == PF_INT_NO_CONVERGENCE, &
                    "the extrapolation's own failure on a jump must be PF_INT_NO_CONVERGENCE")
         if (allocated(error)) return
@@ -1044,7 +1079,7 @@ contains
     subroutine test_blind_spot_is_documented(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
         logical :: uf_ok, uf_was
 
@@ -1072,13 +1107,13 @@ contains
             ! The unit-width bump at 40 is found on [0, 100] and missed on [0, 1000], which is the
             ! measurement the design rests on.
             r = pf_integrate(far_bump, 0.0_real64, 100.0_real64, &
-                             pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=info)
+                             rtol=1.0e-8_real64, atol=1.0e-14_real64, info=info)
             call check(error, abs(r - far_bump_exact()) <= 1.0e-8_real64*far_bump_exact(), &
                        "a unit-width bump at 40 must be found on a range of width 100")
             if (allocated(error)) exit run
 
             r = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
-                             pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=info)
+                             rtol=1.0e-8_real64, atol=1.0e-14_real64, info=info)
             call check(error, abs(r) <= 1.0e-14_real64 .and. info%converged, &
                        "the same bump on a range of width 1000 is missed and reported as converged")
             if (allocated(error)) exit run
@@ -1107,11 +1142,11 @@ contains
     subroutine test_rtol_floor_needs_atol(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
         r = pf_integrate(runge, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=1.0e-14_real64, atol=1.0e-20_real64), info=info)
+                         rtol=1.0e-14_real64, atol=1.0e-20_real64, info=info)
         call check(error, abs(r - runge_exact()) <= 1.0e-12_real64*abs(runge_exact()), &
                    "an rtol below 50*epsilon with a positive atol must be accepted and answered")
         if (allocated(error)) return
@@ -1131,7 +1166,7 @@ contains
     subroutine test_extrapolation_earns_its_keep(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: plain, extrapolated, by_default
+        type(pf_integrate_info) :: plain, extrapolated, by_default
         real(real64)              :: r_plain, r_extrapolated, r_default
 
         r_plain = pf_integrate(log_sqrt, 0.0_real64, 1.0_real64, 1.0e-10_real64, &
@@ -1179,7 +1214,7 @@ contains
     subroutine test_extrapolation_raises_no_underflow(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
         logical                   :: can_test, saved, raised
 
@@ -1241,7 +1276,7 @@ contains
         real(real64), intent(in)                   :: want  !! its closed form over [0, 1]
         character(len=*), intent(in)               :: what  !! names the case in a message
 
-        type(pf_integration_info) :: loose, tight
+        type(pf_integrate_info) :: loose, tight
         real(real64)              :: r_loose, r_tight
 
         r_loose = pf_integrate(fn, 0.0_real64, 1.0_real64, 1.0e-6_real64, info=loose)
@@ -1283,7 +1318,7 @@ contains
     !! **The `extrapolate=.false.` arm is the contrast the default buys.** The plain bisection
     !! keeps halving the interval next to zero, the abscissae go below `1e-280`, `x**-1.1`
     !! overflows to an infinity, and the engine's non-finite screen ends the integration with
-    !! `PF_INT_BAD_VALUE` -- a different answer to the same integral, reached by drilling rather
+    !! `PF_INT_NONFINITE` -- a different answer to the same integral, reached by drilling rather
     !! than by recognising. It is asserted here because it is in process: the screen reports and
     !! does not abort, so the test binary survives what the drill runs into.
     !!
@@ -1294,7 +1329,7 @@ contains
     subroutine test_status_divergent(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
         logical                   :: can_test, saved, raised
 
@@ -1344,9 +1379,9 @@ contains
                    "the drilled integral raised IEEE_INVALID: the engine did arithmetic with the " // &
                    "infinity it screened, which aborts a caller whose traps are unmasked")
         if (allocated(error)) return
-        call check(error, info%status == PF_INT_BAD_VALUE, &
+        call check(error, info%status == PF_INT_NONFINITE, &
                    "without the extrapolation the drill reaches an overflow, which is reported " // &
-                   "as PF_INT_BAD_VALUE rather than ending the process")
+                   "as PF_INT_NONFINITE rather than ending the process")
         if (allocated(error)) return
         call check(error, info%neval > 20*ONE_RULE, &
                    "and it must cost far more than the extrapolated arm, which is what the " // &
@@ -1371,7 +1406,7 @@ contains
     subroutine test_breakpoints_find_the_far_bump(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: blind, named
+        type(pf_integrate_info) :: blind, named
         real(real64)              :: r_blind, r_named
         logical :: uf_ok, uf_was
 
@@ -1382,7 +1417,7 @@ contains
 
         run: block
             r_blind = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
-                                   pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), info=blind)
+                                   rtol=1.0e-8_real64, atol=1.0e-14_real64, info=blind)
             call check(error, abs(r_blind) <= 1.0e-14_real64 .and. blind%converged, &
                        "a bump at 40 on [0, 1000] at atol=1e-14 must come back as zero, converged")
             if (allocated(error)) exit run
@@ -1391,7 +1426,7 @@ contains
             if (allocated(error)) exit run
 
             r_named = pf_integrate(far_bump, 0.0_real64, 1000.0_real64, &
-                                   pf_tolerance(rtol=1.0e-8_real64, atol=1.0e-14_real64), &
+                                   rtol=1.0e-8_real64, atol=1.0e-14_real64, &
                                    breakpoints=[30.0_real64, 50.0_real64], info=named)
             call check(error, abs(r_named - far_bump_exact()) <= 1.0e-9_real64, &
                        "cutting the range at 30 and 50 must find the bump and reproduce sqrt(pi)")
@@ -1414,8 +1449,8 @@ contains
     subroutine test_breakpoints_agree_with_the_whole(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: whole, cut, shuffled
-        type(pf_integration_points) :: pts
+        type(pf_integrate_info) :: whole, cut, shuffled
+        type(pf_integrate_points) :: pts
         real(real64)                :: r_whole, r_cut, r_shuffled, want
         real(real64), parameter     :: LO = 1.0e-3_real64, HI = 1.0e3_real64
 
@@ -1470,7 +1505,7 @@ contains
     subroutine test_breakpoints_on_infinite_ranges(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: tail, line
+        type(pf_integrate_info) :: tail, line
         real(real64)              :: r, inf, sqrt_pi
 
         inf = pf_infinity()
@@ -1524,10 +1559,23 @@ contains
     !! silent failure exactly, and the summed `abserr` is what shows it: the ACTUAL error stays
     !! inside `atol` in both arms, so a test asserting only the answer would pass over it. It is
     !! also the only half a caller who cannot check the answer has.
+    !!
+    !! **The saw arm passes `extrapolate=.false.`, and that is what makes it discriminate.** The
+    !! Wynn-epsilon table is on by default and accelerates each tooth to about `7e-13` whatever
+    !! bound the piece was handed, so with it on the summed `abserr` is SIX ORDERS below `atol` in
+    !! both arms and is bit-identical between them -- the assertion cannot see the split at all.
+    !! The measurement above was taken when the extrapolation was off by default
+    !! (`use_eps = .false.` at commit `ef307eb`, where this test was written); the default was
+    !! flipped afterwards and silently blinded the test. With the bisection alone the engine is
+    !! tolerance-limited again: `abserr` is `9.1e-7` against an `atol` of `1e-6`, and four
+    !! undivided budgets overrun it.
+    !!
+    !! Mutation proved: drop the `/real(npieces, real64)` from `piece_tol` in `integrate_pieces`
+    !! (`src/parquet_integrate_driver.f90`) and the saw arm's `abserr` assertion fails.
     subroutine test_breakpoints_share_atol(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
         real(real64), parameter   :: WAVE_ATOL = 1.0e-8_real64
         real(real64), parameter   :: SAW_ATOL = 1.0e-6_real64
@@ -1535,7 +1583,7 @@ contains
         ! The case atol exists for: an integral that is zero by cancellation. Documenting, not
         ! discriminating -- see the note above.
         r = pf_integrate(full_wave, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=0.0_real64, atol=WAVE_ATOL), &
+                         rtol=0.0_real64, atol=WAVE_ATOL, &
                          breakpoints=[0.25_real64, 0.5_real64, 0.75_real64], info=info)
         call check(error, info%converged, &
                    "an atol-only call over four pieces of a full sine wave must converge")
@@ -1547,10 +1595,12 @@ contains
                    "and its summed error estimate must be inside the atol too")
         if (allocated(error)) return
 
-        ! The case that can tell the split from its absence.
+        ! The case that can tell the split from its absence -- with the extrapolation OFF, which
+        ! is what leaves the engine tolerance-limited; see the note above.
         r = pf_integrate(saw_sqrt, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=0.0_real64, atol=SAW_ATOL), &
-                         breakpoints=[0.25_real64, 0.5_real64, 0.75_real64], info=info)
+                         rtol=0.0_real64, atol=SAW_ATOL, &
+                         breakpoints=[0.25_real64, 0.5_real64, 0.75_real64], &
+                         extrapolate=.false., info=info)
         call check(error, info%converged, &
                    "four endpoint singularities, one per piece, must each reach their share")
         if (allocated(error)) return
@@ -1572,17 +1622,17 @@ contains
     !! module is a bound, a tolerance, a budget or a breakpoint that does not say what it meant,
     !! and each of those aborts; a NaN out of `eval` is the caller's own function misbehaving on
     !! the caller's own data, and a caller sweeping a parameter grid has to be able to keep the
-    !! sweep and say which parameter broke. So it is `PF_INT_BAD_VALUE`, `converged = .false.`
-    !! and `info%non_finite_at`.
+    !! sweep and say which parameter broke. So it is `PF_INT_NONFINITE`, `converged = .false.`
+    !! and `info%nonfinite_at`.
     !!
-    !! **The negative control is the whole of the second half.** `non_finite_at` defaults to zero,
+    !! **The negative control is the whole of the second half.** `nonfinite_at` defaults to zero,
     !! which is a point like any other, so a test asserting only the NaN case would pass against
     !! an implementation that set the component for every call, or for none. The clean call
     !! asserts `PF_INT_OK` and a zero, and the two together are what pin it.
     subroutine test_non_finite_value_is_reported(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: info, clean
+        type(pf_integrate_info) :: info, clean
         real(real64)              :: r
         logical                   :: can_test, saved, raised
 
@@ -1606,16 +1656,16 @@ contains
                    "whose traps are unmasked")
         if (allocated(error)) return
 
-        call check(error, info%status == PF_INT_BAD_VALUE, &
-                   "a non-finite integrand value must report PF_INT_BAD_VALUE")
+        call check(error, info%status == PF_INT_NONFINITE, &
+                   "a non-finite integrand value must report PF_INT_NONFINITE")
         if (allocated(error)) return
         call check(error, .not. info%converged, &
                    "a call that met a non-finite value must not be reported as converged")
         if (allocated(error)) return
         ! `nan_at_half` is NaN exactly on `|x - 0.5| < 0.05`, so the recorded point must be one
         ! the fixture really answers a NaN at -- not merely some number the engine had to hand.
-        call check(error, abs(info%non_finite_at - 0.5_real64) < 0.05_real64, &
-                   "non_finite_at must be a point the integrand actually returned a NaN at")
+        call check(error, abs(info%nonfinite_at - 0.5_real64) < 0.05_real64, &
+                   "nonfinite_at must be a point the integrand actually returned a NaN at")
         if (allocated(error)) return
         ! The screen has to stop the walk of subintervals rather than let it run to the budget:
         ! the first rule application already meets the NaN, so nothing beyond a handful of
@@ -1629,8 +1679,8 @@ contains
         call check(error, clean%status == PF_INT_OK, &
                    "an integrand that never returns a non-finite value must report PF_INT_OK")
         if (allocated(error)) return
-        call check(error, clean%non_finite_at == 0.0_real64, &
-                   "non_finite_at must be left alone when no value was non-finite")
+        call check(error, clean%nonfinite_at == 0.0_real64, &
+                   "nonfinite_at must be left alone when no value was non-finite")
 
     end subroutine test_non_finite_value_is_reported
 
@@ -1646,14 +1696,14 @@ contains
     subroutine test_non_finite_value_stops_every_path(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: walked, pieced, searched
+        type(pf_integrate_info) :: walked, pieced, searched
         real(real64)              :: r, inf
 
         inf = pf_infinity()
 
         r = pf_integrate(nan_at_half, 0.0_real64, inf, 1.0e-8_real64, info=walked)
-        call check(error, walked%status == PF_INT_BAD_VALUE, &
-                   "a walk that meets a non-finite value must report PF_INT_BAD_VALUE")
+        call check(error, walked%status == PF_INT_NONFINITE, &
+                   "a walk that meets a non-finite value must report PF_INT_NONFINITE")
         if (allocated(error)) return
 
         ! **The walk's START-PANEL SEARCH is a third exit**, before any panel has been integrated at
@@ -1663,19 +1713,19 @@ contains
         ! looks at from a positive lower bound, which is why it takes the exit above and not this
         ! one; `nan_near_two`'s lies inside the first. No panel was integrated, so none is counted.
         r = pf_integrate(nan_near_two, 1.0_real64, inf, 1.0e-8_real64, info=searched)
-        call check(error, searched%status == PF_INT_BAD_VALUE, &
-                   "a start-panel search that meets a non-finite value must report PF_INT_BAD_VALUE")
+        call check(error, searched%status == PF_INT_NONFINITE, &
+                   "a start-panel search that meets a non-finite value must report PF_INT_NONFINITE")
         if (allocated(error)) return
         call check(error, .not. searched%converged .and. searched%npanels == 0, &
                    "and must count no panel: the probes are not panels")
         if (allocated(error)) return
-        call check(error, searched%non_finite_at >= 1.5_real64 .and. searched%non_finite_at <= 2.5_real64, &
-                   "non_finite_at must be a point inside the band the fixture answers a NaN on")
+        call check(error, searched%nonfinite_at >= 1.5_real64 .and. searched%nonfinite_at <= 2.5_real64, &
+                   "nonfinite_at must be a point inside the band the fixture answers a NaN on")
         if (allocated(error)) return
         call check(error, .not. walked%converged, &
                    "a walk that met a non-finite value must not be reported as converged")
         if (allocated(error)) return
-        call check(error, abs(walked%non_finite_at - 0.5_real64) < 0.05_real64, &
+        call check(error, abs(walked%nonfinite_at - 0.5_real64) < 0.05_real64, &
                    "the walk must record a point the integrand really answered a NaN at")
         if (allocated(error)) return
         call check(error, walked%npanels < DEFAULT_PANELS, &
@@ -1684,8 +1734,8 @@ contains
 
         r = pf_integrate(nan_at_half, 0.0_real64, 1.0_real64, 1.0e-8_real64, &
                          breakpoints=[0.25_real64, 0.75_real64], info=pieced)
-        call check(error, pieced%status == PF_INT_BAD_VALUE, &
-                   "a piece that meets a non-finite value must report PF_INT_BAD_VALUE")
+        call check(error, pieced%status == PF_INT_NONFINITE, &
+                   "a piece that meets a non-finite value must report PF_INT_NONFINITE")
         if (allocated(error)) return
         call check(error, pieced%npanels == 2, &
                    "the piece list must stop at the piece that met the value, having integrated " // &
@@ -1704,7 +1754,7 @@ contains
     subroutine test_default_panel_cap_clears_an_algebraic_tail(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integration_info) :: deflt, capped
+        type(pf_integrate_info) :: deflt, capped
         real(real64)              :: r, want, inf
 
         inf = pf_infinity()

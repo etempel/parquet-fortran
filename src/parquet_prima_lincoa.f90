@@ -141,7 +141,7 @@ contains
         ! The violation is recomputed in the CALLER's units against the CALLER's own constraints,
         ! never read from `cstrv_engine`: the engine measured it in `y` against rows it normalised
         ! to unit gradient length, which is a different number (6.5 item 12).
-        call finish_run(prima_info, st, n, info, history, &
+        call finish_run(prima_info, st, n, converged=converged, info=info, history=history, &
                         cstrv=caller_violation(x, lower, upper, a_ineq, b_ineq, a_eq, b_eq), &
                         ctol=ctol_use)
 
@@ -152,7 +152,7 @@ contains
     ! refuses the pointer assignment below with "Explicit interface required for 'f'".
     module subroutine minimize_lincoa_func(f, x, fmin, a_ineq, b_ineq, a_eq, b_eq, lower, &
                                            upper, rhobeg, rhoend, npt, scale, ctol, ftarget, &
-                                           max_neval, info, history, context)
+                                           max_neval, converged, info, history, context)
         implicit none
         procedure(pf_objective_func)                     :: f            !! the objective
         real(real64), intent(inout)                      :: x(:)         !! start in, minimum out
@@ -169,7 +169,8 @@ contains
         real(real64), intent(in), optional               :: scale(:)     !! per-coordinate scale
         real(real64), intent(in), optional               :: ctol         !! feasibility tolerance
         real(real64), intent(in), optional               :: ftarget      !! stop at this value
-        integer, intent(in), optional                    :: max_neval    !! evaluation budget
+        integer, intent(in), optional                    :: max_neval    !! evaluation budget; at most huge(1)/2
+        logical, intent(out), optional                   :: converged !! the run's own rule fired
         type(pf_optimize_info), intent(out), optional    :: info         !! what happened
         type(pf_optimize_history), intent(out), optional :: history      !! every evaluation
         character(len=*), intent(in), optional           :: context      !! call-site text
@@ -177,9 +178,12 @@ contains
         type(prima_func_objective) :: obj !! wraps the plain function as an objective object
 
         obj%fun => f
-        call minimize_lincoa_obj(obj, x, fmin, a_ineq, b_ineq, a_eq, b_eq, lower, upper, rhobeg, &
-                                 rhoend, npt, scale, ctol, ftarget, max_neval, info, history, &
-                                 context)
+        call minimize_lincoa_obj(obj, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, a_eq=a_eq, &
+                                 b_eq=b_eq, lower=lower, upper=upper, rhobeg=rhobeg, &
+                                 rhoend=rhoend, npt=npt, scale=scale, ctol=ctol, &
+                                 ftarget=ftarget, max_neval=max_neval, &
+                                 converged=converged, info=info, &
+                                 history=history, context=context)
 
     end subroutine minimize_lincoa_func
 

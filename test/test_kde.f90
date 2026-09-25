@@ -52,7 +52,7 @@ module test_kde
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use parquet_kde
     use parquet_stats, only : pf_stddev, pf_iqr, pf_count_valid
-    use parquet_integrate, only : pf_integrand, pf_integrate, pf_integration_info
+    use parquet_integrate, only : pf_integrand, pf_integrate, pf_integrate_info
     use parquet_utils, only : pf_norm_pdf, pf_norm_cdf
     use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
     use parquet_columns, only : parquet_column, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64
@@ -432,23 +432,23 @@ contains
     end subroutine kde_rounded
 
     !> `x**power` times the density at `x`.
-    function kde_density_eval(this, x) result(f)
-        class(kde_density), intent(inout) :: this !! the estimate as a function
+    function kde_density_eval(self, x) result(f)
+        class(kde_density), intent(inout) :: self !! the estimate as a function
         real(real64), intent(in)          :: x    !! where to evaluate
         real(real64)                      :: f    !! the value
 
-        call this%k%pdf(x, f)
-        if (this%power /= 0) f = f*x**this%power
+        call self%k%pdf(x, f)
+        if (self%power /= 0) f = f*x**self%power
 
     end function kde_density_eval
 
     !> The squared error against `2x` at `x`.
-    function kde_sq_error_eval(this, x) result(f)
-        class(kde_sq_error), intent(inout) :: this !! the estimate as a function
+    function kde_sq_error_eval(self, x) result(f)
+        class(kde_sq_error), intent(inout) :: self !! the estimate as a function
         real(real64), intent(in)           :: x    !! where to evaluate
         real(real64)                       :: f    !! the squared error
 
-        call this%k%pdf(x, f)
+        call self%k%pdf(x, f)
         f = (f - 2.0_real64*x)**2
 
     end function kde_sq_error_eval
@@ -494,13 +494,13 @@ contains
     end subroutine kde_falling
 
     !> `x**power` times the grid's interpolated density at `x`.
-    function grid_density_eval(this, x) result(f)
-        class(grid_density), intent(inout) :: this !! the grid as a function
+    function grid_density_eval(self, x) result(f)
+        class(grid_density), intent(inout) :: self !! the grid as a function
         real(real64), intent(in)            :: x    !! where to evaluate
         real(real64)                        :: f    !! the value
 
-        call this%g%pdf(x, f)
-        if (this%power /= 0) f = f*x**this%power
+        call self%g%pdf(x, f)
+        if (self%power /= 0) f = f*x**self%power
 
     end function grid_density_eval
 
@@ -2279,14 +2279,14 @@ contains
     end function mix_pdf
 
     !> The squared error of the fitted estimate against the mixture at `x`.
-    function kde_mix_error_eval(this, x) result(f)
-        class(kde_mix_error), intent(inout) :: this !! the estimate as a function
+    function kde_mix_error_eval(self, x) result(f)
+        class(kde_mix_error), intent(inout) :: self !! the estimate as a function
         real(real64), intent(in)            :: x    !! where to evaluate
         real(real64)                        :: f    !! the squared error there
 
         real(real64) :: g
 
-        call this%k%pdf(x, g)
+        call self%k%pdf(x, g)
         f = (g - mix_pdf(x))**2
 
     end function kde_mix_error_eval
@@ -2842,7 +2842,7 @@ contains
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(kde_density) :: fn
         real(real64) :: x(280), zhi, c0, c1, got, want, h, cuts(560), v
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         type(pf_kde_grid) :: gdiag
         real(real64) :: rawc(4000)
         character(len=200) :: msg2
@@ -7694,7 +7694,7 @@ contains
     subroutine test_an_adaptive_upper_zone_reads_its_window_three_ways(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(kde_density) :: fn
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64) :: x(2000), t(64), c(64), edge, c_edge, c_hi, want
         integer :: i
         logical :: ok, conv

@@ -64,9 +64,9 @@ contains
         end if
 
         tol_use = 0.0_real64
-        if (present(tol)) then
-            call validate_tolerance("pf_minimize_scalar", "tol", tol, context)
-            tol_use = tol
+        if (present(atol)) then
+            call validate_tolerance("pf_minimize_scalar", "atol", atol, context)
+            tol_use = atol
         end if
 
         budget = SCALAR_MAX_NEVAL
@@ -95,7 +95,7 @@ contains
         call screen_value(fxb, context)
         neval = 1
         niter = 0
-        if (present(history)) call history%append(point, fxb)
+        if (present(history)) call history%add(point, fxb)
         fw = fxb
         fv = fxb
 
@@ -105,7 +105,7 @@ contains
             xm = 0.5_real64*(lo + hi)
             ! **The last term is a floor, and it is this library's rather than `fmin.f`'s.** The
             ! other two vanish as the best point approaches zero -- `sqrt(epsilon)*abs(x)` with it,
-            ! and `tol/3` when the caller asks for all the accuracy the arithmetic allows -- so on
+            ! and `atol/3` when the caller asks for all the accuracy the arithmetic allows -- so on
             ! a minimiser AT zero the stopping test chases a target that recedes as fast as the
             ! bracket narrows, and the run spends its whole budget on an answer it reached early.
             ! A floor proportional to the ORIGINAL bracket keeps the test meetable there while
@@ -116,7 +116,7 @@ contains
             tol2 = 2.0_real64*tol1
 
             ! Brent's stopping rule: the best point is within tol2 of the bracket's midpoint,
-            ! allowing for how much bracket is left. With `tol = 0` this is the arithmetic's own
+            ! allowing for how much bracket is left. With `atol = 0` this is the arithmetic's own
             ! floor rather than a caller's request.
             if (abs(xb - xm) <= tol2 - 0.5_real64*(hi - lo)) exit search
 
@@ -170,7 +170,7 @@ contains
             fu = f%eval(point)
             call screen_value(fu, context)
             neval = neval + 1
-            if (present(history)) call history%append(point, fu)
+            if (present(history)) call history%add(point, fu)
 
             ! ---- narrow the bracket and reorder the three best points ----------------------
             if (fu <= fxb) then
@@ -209,6 +209,9 @@ contains
 
         if (present(history)) call history_trim(history)
 
+        ! `converged` and `info%converged` are ONE expression, so the short answer and the long one
+        ! cannot drift apart, and the flag is set whether or not `info` was asked for.
+        if (present(converged)) converged = (status == PF_OPT_OK)
         if (present(info)) then
             info%status = status
             info%converged = (status == PF_OPT_OK)
@@ -239,15 +242,16 @@ contains
     ! The FULLY RESTATED form, not `module procedure minimize_scalar_func`: in the abbreviated
     ! form gfortran 15 gives the `procedure(pf_objective_func)` dummy an implicit interface and
     ! refuses the pointer assignment below with "Explicit interface required for 'f'".
-    module subroutine minimize_scalar_func(f, a, b, x, fmin, tol, max_neval, info, history, context)
+    module subroutine minimize_scalar_func(f, a, b, x, fmin, atol, max_neval, converged, info, history, context)
         implicit none
         procedure(pf_objective_func)                     :: f         !! the objective
         real(real64), intent(in)                         :: a         !! bracket, lower end
         real(real64), intent(in)                         :: b         !! bracket, upper end
         real(real64), intent(out)                        :: x         !! the minimiser found
         real(real64), intent(out)                        :: fmin      !! value at `x`
-        real(real64), intent(in), optional               :: tol       !! tolerance on `x`
-        integer, intent(in), optional                    :: max_neval !! evaluation budget
+        real(real64), intent(in), optional               :: atol      !! tolerance on `x`
+        integer, intent(in), optional                    :: max_neval !! evaluation budget; at most huge(1)/2
+        logical, intent(out), optional                   :: converged !! the run's own rule fired
         type(pf_optimize_info), intent(out), optional    :: info      !! what happened
         type(pf_optimize_history), intent(out), optional :: history   !! every evaluation
         character(len=*), intent(in), optional           :: context   !! call-site text
@@ -255,7 +259,9 @@ contains
         type(func_objective) :: obj !! wraps the plain function as an objective object
 
         obj%fun => f
-        call minimize_scalar_obj(obj, a, b, x, fmin, tol, max_neval, info, history, context)
+        call minimize_scalar_obj(obj, a, b, x, fmin, atol=atol, max_neval=max_neval, &
+                                 converged=converged, info=info, &
+                                 history=history, context=context)
 
     end subroutine minimize_scalar_func
 

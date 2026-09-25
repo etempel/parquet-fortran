@@ -115,8 +115,8 @@
 module parquet_cosmology
 
     use iso_fortran_env, only : real64
-    use parquet_integrate, only : pf_integrand, pf_tolerance, pf_integration_info, pf_integrate, &
-                                  PF_INT_OK, PF_INT_DIVERGENT, PF_INT_BAD_VALUE, &
+    use parquet_integrate, only : pf_integrand, pf_integrate_info, pf_integrate, &
+                                  PF_INT_OK, PF_INT_DIVERGENT, PF_INT_NONFINITE, &
                                   PF_INT_ROUNDOFF, PF_INT_NO_CONVERGENCE
     use parquet_interpolate, only : pf_interp_1d
     use parquet_utils, only : pf_to_lower, pf_to_str
@@ -771,8 +771,8 @@ module parquet_cosmology
         end function parquet_debug_cosmology_neval
 
         !> The integrand at one point, selected by `%which`.
-        module function cosmology_integrand_eval(this, x) result(f)
-            class(cosmology_integrand), intent(inout) :: this !! the integrand and its cosmology
+        module function cosmology_integrand_eval(self, x) result(f)
+            class(cosmology_integrand), intent(inout) :: self !! the integrand and its cosmology
             real(real64), intent(in)                  :: x    !! `zeta`, or `b` for the age tail
             real(real64)                              :: f    !! the integrand there
         end function cosmology_integrand_eval

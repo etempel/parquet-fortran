@@ -14,8 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `extrapolate=.false.` turns it off and which keeps the cost of an integrable endpoint
   singularity from growing with the tolerance. The integrand is an object extending `pf_integrand`,
   with its parameters as components and an `eval` that may update them, or a plain function;
-  tolerances are `rtol` or a
-  `pf_tolerance` with `atol`; `max_neval` bounds the integrand evaluations and is never exceeded;
+  tolerances are `rtol` and, optionally, `atol`; `max_neval` bounds the integrand evaluations and
+  is never exceeded;
   `log_base=` integrates a range spanning many decades in `log x`. Either bound may be
   `pf_infinity()` or its negative, spelling `[a, +inf)`, `(-inf, b]` and `(-inf, +inf)`; an
   infinite range is integrated by an outward walk that searches for a first panel the integrand is
@@ -24,10 +24,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `breakpoints=` cuts the range at named interior points and integrates each piece on its own,
   which is how a feature the first rule application would not sample is named rather than hunted
   for; the pieces share the evaluation budget and `atol`. `converged=` and `info=`
-  (`pf_integration_info`: status, error estimate, evaluation count, panels) report the outcome and
+  (`pf_integrate_info`: status, error estimate, evaluation count, panels) report the outcome and
   nothing is printed; an integrand that returns a NaN or an infinity ends the integration rather
-  than the process, reporting `PF_INT_BAD_VALUE` with the offending point in `info%non_finite_at`.
-  `points=` (`pf_integration_points`) records every abscissa, weight and value
+  than the process, reporting `PF_INT_NONFINITE` with the offending point in `info%nonfinite_at`.
+  `points=` (`pf_integrate_points`) records every abscissa, weight and value
   of the final partition, whose weighted sum reproduces `info%partition_integral`, and the returned
   result too whenever `info%extrapolated` is false. Reentrant: integrate from as
   many threads as you like, one integrand object per thread. An Arrow-free entry module.
@@ -37,7 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on a bracket by Brent's method, the function given as an object extending `pf_rootfun` or as a
   plain function. `expand=` (`pf_bracket_expansion`) widens a bracket whose ends have the same sign
   under a policy the caller states — the upper end, the lower end or both, by a factor, within
-  limits and a number of tries — and stops at the first sign change. `tol` and `rtol` set the
+  limits and a number of tries — and stops at the first sign change. `rtol` and `atol` set the
   tolerances, full precision at any magnitude by default; `max_neval` bounds the evaluations,
   expansion included; an infinite function value is used as a sign, and a NaN is an `error stop`.
   `converged=` and `info=` (`pf_root_info`: status, counts, `f` at the root, the bracket) report
@@ -61,7 +61,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Optimisation: `parquet_optimize`.** `pf_minimize_scalar` minimises a function of one variable
   on a bracket by Brent's method; `pf_minimize_simplex` minimises a function of one or many
   variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with
-  fractional and absolute tolerances on the value spread. `pf_minimize_de` searches a whole box by
+  relative and absolute tolerances (`rtol`, `atol`) on the value spread. `pf_minimize_de` searches
+  a whole box by
   differential evolution from a seed rather than a start point, with a Latin-hypercube initial
   population, `ftarget=`, an optional final simplex inside the box (`polish=`) and the final
   population on
@@ -70,9 +71,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   evaluate through one clone of the objective per thread, and give the same answer at every thread
   count. The objective is an object extending `pf_objective`, with its parameters as components and
   an `eval` that may update them, or a plain function. `max_neval` bounds the evaluations and is
-  soft by one engine step; `info=` (`pf_optimize_info`: status, convergence, counts, the final
-  spread, the non-finite count, the distinct-minimum count) reports the outcome and nothing is
-  printed, while a caller mistake and a non-finite objective value in a local engine are
+  soft by one engine step; `converged=` and `info=` (`pf_optimize_info`: status, convergence,
+  counts, the final spread, the non-finite count, the distinct-minimum count) report the outcome
+  and nothing is printed, while a caller mistake and a non-finite objective value in a local engine are
   `error stop`; the population engines treat a non-finite value as a point outside the domain.
   `history=` (`pf_optimize_history`) records every evaluation, every generation's best, or every
   start's minimum, trimmed to the records in use. `pf_constrained_objective` is declared here so

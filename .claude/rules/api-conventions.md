@@ -126,6 +126,41 @@
 - A sorting procedure taking `threads` hands it to every callee that takes one
   (`check_threads_are_forwarded`).
 
+## Solver entry points
+
+The four callback-driven modules -- `parquet_integrate`, `parquet_root`, `parquet_optimize`,
+`parquet_prima` -- share one vocabulary, enforced by `check_solver_vocabulary` and stated once for
+readers on `doc/pages/utilities/solvers.md`. An entry point is a procedure with an optional `info`
+dummy of a `pf_*_info` type and a `context` dummy; the check derives its scope from that, so a
+fifth solver module is covered without editing it.
+
+- **The passed object of every callback interface is `self`**, the point is `x`, the value an
+  evaluation returns is `f`, and an objective handed to a procedure is `f`. F2018 7.5.7.3 makes an
+  overriding binding repeat its interface's dummy names, so these are public API: renaming one
+  after a release breaks every caller's extension at compile time. `pf_constraint_count`'s result
+  is a count and stays `m`.
+- **A stopping tolerance is `rtol` (relative) or `atol` (absolute)**, `real64`, on whatever the
+  engine's stopping test measures; `rtol` comes first where both exist, and either test ends the
+  run. A tolerance that is NOT a stopping test on the answer keeps a name of its own: `ctol`,
+  `rhobeg`, `rhoend`, `ftarget`, `merge_tol`. A future engine with stopping tests on two
+  quantities prefixes both, in SciPy's Nelder-Mead spelling (`xatol`, `fatol`).
+- **The optional outputs come in one order**: `converged`, then `info`, then the record
+  (`history=`, or `points=` where it is a quadrature rule rather than an evaluation log), then any
+  engine-specific output, and `context` is always the LAST dummy. Every entry point answers
+  `converged=` as well as `info=`, equal on every path and set whether or not `info` is present.
+- **`max_neval` is a default `integer`, `intent(in)`, `optional`**, and its `!!` tag says why that
+  suffices -- the guard that bounds it, or why the count stays small where there is none.
+  Reaching it is the module's `LIMIT` status, never an abort, and a value below 1 is refused.
+- **In a solver OBJECT `max_neval = 0` means the engine's own default and a negative value is
+  refused**, in `pf_simplex_solver` and `pf_bobyqa_solver` alike. `0` passed as an ARGUMENT is
+  still refused; the zero rule belongs to the object.
+- Each module keeps its own status prefix (`PF_INT_`, `PF_ROOT_`, `PF_OPT_`), with `OK = 0` and
+  `LIMIT = 1` in every set, and a cause two modules share has ONE spelling (`PF_INT_ROUNDOFF` and
+  `PF_OPT_ROUNDOFF`; `PF_INT_NONFINITE` and `PF_OPT_NONFINITE`).
+- An outcome type is `pf_<stem>_info` and its record `pf_<stem>_history`, for the module's own
+  stem; `%add(x, f)` appends one evaluation and `%append(other)` joins two records, and neither
+  name means the other.
+
 ## Reader facts for sibling modules
 
 - `parquet_reader`'s components are private. A sibling module (`parquet_tables`) reaches a reader

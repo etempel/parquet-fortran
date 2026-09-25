@@ -34,7 +34,7 @@ contains
         real(real64) :: fdum                      !! scratch value
         real(real64) :: fsave                     !! worst value before a contraction
         real(real64) :: ftry                      !! value at the most recent trial point
-        real(real64) :: rtol                      !! fractional spread of the current values
+        real(real64) :: spread_rel                !! fractional spread of the current values
         integer :: npar                           !! number of variables
         integer :: budget                         !! evaluation budget actually in force
         integer :: i                              !! iterator
@@ -58,7 +58,7 @@ contains
         if (any(ieee_is_nan(x))) call optimize_abort("pf_minimize_simplex", &
             "the start point must not contain NaN", context)
 
-        call validate_tolerance("pf_minimize_simplex", "ftol", ftol, context)
+        call validate_tolerance("pf_minimize_simplex", "rtol", rtol, context)
         atol_use = 0.0_real64
         if (present(atol)) then
             call validate_tolerance("pf_minimize_simplex", "atol", atol, context)
@@ -68,8 +68,8 @@ contains
         ! At least one convergence test must be able to fire, or the run can only end by
         ! exhausting the budget -- a caller mistake rather than a way to ask for "as many
         ! evaluations as possible". qfeet refuses the same pair.
-        if (ftol + atol_use <= 0.0_real64) call optimize_abort("pf_minimize_simplex", &
-            "at least one of ftol and atol must be positive", context)
+        if (rtol + atol_use <= 0.0_real64) call optimize_abort("pf_minimize_simplex", &
+            "at least one of rtol and atol must be positive", context)
 
         budget = SIMPLEX_MAX_NEVAL
         if (present(max_neval)) then
@@ -98,7 +98,7 @@ contains
         do i = 1, npar + 1
             fvalues(i) = f%eval(points(i,:))
             call screen_value(fvalues(i))
-            if (present(history)) call history%append(points(i,:), fvalues(i))
+            if (present(history)) call history%add(points(i,:), fvalues(i))
         end do
         neval = npar + 1
         niter = 0
@@ -121,12 +121,12 @@ contains
             ! A branch rather than a `merge`, which would evaluate 0/0 before discarding it.
             fdum = abs(fvalues(ihi)) + abs(fvalues(ilo))
             if (fdum > 0.0_real64) then
-                rtol = 2.0_real64*abs(fvalues(ihi) - fvalues(ilo))/fdum
+                spread_rel = 2.0_real64*abs(fvalues(ihi) - fvalues(ilo))/fdum
             else
-                rtol = 0.0_real64
+                spread_rel = 0.0_real64
             end if
 
-            if (rtol < ftol .or. abs(fvalues(ihi) - fvalues(ilo)) < atol_use) then
+            if (spread_rel < rtol .or. abs(fvalues(ihi) - fvalues(ilo)) < atol_use) then
                 status = PF_OPT_OK
                 exit simplex
             end if
@@ -163,7 +163,7 @@ contains
                             fvalues(i) = f%eval(points(i,:))
                             call screen_value(fvalues(i))
                             neval = neval + 1
-                            if (present(history)) call history%append(points(i,:), fvalues(i))
+                            if (present(history)) call history%add(points(i,:), fvalues(i))
                         end if
                     end do
 
@@ -185,6 +185,9 @@ contains
 
         if (present(history)) call history_trim(history)
 
+        ! `converged` and `info%converged` are ONE expression, so the short answer and the long one
+        ! cannot drift apart, and the flag is set whether or not `info` was asked for.
+        if (present(converged)) converged = (status == PF_OPT_OK)
         if (present(info)) then
             info%status = status
             info%converged = (status == PF_OPT_OK)
@@ -217,7 +220,7 @@ contains
             res = f%eval(ptry)
             call screen_value(res)
             neval = neval + 1
-            if (present(history)) call history%append(ptry, res)
+            if (present(history)) call history%add(ptry, res)
 
             if (res < fvalues(ihi)) then
                 fvalues(ihi) = res
@@ -263,16 +266,17 @@ contains
     ! The FULLY RESTATED form, not `module procedure minimize_simplex_func`: in the abbreviated
     ! form gfortran 15 gives the `procedure(pf_objective_func)` dummy an implicit interface and
     ! refuses the pointer assignment below with "Explicit interface required for 'f'".
-    module subroutine minimize_simplex_func(f, x, fmin, step, ftol, atol, max_neval, info, &
+    module subroutine minimize_simplex_func(f, x, fmin, step, rtol, atol, max_neval, converged, info, &
                                             history, context)
         implicit none
         procedure(pf_objective_func)                     :: f         !! the objective
         real(real64), intent(inout)                      :: x(:)      !! start in, minimum out
         real(real64), intent(out)                        :: fmin      !! value at `x`
         real(real64), intent(in)                         :: step(:)   !! offset per coordinate
-        real(real64), intent(in)                         :: ftol      !! fractional tolerance
+        real(real64), intent(in)                         :: rtol      !! fractional tolerance
         real(real64), intent(in), optional               :: atol      !! absolute tolerance
-        integer, intent(in), optional                    :: max_neval !! evaluation budget
+        integer, intent(in), optional                    :: max_neval !! evaluation budget; at most huge(1)/2
+        logical, intent(out), optional                   :: converged !! the run's own rule fired
         type(pf_optimize_info), intent(out), optional    :: info      !! what happened
         type(pf_optimize_history), intent(out), optional :: history   !! every evaluation
         character(len=*), intent(in), optional           :: context   !! call-site text
@@ -280,7 +284,9 @@ contains
         type(func_objective) :: obj !! wraps the plain function as an objective object
 
         obj%fun => f
-        call minimize_simplex_obj(obj, x, fmin, step, ftol, atol, max_neval, info, history, context)
+        call minimize_simplex_obj(obj, x, fmin, step, rtol, atol=atol, max_neval=max_neval, &
+                                  converged=converged, info=info, history=history, &
+                                  context=context)
 
     end subroutine minimize_simplex_func
 
@@ -290,10 +296,19 @@ contains
 
         ! The driver's box sizes the step; the simplex itself is unbounded and may leave it, which
         ! is what `pf_bobyqa_solver` differs in and what the guide page says about both.
-        step(:) = this%step_fraction*(upper(:) - lower(:))
+        step(:) = self%step_fraction*(upper(:) - lower(:))
 
-        call pf_minimize_simplex(obj, x, fmin, step, this%ftol, atol=this%atol, &
-                                 max_neval=this%max_neval, info=info)
+        ! `0` is the engine's own default and is passed on by OMISSION, since `pf_minimize_simplex`
+        ! refuses a `max_neval` of zero as an argument. A negative value is a caller mistake in
+        ! either reading and is refused here, where the object is, rather than silently adjusted.
+        if (self%max_neval < 0) call optimize_abort("pf_simplex_solver%run", &
+            "max_neval must not be negative")
+        if (self%max_neval > 0) then
+            call pf_minimize_simplex(f, x, fmin, step, self%rtol, atol=self%atol, &
+                                     max_neval=self%max_neval, info=info)
+        else
+            call pf_minimize_simplex(f, x, fmin, step, self%rtol, atol=self%atol, info=info)
+        end if
 
     end procedure simplex_solver_run
 

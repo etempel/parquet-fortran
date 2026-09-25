@@ -41,10 +41,10 @@ contains
         real(real64), allocatable :: xs(:,:)           !! each start's own minimum
         real(real64), allocatable :: fs(:)             !! its value; finite or `+Infinity`, never NaN
         real(real64), allocatable :: reps(:,:)         !! one representative per distinct minimum
-        real(real64), allocatable :: tol(:)            !! the merge radius, per coordinate
+        real(real64), allocatable :: radius(:)         !! the merge radius, per coordinate
         integer, allocatable :: neval_k(:)             !! evaluations each run spent
         integer, allocatable :: status_k(:)            !! the code each run ended on
-        real(real64) :: xtol_use                       !! merge radius actually in force, as a fraction
+        real(real64) :: merge_tol_use                       !! merge radius actually in force, as a fraction
         real(real64) :: spread_end                     !! spread of the starts' final values
         integer :: npar                                !! number of variables
         integer :: ns                                  !! number of starts actually in force
@@ -70,17 +70,17 @@ contains
             ns = nstart
         end if
 
-        xtol_use = MULTISTART_XTOL
-        if (present(xtol)) then
-            call validate_tolerance("pf_minimize_multistart", "xtol", xtol, context)
-            xtol_use = xtol
+        merge_tol_use = MULTISTART_MERGE_TOL
+        if (present(merge_tol)) then
+            call validate_tolerance("pf_minimize_multistart", "merge_tol", merge_tol, context)
+            merge_tol_use = merge_tol
         end if
 
         call resolve_threads("pf_minimize_multistart", threads, nt, context)
 
         ! ---- set up ------------------------------------------------------------------------
         allocate(starts(npar, ns), xs(npar, ns), fs(ns))
-        allocate(reps(npar, ns), tol(npar))
+        allocate(reps(npar, ns), radius(npar))
         allocate(neval_k(ns), status_k(ns))
 
         ! One clone of the caller's objective per thread, in a SHARED array allocated before the
@@ -98,7 +98,7 @@ contains
 
         ! The default is a fresh `pf_simplex_solver`, whose own defaults are a valid tolerance pair
         ! as they stand -- which the bare `pf_minimize_simplex` call is not, since that one
-        ! requires `ftol` positionally.
+        ! requires `rtol` positionally.
         if (present(solver)) then
             call run_every_start(solver)
         else
@@ -140,16 +140,16 @@ contains
             spread_end = maxval(fs) - minval(fs)
 
             ! Distinct minima, counted by walking the starts IN INDEX ORDER and merging each into
-            ! the first representative it is within `xtol` of, coordinate by coordinate. Walking in
+            ! the first representative it is within `merge_tol` of, coordinate by coordinate. Walking in
             ! any other order can give a different count on the same data, which is why no thread
             ! does any of this.
-            tol(:) = xtol_use*(upper(:) - lower(:))
+            radius(:) = merge_tol_use*(upper(:) - lower(:))
             nmin = 0
             do k = 1, ns
                 if (.not. is_finite_quiet(fs(k))) cycle
                 fresh = .true.
                 do m = 1, nmin
-                    if (all(abs(xs(:,k) - reps(:,m)) <= tol(:))) then
+                    if (all(abs(xs(:,k) - reps(:,m)) <= radius(:))) then
                         fresh = .false.
                         exit
                     end if
@@ -175,11 +175,14 @@ contains
         ! value is not one of the distinct minima is a run that ran out of budget.
         if (present(history)) then
             do k = 1, ns
-                call history%append(xs(:,k), fs(k))
+                call history%add(xs(:,k), fs(k))
             end do
             call history_trim(history)
         end if
 
+        ! `converged` and `info%converged` are ONE expression, so the short answer and the long one
+        ! cannot drift apart, and the flag is set whether or not `info` was asked for.
+        if (present(converged)) converged = (status == PF_OPT_OK)
         if (present(info)) then
             info%status = status
             info%converged = (status == PF_OPT_OK)
@@ -263,7 +266,7 @@ contains
     ! form gfortran 15 gives the `procedure(pf_objective_func)` dummy an implicit interface and
     ! refuses the pointer assignment below with "Explicit interface required for 'f'".
     module subroutine minimize_multistart_func(f, lower, upper, seed, x, fmin, nstart, solver, &
-                                               xtol, threads, info, history, context)
+                                               merge_tol, threads, converged, info, history, context)
         implicit none
         procedure(pf_objective_func)                     :: f        !! the objective
         real(real64), intent(in)                         :: lower(:) !! the box, lower corner
@@ -273,8 +276,9 @@ contains
         real(real64), intent(out)                        :: fmin     !! value at `x`
         integer, intent(in), optional                    :: nstart   !! how many starts
         class(pf_local_solver), intent(in), optional     :: solver   !! the local engine
-        real(real64), intent(in), optional               :: xtol     !! merge radius, as a fraction
+        real(real64), intent(in), optional               :: merge_tol     !! merge radius, as a fraction
         integer, intent(in), optional                    :: threads  !! team the starts run on
+        logical, intent(out), optional                   :: converged !! the run's own rule fired
         type(pf_optimize_info), intent(out), optional    :: info     !! what happened
         type(pf_optimize_history), intent(out), optional :: history  !! every start's minimum
         character(len=*), intent(in), optional           :: context  !! call-site text
@@ -282,8 +286,10 @@ contains
         type(func_objective) :: obj !! wraps the plain function as an objective object
 
         obj%fun => f
-        call minimize_multistart_obj(obj, lower, upper, seed, x, fmin, nstart, solver, xtol, &
-                                     threads, info, history, context)
+        call minimize_multistart_obj(obj, lower, upper, seed, x, fmin, nstart=nstart, &
+                                     solver=solver, merge_tol=merge_tol, threads=threads, &
+                                     converged=converged, info=info, &
+                                     history=history, context=context)
 
     end subroutine minimize_multistart_func
 

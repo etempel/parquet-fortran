@@ -2536,11 +2536,11 @@ module parquet_kde
         !> The ISJ rule's fixed-point function at `x`, the squared bandwidth in units of the grid's
         !! span: `x - xi*gamma^[l](x)`. A stage whose norm is zero or too small to divide by makes
         !! the answer `-huge`, the limit the function falls to there. Never NaN and never overflows.
-        module function kde_isj_eval(this, x) result(y)
+        module function kde_isj_eval(self, x) result(f)
             implicit none
-            class(kde_isj_point), intent(inout) :: this !! the sample's binned transform
+            class(kde_isj_point), intent(inout) :: self !! the sample's binned transform
             real(real64), intent(in)            :: x    !! `t`
-            real(real64)                        :: y    !! `F(t)`
+            real(real64)                        :: f    !! `F(t)`
         end function kde_isj_eval
 
         !> Widens a numeric `parquet_column` for a column form: `int32`, `int64`, `float32` and

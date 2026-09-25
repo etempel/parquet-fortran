@@ -83,20 +83,21 @@ bracket:
 
 ```fortran
 call pf_minimize_bobyqa(f, x, fmin, [lower], [upper], [rhobeg], [rhoend], [npt], [scale], &
-                        [ftarget], [max_neval], [info], [history], [context])
+                        [ftarget], [max_neval], [converged], [info], [history], [context])
 call pf_minimize_lincoa(f, x, fmin, [a_ineq], [b_ineq], [a_eq], [b_eq], [lower], [upper], &
                         [rhobeg], [rhoend], [npt], [scale], [ctol], [ftarget], [max_neval], &
-                        [info], [history], [context])
+                        [converged], [info], [history], [context])
 call pf_minimize_cobyla(f, x, fmin, [a_ineq], [b_ineq], [a_eq], [b_eq], [lower], [upper], &
-                        [rhobeg], [rhoend], [scale], [ctol], [ftarget], [max_neval], [info], &
-                        [history], [context])
+                        [rhobeg], [rhoend], [scale], [ctol], [ftarget], [max_neval], &
+                        [converged], [info], [history], [context])
 ```
 
 Every argument the three share means the same thing in each.
 
 ## Supplying the objective
 
-Exactly as for [`parquet_optimize`](optimization.html), and with the same types: `f` is either a
+Exactly as for [`parquet_optimize`](optimization.html), under the rules
+[Solver conventions](solvers.html#the-function-you-supply) states once, and with the same types: `f` is either a
 plain module procedure matching `pf_objective_func`, or an object extending `pf_objective` with an
 `eval` binding, which is how an objective carries its own parameters — a data table, a model, a
 counter. Both reach the same engine through one generic. `parquet_prima` re-exports `pf_objective`,
@@ -212,8 +213,8 @@ end type disc_fit
 ```
 
 ```fortran
-subroutine disc_constraints(this, x, c)
-    class(disc_fit), intent(inout) :: this
+subroutine disc_constraints(self, x, c)
+    class(disc_fit), intent(inout) :: self
     real(real64), intent(in)  :: x(:)
     real(real64), intent(out) :: c(:)   ! exactly n_constraints() values
     c(1) = x(1)**2 + x(2)**2 - 1.0_real64    ! feasible inside the unit disc
@@ -366,7 +367,7 @@ Its four components carry the options:
 | `scale_from_box` | `.true.` | scale each coordinate by `upper - lower`, so the radii below are fractions of the box |
 | `rhobeg_fraction` | `0.1` | the initial radius: in the scaled units when `scale_from_box`, else this fraction of the narrowest side; at most `0.5`, above which the call is refused |
 | `rhoend` | `1e-6` | the final radius, in the same units |
-| `max_neval` | `0` | evaluations per start; `0` means `500*n` |
+| `max_neval` | `0` | evaluations per start; `0` means `500*n`, and a negative value is refused rather than read as the default |
 
 The driver clones the objective once per thread, so a BOBYQA run under `threads > 1` sees its own
 copy. The answer does not depend on the thread count: the starts come from the seed, the box and
@@ -393,8 +394,14 @@ The status codes, and what PRIMA reported to produce each:
 | `PF_OPT_OK` | the trust-region radius came down to `rhoend` — the normal exit |
 | `PF_OPT_TARGET` | a value at or below `ftarget` was found |
 | `PF_OPT_LIMIT` | `max_neval` ran out, or the iteration cap did |
-| `PF_OPT_ROUNDING` | rounding errors left the model unimprovable, or the trust-region subproblem failed |
+| `PF_OPT_ROUNDOFF` | rounding errors left the model unimprovable, or the trust-region subproblem failed |
 | `PF_OPT_INFEASIBLE` | the run ended with `cstrv` above `ctol` (the two constrained engines only) |
+
+**`max_neval` is a hard ceiling on all three engines: a run never overruns it.** It defaults to
+`500*n`. Where the local engines of `parquet_optimize` may take one more step after the budget is
+tested -- a whole simplex step, a Brent iteration, a DE generation -- PRIMA tests its count before
+each evaluation, so `info%neval` is at most the `max_neval` you passed. Reaching it is
+`PF_OPT_LIMIT`, not an error.
 
 `history`, when present, holds every point evaluated and its value, in order, in your units.
 

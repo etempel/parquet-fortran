@@ -90,7 +90,7 @@ contains
 
     end procedure validate_budget
 
-    module procedure history_append
+    module procedure history_add
 
         real(real64), allocatable :: grown_x(:,:), grown_f(:)
         integer :: cap, want, npar
@@ -117,7 +117,7 @@ contains
         this%x(:, this%n) = x
         this%f(this%n) = f
 
-    end procedure history_append
+    end procedure history_add
 
     module procedure history_trim
 
@@ -157,7 +157,7 @@ contains
 
     module procedure func_objective_eval
 
-        f = this%fun(x)
+        f = self%fun(x)
 
     end procedure func_objective_eval
 

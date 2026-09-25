@@ -945,11 +945,11 @@ contains
     procedure :: eval => density_eval
 end type density_fn
 
-function density_eval(this, x) result(f)
-    class(density_fn), intent(inout) :: this
+function density_eval(self, x) result(f)
+    class(density_fn), intent(inout) :: self
     real(real64), intent(in) :: x
     real(real64) :: f
-    call this%k%pdf(x, f)
+    call self%k%pdf(x, f)
 end function density_eval
 ```
 

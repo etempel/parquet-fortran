@@ -45,9 +45,10 @@ module error_scenarios_numeric
     ! The root-finding scenarios' functions: module procedures shared with test_root.f90, so a
     ! scenario and a test name the same function and neither reaches an internal procedure.
     use test_root_support, only : root_sq2, root_line_03, root_nan_beyond_two
-    use parquet_prima, only : pf_minimize_bobyqa, pf_minimize_lincoa, pf_minimize_cobyla
+    use parquet_prima, only : pf_minimize_bobyqa, pf_minimize_lincoa, pf_minimize_cobyla, &
+        pf_bobyqa_solver
     use parquet_optimize, only : pf_minimize_scalar, pf_minimize_simplex, pf_minimize_de, &
-        pf_minimize_multistart
+        pf_minimize_multistart, pf_simplex_solver
     use parquet_tables
     ! The grouping scenarios' callbacks: module procedures, since an internal one of this
     ! program cannot be passed as a callback under every supported compiler.
@@ -807,8 +808,12 @@ contains
             call scenario_optimize_de_constraints_not_honoured()
         case ("optimize_multistart_nstart_zero")
             call scenario_optimize_multistart_nstart_zero()
-        case ("optimize_multistart_xtol_negative")
-            call scenario_optimize_multistart_xtol_negative()
+        case ("optimize_multistart_merge_tol_negative")
+            call scenario_optimize_multistart_merge_tol_negative()
+        case ("optimize_simplex_solver_negative_budget")
+            call scenario_optimize_simplex_solver_negative_budget()
+        case ("prima_bobyqa_solver_negative_budget")
+            call scenario_prima_bobyqa_solver_negative_budget()
         case ("optimize_multistart_constraints_not_honoured")
             call scenario_optimize_multistart_constraints_not_honoured()
         case ("optimize_multistart_nonfinite_threaded")
@@ -881,8 +886,8 @@ contains
             call scenario_root_nan_bracket_end()
         case ("root_bracket_width")
             call scenario_root_bracket_width()
-        case ("root_negative_tol")
-            call scenario_root_negative_tol()
+        case ("root_negative_atol")
+            call scenario_root_negative_atol()
         case ("root_negative_rtol")
             call scenario_root_negative_rtol()
         case ("root_bad_max_neval")
@@ -5074,7 +5079,7 @@ contains
         real(real64) :: r
 
         r = pf_integrate(runge, 0.0_real64, 1.0_real64, &
-                         pf_tolerance(rtol=1.0e-8_real64, atol=-1.0_real64))
+                         rtol=1.0e-8_real64, atol=-1.0_real64)
         print '(a, es22.15)', "accepted a negative atol: ", r
     end subroutine scenario_integrate_negative_atol
     !
@@ -6067,7 +6072,7 @@ contains
         x = 5.0_real64
         bad_ftol = ieee_value(1.0_real64, ieee_quiet_nan)
         call pf_minimize_simplex(sphere, x, fmin, [0.5_real64], bad_ftol)
-        print '(a, es22.15)', "accepted a NaN ftol: ", fmin
+        print '(a, es22.15)', "accepted a NaN rtol: ", fmin
     end subroutine scenario_optimize_tolerance_nonfinite
 
     !> A bracket whose ends are the wrong way round.
@@ -6209,8 +6214,8 @@ contains
 
         lo = -2.0_real64
         hi = 2.0_real64
-        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, ftol=0.0_real64, atol=0.0_real64)
-        print '(a, es22.15)', "accepted ftol and atol both zero: ", fmin
+        call pf_minimize_de(sphere, lo, hi, 1_int64, x, fmin, rtol=0.0_real64, atol=0.0_real64)
+        print '(a, es22.15)', "accepted rtol and atol both zero: ", fmin
     end subroutine scenario_optimize_de_no_tolerance
 
     !> A `parquet_optimize` refusal whose message carries the caller's `context`.
@@ -6327,15 +6332,52 @@ contains
     end subroutine scenario_optimize_multistart_nstart_zero
 
     !> A negative merge radius, which no pair of minima could be within.
-    subroutine scenario_optimize_multistart_xtol_negative()
+    subroutine scenario_optimize_multistart_merge_tol_negative()
         real(real64) :: x(2), fmin, lo(2), hi(2)
 
         lo = -2.0_real64
         hi = 2.0_real64
-        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=4, xtol=-1.0e-6_real64)
-        print '(a, es22.15)', "accepted a negative xtol: ", fmin
-    end subroutine scenario_optimize_multistart_xtol_negative
+        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=4, merge_tol=-1.0e-6_real64)
+        print '(a, es22.15)', "accepted a negative merge_tol: ", fmin
+    end subroutine scenario_optimize_multistart_merge_tol_negative
 
+    !> A NEGATIVE `max_neval` in a `pf_simplex_solver`; the control is `0`, which is the default
+    !! and means the simplex's own 5000.
+    !!
+    !! The two calls differ in that one component alone, so the abort can only be the budget rule.
+    subroutine scenario_optimize_simplex_solver_negative_budget()
+        type(pf_simplex_solver) :: solver
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        solver%max_neval = 0
+        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=1, solver=solver)
+        print '(a, es22.15)', "simplex solver control ran: ", fmin
+        solver%max_neval = -1
+        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=1, solver=solver)
+        print '(a, es22.15)', "accepted a negative pf_simplex_solver%max_neval: ", fmin
+    end subroutine scenario_optimize_simplex_solver_negative_budget
+    !
+    !> A NEGATIVE `max_neval` in a `pf_bobyqa_solver`; the control is `0`, which means `500*n`.
+    !!
+    !! Until V5 of the solver vocabulary, any value at or below zero was read as the default here,
+    !! so a negative budget was silently accepted. The control proves the zero still means what it
+    !! meant.
+    subroutine scenario_prima_bobyqa_solver_negative_budget()
+        type(pf_bobyqa_solver) :: solver
+        real(real64) :: x(2), fmin, lo(2), hi(2)
+
+        lo = -2.0_real64
+        hi = 2.0_real64
+        solver%max_neval = 0
+        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=1, solver=solver)
+        print '(a, es22.15)', "bobyqa solver control ran: ", fmin
+        solver%max_neval = -1
+        call pf_minimize_multistart(sphere, lo, hi, 1_int64, x, fmin, nstart=1, solver=solver)
+        print '(a, es22.15)', "accepted a negative pf_bobyqa_solver%max_neval: ", fmin
+    end subroutine scenario_prima_bobyqa_solver_negative_budget
+    !
     !> A constrained objective handed to the multistart driver, which honours no constraint.
     !!
     !! **The driver's OWN refusal is what this proves**, which is why its wrapper asserts the
@@ -6743,14 +6785,14 @@ contains
     end subroutine scenario_root_bracket_width
     !
     !> A negative absolute tolerance; the control is zero, the default.
-    subroutine scenario_root_negative_tol()
+    subroutine scenario_root_negative_atol()
         real(real64) :: x
 
-        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, tol=0.0_real64)
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, atol=0.0_real64)
         print '(a, es22.15)', "root control solved: ", x
-        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, tol=-1.0e-10_real64)
-        print '(a, es22.15)', "accepted a negative tol: ", x
-    end subroutine scenario_root_negative_tol
+        call pf_find_root(root_sq2, 1.0_real64, 2.0_real64, x, atol=-1.0e-10_real64)
+        print '(a, es22.15)', "accepted a negative atol: ", x
+    end subroutine scenario_root_negative_atol
     !
     !> A negative relative tolerance; the control is zero, which is raised to the floor.
     subroutine scenario_root_negative_rtol()

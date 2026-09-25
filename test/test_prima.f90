@@ -69,6 +69,8 @@ contains
                          test_bobyqa_scale_matches_hand_scaling), &
             new_unittest("scale= reaches a badly conditioned minimum the unscaled run misses", &
                          test_bobyqa_scale_earns_its_place), &
+            new_unittest("converged= agrees with info%converged on every exit, per engine", &
+                         test_prima_converged_argument_agrees), &
             new_unittest("a budget stops at PF_OPT_LIMIT with the best point so far", &
                          test_bobyqa_budget), &
             new_unittest("ftarget stops at PF_OPT_TARGET as soon as it is met", &
@@ -485,7 +487,7 @@ contains
     !! assertion is that SOME exception is raised, not which one.
     !!
     !! **The tolerances are loose on purpose.** A run whose model arithmetic overflows ends on
-    !! `PF_OPT_ROUNDING` wherever rounding first blocks it, and that point moves with the last bit of
+    !! `PF_OPT_ROUNDOFF` wherever rounding first blocks it, and that point moves with the last bit of
     !! every value the model forms -- by `1.5e-2` in `x` between arm64 and x86-64 under nagfor 7.2,
     !! which contract `a*b + c` differently; see
     !! `fortran-gotchas.md`, "One target contracts to an FMA and another cannot".
@@ -637,6 +639,116 @@ contains
 
     end subroutine test_bobyqa_scale_earns_its_place
 
+    !> `converged=` equals `info%converged` on every exit the three PRIMA engines reach, and is set
+    !! whether or not `info` was asked for.
+    !!
+    !! **Every actual is seeded with the WRONG answer before each call**, so a path that never
+    !! assigns `converged` is caught rather than passing on a lucky initial value. All three
+    !! engines report through one `finish_run`, so the flag and the component come from a single
+    !! expression there; what this test pins is that every driver actually FORWARDS the argument,
+    !! which is three separate call sites and the place a new engine would forget.
+    !!
+    !! BOBYQA and LINCOA are exercised through both specifics, the object form and the
+    !! plain-function form that forwards to it; COBYLA takes an object only.
+    !!
+    !! Mutation proved: drop `converged=converged` from any one of the three `finish_run` calls
+    !! (`src/parquet_prima_{bobyqa,lincoa,cobyla}.f90`) and this test fails on that engine.
+    subroutine test_prima_converged_argument_agrees(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64)             :: x(2), x3(3), fmin, lo(3), hi(3), a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info)   :: info
+        type(shifted_quadratic)  :: obj
+        type(disc_fit)           :: cobj
+        logical                  :: flag
+
+        ! ---- BOBYQA: LIMIT, then TARGET, then the object form ----
+        lo = -5.0_real64
+        hi = 10.0_real64
+        x = [-1.2_real64, 1.0_real64]
+        flag = .true.
+        call pf_minimize_bobyqa(rosenbrock, x, fmin, lower=lo(1:2), upper=hi(1:2), &
+                                rhobeg=0.5_real64, rhoend=1.0e-10_real64, max_neval=12, &
+                                converged=flag, info=info)
+        call check(error, info%status == PF_OPT_LIMIT, "bobyqa LIMIT: the fixture must spend its budget")
+        if (allocated(error)) return
+        call check(error, flag .eqv. info%converged, "bobyqa LIMIT: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, .not. flag, "bobyqa LIMIT: the flag must be false on a spent budget")
+        if (allocated(error)) return
+
+        x = [-1.2_real64, 1.0_real64]
+        flag = .true.
+        call pf_minimize_bobyqa(rosenbrock, x, fmin, lower=lo(1:2), upper=hi(1:2), &
+                                rhobeg=0.5_real64, rhoend=1.0e-10_real64, max_neval=12, &
+                                converged=flag)
+        call check(error, .not. flag, "bobyqa LIMIT: the flag must be cleared with no info= present")
+        if (allocated(error)) return
+
+        lo = -5.0_real64
+        hi = 5.0_real64
+        x3 = [1.0_real64, -2.0_real64, 1.5_real64]
+        flag = .false.
+        call pf_minimize_bobyqa(sphere, x3, fmin, lower=lo, upper=hi, rhobeg=0.5_real64, &
+                                rhoend=1.0e-10_real64, ftarget=1.0e-4_real64, converged=flag, info=info)
+        call check(error, info%status == PF_OPT_TARGET, "bobyqa TARGET: the fixture must meet its target")
+        if (allocated(error)) return
+        call check(error, flag .eqv. info%converged, "bobyqa TARGET: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, flag, "bobyqa TARGET: a met target counts as converged")
+        if (allocated(error)) return
+
+        x = 0.0_real64
+        flag = .false.
+        call pf_minimize_bobyqa(obj, x, fmin, rhobeg=0.3_real64, rhoend=1.0e-9_real64, &
+                                converged=flag, info=info)
+        call check(error, flag .eqv. info%converged, "bobyqa object: converged= must equal info%converged")
+        if (allocated(error)) return
+
+        ! ---- LINCOA: both specifics ----
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        b_ineq = 1.0_real64
+        x = 0.0_real64
+        flag = .false.
+        call pf_minimize_lincoa(sphere, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.3_real64, rhoend=1.0e-9_real64, converged=flag, info=info)
+        call check(error, flag .eqv. info%converged, "lincoa function: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, flag, "lincoa function: this fixture converges")
+        if (allocated(error)) return
+        x = 0.0_real64
+        flag = .false.
+        call pf_minimize_lincoa(obj, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                rhobeg=0.3_real64, rhoend=1.0e-9_real64, converged=flag)
+        call check(error, flag, "lincoa object: the flag must be set with no info= present")
+        if (allocated(error)) return
+
+        ! ---- COBYLA: a converged run, then the infeasible one ----
+        x = 0.0_real64
+        flag = .false.
+        call pf_minimize_cobyla(cobj, x, fmin, converged=flag, info=info)
+        call check(error, flag .eqv. info%converged, "cobyla OK: converged= must equal info%converged")
+        if (allocated(error)) return
+
+        a_ineq(1, :) = [-1.0_real64, 0.0_real64]
+        b_ineq = -2.0_real64
+        x = 0.0_real64
+        flag = .true.
+        call pf_minimize_cobyla(cobj, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, converged=flag, info=info)
+        call check(error, info%status == PF_OPT_INFEASIBLE, &
+                   "cobyla INFEASIBLE: the fixture must report an infeasible answer")
+        if (allocated(error)) return
+        call check(error, flag .eqv. info%converged, "cobyla INFEASIBLE: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, .not. flag, "cobyla INFEASIBLE: an infeasible answer is never convergence")
+        if (allocated(error)) return
+        x = 0.0_real64
+        flag = .true.
+        call pf_minimize_cobyla(cobj, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, converged=flag)
+        call check(error, .not. flag, "cobyla INFEASIBLE: the flag must be cleared with no info= present")
+
+    end subroutine test_prima_converged_argument_agrees
+
     !> A budget too small to converge is `PF_OPT_LIMIT`, not an error, and the best point so far.
     subroutine test_bobyqa_budget(error)
         type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
@@ -655,8 +767,8 @@ contains
         if (allocated(error)) return
         call check(error, .not. info%converged, "PF_OPT_LIMIT is not converged")
         if (allocated(error)) return
-        call check(error, info%neval <= 12 + 1, &
-                   "the budget is soft by at most one step, not by more")
+        call check(error, info%neval <= 12, &
+                   "the budget must not be overrun at all")
         if (allocated(error)) return
         call check(error, fmin <= fstart, "the best point so far cannot be worse than the start")
         if (allocated(error)) return
@@ -1609,8 +1721,8 @@ contains
                                 rhobeg=0.2_real64, rhoend=1.0e-12_real64, info=info)
         call check(error, info%status == PF_OPT_LIMIT, "an exhausted budget is PF_OPT_LIMIT")
         if (allocated(error)) return
-        call check(error, info%neval > 5 .and. info%neval <= 9 + 1, &
-                   "the run must get past the five-point model and stop on its budget")
+        call check(error, info%neval > 5 .and. info%neval <= 9, &
+                   "the run must get past the five-point model and stop on its budget exactly")
 
     end subroutine test_lincoa_target_and_budget
 
@@ -1679,8 +1791,8 @@ contains
             call pf_minimize_cobyla(disc, x, fmin, rhobeg=0.5_real64, rhoend=1.0e-10_real64, &
                                     max_neval=b, info=info)
 
-            call check(error, info%neval <= b + 1, &
-                       trim(which)//": the budget must be honoured, soft by at most one step")
+            call check(error, info%neval <= b, &
+                       trim(which)//": the budget must be honoured exactly, never overrun")
             if (allocated(error)) return
             call check(error, .not. ieee_is_nan(fmin), &
                        trim(which)//": the value returned must be a number")

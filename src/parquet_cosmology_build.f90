@@ -24,7 +24,7 @@ contains
     ! =========================================================================================
 
     module procedure cosmology_integrand_eval
-        f = cosmology_integrand_at(this%p, this%d, this%which, x)
+        f = cosmology_integrand_at(self%p, self%d, self%which, x)
     end procedure cosmology_integrand_eval
 
     ! =========================================================================================
@@ -332,7 +332,7 @@ contains
         character(len=*), intent(in), optional :: context !! the caller's context
 
         type(cosmology_integrand) :: integ
-        type(pf_tolerance)        :: tol
+        real(real64)              :: rtol
         real(real64), allocatable :: zeta(:), dist(:), time(:), age(:), fval(:), gval(:), aval(:)
         real(real64), allocatable :: absd(:), xval(:), dxval(:)
         real(real64), allocatable :: dfval(:), dgval(:), daval(:)
@@ -341,8 +341,7 @@ contains
         integer                   :: n, m, m_ok, lost, nt, zero, i, md, mt, ma
         integer                   :: md_lo, mt_lo, ma_hi
 
-        tol%rtol = PFC_RTOL
-        tol%atol = 0.0_real64
+        rtol = PFC_RTOL
         pfc_neval = 0
 
         ! The model's own bottom, found BEFORE anything is integrated: the blueshift bounds are
@@ -412,16 +411,16 @@ contains
         time(zero) = 0.0_real64
         absd(zero) = 0.0_real64
         do i = zero, n + m
-            dist(i + 1) = dist(i) + one_interval(this, integ, tol, PFC_INT_DISTANCE, &
+            dist(i + 1) = dist(i) + one_interval(this, integ, rtol, PFC_INT_DISTANCE, &
                                                  zeta(i), zeta(i + 1), context)
             ! The `1/E` intervals are KEPT, not only accumulated: the age needs them individually.
-            step_t(i) = one_interval(this, integ, tol, PFC_INT_TIME, zeta(i), zeta(i + 1), context)
+            step_t(i) = one_interval(this, integ, rtol, PFC_INT_TIME, zeta(i), zeta(i + 1), context)
             time(i + 1) = time(i) + step_t(i)
             ! The FOURTH integral, `e^(3 zeta)/E`, whose cumulative sum is the absorption
             ! distance. It is not a combination of the other two, so it is integrated beside them
             ! -- about half as much work again, which N4 of the review's plan accepted rather than
             ! leave one binding a hundred times slower than its neighbours.
-            absd(i + 1) = absd(i) + one_interval(this, integ, tol, PFC_INT_ABSORPTION, &
+            absd(i + 1) = absd(i) + one_interval(this, integ, rtol, PFC_INT_ABSORPTION, &
                                                  zeta(i), zeta(i + 1), context)
         end do
         ! **Downward the intervals STOP rather than abort** (the blueshift half is a convenience,
@@ -431,7 +430,7 @@ contains
         ! not get -- which is why this loop does not go through `one_interval`.
         m_ok = 0
         do i = zero - 1, 1, -1
-            if (.not. blueshift_interval(integ, tol, zeta(i), zeta(i + 1), step_d, step_t(i), &
+            if (.not. blueshift_interval(integ, rtol, zeta(i), zeta(i + 1), step_d, step_t(i), &
             ! `m` is clamped so the table's bottom node stands a whole `PFC_PANEL` clear of the
             ! model's floor, and a panel reaching the floor is the only thing that makes a
             ! blueshift interval fail to converge. A starved evaluation budget does not reach it
@@ -468,7 +467,7 @@ contains
         if (this%age_diverges) then
             this%d%age0 = ieee_value(this%d%age0, ieee_positive_inf)
         else
-            tail = age_tail_integral(this, integ, tol, context)
+            tail = age_tail_integral(this, integ, rtol, context)
             ! ACCUMULATED FROM THE TOP DOWN over the interval integrals themselves, never as
             ! `time(n + 1) - time(i)`. That difference is the cancellation this whole design
             ! exists to avoid, and it reappears here for a large `zmax`: by `zeta = 23` the
@@ -841,9 +840,9 @@ contains
     !! be told. The blueshift half is different in kind -- it is there to make a negative redshift
     !! FAST, and every one of them is answered by the panel walk whether or not a node exists --
     !! so an interval that fails simply ends the table, and the nodes below it are dropped.
-    function blueshift_interval(integ, tol, a, b, step_d, step_t, step_x) result(ok)
+    function blueshift_interval(integ, rtol, a, b, step_d, step_t, step_x) result(ok)
         type(cosmology_integrand), intent(inout) :: integ  !! the integrand object
-        type(pf_tolerance), intent(in)           :: tol    !! the tolerance
+        real(real64), intent(in)                 :: rtol   !! relative tolerance
         real(real64), intent(in)                 :: a      !! the interval's lower edge in `zeta`
         real(real64), intent(in)                 :: b      !! its upper edge
         real(real64), intent(out)                :: step_d !! the distance integrand's integral
@@ -853,9 +852,9 @@ contains
 
         logical :: ok_t, ok_x
 
-        step_d = floor_panel(integ, tol, PFC_INT_DISTANCE, a, b, ok)
-        step_t = floor_panel(integ, tol, PFC_INT_TIME, a, b, ok_t)
-        step_x = floor_panel(integ, tol, PFC_INT_ABSORPTION, a, b, ok_x)
+        step_d = floor_panel(integ, rtol, PFC_INT_DISTANCE, a, b, ok)
+        step_t = floor_panel(integ, rtol, PFC_INT_TIME, a, b, ok_t)
+        step_x = floor_panel(integ, rtol, PFC_INT_ABSORPTION, a, b, ok_x)
         ok = ok .and. ok_t .and. ok_x
 
     end function blueshift_interval
@@ -991,8 +990,7 @@ contains
         real(real64), intent(out)                :: time       !! `(t_L(reached) - t_L(zeta_start)) / t_H`
         real(real64), intent(out)                :: reached    !! how far down both converged
 
-        type(pf_tolerance) :: tol
-        real(real64)       :: hi, lo, piece_d, piece_t
+        real(real64)       :: rtol, hi, lo, piece_d, piece_t
         logical            :: ok_d, ok_t
         integer            :: i, panels
 
@@ -1000,8 +998,7 @@ contains
         ! exactly here whatever the build's flag says. `cosmology_e2` would fall back on its own
         ! range test; clearing the flag says so at the place that knows why.
         integ%d%use_nu_tab = .false.
-        tol%rtol = PFC_RTOL
-        tol%atol = 0.0_real64
+        rtol = PFC_RTOL
         dist = 0.0_real64
         time = 0.0_real64
         reached = zeta_start
@@ -1013,8 +1010,8 @@ contains
             if (zeta_floor > -PFC_ZETA_CEILING .and. lo - zeta_floor < PFC_PANEL) then
                 ! Within one panel of a REAL floor, where the integrand grows like
                 ! `(zeta - zeta_floor)^(-1/2)`: the adaptive rule, at several hundred evaluations.
-                piece_d = floor_panel(integ, tol, PFC_INT_DISTANCE, lo, hi, ok_d)
-                piece_t = floor_panel(integ, tol, PFC_INT_TIME, lo, hi, ok_t)
+                piece_d = floor_panel(integ, rtol, PFC_INT_DISTANCE, lo, hi, ok_d)
+                piece_t = floor_panel(integ, rtol, PFC_INT_TIME, lo, hi, ok_t)
                 if (.not. (ok_d .and. ok_t)) return
             else
                 ! Everywhere else the integrand is smooth and the fixed 20-point rule is exact to
@@ -1037,27 +1034,27 @@ contains
     end subroutine floor_bounds
 
     !> One adaptive panel of `floor_bounds`, reporting whether it converged instead of aborting.
-    function floor_panel(integ, tol, which, a, b, ok) result(v)
+    function floor_panel(integ, rtol, which, a, b, ok) result(v)
         type(cosmology_integrand), intent(inout) :: integ !! the integrand object
-        type(pf_tolerance), intent(in)           :: tol   !! the tolerance
+        real(real64), intent(in)                 :: rtol  !! relative tolerance
         integer, intent(in)                      :: which !! which integrand
         real(real64), intent(in)                 :: a     !! the panel's lower edge in `zeta`
         real(real64), intent(in)                 :: b     !! its upper edge
         logical, intent(out)                     :: ok    !! the integral converged and is finite
         real(real64)                             :: v     !! the panel's integral
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
 
         integ%which = which
         if (pfc_max_neval > 0) then
-            v = pf_integrate(integ, a, b, tol, max_neval=pfc_max_neval, converged=ok, info=info)
+            v = pf_integrate(integ, a, b, rtol, max_neval=pfc_max_neval, converged=ok, info=info)
         else
-            v = pf_integrate(integ, a, b, tol, converged=ok, info=info)
+            v = pf_integrate(integ, a, b, rtol, converged=ok, info=info)
         end if
         pfc_neval = pfc_neval + info%neval
         ! The two ROUND-OFF statuses are accepted on the error estimate the engine itself reports,
         ! because they mean "this is as close as double arithmetic gets", not "the integrand
-        ! misbehaved". Every other status, `PF_INT_BAD_VALUE` and `PF_INT_DIVERGENT` included, is
+        ! misbehaved". Every other status, `PF_INT_NONFINITE` and `PF_INT_DIVERGENT` included, is
         ! refused whatever the estimate says.
         if (.not. ok .and. (info%status == PF_INT_ROUNDOFF .or. info%status == PF_INT_NO_CONVERGENCE)) &
             ok = info%abserr <= PFC_FLOOR_RTOL * abs(v)
@@ -1101,24 +1098,24 @@ contains
     end subroutine increasing_run
 
     !> One interval integral, in units of `D_H` or `t_H`. Every status but `PF_INT_OK` aborts.
-    function one_interval(this, integ, tol, which, a, b, context) result(v)
+    function one_interval(this, integ, rtol, which, a, b, context) result(v)
         class(pf_cosmology), intent(in)          :: this    !! the cosmology being built
         type(cosmology_integrand), intent(inout) :: integ   !! the integrand object
-        type(pf_tolerance), intent(in)           :: tol     !! the tolerance
+        real(real64), intent(in)                 :: rtol    !! relative tolerance
         integer, intent(in)                      :: which   !! which integrand
         real(real64), intent(in)                 :: a       !! the interval's lower edge in `zeta`
         real(real64), intent(in)                 :: b       !! its upper edge
         character(len=*), intent(in), optional   :: context !! the caller's context
         real(real64)                             :: v       !! the interval's integral
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         logical                   :: ok
 
         integ%which = which
         if (pfc_max_neval > 0) then
-            v = pf_integrate(integ, a, b, tol, max_neval=pfc_max_neval, converged=ok, info=info)
+            v = pf_integrate(integ, a, b, rtol, max_neval=pfc_max_neval, converged=ok, info=info)
         else
-            v = pf_integrate(integ, a, b, tol, converged=ok, info=info)
+            v = pf_integrate(integ, a, b, rtol, converged=ok, info=info)
         end if
         pfc_neval = pfc_neval + info%neval
         if (.not. ok) call report_interval(this, info, which, a, b, context)
@@ -1129,7 +1126,7 @@ contains
     !! else is a table that did not converge.
     subroutine report_interval(this, info, which, a, b, context)
         class(pf_cosmology), intent(in)        :: this    !! the cosmology being built
-        type(pf_integration_info), intent(in)  :: info    !! what the integrator reported
+        type(pf_integrate_info), intent(in)  :: info    !! what the integrator reported
         integer, intent(in)                    :: which   !! which integrand
         real(real64), intent(in)               :: a       !! the interval's lower edge
         real(real64), intent(in)               :: b       !! its upper edge
@@ -1138,10 +1135,10 @@ contains
         character(len=:), allocatable :: what
         character(len=:), allocatable :: num, num2, num3
 
-        if (info%status == PF_INT_BAD_VALUE) then
-            ! `non_finite_at` is in the INTEGRATION variable, so it is converted back to a
+        if (info%status == PF_INT_NONFINITE) then
+            ! `nonfinite_at` is in the INTEGRATION variable, so it is converted back to a
             ! redshift before anyone reads it.
-            call pf_to_str(z_of_point(which, info%non_finite_at), num)
+            call pf_to_str(z_of_point(which, info%nonfinite_at), num)
             call cosmology_abort("pf_cosmology%init: this cosmology has no big bang: E(z)^2 is not " // &
                                  "positive at z = " // num, context)
         end if
@@ -1234,20 +1231,20 @@ contains
     !! **This integral is also what protects the UPPER half of the domain from a model whose
     !! `E^2` turns negative above `zmax`.** Its range in `b` is `[0, e^(-zeta_n/2)]`, that is
     !! every scale factor below the table's edge, so it visits every redshift from `zmax` to
-    !! infinity; a non-positive `E^2` anywhere up there comes back as `PF_INT_BAD_VALUE` and
+    !! infinity; a non-positive `E^2` anywhere up there comes back as `PF_INT_NONFINITE` and
     !! `report_interval` turns it into "this cosmology has no big bang", naming the redshift.
     !! `om0 = 0, ode0 = 2, w0 = -0.366` with `zmax = 1100` is the reachable case, and it aborts
     !! naming `z = 4420`, four times beyond the table. A later change that skips the tail -- for a
     !! model already flagged divergent, say -- or that narrows its range removes that protection,
     !! and nothing else in `%init` looks above `zmax` at all.
-    function age_tail_integral(this, integ, tol, context) result(v)
+    function age_tail_integral(this, integ, rtol, context) result(v)
         class(pf_cosmology), intent(inout)       :: this    !! the cosmology being built
         type(cosmology_integrand), intent(inout) :: integ   !! the integrand object
-        type(pf_tolerance), intent(in)           :: tol     !! the tolerance
+        real(real64), intent(in)                 :: rtol    !! relative tolerance
         character(len=*), intent(in), optional   :: context !! the caller's context
         real(real64)                             :: v       !! the tail, in units of `t_H`
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         logical                   :: ok
         real(real64)              :: b_top
 
@@ -1257,9 +1254,9 @@ contains
         integ%d%use_nu_tab = .false.
         b_top = exp(-0.5_real64 * this%d%zeta_n)
         if (pfc_max_neval > 0) then
-            v = pf_integrate(integ, 0.0_real64, b_top, tol, max_neval=pfc_max_neval, converged=ok, info=info)
+            v = pf_integrate(integ, 0.0_real64, b_top, rtol, max_neval=pfc_max_neval, converged=ok, info=info)
         else
-            v = pf_integrate(integ, 0.0_real64, b_top, tol, converged=ok, info=info)
+            v = pf_integrate(integ, 0.0_real64, b_top, rtol, converged=ok, info=info)
         end if
         pfc_neval = pfc_neval + info%neval
         if (.not. ok) then

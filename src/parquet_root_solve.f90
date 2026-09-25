@@ -15,9 +15,9 @@
 !!    inverse quadratic -- and the step bisects everywhere else. That is what makes an infinite
 !!    end a sign rather than a trap, and it keeps every product finite. Inside those ranges the
 !!    step is `zeroin.f`'s exactly.
-!! 3. The stopping tolerance is `2*eps*|b| + max(tol, rtol*|b|)/2` in place of `2*eps*|b| +
-!!    tol/2`, floored at `tiny(1.0_real64)` so that a best point of exactly zero still steps, and
-!!    saturating where `rtol*|b|` would pass `huge`.
+!! 3. The stopping tolerance is `2*eps*|b| + max(atol, rtol*|b|)/2` in place of `2*eps*|b| +
+!!    tol/2`, `zeroin.f`'s own, floored at `tiny(1.0_real64)` so that a best point of exactly
+!!    zero still steps, and saturating where `rtol*|b|` would pass `huge`.
 !! 4. The bracket may be widened first, under the caller's `pf_bracket_expansion`, and no
 !!    expansion builds a bracket wider than `WIDTH_CAP`, a few units of `epsilon` short of `huge`,
 !!    so every difference of two points in it is finite.
@@ -41,7 +41,7 @@ submodule (parquet_root) parquet_root_solve
     !> Machine epsilon, the unit of Brent's own `2*eps*|b|` stopping term.
     real(real64), parameter :: EPS = epsilon(1.0_real64)
     !> The smallest normal `real64`: the floor under the stopping tolerance, so that a best point
-    !! of exactly zero with `tol = 0` still takes a step rather than evaluating itself again.
+    !! of exactly zero with `atol = 0` still takes a step rather than evaluating itself again.
     real(real64), parameter :: TINY_TOL = tiny(1.0_real64)
     !> A factor eight units of `epsilon` below one. An expansion move is formed from a span cut
     !! this much short of the room it may use, so that the rounding of the few operations forming
@@ -68,7 +68,7 @@ contains
     ! nagfor rejects a separate module procedure whose body appears BELOW a call to it in the same
     ! submodule (`code-style.md`), so these sit above the solver that uses them.
 
-    module procedure root_history_append
+    module procedure root_history_add
 
         real(real64), allocatable :: grown_x(:), grown_f(:)
         integer                   :: cap, want
@@ -93,11 +93,11 @@ contains
         this%x(this%n) = x
         this%f(this%n) = f
 
-    end procedure root_history_append
+    end procedure root_history_add
 
     module procedure func_rootfun_eval
 
-        y = this%fp(x)
+        f = self%fp(x)
 
     end procedure func_rootfun_eval
 
@@ -133,7 +133,7 @@ contains
 
         if (present(expand)) grow = expand
         tol_abs = 0.0_real64
-        if (present(tol)) tol_abs = tol
+        if (present(atol)) tol_abs = atol
         tol_rel = RTOL_FLOOR
         if (present(rtol)) tol_rel = rtol
         budget = DEFAULT_MAX_NEVAL
@@ -377,7 +377,7 @@ contains
             fe = f%eval(xe)
             if (ieee_is_nan(fe)) call root_abort("the function returned a NaN", context)
             outcome%neval = outcome%neval + 1
-            if (present(history)) call history%append(xe, fe)
+            if (present(history)) call history%add(xe, fe)
 
         end subroutine evaluate
 
@@ -398,20 +398,22 @@ contains
     end procedure find_root_obj
 
     ! The FULLY RESTATED form, not `module procedure find_root_func`: in the abbreviated form
-    ! gfortran 15 gives the `procedure(pf_root_func)` dummy an implicit interface and refuses the
+    ! gfortran 15 gives the `procedure(pf_rootfun_func)` dummy an implicit interface and refuses the
     ! pointer assignment below (`fortran-gotchas.md`). It calls the object specific rather than
     ! repeating it, so the two forms agree to the bit by construction.
-    module subroutine find_root_func(f, a, b, x, expand, tol, rtol, max_neval, converged, info, &
+    module subroutine find_root_func(f, a, b, x, expand, rtol, atol, max_neval, converged, info, &
                                      history, context)
         implicit none
-        procedure(pf_root_func)                          :: f         !! the function
+        procedure(pf_rootfun_func)                          :: f         !! the function
         real(real64), intent(in)                         :: a         !! bracket, lower end
         real(real64), intent(in)                         :: b         !! bracket, upper end
         real(real64), intent(out)                        :: x         !! the root
         type(pf_bracket_expansion), intent(in), optional :: expand    !! the growth policy
-        real(real64), intent(in), optional               :: tol       !! absolute tolerance
         real(real64), intent(in), optional               :: rtol      !! relative tolerance
-        integer, intent(in), optional                    :: max_neval !! evaluation budget
+        real(real64), intent(in), optional               :: atol      !! absolute tolerance
+        integer, intent(in), optional                    :: max_neval !! evaluation budget; a
+                                                                     !! bracketed solve takes
+                                                                     !! tens, never huge(1)
         logical, intent(out), optional                   :: converged !! status is OK
         type(pf_root_info), intent(out), optional        :: info      !! what happened
         type(pf_root_history), intent(out), optional     :: history   !! every evaluation
@@ -420,8 +422,9 @@ contains
         type(func_rootfun) :: wrapped !! the plain function as a function object
 
         wrapped%fp => f
-        call find_root_obj(wrapped, a, b, x, expand, tol, rtol, max_neval, converged, info, &
-                           history, context)
+        call find_root_obj(wrapped, a, b, x, expand=expand, rtol=rtol, atol=atol, &
+                           max_neval=max_neval, converged=converged, info=info, &
+                           history=history, context=context)
 
     end subroutine find_root_func
 
@@ -435,7 +438,7 @@ contains
     subroutine validate_call(a, b, tol_abs, tol_rel, budget, grow, context)
         real(real64), intent(in)               :: a       !! bracket, lower end
         real(real64), intent(in)               :: b       !! bracket, upper end
-        real(real64), intent(in)               :: tol_abs !! resolved `tol`
+        real(real64), intent(in)               :: tol_abs !! resolved `atol`
         real(real64), intent(in)               :: tol_rel !! resolved `rtol`, before its floor
         integer, intent(in)                    :: budget  !! resolved `max_neval`
         type(pf_bracket_expansion), intent(in) :: grow    !! resolved `expand`
@@ -458,11 +461,11 @@ contains
 
         bad = .not. ieee_is_finite(tol_abs)
         if (.not. bad) bad = (tol_abs < 0.0_real64)
-        if (bad) call root_abort("tol must be a non-negative finite number", context)
+        if (bad) call root_abort("atol must be a finite, non-negative number", context)
         bad = .not. ieee_is_finite(tol_rel)
         if (.not. bad) bad = (tol_rel < 0.0_real64)
-        if (bad) call root_abort("rtol must be a non-negative finite number", context)
-        if (budget < 1) call root_abort("max_neval must be at least 1", context)
+        if (bad) call root_abort("rtol must be a finite, non-negative number", context)
+        if (budget < 1) call root_abort("max_neval must be positive", context)
 
         select case (grow%mode)
         case (PF_EXPAND_NONE, PF_EXPAND_UP, PF_EXPAND_DOWN, PF_EXPAND_BOTH)
@@ -550,10 +553,10 @@ contains
 
     end function opposite
 
-    !> Brent's stopping tolerance at the best point: `2*eps*|xb| + max(tol, rtol*|xb|)/2`, floored
+    !> Brent's stopping tolerance at the best point: `2*eps*|xb| + max(atol, rtol*|xb|)/2`, floored
     !! at `tiny` and saturating short of `huge`.
     !!
-    !! The floor keeps a best point of exactly zero stepping when `tol = 0`, where both relative
+    !! The floor keeps a best point of exactly zero stepping when `atol = 0`, where both relative
     !! terms vanish. The saturation caps `|xb|` at `ax_cap`, `(huge/max(rtol, 1))` less a few units
     !! of `epsilon`, so `rtol*|xb|` cannot overflow. For `rtol > 1` the capped tolerance is still
     !! about `huge/2`, no smaller than any half-width it is compared with, so the search ends where
@@ -562,7 +565,7 @@ contains
     !! this is not `pure`.
     function stop_tolerance(xb, tol_abs, tol_rel, ax_cap) result(tol1)
         real(real64), intent(in) :: xb      !! the best point
-        real(real64), intent(in) :: tol_abs !! `tol`, finite and non-negative
+        real(real64), intent(in) :: tol_abs !! `atol`, finite and non-negative
         real(real64), intent(in) :: tol_rel !! `rtol`, finite and at least `4*epsilon`
         real(real64), intent(in) :: ax_cap  !! largest `|xb|` that `tol_rel` may multiply
         real(real64)             :: tol1    !! the tolerance on the bracket's half-width

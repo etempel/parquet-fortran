@@ -85,7 +85,9 @@ contains
                          test_root_budget_is_spent), &
             new_unittest("a root near 1e-9 comes back to the relative bound under the defaults", &
                          test_root_relative_tolerance_at_a_tiny_root), &
-            new_unittest("a looser tol or rtol stops sooner and still meets itself", &
+            new_unittest("a root at zero converges with atol and spends the budget without it", &
+                         test_root_at_zero_needs_atol), &
+            new_unittest("a looser atol or rtol stops sooner and still meets itself", &
                          test_root_tolerances_stop_early_when_asked), &
             new_unittest("the object and plain-function forms agree to the bit", &
                          test_root_both_forms_agree), &
@@ -147,7 +149,7 @@ contains
     !> Asserts the solver, the oracle and the stated root agree for one function.
     subroutine compare_with_oracle(error, f, a, b, want, label)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
-        procedure(pf_root_func)                    :: f     !! the function
+        procedure(pf_rootfun_func)                    :: f     !! the function
         real(real64), intent(in)                   :: a     !! bracket, lower end
         real(real64), intent(in)                   :: b     !! bracket, upper end
         real(real64), intent(in)                   :: want  !! the stated root
@@ -171,7 +173,7 @@ contains
 
     !> Bisection to adjacent doubles, counting its evaluations: the slow, obviously correct way.
     subroutine bisection_oracle(f, a, b, x, neval)
-        procedure(pf_root_func)   :: f     !! the function
+        procedure(pf_rootfun_func)   :: f     !! the function
         real(real64), intent(in)  :: a     !! bracket, lower end
         real(real64), intent(in)  :: b     !! bracket, upper end; f(a) and f(b) differ in sign
         real(real64), intent(out) :: x     !! an end of the final, adjacent-double bracket
@@ -223,7 +225,7 @@ contains
     !> Asserts the solver spends under half of the oracle's evaluations on one function.
     subroutine beat_bisection(error, f, a, b, label)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
-        procedure(pf_root_func)                    :: f     !! the function
+        procedure(pf_rootfun_func)                    :: f     !! the function
         real(real64), intent(in)                   :: a     !! bracket, lower end
         real(real64), intent(in)                   :: b     !! bracket, upper end
         character(len=*), intent(in)               :: label !! names the function in a message
@@ -682,7 +684,48 @@ contains
 
     end subroutine test_root_relative_tolerance_at_a_tiny_root
 
-    !> A looser `tol` or `rtol` stops sooner, and the answer still meets what was asked for.
+    !> A root at exactly zero is the one place a relative tolerance cannot help, so `atol` decides.
+    !!
+    !! **`x**3` has a triple root at zero.** The bracket around it cannot become narrow RELATIVE to
+    !! `|x|`, because `|x|` is going to zero with it, so `rtol*|x|` vanishes as fast as the bracket
+    !! and the stopping test `2*eps*|x| + max(atol, rtol*|x|)/2` is met only through `atol`. Both
+    !! halves are asserted, because either alone would pass with the two tolerances exchanged: the
+    !! call WITH `atol` must converge, and the call without it must spend the budget and report
+    !! `PF_ROOT_LIMIT`.
+    !!
+    !! Mutation proved: exchange `atol` and `rtol` in the stopping rule -- swap `tol_abs` and
+    !! `tol_rel` where `stop_tolerance` forms `max(tol_abs, tol_rel*ax)`
+    !! (`src/parquet_root_solve.f90`) -- and this test fails on `a root at zero must NOT converge on
+    !! the relative tolerance alone`. It is the SECOND half that catches it, not the first: the
+    !! exchange puts `rtol`, whose default is `4*epsilon`, into the ABSOLUTE slot, which is a
+    !! positive floor the bracket at zero can meet, so the call with no `atol` converges when it
+    !! must not. The first half still passes, because a mutant that converges too readily converges
+    !! in that arm too.
+    subroutine test_root_at_zero_needs_atol(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_root_info) :: with_atol, without
+        real(real64)       :: x
+
+        call pf_find_root(root_cube, -1.0_real64, 2.0_real64, x, atol=1.0e-8_real64, info=with_atol)
+        call check(error, with_atol%converged, "a root at zero must converge when atol is given")
+        if (allocated(error)) return
+        call check(error, abs(x) <= 1.0e-8_real64, "the root found must be zero to within atol")
+        if (allocated(error)) return
+
+        call pf_find_root(root_cube, -1.0_real64, 2.0_real64, x, info=without)
+        call check(error, .not. without%converged, &
+                   "a root at zero must NOT converge on the relative tolerance alone")
+        if (allocated(error)) return
+        call check(error, without%status == PF_ROOT_LIMIT, &
+                   "the run without atol must end on PF_ROOT_LIMIT, having spent the budget")
+        if (allocated(error)) return
+        call check(error, without%neval > with_atol%neval, &
+                   "the run without atol must cost more than the one with it")
+
+    end subroutine test_root_at_zero_needs_atol
+
+    !> A looser `atol` or `rtol` stops sooner, and the answer still meets what was asked for.
     subroutine test_root_tolerances_stop_early_when_asked(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
@@ -690,9 +733,9 @@ contains
         real(real64)       :: x
 
         call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, info=tight)
-        call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, tol=1.0e-3_real64, info=loose)
+        call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, atol=1.0e-3_real64, info=loose)
         call check(error, loose%neval < tight%neval .and. abs(x - DOTTIE) <= 1.0e-3_real64 + DEFAULT_BOUND, &
-                   "tol = 1e-3 must stop sooner and still be within 1e-3 of the root")
+                   "atol = 1e-3 must stop sooner and still be within 1e-3 of the root")
         if (allocated(error)) return
         call pf_find_root(root_cos_minus_x, 0.0_real64, 1.0_real64, x, rtol=1.0e-4_real64, info=loose)
         call check(error, loose%neval < tight%neval .and. &
@@ -846,7 +889,7 @@ contains
         call pf_find_root(root_steep, 0.0_real64, 1.0_real64, x, info=info)
         line%root = 1.0e300_real64
         call pf_find_root(line, 0.5e300_real64, 2.0e300_real64, x, rtol=1.0e10_real64, info=info)
-        call pf_find_root(line, 0.5e300_real64, 2.0e300_real64, x, tol=1.0e308_real64, info=info)
+        call pf_find_root(line, 0.5e300_real64, 2.0e300_real64, x, atol=1.0e308_real64, info=info)
 
         ! The seeded stress run: a 31-bit linear congruential generator, formed in int64 so that no
         ! product overflows, gives the same cases under every compiler.
@@ -876,7 +919,7 @@ contains
                 grow%lower_limit = a - abs(a)*u(12)
                 grow%upper_limit = b + abs(b)*u(12)
             end if
-            call pf_find_root(shape, a, b, x, expand=grow, tol=TOLS(1 + int(5.0_real64*u(11))), &
+            call pf_find_root(shape, a, b, x, expand=grow, atol=TOLS(1 + int(5.0_real64*u(11))), &
                               rtol=RTOLS(1 + int(7.0_real64*u(12))), info=info)
             if (.not. ieee_is_finite(x)) then
                 nbad = nbad + 1

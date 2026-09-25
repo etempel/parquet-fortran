@@ -59,12 +59,12 @@ contains
     !! The projection is `min`/`max` on values the simplex formed from finite vertices, so neither
     !! sees a NaN -- which matters, since both compile to instructions that raise IEEE invalid on
     !! one.
-    function boxed_objective_eval(this, x) result(f)
-        class(boxed_objective), intent(inout) :: this !! the wrapper, holding the box
+    function boxed_objective_eval(self, x) result(f)
+        class(boxed_objective), intent(inout) :: self !! the wrapper, holding the box
         real(real64), intent(in)              :: x(:) !! the point the simplex chose
         real(real64)                          :: f    !! objective value at the projected point
 
-        f = this%inner%eval(min(this%upper, max(this%lower, x)))
+        f = self%inner%eval(min(self%upper, max(self%lower, x)))
 
     end function boxed_objective_eval
 
@@ -76,13 +76,13 @@ contains
         real(real64), allocatable :: trial(:,:)       !! this generation's trial vectors
         real(real64), allocatable :: ftrial(:)        !! their values, before the selection screens them
         type(pf_optimize_info) :: polish_info         !! what the optional final simplex did
-        real(real64) :: ftol_use                      !! fractional tolerance actually in force
+        real(real64) :: rtol_use                      !! fractional tolerance actually in force
         real(real64) :: atol_use                      !! absolute tolerance actually in force
         real(real64) :: fw                            !! differential weight actually in force
         real(real64) :: cr_use                        !! crossover probability actually in force
         real(real64) :: fhi, flo                      !! worst and best value in the population
         real(real64) :: spread_end                    !! the value spread the run ended on
-        real(real64) :: rtol                          !! fractional spread of the current values
+        real(real64) :: spread_rel                    !! fractional spread of the current values
         real(real64) :: denom                         !! scale the fractional test divides by
         real(real64) :: fpolish                       !! value the optional final simplex reached
         integer :: npar                               !! number of variables
@@ -133,10 +133,10 @@ contains
             cr_use = cr
         end if
 
-        ftol_use = DE_FTOL
-        if (present(ftol)) then
-            call validate_tolerance("pf_minimize_de", "ftol", ftol, context)
-            ftol_use = ftol
+        rtol_use = DE_RTOL
+        if (present(rtol)) then
+            call validate_tolerance("pf_minimize_de", "rtol", rtol, context)
+            rtol_use = rtol
         end if
         atol_use = 0.0_real64
         if (present(atol)) then
@@ -147,8 +147,8 @@ contains
         ! At least one convergence test must be able to fire, or the run can only end by
         ! exhausting a budget -- a caller mistake rather than a way to ask for "as long as
         ! possible". `pf_minimize_simplex` refuses the same pair.
-        if (ftol_use + atol_use <= 0.0_real64) call optimize_abort("pf_minimize_de", &
-            "at least one of ftol and atol must be positive", context)
+        if (rtol_use + atol_use <= 0.0_real64) call optimize_abort("pf_minimize_de", &
+            "at least one of rtol and atol must be positive", context)
 
         gen_budget = DE_MAX_GEN
         if (present(max_gen)) then
@@ -224,7 +224,7 @@ contains
             where (.not. is_finite_quiet(fpop)) fpop = ieee_value(1.0_real64, ieee_positive_inf)
 
             ib = minloc(fpop, 1)
-            if (present(history)) call history%append(pop(:,ib), fpop(ib))
+            if (present(history)) call history%add(pop(:,ib), fpop(ib))
 
             status = PF_OPT_LIMIT
             generations: do
@@ -250,11 +250,11 @@ contains
                 if (ieee_is_finite(fhi)) then
                     denom = abs(fhi) + abs(flo)
                     if (denom > 0.0_real64) then
-                        rtol = 2.0_real64*(fhi - flo)/denom
+                        spread_rel = 2.0_real64*(fhi - flo)/denom
                     else
-                        rtol = 0.0_real64
+                        spread_rel = 0.0_real64
                     end if
-                    if (rtol < ftol_use) hit = .true.
+                    if (spread_rel < rtol_use) hit = .true.
                     if ((fhi - flo) < atol_use) hit = .true.
                 end if
                 if (hit) then
@@ -286,7 +286,7 @@ contains
                 end do
 
                 ib = minloc(fpop, 1)
-                if (present(history)) call history%append(pop(:,ib), fpop(ib))
+                if (present(history)) call history%add(pop(:,ib), fpop(ib))
 
             end do generations
 
@@ -319,6 +319,9 @@ contains
         if (present(population)) population = pop
         if (present(history)) call history_trim(history)
 
+        ! `converged` and `info%converged` are ONE expression, so the short answer and the long one
+        ! cannot drift apart, and the flag is set whether or not `info` was asked for.
+        if (present(converged)) converged = (status == PF_OPT_OK .or. status == PF_OPT_TARGET)
         if (present(info)) then
             info%status = status
             info%converged = (status == PF_OPT_OK .or. status == PF_OPT_TARGET)
@@ -348,7 +351,7 @@ contains
             bx%inner => obj
             bx%lower = lower
             bx%upper = upper
-            call pf_minimize_simplex(bx, xp, fp, DE_POLISH_STEP*(upper - lower), ftol_use, &
+            call pf_minimize_simplex(bx, xp, fp, DE_POLISH_STEP*(upper - lower), rtol_use, &
                                      atol=atol_use, info=ip, context=context)
             ! `fp` is already the value AT this projection -- every evaluation the simplex made was
             ! of the projected point -- so the two come back consistent with each other.
@@ -491,9 +494,9 @@ contains
     ! The FULLY RESTATED form, not `module procedure minimize_de_func`: in the abbreviated form
     ! gfortran 15 gives the `procedure(pf_objective_func)` dummy an implicit interface and refuses
     ! the pointer assignment below with "Explicit interface required for 'f'".
-    module subroutine minimize_de_func(f, lower, upper, seed, x, fmin, np, f_weight, cr, ftol, &
+    module subroutine minimize_de_func(f, lower, upper, seed, x, fmin, np, f_weight, cr, rtol, &
                                        atol, ftarget, max_gen, max_neval, threads, polish, &
-                                       info, history, population, context)
+                                       converged, info, history, population, context)
         implicit none
         procedure(pf_objective_func)                     :: f          !! the objective
         real(real64), intent(in)                         :: lower(:)   !! the box, lower corner
@@ -504,13 +507,14 @@ contains
         integer, intent(in), optional                    :: np         !! population size
         real(real64), intent(in), optional               :: f_weight   !! differential weight
         real(real64), intent(in), optional               :: cr         !! crossover probability
-        real(real64), intent(in), optional               :: ftol       !! fractional tolerance
+        real(real64), intent(in), optional               :: rtol       !! fractional tolerance
         real(real64), intent(in), optional               :: atol       !! absolute tolerance
         real(real64), intent(in), optional               :: ftarget    !! stop at this value
         integer, intent(in), optional                    :: max_gen    !! generation budget
-        integer, intent(in), optional                    :: max_neval  !! evaluation budget
+        integer, intent(in), optional                    :: max_neval  !! evaluation budget; at most huge(1)/2
         integer, intent(in), optional                    :: threads    !! evaluation team size
         logical, intent(in), optional                    :: polish     !! finish with a simplex
+        logical, intent(out), optional                   :: converged !! the run's own rule fired
         type(pf_optimize_info), intent(out), optional    :: info       !! what happened
         type(pf_optimize_history), intent(out), optional :: history    !! best of each generation
         real(real64), allocatable, intent(out), optional :: population(:,:) !! final population
@@ -519,9 +523,11 @@ contains
         type(func_objective) :: obj !! wraps the plain function as an objective object
 
         obj%fun => f
-        call minimize_de_obj(obj, lower, upper, seed, x, fmin, np, f_weight, cr, ftol, atol, &
-                             ftarget, max_gen, max_neval, threads, polish, info, history, &
-                             population, context)
+        call minimize_de_obj(obj, lower, upper, seed, x, fmin, np=np, f_weight=f_weight, cr=cr, &
+                             rtol=rtol, atol=atol, ftarget=ftarget, max_gen=max_gen, &
+                             max_neval=max_neval, threads=threads, polish=polish, &
+                             converged=converged, info=info, &
+                             history=history, population=population, context=context)
 
     end subroutine minimize_de_func
 

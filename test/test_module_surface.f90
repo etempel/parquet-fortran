@@ -1496,8 +1496,8 @@ contains
     subroutine check_integrate_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
 
-        type(pf_integration_info)   :: info
-        type(pf_integration_points) :: pts
+        type(pf_integrate_info)   :: info
+        type(pf_integrate_points) :: pts
         real(real64)                :: r, inf
 
         what = ""
@@ -1505,17 +1505,17 @@ contains
         ! The generic, in its bare-rtol form, with the info and points records.
         r = pf_integrate(unit_square, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info, points=pts)
         if (abs(r - 1.0_real64/3.0_real64) > 1.0e-12_real64) what = "pf_integrate"
-        if (what == "" .and. .not. info%converged) what = "pf_integration_info%converged"
+        if (what == "" .and. .not. info%converged) what = "pf_integrate_info%converged"
         if (what == "" .and. info%status /= PF_INT_OK) what = "PF_INT_OK"
-        if (what == "" .and. pts%n /= 21) what = "pf_integration_points%n"
+        if (what == "" .and. pts%n /= 21) what = "pf_integrate_points%n"
         if (what == "" .and. abs(sum(pts%w(1:pts%n)*pts%f(1:pts%n)) - r) > 1.0e-12_real64) &
-            what = "pf_integration_points weights"
+            what = "pf_integrate_points weights"
 
-        ! The pf_tolerance form.
+        ! The atol= form: both tolerances by keyword, reached through this one import.
         if (what == "") then
             r = pf_integrate(unit_square, 0.0_real64, 1.0_real64, &
-                             pf_tolerance(rtol=0.0_real64, atol=1.0e-10_real64))
-            if (abs(r - 1.0_real64/3.0_real64) > 1.0e-10_real64) what = "pf_tolerance"
+                             rtol=0.0_real64, atol=1.0e-10_real64)
+            if (abs(r - 1.0_real64/3.0_real64) > 1.0e-10_real64) what = "pf_integrate atol="
         end if
 
         ! pf_infinity is reachable and is an infinity, which is all this phase can assert of it.
@@ -1677,13 +1677,13 @@ module test_module_surface_optimize
 contains
 
     !> `(x - 2)**2`, counting the call.
-    function surface_objective_eval(this, x) result(f)
-        class(surface_objective), intent(inout) :: this !! the objective
+    function surface_objective_eval(self, x) result(f)
+        class(surface_objective), intent(inout) :: self !! the objective
         real(real64), intent(in)                :: x(:) !! the point
         real(real64)                            :: f    !! the objective value
 
         f = (x(1) - 2.0_real64)**2
-        this%calls = this%calls + 1
+        self%calls = self%calls + 1
 
     end function surface_objective_eval
 
@@ -1697,14 +1697,18 @@ contains
         type(surface_objective)   :: obj
         real(real64)              :: xs, fs, x(1), fmin, lower(1), upper(1)
         real(real64), allocatable :: population(:,:)
+        logical                   :: ok
         character(len=:), allocatable :: verbosity, stream
 
         what = ""
 
-        ! Brent on a bracket, with both records.
-        call pf_minimize_scalar(offset_square, -3.0_real64, 3.0_real64, xs, fs, info=info, &
-                                history=record)
+        ! Brent on a bracket, with both records and the short answer.
+        ok = .false.
+        call pf_minimize_scalar(offset_square, -3.0_real64, 3.0_real64, xs, fs, converged=ok, &
+                                info=info, history=record)
         if (abs(xs - 2.0_real64) > 1.0e-6_real64) what = "pf_minimize_scalar"
+        if (what == "" .and. .not. ok) what = "pf_minimize_scalar converged="
+        if (what == "" .and. (ok .neqv. info%converged)) what = "converged= against info%converged"
         if (what == "" .and. .not. info%converged) what = "pf_optimize_info%converged"
         if (what == "" .and. info%status /= PF_OPT_OK) what = "PF_OPT_OK"
         if (what == "" .and. record%n /= info%neval) what = "pf_optimize_history%n"
@@ -1750,7 +1754,7 @@ contains
         if (what == "") then
             x = [0.0_real64]
             call pf_minimize_multistart(offset_square, lower, upper, 7_int64, x, fmin, nstart=4, &
-                                        solver=solver, xtol=1.0e-3_real64, threads=2, info=info)
+                                        solver=solver, merge_tol=1.0e-3_real64, threads=2, info=info)
             if (abs(x(1) - 2.0_real64) > 1.0e-3_real64) what = "pf_minimize_multistart"
             if (what == "" .and. info%nminima < 1) what = "pf_optimize_info%nminima"
             if (what == "" .and. info%nlimit < 0) what = "pf_optimize_info%nlimit"
@@ -1774,7 +1778,7 @@ contains
 
         ! The remaining status codes are reachable by name through this import alone.
         if (what == "" .and. PF_OPT_LIMIT == PF_OPT_TARGET) what = "PF_OPT_LIMIT"
-        if (what == "" .and. PF_OPT_NONFINITE == PF_OPT_ROUNDING) what = "PF_OPT_NONFINITE"
+        if (what == "" .and. PF_OPT_NONFINITE == PF_OPT_ROUNDOFF) what = "PF_OPT_NONFINITE"
         if (what == "" .and. PF_OPT_INFEASIBLE == PF_OPT_OK) what = "PF_OPT_INFEASIBLE"
 
     end subroutine check_optimize_surface
@@ -1820,30 +1824,30 @@ module test_module_surface_prima
 contains
 
     !> `(x - 2)**2`, counting the call.
-    function prima_surface_objective_eval(this, x) result(f)
-        class(prima_surface_objective), intent(inout) :: this !! the objective
+    function prima_surface_objective_eval(self, x) result(f)
+        class(prima_surface_objective), intent(inout) :: self !! the objective
         real(real64), intent(in)                      :: x(:) !! the point
         real(real64)                                  :: f    !! the objective value
 
         f = (x(1) - 2.0_real64)**2
-        this%calls = this%calls + 1
+        self%calls = self%calls + 1
 
     end function prima_surface_objective_eval
 
     !> `(x - 2)**2` again, for the constrained type.
-    function prima_surface_constrained_eval(this, x) result(f)
-        class(prima_surface_constrained), intent(inout) :: this !! the objective
+    function prima_surface_constrained_eval(self, x) result(f)
+        class(prima_surface_constrained), intent(inout) :: self !! the objective
         real(real64), intent(in)                        :: x(:) !! the point
         real(real64)                                    :: f    !! the objective value
 
         f = (x(1) - 2.0_real64)**2
-        this%calls = this%calls + 1
+        self%calls = self%calls + 1
 
     end function prima_surface_constrained_eval
 
     !> How many constraint values `constraints` fills.
-    function prima_surface_count(this) result(m)
-        class(prima_surface_constrained), intent(in) :: this !! the objective
+    function prima_surface_count(self) result(m)
+        class(prima_surface_constrained), intent(in) :: self !! the objective
         integer                                      :: m    !! the number of constraints
 
         m = 1
@@ -1851,12 +1855,12 @@ contains
     end function prima_surface_count
 
     !> `x - 1 <= 0`.
-    subroutine prima_surface_constr(this, x, c)
-        class(prima_surface_constrained), intent(inout) :: this !! the objective
+    subroutine prima_surface_constr(self, x, c)
+        class(prima_surface_constrained), intent(inout) :: self !! the objective
         real(real64), intent(in)                        :: x(:) !! the point
         real(real64), intent(out)                       :: c(:) !! the constraint values
 
-        this%calls = this%calls + 0
+        self%calls = self%calls + 0
         c(1) = x(1) - 1.0_real64
 
     end subroutine prima_surface_constr
@@ -1876,6 +1880,7 @@ contains
         type(prima_surface_constrained) :: constrained
         real(real64)                    :: x(1), fmin, lower(1), upper(1), c(1)
         real(real64)                    :: a_ineq(1, 1), b_ineq(1)
+        logical                         :: ok
 
         what = ""
         a_ineq(1, 1) = 1.0_real64
@@ -1885,10 +1890,13 @@ contains
         x = [5.0_real64]
         lower = [-3.0_real64]
         upper = [8.0_real64]
+        ok = .false.
         call pf_minimize_bobyqa(prima_offset_square, x, fmin, lower=lower, upper=upper, &
-                                rhobeg=0.5_real64, rhoend=1.0e-8_real64, info=info, &
+                                rhobeg=0.5_real64, rhoend=1.0e-8_real64, converged=ok, info=info, &
                                 history=record)
         if (abs(x(1) - 2.0_real64) > 1.0e-6_real64) what = "pf_minimize_bobyqa"
+        if (what == "" .and. .not. ok) what = "pf_minimize_bobyqa converged="
+        if (what == "" .and. (ok .neqv. info%converged)) what = "converged= against info%converged"
         if (what == "" .and. .not. info%converged) what = "pf_optimize_info%converged"
         if (what == "" .and. info%status /= PF_OPT_OK) what = "PF_OPT_OK"
         if (what == "" .and. record%n /= info%neval) what = "pf_optimize_history%n"
@@ -1949,7 +1957,7 @@ contains
 
         ! The remaining status codes are reachable by name through this import alone.
         if (what == "" .and. PF_OPT_LIMIT == PF_OPT_TARGET) what = "PF_OPT_LIMIT"
-        if (what == "" .and. PF_OPT_NONFINITE == PF_OPT_ROUNDING) what = "PF_OPT_NONFINITE"
+        if (what == "" .and. PF_OPT_NONFINITE == PF_OPT_ROUNDOFF) what = "PF_OPT_NONFINITE"
         if (what == "" .and. PF_OPT_INFEASIBLE == PF_OPT_OK) what = "PF_OPT_INFEASIBLE"
 
     end subroutine check_prima_surface
@@ -2152,12 +2160,12 @@ contains
     end function surface_sq2_func
 
     !> Evaluates `x*x - 2` for the object form.
-    function surface_sq2_eval(this, x) result(y)
-        class(surface_sq2), intent(inout) :: this !! the function object, which does not change
+    function surface_sq2_eval(self, x) result(f)
+        class(surface_sq2), intent(inout) :: self !! the function object, which does not change
         real(real64), intent(in)          :: x    !! where to evaluate
-        real(real64)                      :: y    !! the value there
+        real(real64)                      :: f    !! the value there
 
-        y = surface_sq2_func(x)
+        f = surface_sq2_func(x)
 
     end function surface_sq2_eval
 

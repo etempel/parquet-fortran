@@ -18,84 +18,64 @@ submodule (parquet_integrate) parquet_integrate_driver
 
 contains
 
-    ! ---- the four specifics ------------------------------------------------------------------
+    ! ---- the two specifics -------------------------------------------------------------------
 
-    module procedure integrate_obj_rtol
+    module procedure integrate_obj
 
-        call integrate_impl(f, a, b, pf_tolerance(rtol=rtol, atol=0.0_real64), max_neval, &
-                            converged, info, points, context, log_base, extrapolate, max_panels, &
-                            breakpoints, res)
+        call integrate_impl(f, a, b, tolerance_of(rtol, atol), max_neval=max_neval, &
+                            converged=converged, info=info, points=points, context=context, &
+                            log_base=log_base, extrapolate=extrapolate, max_panels=max_panels, &
+                            breakpoints=breakpoints, res=res)
 
-    end procedure integrate_obj_rtol
+    end procedure integrate_obj
 
-    module procedure integrate_obj_tol
-
-        call integrate_impl(f, a, b, tol, max_neval, converged, info, points, context, &
-                            log_base, extrapolate, max_panels, breakpoints, res)
-
-    end procedure integrate_obj_tol
-
-    !> Integrand as a plain function, tolerance as a bare `rtol`.
+    !> Integrand as a plain function.
     !!
     !! Written in the fully restated form rather than the abbreviated `module procedure` one: a
     !! dummy PROCEDURE argument in an abbreviated body has an implicit interface under gfortran 15
     !! (`fortran-gotchas.md`).
-    module function integrate_func_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                        context, log_base, extrapolate, max_panels, breakpoints) result(res)
+    module function integrate_func(f, a, b, rtol, atol, max_neval, log_base, extrapolate, &
+                                   max_panels, breakpoints, converged, info, points, context) result(res)
         procedure(pf_integrand_func)                       :: f           !! the integrand
         real(real64), intent(in)                           :: a           !! lower bound
         real(real64), intent(in)                           :: b           !! upper bound
         real(real64), intent(in)                           :: rtol        !! relative tolerance
-        integer, intent(in), optional                      :: max_neval   !! evaluation budget
-        logical, intent(out), optional                     :: converged   !! status is OK
-        type(pf_integration_info), intent(out), optional   :: info        !! what happened
-        type(pf_integration_points), intent(out), optional :: points      !! the record
-        character(len=*), intent(in), optional             :: context     !! call-site text
+        real(real64), intent(in), optional                 :: atol        !! absolute tolerance
+        integer, intent(in), optional                      :: max_neval   !! evaluation budget; at most huge(1)/42
         logical, intent(in), optional                      :: log_base    !! integrate in log x
         logical, intent(in), optional                      :: extrapolate !! epsilon table
         integer, intent(in), optional                      :: max_panels  !! walk panel cap
         real(real64), intent(in), optional                 :: breakpoints(:) !! interior cuts
+        logical, intent(out), optional                     :: converged   !! status is OK
+        type(pf_integrate_info), intent(out), optional   :: info        !! what happened
+        type(pf_integrate_points), intent(out), optional :: points      !! the record
+        character(len=*), intent(in), optional             :: context     !! call-site text
         real(real64)                                       :: res         !! the integral
 
         type(func_integrand) :: wrapped
 
         wrapped%fp => f
-        call integrate_impl(wrapped, a, b, pf_tolerance(rtol=rtol, atol=0.0_real64), max_neval, &
-                            converged, info, points, context, log_base, extrapolate, max_panels, &
-                            breakpoints, res)
+        call integrate_impl(wrapped, a, b, tolerance_of(rtol, atol), max_neval=max_neval, &
+                            converged=converged, info=info, points=points, context=context, &
+                            log_base=log_base, extrapolate=extrapolate, max_panels=max_panels, &
+                            breakpoints=breakpoints, res=res)
 
-    end function integrate_func_rtol
+    end function integrate_func
 
-    !> Integrand as a plain function, tolerance as a `pf_tolerance`. Fully restated for the same
-    !! reason as `integrate_func_rtol`.
-    module function integrate_func_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                       context, log_base, extrapolate, max_panels, breakpoints) result(res)
-        procedure(pf_integrand_func)                       :: f           !! the integrand
-        real(real64), intent(in)                           :: a           !! lower bound
-        real(real64), intent(in)                           :: b           !! upper bound
-        type(pf_tolerance), intent(in)                     :: tol         !! both tolerances
-        integer, intent(in), optional                      :: max_neval   !! evaluation budget
-        logical, intent(out), optional                     :: converged   !! status is OK
-        type(pf_integration_info), intent(out), optional   :: info        !! what happened
-        type(pf_integration_points), intent(out), optional :: points      !! the record
-        character(len=*), intent(in), optional             :: context     !! call-site text
-        logical, intent(in), optional                      :: log_base    !! integrate in log x
-        logical, intent(in), optional                      :: extrapolate !! epsilon table
-        integer, intent(in), optional                      :: max_panels  !! walk panel cap
-        real(real64), intent(in), optional                 :: breakpoints(:) !! interior cuts
-        real(real64)                                       :: res         !! the integral
+    !> The two tolerance arguments as the one object the driver carries, `atol` defaulting to 0.
+    pure function tolerance_of(rtol, atol) result(tol)
+        real(real64), intent(in)           :: rtol !! relative tolerance, as given
+        real(real64), intent(in), optional :: atol !! absolute tolerance, absent meaning zero
+        type(tolerance_pair)               :: tol  !! the pair, for `integrate_impl`
 
-        type(func_integrand) :: wrapped
+        tol%rtol = rtol
+        if (present(atol)) tol%atol = atol
 
-        wrapped%fp => f
-        call integrate_impl(wrapped, a, b, tol, max_neval, converged, info, points, context, &
-                            log_base, extrapolate, max_panels, breakpoints, res)
-
-    end function integrate_func_tol
+    end function tolerance_of
 
     module procedure func_integrand_eval
 
-        f = this%fp(x)
+        f = self%fp(x)
 
     end procedure func_integrand_eval
 
@@ -128,7 +108,7 @@ contains
 
     module procedure points_append
 
-        type(pf_integration_points) :: merged
+        type(pf_integrate_points) :: merged
         integer                     :: n1, n2
 
         n1 = this%n
@@ -238,11 +218,11 @@ contains
         class(pf_integrand), intent(inout)                 :: f           !! the integrand
         real(real64), intent(in)                           :: a           !! lower bound
         real(real64), intent(in)                           :: b           !! upper bound
-        type(pf_tolerance), intent(in)                     :: tol         !! both tolerances
+        type(tolerance_pair), intent(in)                     :: tol         !! both tolerances
         integer, intent(in), optional                      :: max_neval   !! evaluation budget
         logical, intent(out), optional                     :: converged   !! status is OK
-        type(pf_integration_info), intent(out), optional   :: info        !! what happened
-        type(pf_integration_points), intent(out), optional :: points      !! the record
+        type(pf_integrate_info), intent(out), optional   :: info        !! what happened
+        type(pf_integrate_points), intent(out), optional :: points      !! the record
         character(len=*), intent(in), optional             :: context     !! call-site text
         logical, intent(in), optional                      :: log_base    !! integrate in log x
         logical, intent(in), optional                      :: extrapolate !! epsilon table
@@ -250,8 +230,8 @@ contains
         real(real64), intent(in), optional                 :: breakpoints(:) !! interior cuts
         real(real64), intent(out)                          :: res         !! the integral
 
-        type(pf_integration_info)   :: outcome
-        type(pf_integration_points) :: record
+        type(pf_integrate_info)   :: outcome
+        type(pf_integrate_points) :: record
         type(engine_work)           :: work
         type(bad_value)             :: bad
         logical                     :: in_log, use_eps, record_wanted
@@ -310,8 +290,8 @@ contains
         ! wrong, and no accuracy claim over that means anything. It is the caller's function
         ! misbehaving rather than the call being malformed, so it is reported and not aborted on.
         if (bad%seen) then
-            outcome%status = worse_status(outcome%status, PF_INT_BAD_VALUE)
-            outcome%non_finite_at = bad%x
+            outcome%status = worse_status(outcome%status, PF_INT_NONFINITE)
+            outcome%nonfinite_at = bad%x
         end if
 
         outcome%converged = outcome%status == PF_INT_OK
@@ -324,8 +304,8 @@ contains
 
     !> Moves an assembled record into the caller's `points`, leaving nothing copied.
     subroutine hand_back_record(record, points)
-        type(pf_integration_points), intent(inout) :: record !! the assembled record, consumed
-        type(pf_integration_points), intent(out)   :: points !! the caller's record
+        type(pf_integrate_points), intent(inout) :: record !! the assembled record, consumed
+        type(pf_integrate_points), intent(out)   :: points !! the caller's record
 
         points%n = record%n
         call move_alloc(record%x, points%x)
@@ -361,21 +341,21 @@ contains
         real(real64), intent(in)                   :: a              !! lower bound
         real(real64), intent(in)                   :: b              !! upper bound
         real(real64), intent(in)                   :: breakpoints(:) !! interior cuts, any order
-        type(pf_tolerance), intent(in)             :: tol            !! both tolerances
+        type(tolerance_pair), intent(in)             :: tol            !! both tolerances
         integer, intent(in)                        :: budget         !! resolved `max_neval`
         integer, intent(in)                        :: panel_cap      !! resolved `max_panels`
         logical, intent(in)                        :: in_log         !! integrate in `log x`
         logical, intent(in)                        :: use_eps        !! run the epsilon table
         type(engine_work), intent(inout)           :: work           !! the engine's work arrays
-        type(pf_integration_points), intent(inout) :: record         !! the record, appended to
+        type(pf_integrate_points), intent(inout) :: record         !! the record, appended to
         real(real64), intent(inout)                :: res            !! running result, added to
-        type(pf_integration_info), intent(inout)   :: outcome        !! filled in as it goes
+        type(pf_integrate_info), intent(inout)   :: outcome        !! filled in as it goes
         integer, intent(inout)                     :: neval          !! evaluation counter
         type(bad_value), intent(inout)             :: bad            !! set on a non-finite value
         character(len=*), intent(in), optional     :: context        !! call-site text
 
         real(real64), allocatable :: cut(:)
-        type(pf_tolerance)        :: piece_tol
+        type(tolerance_pair)        :: piece_tol
         real(real64)              :: lo, hi, key
         integer                   :: npieces, ipiece, i, j
 
@@ -392,7 +372,7 @@ contains
         end do
 
         npieces = size(cut) + 1
-        piece_tol = pf_tolerance(rtol=tol%rtol, atol=tol%atol/real(npieces, real64))
+        piece_tol = tolerance_pair(rtol=tol%rtol, atol=tol%atol/real(npieces, real64))
 
         do ipiece = 1, npieces
             if (ipiece == 1) then
@@ -427,15 +407,15 @@ contains
         class(pf_integrand), intent(inout)         :: f         !! the integrand
         real(real64), intent(in)                   :: a         !! lower bound
         real(real64), intent(in)                   :: b         !! upper bound
-        type(pf_tolerance), intent(in)             :: tol       !! both tolerances
+        type(tolerance_pair), intent(in)             :: tol       !! both tolerances
         integer, intent(in)                        :: budget    !! evaluations this range may use
         integer, intent(in)                        :: panel_cap !! resolved `max_panels`
         logical, intent(in)                        :: in_log    !! integrate in `log x`
         logical, intent(in)                        :: use_eps   !! run the epsilon table
         type(engine_work), intent(inout)           :: work      !! the engine's work arrays
-        type(pf_integration_points), intent(inout) :: record    !! the record, appended to
+        type(pf_integrate_points), intent(inout) :: record    !! the record, appended to
         real(real64), intent(inout)                :: res       !! running result, added to
-        type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
+        type(pf_integrate_info), intent(inout)   :: outcome   !! filled in as it goes
         integer, intent(inout)                     :: neval     !! evaluation counter
         type(bad_value), intent(inout)             :: bad       !! set on a non-finite value
         character(len=*), intent(in), optional     :: context   !! call-site text
@@ -458,19 +438,19 @@ contains
         class(pf_integrand), intent(inout)         :: f       !! the integrand
         real(real64), intent(in)                   :: a       !! lower bound, finite
         real(real64), intent(in)                   :: b       !! upper bound, finite
-        type(pf_tolerance), intent(in)             :: tol     !! both tolerances
+        type(tolerance_pair), intent(in)             :: tol     !! both tolerances
         integer, intent(in)                        :: budget  !! evaluations this range may use
         logical, intent(in)                        :: in_log  !! integrate in `log x`
         logical, intent(in)                        :: use_eps !! run the epsilon table
         type(engine_work), intent(inout)           :: work    !! the engine's work arrays
-        type(pf_integration_points), intent(inout) :: record  !! the record, appended to
+        type(pf_integrate_points), intent(inout) :: record  !! the record, appended to
         real(real64), intent(inout)                :: res     !! running result, added to
-        type(pf_integration_info), intent(inout)   :: outcome !! filled in as it goes
+        type(pf_integrate_info), intent(inout)   :: outcome !! filled in as it goes
         integer, intent(inout)                     :: neval   !! evaluation counter
         type(bad_value), intent(inout)             :: bad     !! set on a non-finite value
         character(len=*), intent(in), optional     :: context !! call-site text
 
-        type(pf_integration_points) :: piece_record
+        type(pf_integrate_points) :: piece_record
         integer                     :: limit, ier, last
         real(real64)                :: lo, hi, res1, abserr, defabs
         logical                     :: extrapolated
@@ -539,14 +519,14 @@ contains
         class(pf_integrand), intent(inout)         :: f         !! the integrand
         real(real64), intent(in)                   :: a         !! lower bound
         real(real64), intent(in)                   :: b         !! upper bound
-        type(pf_tolerance), intent(in)             :: tol       !! both tolerances
+        type(tolerance_pair), intent(in)             :: tol       !! both tolerances
         integer, intent(in)                        :: budget    !! evaluations this range may use
         integer, intent(in)                        :: panel_cap !! resolved `max_panels`
         logical, intent(in)                        :: use_eps   !! run the epsilon table
         type(engine_work), intent(inout)           :: work      !! the engine's work arrays
-        type(pf_integration_points), intent(inout) :: record    !! the record, appended to
+        type(pf_integrate_points), intent(inout) :: record    !! the record, appended to
         real(real64), intent(inout)                :: res       !! running result, added to
-        type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
+        type(pf_integrate_info), intent(inout)   :: outcome   !! filled in as it goes
         integer, intent(inout)                     :: neval     !! evaluation counter
         type(bad_value), intent(inout)             :: bad       !! set on a non-finite value
         character(len=*), intent(in), optional     :: context   !! call-site text
@@ -583,14 +563,14 @@ contains
         class(pf_integrand), intent(inout)         :: f         !! the integrand
         real(real64), intent(in)                   :: a         !! lower bound, in the walk's `y`
         logical, intent(in)                        :: negate    !! the caller's `x` is `-y`
-        type(pf_tolerance), intent(in)             :: tol       !! both tolerances
+        type(tolerance_pair), intent(in)             :: tol       !! both tolerances
         integer, intent(in)                        :: budget    !! evaluations this range may use
         integer, intent(in)                        :: panel_cap !! resolved `max_panels`
         logical, intent(in)                        :: use_eps   !! run the epsilon table
         type(engine_work), intent(inout)           :: work      !! the engine's work arrays
-        type(pf_integration_points), intent(inout) :: record    !! the record, grown per panel
+        type(pf_integrate_points), intent(inout) :: record    !! the record, grown per panel
         real(real64), intent(inout)                :: res       !! running result, added to
-        type(pf_integration_info), intent(inout)   :: outcome   !! filled in as it goes
+        type(pf_integrate_info), intent(inout)   :: outcome   !! filled in as it goes
         integer, intent(inout)                     :: neval     !! evaluation counter
         type(bad_value), intent(inout)             :: bad       !! set on a non-finite value
         character(len=*), intent(in), optional     :: context   !! call-site text
@@ -644,7 +624,7 @@ contains
             outcome%abserr = outcome%abserr + abserr1
             ! No tail estimate is formed from a panel the integrand did not answer, and the walk
             ! stops rather than stepping further out with a broken integrand. `finished` stays
-            ! false, but `PF_INT_BAD_VALUE` outranks the `PF_INT_LIMIT` that gives it.
+            ! false, but `PF_INT_NONFINITE` outranks the `PF_INT_LIMIT` that gives it.
             if (bad%seen) exit walk
             floor = ROUNDOFF_FACTOR*epsilon(1.0_real64)*resabstot
 
@@ -774,21 +754,21 @@ contains
         real(real64), intent(in)                   :: hi      !! panel's upper bound
         logical, intent(in)                        :: in_log  !! the bounds are in `log y`
         logical, intent(in)                        :: negate  !! the caller's `x` is `-y`
-        type(pf_tolerance), intent(in)             :: tol     !! both tolerances
+        type(tolerance_pair), intent(in)             :: tol     !! both tolerances
         integer, intent(in)                        :: budget  !! evaluations this walk may use
         logical, intent(in)                        :: use_eps !! run the epsilon table
         type(engine_work), intent(inout)           :: work    !! the engine's work arrays
-        type(pf_integration_points), intent(inout) :: record  !! the record, appended to
+        type(pf_integrate_points), intent(inout) :: record  !! the record, appended to
         real(real64), intent(out)                  :: res1    !! this panel's integral
         real(real64), intent(out)                  :: abserr1 !! this panel's error estimate
         real(real64), intent(out)                  :: defabs1 !! this panel's integral of `|f|`
         real(real64), intent(inout)                :: res     !! running result, added to
-        type(pf_integration_info), intent(inout)   :: outcome !! filled in as it goes
+        type(pf_integrate_info), intent(inout)   :: outcome !! filled in as it goes
         integer, intent(inout)                     :: neval   !! evaluation counter
         type(bad_value), intent(inout)             :: bad     !! set on a non-finite value
         character(len=*), intent(in), optional     :: context !! call-site text
 
-        type(pf_integration_points) :: panel_record
+        type(pf_integrate_points) :: panel_record
         integer                     :: limit, ier, last
         logical                     :: extrapolated
 
@@ -874,7 +854,7 @@ contains
             rank = 3
         case (PF_INT_DIVERGENT)
             rank = 4
-        case (PF_INT_BAD_VALUE)
+        case (PF_INT_NONFINITE)
             ! Above every code the engine can reach on its own: the others describe how well an
             ! integral was approximated, while this one says the integrand stopped producing
             ! numbers, which makes the approximation meaningless rather than merely loose.
@@ -894,7 +874,7 @@ contains
                              context)
         real(real64), intent(in)               :: a            !! lower bound, as the caller gave it
         real(real64), intent(in)               :: b            !! upper bound, as the caller gave it
-        type(pf_tolerance), intent(in)         :: tol          !! both tolerances
+        type(tolerance_pair), intent(in)         :: tol          !! both tolerances
         integer, intent(in)                    :: budget       !! resolved `max_neval`
         logical, intent(in)                    :: in_log       !! resolved `log_base`
         logical, intent(in)                    :: panels_given !! `max_panels` was passed
@@ -1031,7 +1011,7 @@ contains
     subroutine gather_points(work, last, points)
         type(engine_work), intent(in)              :: work   !! the engine's work arrays
         integer, intent(in)                        :: last   !! subintervals in the partition
-        type(pf_integration_points), intent(inout) :: points !! record to fill
+        type(pf_integrate_points), intent(inout) :: points !! record to fill
 
         integer :: i, lo, hi
 

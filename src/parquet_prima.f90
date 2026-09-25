@@ -42,7 +42,7 @@ module parquet_prima
     use parquet_optimize, only : pf_objective, pf_objective_eval, pf_objective_func, &
         pf_constrained_objective, pf_constraint_count, pf_constraint_eval, &
         pf_optimize_info, pf_optimize_history, pf_local_solver, pf_local_run, &
-        PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET, PF_OPT_NONFINITE, PF_OPT_ROUNDING, &
+        PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET, PF_OPT_NONFINITE, PF_OPT_ROUNDOFF, &
         PF_OPT_INFEASIBLE
 
     implicit none
@@ -63,7 +63,7 @@ module parquet_prima
     public :: pf_optimize_info, pf_optimize_history
     public :: pf_local_solver, pf_local_run
     public :: PF_OPT_OK, PF_OPT_LIMIT, PF_OPT_TARGET
-    public :: PF_OPT_NONFINITE, PF_OPT_ROUNDING, PF_OPT_INFEASIBLE
+    public :: PF_OPT_NONFINITE, PF_OPT_ROUNDOFF, PF_OPT_INFEASIBLE
 
     ! ---- the plain-function adapter, shared by the driver submodules ---------------------------
 
@@ -87,9 +87,9 @@ module parquet_prima
     interface
 
         !> Calls the wrapped plain function.
-        module function prima_func_objective_eval(this, x) result(f)
+        module function prima_func_objective_eval(self, x) result(f)
             implicit none
-            class(prima_func_objective), intent(inout) :: this !! the wrapper
+            class(prima_func_objective), intent(inout) :: self !! the wrapper
             real(real64), intent(in)                   :: x(:) !! the point
             real(real64)                               :: f    !! objective value at `x`
         end function prima_func_objective_eval
@@ -115,7 +115,8 @@ module parquet_prima
         logical      :: scale_from_box = .true.       !! `scale = upper - lower`
         real(real64) :: rhobeg_fraction = 0.1_real64  !! initial radius, as a fraction of the box; at most `0.5`
         real(real64) :: rhoend = 1.0e-6_real64        !! final radius, in the same units
-        integer      :: max_neval = 0                 !! evaluation budget; `0` means `500*n`
+        integer      :: max_neval = 0                 !! `0` means `500*n`; a negative
+                                                      !! value is refused
     contains
         procedure :: run => bobyqa_solver_run         !! Calls `pf_minimize_bobyqa` with these.
     end type pf_bobyqa_solver
@@ -150,7 +151,7 @@ module parquet_prima
 
         !> BOBYQA with the objective as an object.
         module subroutine minimize_bobyqa_obj(f, x, fmin, lower, upper, rhobeg, rhoend, npt, &
-                                              scale, ftarget, max_neval, info, history, context)
+                                              scale, ftarget, max_neval, converged, info, history, context)
             implicit none
             class(pf_objective), intent(inout)               :: f          !! the objective
             real(real64), intent(inout)                      :: x(:)       !! start in, minimum out
@@ -162,7 +163,8 @@ module parquet_prima
             integer, intent(in), optional                    :: npt        !! interpolation points
             real(real64), intent(in), optional               :: scale(:)   !! per-coordinate scale
             real(real64), intent(in), optional               :: ftarget    !! stop at this value
-            integer, intent(in), optional                    :: max_neval  !! evaluation budget
+            integer, intent(in), optional                    :: max_neval  !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info       !! what happened
             type(pf_optimize_history), intent(out), optional :: history    !! every evaluation
             character(len=*), intent(in), optional           :: context    !! call-site text
@@ -170,7 +172,7 @@ module parquet_prima
 
         !> BOBYQA with the objective as a plain module procedure.
         module subroutine minimize_bobyqa_func(f, x, fmin, lower, upper, rhobeg, rhoend, npt, &
-                                               scale, ftarget, max_neval, info, history, context)
+                                               scale, ftarget, max_neval, converged, info, history, context)
             implicit none
             procedure(pf_objective_func)                     :: f          !! the objective
             real(real64), intent(inout)                      :: x(:)       !! start in, minimum out
@@ -182,7 +184,8 @@ module parquet_prima
             integer, intent(in), optional                    :: npt        !! interpolation points
             real(real64), intent(in), optional               :: scale(:)   !! per-coordinate scale
             real(real64), intent(in), optional               :: ftarget    !! stop at this value
-            integer, intent(in), optional                    :: max_neval  !! evaluation budget
+            integer, intent(in), optional                    :: max_neval  !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info       !! what happened
             type(pf_optimize_history), intent(out), optional :: history    !! every evaluation
             character(len=*), intent(in), optional           :: context    !! call-site text
@@ -227,7 +230,7 @@ module parquet_prima
         !> LINCOA with the objective as an object.
         module subroutine minimize_lincoa_obj(f, x, fmin, a_ineq, b_ineq, a_eq, b_eq, lower, &
                                               upper, rhobeg, rhoend, npt, scale, ctol, ftarget, &
-                                              max_neval, info, history, context)
+                                              max_neval, converged, info, history, context)
             implicit none
             class(pf_objective), intent(inout)               :: f            !! the objective
             real(real64), intent(inout)                      :: x(:)         !! start in, minimum out
@@ -244,7 +247,8 @@ module parquet_prima
             real(real64), intent(in), optional               :: scale(:)     !! per-coordinate scale
             real(real64), intent(in), optional               :: ctol         !! feasibility tolerance
             real(real64), intent(in), optional               :: ftarget      !! stop at this value
-            integer, intent(in), optional                    :: max_neval    !! evaluation budget
+            integer, intent(in), optional                    :: max_neval    !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info         !! what happened
             type(pf_optimize_history), intent(out), optional :: history      !! every evaluation
             character(len=*), intent(in), optional           :: context      !! call-site text
@@ -253,7 +257,7 @@ module parquet_prima
         !> LINCOA with the objective as a plain module procedure.
         module subroutine minimize_lincoa_func(f, x, fmin, a_ineq, b_ineq, a_eq, b_eq, lower, &
                                                upper, rhobeg, rhoend, npt, scale, ctol, ftarget, &
-                                               max_neval, info, history, context)
+                                               max_neval, converged, info, history, context)
             implicit none
             procedure(pf_objective_func)                     :: f            !! the objective
             real(real64), intent(inout)                      :: x(:)         !! start in, minimum out
@@ -270,7 +274,8 @@ module parquet_prima
             real(real64), intent(in), optional               :: scale(:)     !! per-coordinate scale
             real(real64), intent(in), optional               :: ctol         !! feasibility tolerance
             real(real64), intent(in), optional               :: ftarget      !! stop at this value
-            integer, intent(in), optional                    :: max_neval    !! evaluation budget
+            integer, intent(in), optional                    :: max_neval    !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                   :: converged !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info         !! what happened
             type(pf_optimize_history), intent(out), optional :: history      !! every evaluation
             character(len=*), intent(in), optional           :: context      !! call-site text
@@ -318,7 +323,7 @@ module parquet_prima
         !! mean what they mean there.
         module subroutine pf_minimize_cobyla(f, x, fmin, a_ineq, b_ineq, a_eq, b_eq, lower, &
                                              upper, rhobeg, rhoend, scale, ctol, ftarget, &
-                                             max_neval, info, history, context)
+                                             max_neval, converged, info, history, context)
             implicit none
             class(pf_constrained_objective), intent(inout)   :: f            !! objective and constraints
             real(real64), intent(inout)                      :: x(:)         !! start in, minimum out
@@ -334,7 +339,8 @@ module parquet_prima
             real(real64), intent(in), optional               :: scale(:)     !! per-coordinate scale
             real(real64), intent(in), optional               :: ctol         !! feasibility tolerance
             real(real64), intent(in), optional               :: ftarget      !! stop at this value
-            integer, intent(in), optional                    :: max_neval    !! evaluation budget
+            integer, intent(in), optional                    :: max_neval    !! evaluation budget; at most huge(1)/2
+            logical, intent(out), optional                   :: converged    !! the run's own rule fired
             type(pf_optimize_info), intent(out), optional    :: info         !! what happened
             type(pf_optimize_history), intent(out), optional :: history      !! every evaluation
             character(len=*), intent(in), optional           :: context      !! call-site text
@@ -348,10 +354,10 @@ module parquet_prima
 
         !> `pf_bobyqa_solver%run`: derives the scale and the radii from the box and calls
         !! `pf_minimize_bobyqa`.
-        module subroutine bobyqa_solver_run(this, obj, x, fmin, lower, upper, info)
+        module subroutine bobyqa_solver_run(self, f, x, fmin, lower, upper, info)
             implicit none
-            class(pf_bobyqa_solver), intent(in) :: this     !! the solver and its options
-            class(pf_objective), intent(inout)  :: obj      !! the objective
+            class(pf_bobyqa_solver), intent(in) :: self     !! the solver and its options
+            class(pf_objective), intent(inout)  :: f        !! the objective
             real(real64), intent(inout)         :: x(:)     !! start in, minimum out
             real(real64), intent(out)           :: fmin     !! value at `x`
             real(real64), intent(in)            :: lower(:) !! the driver's box

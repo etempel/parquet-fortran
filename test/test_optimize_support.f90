@@ -16,7 +16,7 @@ module test_optimize_support
 
     use parquet_optimize, only : pf_objective, pf_constrained_objective, pf_local_solver, &
                                  pf_optimize_info
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : real64, int64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf
 
     implicit none
@@ -31,6 +31,7 @@ module test_optimize_support
     public :: bad_scaling, bad_scaling_unit, BAD_SCALING_SCALE, BAD_SCALING_MIN
     public :: disc_fit, outside_disc, dist12, sphere123, SPHERE123_CENTRE
     public :: negative_count_disc, nan_constraint_disc, nan_value_disc, unscreened_solver
+    public :: counted_hash
 
     !> Sum of squares about `1` plus a shift, counting its own evaluations.
     !!
@@ -43,6 +44,24 @@ module test_optimize_support
     contains
         procedure :: eval => shifted_quadratic_eval !! Evaluates the shifted quadratic.
     end type shifted_quadratic
+
+    !> An objective whose value depends on WHEN it is called, not where: a hash of its own call
+    !! count, in `[0, 1000)`.
+    !!
+    !! **It exists so that a simplex cannot converge on it while every value stays finite.** A
+    !! shrinking simplex converges when the spread of the values at its vertices falls below the
+    !! tolerance; here re-evaluating the same point gives a different number, so the spread never
+    !! settles and the run can only end on its budget. An objective that merely oscillates finely in
+    !! `x` would not do: Nelder-Mead contracts geometrically, so within a few hundred iterations the
+    !! vertices coincide to the last bit and the spread collapses to zero whatever the shape.
+    !!
+    !! The counter is a COMPONENT, so the object is reentrant: the multistart driver clones the
+    !! objective once per thread and each clone counts its own calls.
+    type, extends(pf_objective) :: counted_hash
+        integer(int64) :: ncall = 0_int64 !! evaluations so far, written by `eval`
+    contains
+        procedure :: eval => counted_hash_eval !! A hash of the call count, never the point.
+    end type counted_hash
 
     !> Sum of squared residuals about a straight line, counting its own evaluations.
     !!
@@ -180,31 +199,44 @@ module test_optimize_support
 
 contains
 
+    !> A hash of the call count, in `[0, 1000)`: finite, bounded, and never the same twice running.
+    function counted_hash_eval(self, x) result(f)
+        class(counted_hash), intent(inout) :: self !! the objective, which counts its own calls
+        real(real64), intent(in)           :: x(:) !! the point, which the value ignores
+        real(real64)                       :: f    !! the hash of `self%ncall`
+
+        ! Knuth's multiplicative constant, in int64 so the product cannot overflow, then folded to
+        ! [0, 1000). `x` is referenced so that no compiler may drop the argument.
+        self%ncall = self%ncall + 1_int64 + int(0.0_real64*sum(x), int64)
+        f = real(modulo(self%ncall*2654435761_int64, 1000_int64), real64)
+
+    end function counted_hash_eval
+
     !> Evaluates the shifted quadratic and counts the call.
-    function shifted_quadratic_eval(this, x) result(f)
-        class(shifted_quadratic), intent(inout) :: this !! the objective, shift and counter
+    function shifted_quadratic_eval(self, x) result(f)
+        class(shifted_quadratic), intent(inout) :: self !! the objective, shift and counter
         real(real64), intent(in)                :: x(:) !! the point
         real(real64)                            :: f    !! objective value at `x`
 
-        f = sum((x - 1.0_real64)**2) + this%shift
-        this%ncall = this%ncall + 1
+        f = sum((x - 1.0_real64)**2) + self%shift
+        self%ncall = self%ncall + 1
 
     end function shifted_quadratic_eval
 
     !> Sum of squared residuals about a straight line, and counts the call.
-    function line_fit_eval(this, x) result(f)
-        class(line_fit), intent(inout) :: this !! the objective, data and counter
+    function line_fit_eval(self, x) result(f)
+        class(line_fit), intent(inout) :: self !! the objective, data and counter
         real(real64), intent(in)       :: x(:) !! slope and intercept
         real(real64)                   :: f    !! residual sum of squares
 
-        f = sum((this%yd - (x(1)*this%xd + x(2)))**2)
-        this%ncall = this%ncall + 1
+        f = sum((self%yd - (x(1)*self%xd + x(2)))**2)
+        self%ncall = self%ncall + 1
 
     end function line_fit_eval
 
     !> Squared distance from the all-ones point, in any number of variables.
-    function unit_disc_eval(this, x) result(f)
-        class(unit_disc), intent(inout) :: this !! the objective
+    function unit_disc_eval(self, x) result(f)
+        class(unit_disc), intent(inout) :: self !! the objective
         real(real64), intent(in)        :: x(:) !! the point
         real(real64)                    :: f    !! squared distance from the all-ones point
 
@@ -213,8 +245,8 @@ contains
     end function unit_disc_eval
 
     !> How many constraint values `constraints` fills.
-    function unit_disc_count(this) result(m)
-        class(unit_disc), intent(in) :: this !! the objective
+    function unit_disc_count(self) result(m)
+        class(unit_disc), intent(in) :: self !! the objective
         integer                      :: m    !! one
 
         m = 1
@@ -222,8 +254,8 @@ contains
     end function unit_disc_count
 
     !> The unit ball as `c(x) <= 0`.
-    subroutine unit_disc_constraints(this, x, c)
-        class(unit_disc), intent(inout) :: this !! the objective
+    subroutine unit_disc_constraints(self, x, c)
+        class(unit_disc), intent(inout) :: self !! the objective
         real(real64), intent(in)        :: x(:) !! the point
         real(real64), intent(out)       :: c(:) !! exactly `n_constraints()` values
 
@@ -232,8 +264,8 @@ contains
     end subroutine unit_disc_constraints
 
     !> Squared distance from `(1, 2)`.
-    function disc_fit_eval(this, x) result(f)
-        class(disc_fit), intent(inout) :: this !! the objective
+    function disc_fit_eval(self, x) result(f)
+        class(disc_fit), intent(inout) :: self !! the objective
         real(real64), intent(in)       :: x(:) !! the point
         real(real64)                   :: f    !! squared distance from `(1, 2)`
 
@@ -242,8 +274,8 @@ contains
     end function disc_fit_eval
 
     !> How many constraint values `constraints` fills.
-    function disc_fit_count(this) result(m)
-        class(disc_fit), intent(in) :: this !! the objective
+    function disc_fit_count(self) result(m)
+        class(disc_fit), intent(in) :: self !! the objective
         integer                     :: m    !! one
 
         m = 1
@@ -251,8 +283,8 @@ contains
     end function disc_fit_count
 
     !> The unit disc as `c(x) <= 0`.
-    subroutine disc_fit_constraints(this, x, c)
-        class(disc_fit), intent(inout) :: this !! the objective
+    subroutine disc_fit_constraints(self, x, c)
+        class(disc_fit), intent(inout) :: self !! the objective
         real(real64), intent(in)       :: x(:) !! the point
         real(real64), intent(out)      :: c(:) !! exactly `n_constraints()` values
 
@@ -271,8 +303,8 @@ contains
     end function dist12
 
     !> Squared distance from the origin.
-    function outside_disc_eval(this, x) result(f)
-        class(outside_disc), intent(inout) :: this !! the objective
+    function outside_disc_eval(self, x) result(f)
+        class(outside_disc), intent(inout) :: self !! the objective
         real(real64), intent(in)           :: x(:) !! the point
         real(real64)                       :: f    !! squared distance from the origin
 
@@ -281,8 +313,8 @@ contains
     end function outside_disc_eval
 
     !> How many constraint values `constraints` fills.
-    function outside_disc_count(this) result(m)
-        class(outside_disc), intent(in) :: this !! the objective
+    function outside_disc_count(self) result(m)
+        class(outside_disc), intent(in) :: self !! the objective
         integer                         :: m    !! one
 
         m = 1
@@ -290,8 +322,8 @@ contains
     end function outside_disc_count
 
     !> The OUTSIDE of the unit disc as `c(x) <= 0`: feasible where `|x| >= 1`.
-    subroutine outside_disc_constraints(this, x, c)
-        class(outside_disc), intent(inout) :: this !! the objective
+    subroutine outside_disc_constraints(self, x, c)
+        class(outside_disc), intent(inout) :: self !! the objective
         real(real64), intent(in)           :: x(:) !! the point
         real(real64), intent(out)          :: c(:) !! exactly `n_constraints()` values
 
@@ -300,8 +332,8 @@ contains
     end subroutine outside_disc_constraints
 
     !> A negative constraint count, which no engine may accept.
-    function negative_count(this) result(m)
-        class(negative_count_disc), intent(in) :: this !! the objective
+    function negative_count(self) result(m)
+        class(negative_count_disc), intent(in) :: self !! the objective
         integer                                :: m    !! a negative number, on purpose
 
         m = -1
@@ -309,9 +341,9 @@ contains
     end function negative_count
 
     !> A constraint value that is a NaN.
-    subroutine nan_constraint(this, x, c)
+    subroutine nan_constraint(self, x, c)
         use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
-        class(nan_constraint_disc), intent(inout) :: this !! the objective
+        class(nan_constraint_disc), intent(inout) :: self !! the objective
         real(real64), intent(in)                  :: x(:) !! the point
         real(real64), intent(out)                 :: c(:) !! one NaN
 
@@ -320,9 +352,9 @@ contains
     end subroutine nan_constraint
 
     !> A NaN objective value, formed with `ieee_value` so no fixture arithmetic raises a flag.
-    function nan_value(this, x) result(f)
+    function nan_value(self, x) result(f)
         use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
-        class(nan_value_disc), intent(inout) :: this !! the objective
+        class(nan_value_disc), intent(inout) :: self !! the objective
         real(real64), intent(in)             :: x(:) !! the point
         real(real64)                         :: f    !! a NaN
 
@@ -345,16 +377,16 @@ contains
     end function sphere_1e13
 
     !> One evaluation at the start, reported as the minimum with no finiteness screen.
-    subroutine unscreened_run(this, obj, x, fmin, lower, upper, info)
-        class(unscreened_solver), intent(in) :: this     !! the solver
-        class(pf_objective), intent(inout)   :: obj      !! the objective
+    subroutine unscreened_run(self, f, x, fmin, lower, upper, info)
+        class(unscreened_solver), intent(in) :: self     !! the solver
+        class(pf_objective), intent(inout)   :: f        !! the objective
         real(real64), intent(inout)          :: x(:)     !! the start, left where it is
         real(real64), intent(out)            :: fmin     !! the objective's value at `x`, unscreened
         real(real64), intent(in)             :: lower(:) !! the driver's box, not used
         real(real64), intent(in)             :: upper(:) !! the driver's box, not used
         type(pf_optimize_info), intent(out)  :: info     !! one evaluation
 
-        fmin = obj%eval(x)
+        fmin = f%eval(x)
         info%neval = 1
 
     end subroutine unscreened_run
@@ -540,12 +572,12 @@ contains
     end function nan_beyond_two
 
     !> Squared distance from a centre held in an allocatable component.
-    function table_sphere_eval(this, x) result(f)
-        class(table_sphere), intent(inout) :: this !! the objective and its centre
+    function table_sphere_eval(self, x) result(f)
+        class(table_sphere), intent(inout) :: self !! the objective and its centre
         real(real64), intent(in)           :: x(:) !! the point
         real(real64)                       :: f    !! squared distance from `this%centre`
 
-        f = sum((x - this%centre)**2)
+        f = sum((x - self%centre)**2)
 
     end function table_sphere_eval
 

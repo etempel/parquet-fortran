@@ -328,7 +328,7 @@ contains
     !! The divergence is found WITH the extrapolation, which is the default. The plain bisection
     !! keeps halving the interval next to zero and takes the abscissae below `1e-280`, where
     !! `x**-1.1` overflows to an infinity and the engine's non-finite screen ends the integration
-    !! with `PF_INT_BAD_VALUE` -- the contrast `test_status_divergent` asserts, and itself part of
+    !! with `PF_INT_NONFINITE` -- the contrast `test_status_divergent` asserts, and itself part of
     !! what the default buys.
     function divergent_pow(x) result(f)
         real(real64), intent(in) :: x !! point at which to evaluate
@@ -679,24 +679,24 @@ contains
     end function narrow_spike_exact
 
     !> Evaluates `amp/(1 + 25 x^2)` and counts the call.
-    function scaled_runge_eval(this, x) result(f)
-        class(scaled_runge), intent(inout) :: this !! the integrand object
+    function scaled_runge_eval(self, x) result(f)
+        class(scaled_runge), intent(inout) :: self !! the integrand object
         real(real64), intent(in)           :: x    !! point at which to evaluate
         real(real64)                       :: f    !! the integrand value
 
-        this%calls = this%calls + 1
-        f = this%amp/(1.0_real64 + 25.0_real64*x*x)
+        self%calls = self%calls + 1
+        f = self%amp/(1.0_real64 + 25.0_real64*x*x)
 
     end function scaled_runge_eval
 
     !> Evaluates `amp*exp(-x/scale)` and counts the call.
-    function exp_profile_eval(this, x) result(f)
-        class(exp_profile), intent(inout) :: this !! the integrand object
+    function exp_profile_eval(self, x) result(f)
+        class(exp_profile), intent(inout) :: self !! the integrand object
         real(real64), intent(in)          :: x    !! point at which to evaluate
         real(real64)                      :: f    !! the integrand value
 
-        this%calls = this%calls + 1
-        f = this%amp*exp(-x/this%scale)
+        self%calls = self%calls + 1
+        f = self%amp*exp(-x/self%scale)
 
     end function exp_profile_eval
 

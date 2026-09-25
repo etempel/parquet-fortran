@@ -38,8 +38,12 @@ contains
                          test_scalar_closed_forms), &
             new_unittest("a minimiser at zero converges at the default tolerance", &
                          test_scalar_zero_minimiser), &
-            new_unittest("a looser tol gives a looser answer, and tol=0 the arithmetic's own floor", &
+            new_unittest("a looser atol gives a looser answer, and atol=0 the arithmetic's own floor", &
                          test_scalar_tolerance), &
+            new_unittest("pf_simplex_solver's default budget is the simplex's own", &
+                         test_simplex_solver_default_budget), &
+            new_unittest("converged= agrees with info%converged on every exit, per engine", &
+                         test_converged_argument_agrees), &
             new_unittest("a scalar budget stops at PF_OPT_LIMIT with the best point so far", &
                          test_scalar_budget), &
             new_unittest("the scalar record holds every evaluation, in order", &
@@ -92,7 +96,7 @@ contains
                          test_multistart_basins), &
             new_unittest("the lowest start index wins, whatever the thread count", &
                          test_multistart_tie_rule), &
-            new_unittest("xtol decides how many minima count as distinct", &
+            new_unittest("merge_tol decides how many minima count as distinct", &
                          test_multistart_xtol), &
             new_unittest("the default merge radius counts one minimum on a one-basin objective", &
                          test_multistart_default_xtol), &
@@ -102,7 +106,7 @@ contains
                          test_multistart_nothing_finite), &
             new_unittest("NaN starts are counted and skipped, and the best finite start wins", &
                          test_multistart_some_nan_starts), &
-            new_unittest("DE accepts an explicit f_weight, ftol and max_neval and honours each", &
+            new_unittest("DE accepts an explicit f_weight, rtol and max_neval and honours each", &
                          test_de_explicit_knobs) &
             ]
 
@@ -152,7 +156,7 @@ contains
 
     end subroutine test_scalar_closed_forms
 
-    !> A minimiser AT ZERO converges, at the default tolerance and at an explicit `tol = 0`.
+    !> A minimiser AT ZERO converges, at the default tolerance and at an explicit `atol = 0`.
     !!
     !! The relative part of the effective tolerance, `sqrt(epsilon)*abs(x)`, vanishes as `x`
     !! approaches zero, so without the bracket-width floor the stopping test chases a target that
@@ -176,32 +180,32 @@ contains
         call check(error, abs(x) <= 1.0e-7_real64, "and the answer is still the minimiser")
         if (allocated(error)) return
 
-        ! An explicit `tol = 0` asks for as much accuracy as the arithmetic allows, which is what
+        ! An explicit `atol = 0` asks for as much accuracy as the arithmetic allows, which is what
         ! the floor supplies; it must not be the one spelling that cannot stop.
-        call pf_minimize_scalar(origin_sphere, -1.0_real64, 1.0_real64, x, fmin, tol=0.0_real64, &
+        call pf_minimize_scalar(origin_sphere, -1.0_real64, 1.0_real64, x, fmin, atol=0.0_real64, &
                                 info=info)
-        call check(error, info%converged, "tol = 0 must converge on the same minimum")
+        call check(error, info%converged, "atol = 0 must converge on the same minimum")
         if (allocated(error)) return
         call check(error, abs(x) <= 1.0e-7_real64, "and reach it")
 
     end subroutine test_scalar_zero_minimiser
 
-    !> `tol` is honoured, and `tol = 0` means the arithmetic's own floor rather than no tolerance.
+    !> `atol` is honoured, and `atol = 0` means the arithmetic's own floor rather than no tolerance.
     subroutine test_scalar_tolerance(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
         real(real64) :: x_loose, x_tight, fmin
         type(pf_optimize_info) :: loose, tight
         real(real64), parameter :: TOL = 1.0e-4_real64
 
-        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x_loose, fmin, tol=TOL, info=loose)
+        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x_loose, fmin, atol=TOL, info=loose)
         call check(error, abs(x_loose - quad1d_min()) <= 3.0_real64*TOL, &
             "a requested tol should bound the distance to the minimiser")
         if (allocated(error)) return
 
-        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x_tight, fmin, tol=0.0_real64, &
+        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x_tight, fmin, atol=0.0_real64, &
                                 info=tight)
         call check(error, abs(x_tight - quad1d_min()) <= 1.0e-7_real64, &
-            "tol = 0 should reach the arithmetic's own floor")
+            "atol = 0 should reach the arithmetic's own floor")
         if (allocated(error)) return
 
         ! The looser request must not cost more than the tighter one: that is what asking for
@@ -210,6 +214,168 @@ contains
             "a looser tol should not cost more evaluations than a tighter one")
 
     end subroutine test_scalar_tolerance
+
+    !> `pf_simplex_solver%max_neval = 0`, its default, means the simplex's OWN default of 5000.
+    !!
+    !! **The component and the argument mean different things by zero, and this pins which.** An
+    !! explicit `max_neval = 0` passed to `pf_minimize_simplex` is refused -- "max_neval must be
+    !! positive" -- so the solver object cannot simply forward its zero; it omits the argument
+    !! instead, and the engine's own default applies. The sibling `pf_bobyqa_solver` has read `0`
+    !! as `500*n` since it was written, and V5 of `feature_solver_vocabulary.md` makes one
+    !! component name mean one thing in both.
+    !!
+    !! `counted_hash` is an objective no simplex can converge on while every value stays finite
+    !! (see its own note), so the run can only end on its budget and `info%nlimit` counts it. The
+    !! evaluation count is then the simplex's 5000, soft by at most one step of `n+2`.
+    !!
+    !! Mutation proved: make `simplex_solver_run` pass its zero on --
+    !! `max_neval=self%max_neval` unconditionally (`src/parquet_optimize_simplex.f90`) -- and the
+    !! run aborts on "max_neval must be positive" instead of reaching these assertions.
+    subroutine test_simplex_solver_default_budget(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+
+        type(pf_optimize_info)  :: info
+        type(pf_simplex_solver) :: solver
+        type(counted_hash)      :: obj
+        real(real64)            :: x(2), fmin, lo(2), hi(2)
+
+        call check(error, solver%max_neval, 0, "the default component must be 0, not a number")
+        if (allocated(error)) return
+
+        lo = -1.0_real64
+        hi = 1.0_real64
+        call pf_minimize_multistart(obj, lo, hi, 11_int64, x, fmin, nstart=1, solver=solver, &
+                                    info=info)
+
+        call check(error, info%nlimit, 1, &
+                   "an objective that cannot converge must spend the one start's budget")
+        if (allocated(error)) return
+        call check(error, info%neval >= 5000, &
+                   "a default pf_simplex_solver must get the simplex's own 5000, not something less")
+        if (allocated(error)) return
+        call check(error, info%neval <= 5000 + 4, &
+                   "and no more than one simplex step of n+2 beyond it")
+
+    end subroutine test_simplex_solver_default_budget
+
+    !> `converged=` equals `info%converged` on every exit each engine reaches, and is set whether
+    !! or not `info` was asked for.
+    !!
+    !! **Every actual is seeded with the WRONG answer before each call**, so a path that never
+    !! assigns `converged` is caught rather than passing on a lucky initial value: `.true.` before
+    !! a run that must end on `PF_OPT_LIMIT`, `.false.` before one that must converge. That is the
+    !! whole point of the test -- an `intent(out) optional` that is simply never written would
+    !! otherwise be indistinguishable from one written correctly.
+    !!
+    !! Each engine is exercised through BOTH specifics, the object form and the plain-function
+    !! form that forwards to it, and each of those once with `info=` and once without, because the
+    !! flag and the component are set by two different statements and only the paired call proves
+    !! they agree.
+    !!
+    !! Mutation proved: delete the `if (present(converged))` line from any one engine's reporting
+    !! block (`src/parquet_optimize_*.f90`) and this test fails on that engine.
+    subroutine test_converged_argument_agrees(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+
+        type(pf_optimize_info)  :: info
+        type(shifted_quadratic) :: obj
+        type(pf_simplex_solver) :: solver
+        real(real64)            :: x1, fmin, x(2), lo(2), hi(2), step(2)
+        logical                 :: flag
+
+        lo = -5.0_real64
+        hi = 5.0_real64
+
+        ! ---- pf_minimize_scalar: OK, then LIMIT ----
+        flag = .false.
+        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x1, fmin, converged=flag, info=info)
+        call check(error, flag .eqv. info%converged, "scalar OK: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, flag, "scalar OK: the flag must be true when the run converged")
+        if (allocated(error)) return
+        flag = .false.
+        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x1, fmin, converged=flag)
+        call check(error, flag, "scalar OK: the flag must be set with no info= present")
+        if (allocated(error)) return
+        flag = .true.
+        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x1, fmin, max_neval=4, &
+                                converged=flag, info=info)
+        call check(error, info%status, PF_OPT_LIMIT, "scalar LIMIT: the fixture must spend its budget")
+        if (allocated(error)) return
+        call check(error, flag .eqv. info%converged, "scalar LIMIT: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, .not. flag, "scalar LIMIT: the flag must be false on a spent budget")
+        if (allocated(error)) return
+        flag = .true.
+        call pf_minimize_scalar(quad1d, -5.0_real64, 5.0_real64, x1, fmin, max_neval=4, converged=flag)
+        call check(error, .not. flag, "scalar LIMIT: the flag must be cleared with no info= present")
+        if (allocated(error)) return
+
+        ! ---- pf_minimize_simplex: the object specific and the plain-function one ----
+        step = 0.5_real64
+        x = 1.0_real64
+        flag = .false.
+        call pf_minimize_simplex(obj, x, fmin, step, 1.0e-10_real64, converged=flag, info=info)
+        call check(error, flag .eqv. info%converged, "simplex object: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, flag, "simplex object: the flag must be true when the run converged")
+        if (allocated(error)) return
+        x = 1.0_real64
+        flag = .false.
+        call pf_minimize_simplex(sphere, x, fmin, step, 1.0e-10_real64, converged=flag)
+        call check(error, flag, "simplex function: the flag must be set with no info= present")
+        if (allocated(error)) return
+        x = 1.0_real64
+        flag = .true.
+        call pf_minimize_simplex(sphere, x, fmin, step, 1.0e-10_real64, max_neval=3, &
+                                 converged=flag, info=info)
+        call check(error, info%status, PF_OPT_LIMIT, "simplex LIMIT: the fixture must spend its budget")
+        if (allocated(error)) return
+        call check(error, flag .eqv. info%converged, "simplex LIMIT: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, .not. flag, "simplex LIMIT: the flag must be false on a spent budget")
+        if (allocated(error)) return
+
+        ! ---- pf_minimize_de: LIMIT on a generation budget, then a converged run ----
+        flag = .true.
+        call pf_minimize_de(rosenbrock, lo, hi, 42_int64, x, fmin, max_gen=3, converged=flag, info=info)
+        call check(error, info%status, PF_OPT_LIMIT, "DE LIMIT: three generations cannot converge")
+        if (allocated(error)) return
+        call check(error, flag .eqv. info%converged, "DE LIMIT: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, .not. flag, "DE LIMIT: the flag must be false on a spent generation budget")
+        if (allocated(error)) return
+        flag = .true.
+        call pf_minimize_de(rosenbrock, lo, hi, 42_int64, x, fmin, max_gen=3, converged=flag)
+        call check(error, .not. flag, "DE LIMIT: the flag must be cleared with no info= present")
+        if (allocated(error)) return
+        flag = .false.
+        call pf_minimize_de(sphere, lo, hi, 7_int64, x, fmin, ftarget=1.0e-8_real64, converged=flag, &
+                            info=info)
+        call check(error, flag .eqv. info%converged, "DE TARGET: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, flag, "DE TARGET: reaching ftarget is convergence")
+        if (allocated(error)) return
+
+        ! ---- pf_minimize_multistart: every start spends its budget, so the driver says LIMIT ----
+        solver%max_neval = 5
+        flag = .true.
+        call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, solver=solver, &
+                                    converged=flag, info=info)
+        call check(error, info%status, PF_OPT_LIMIT, "multistart LIMIT: no start can converge on five")
+        if (allocated(error)) return
+        call check(error, flag .eqv. info%converged, "multistart LIMIT: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, .not. flag, "multistart LIMIT: the flag must be false when no start converged")
+        if (allocated(error)) return
+        flag = .false.
+        call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=4, converged=flag, &
+                                    info=info)
+        call check(error, flag .eqv. info%converged, "multistart OK: converged= must equal info%converged")
+        if (allocated(error)) return
+        call check(error, flag, "multistart OK: the default solver converges on a sphere")
+
+    end subroutine test_converged_argument_agrees
 
     !> A budget too small to converge stops at `PF_OPT_LIMIT` with the best point so far.
     subroutine test_scalar_budget(error)
@@ -282,7 +448,7 @@ contains
 
         x = [0.0_real64, -5.0_real64]
         call pf_minimize_simplex(shifted_norm, x, fmin, step=[2.5_real64, 2.5_real64], &
-                                 ftol=1.0e-2_real64, info=info)
+                                 rtol=1.0e-2_real64, info=info)
         call check(error, norm2(x - 1.0_real64) <= 1.0e-4_real64, &
             "the simplex should reach the objective's own minimiser")
         if (allocated(error)) return
@@ -301,7 +467,7 @@ contains
         ! tested at all, so the count cannot fall below npar+1 whatever the caller asked for.
         x = [0.0_real64, -5.0_real64]
         call pf_minimize_simplex(shifted_norm, x, fmin, step=[2.5_real64, 2.5_real64], &
-                                 ftol=1.0e-2_real64, max_neval=1, info=info)
+                                 rtol=1.0e-2_real64, max_neval=1, info=info)
         call check(error, info%neval, 3, "neval cannot fall below npar+1 whatever max_neval says")
         if (allocated(error)) return
         call check(error, .not. info%converged, "an exhausted budget should report not converged")
@@ -322,7 +488,7 @@ contains
         x = [0.0_real64, -5.0_real64]
 
         call pf_minimize_simplex(obj, x, fmin, step=[2.5_real64, 2.5_real64], &
-                                 ftol=1.0e-10_real64, info=info)
+                                 rtol=1.0e-10_real64, info=info)
 
         call check(error, info%converged, "the object form should have converged")
         if (allocated(error)) return
@@ -337,7 +503,7 @@ contains
 
     end subroutine test_simplex_object_form
 
-    !> `atol` alone converges an objective whose minimum value is zero, which `ftol` alone cannot.
+    !> `atol` alone converges an objective whose minimum value is zero, which `rtol` alone cannot.
     subroutine test_simplex_atol_only(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
         real(real64) :: x(2), fmin
@@ -345,12 +511,12 @@ contains
         type(shifted_quadratic) :: obj
 
         ! A fractional spread over values that are all near zero never falls below a positive
-        ! ftol, so ftol = 0 with a positive atol is the only pair that can converge here.
+        ! rtol, so rtol= 0 with a positive atol is the only pair that can converge here.
         obj%shift = 0.0_real64
         obj%ncall = 0
         x = [5.0_real64, -3.0_real64]
 
-        call pf_minimize_simplex(obj, x, fmin, step=[0.5_real64, 0.5_real64], ftol=0.0_real64, &
+        call pf_minimize_simplex(obj, x, fmin, step=[0.5_real64, 0.5_real64], rtol=0.0_real64, &
                                  atol=1.0e-10_real64, info=info)
 
         call check(error, info%converged, "atol alone should have converged")
@@ -370,7 +536,7 @@ contains
 
         ! One variable is the shape most likely to be broken by an off-by-one.
         x = [5.0_real64]
-        call pf_minimize_simplex(one_dim, x, fmin, step=[0.5_real64], ftol=1.0e-10_real64, &
+        call pf_minimize_simplex(one_dim, x, fmin, step=[0.5_real64], rtol=1.0e-10_real64, &
                                  info=info)
         call check(error, info%converged, "a one-variable fit should have converged")
         if (allocated(error)) return
@@ -382,7 +548,7 @@ contains
         ! A simplex whose vertices already agree converges without a single iteration, so the only
         ! evaluations are the npar+1 spent on the starting simplex itself.
         x = [0.0_real64]
-        call pf_minimize_simplex(constant_one, x, fmin, step=[7.0_real64], ftol=1.0e-6_real64, &
+        call pf_minimize_simplex(constant_one, x, fmin, step=[7.0_real64], rtol=1.0e-6_real64, &
                                  info=info)
         call check(error, info%converged, "a constant objective should converge immediately")
         if (allocated(error)) return
@@ -391,7 +557,7 @@ contains
         call check(error, info%niter, 0, "immediate convergence takes no iteration")
         if (allocated(error)) return
 
-        ! Every optional argument omitted: the bare call is legal because ftol is required.
+        ! Every optional argument omitted: the bare call is legal because rtol is required.
         x = [5.0_real64]
         call pf_minimize_simplex(one_dim, x, fmin, [0.5_real64], 1.0e-10_real64)
         call check(error, x(1), one_dim_min(), thr=1.0e-5_real64)
@@ -409,7 +575,7 @@ contains
         x = [1.0_real64, 0.0_real64]
 
         call pf_minimize_simplex(fit, x, fmin, step=[0.2_real64, 0.2_real64], &
-                                 ftol=1.0e-12_real64, info=info)
+                                 rtol=1.0e-12_real64, info=info)
 
         ! The reference is the normal-equations solution, not a recorded run.
         call check(error, x(1), line_fit_slope, thr=1.0e-6_real64)
@@ -435,7 +601,7 @@ contains
         ! must be below the tolerance that ended the run. A spread left at its default 0, or
         ! carrying some other quantity, fails here.
         x = [5.0_real64, -3.0_real64]
-        call pf_minimize_simplex(sphere, x, fmin, step=[0.5_real64, 0.5_real64], ftol=0.0_real64, &
+        call pf_minimize_simplex(sphere, x, fmin, step=[0.5_real64, 0.5_real64], rtol=0.0_real64, &
                                  atol=ATOL, info=info)
         call check(error, info%converged, "the atol run should have converged")
         if (allocated(error)) return
@@ -448,7 +614,7 @@ contains
         ! Stopped on the budget instead: the spread is whatever the simplex had reached, and it
         ! must be ABOVE the tolerance that did not fire.
         x = [5.0_real64, -3.0_real64]
-        call pf_minimize_simplex(sphere, x, fmin, step=[0.5_real64, 0.5_real64], ftol=0.0_real64, &
+        call pf_minimize_simplex(sphere, x, fmin, step=[0.5_real64, 0.5_real64], rtol=0.0_real64, &
                                  atol=ATOL, max_neval=8, info=info)
         call check(error, .not. info%converged, "an eight-evaluation budget cannot converge here")
         if (allocated(error)) return
@@ -472,11 +638,11 @@ contains
 
         x_fun = [5.0_real64, -3.0_real64]
         call pf_minimize_simplex(sphere, x_fun, f_fun, step=[0.5_real64, 0.5_real64], &
-                                 ftol=0.0_real64, atol=1.0e-10_real64, history=h_fun)
+                                 rtol=0.0_real64, atol=1.0e-10_real64, history=h_fun)
 
         x_obj = [5.0_real64, -3.0_real64]
         call pf_minimize_simplex(obj, x_obj, f_obj, step=[0.5_real64, 0.5_real64], &
-                                 ftol=0.0_real64, atol=1.0e-10_real64, history=h_obj)
+                                 rtol=0.0_real64, atol=1.0e-10_real64, history=h_obj)
 
         call check(error, h_fun%n, h_obj%n, "the two forms should evaluate the same number of times")
         if (allocated(error)) return
@@ -506,7 +672,7 @@ contains
         ! `converged` means, and it is why `info%converged` is documented as "the engine's own
         ! stopping rule fired", never "a minimum was found".
         x = [5.0_real64]
-        call pf_minimize_simplex(quad1d, x, fmin, step=[0.5_real64], ftol=1.0e-10_real64, &
+        call pf_minimize_simplex(quad1d, x, fmin, step=[0.5_real64], rtol=1.0e-10_real64, &
                                  info=info, history=record)
 
         call check(error, info%converged, "the straddle case should report converged")
@@ -546,7 +712,7 @@ contains
         ! The record grows geometrically, so an untrimmed one would be longer than `n` on almost
         ! every run; a caller must be able to use `size()` without knowing that.
         x = [5.0_real64, -3.0_real64]
-        call pf_minimize_simplex(sphere, x, fmin, step=[0.5_real64, 0.5_real64], ftol=0.0_real64, &
+        call pf_minimize_simplex(sphere, x, fmin, step=[0.5_real64, 0.5_real64], rtol=0.0_real64, &
                                  atol=1.0e-10_real64, info=info, history=record)
 
         call check(error, allocated(record%f), "a record must come back allocated")
@@ -1092,7 +1258,7 @@ contains
 
     end subroutine test_multistart_tie_rule
 
-    !> `xtol` is what decides whether two starts in one basin count once or twice.
+    !> `merge_tol` is what decides whether two starts in one basin count once or twice.
     subroutine test_multistart_xtol(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
         type(pf_optimize_info) :: merged, separate
@@ -1102,18 +1268,18 @@ contains
         lo = -3.0_real64
         hi = 3.0_real64
         call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, &
-                                    xtol=1.0e-2_real64, info=merged)
+                                    merge_tol=1.0e-2_real64, info=merged)
         call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, &
-                                    xtol=0.0_real64, info=separate)
+                                    merge_tol=0.0_real64, info=separate)
 
         call check(error, merged%nminima, 1, &
             "a merge radius wider than the spread of the answers makes them one minimum")
         if (allocated(error)) return
         call check(error, separate%nminima > merged%nminima, &
-            "vacuity guard: with xtol = 0 the same runs must count separately, or xtol reaches nothing")
+            "vacuity guard: with merge_tol= 0 the same runs must count separately, or merge_tol reaches nothing")
         if (allocated(error)) return
         call check(error, separate%neval, merged%neval, &
-            "xtol decides only the counting; the runs themselves are the same")
+            "merge_tol decides only the counting; the runs themselves are the same")
 
     end subroutine test_multistart_xtol
 
@@ -1133,7 +1299,7 @@ contains
         call pf_minimize_multistart(sphere, lo, hi, 5_int64, x, fmin, nstart=12, info=info)
 
         call check(error, info%nminima, 1, &
-            "twelve starts on a single-basin objective are one minimum at the default xtol")
+            "twelve starts on a single-basin objective are one minimum at the default merge_tol")
         if (allocated(error)) return
         call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-4_real64, &
             "and the basin they all found is the sphere's own minimiser")
@@ -1298,7 +1464,7 @@ contains
 
     end subroutine test_multistart_some_nan_starts
 
-    !> `pf_minimize_de` takes an explicit `f_weight`, `ftol` and `max_neval`, and each has effect.
+    !> `pf_minimize_de` takes an explicit `f_weight`, `rtol` and `max_neval`, and each has effect.
     !!
     !! The refusals around these three are covered by the `optimize_de_*` scenarios; what is
     !! asserted here is the ACCEPTING side of the same validation -- a value inside the allowed
@@ -1306,7 +1472,7 @@ contains
     !!
     !! 1. `max_neval` bounds the evaluation count, and the negative control is the same run
     !!    without it, which spends more;
-    !! 2. `ftol` loose enough to stop the search early leaves a worse value than a tight one;
+    !! 2. `rtol` loose enough to stop the search early leaves a worse value than a tight one;
     !! 3. `f_weight` inside `(0, 2]` is accepted and the run still reaches the basin.
     subroutine test_de_explicit_knobs(error)
         type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
@@ -1343,19 +1509,19 @@ contains
                    "with f_weight = 1.2 the search must still reach the sphere's basin")
         if (allocated(error)) return
 
-        ! 3. A loose ftol stops the search sooner than a tight one, so it is read rather than
+        ! 3. A loose rtol stops the search sooner than a tight one, so it is read rather than
         !    validated and dropped. The objective is SHIFTED away from zero on purpose: DE's
-        !    `ftol` test is the relative spread `2*(fhi - flo)/(|fhi| + |flo|)`, which is
+        !    `rtol` test is the relative spread `2*(fhi - flo)/(|fhi| + |flo|)`, which is
         !    ill-conditioned at a minimum of exactly zero -- there the two runs converge alike
         !    and the comparison below would be vacuous rather than wrong.
         loose%shift = 10.0_real64
         tight%shift = 10.0_real64
-        call pf_minimize_de(loose, lo, hi, 20260921_int64, x, fmin, ftol=1.0e-1_real64, &
+        call pf_minimize_de(loose, lo, hi, 20260921_int64, x, fmin, rtol=1.0e-1_real64, &
                             max_gen=300, info=info)
-        call pf_minimize_de(tight, lo, hi, 20260921_int64, x2, fmin2, ftol=1.0e-12_real64, &
+        call pf_minimize_de(tight, lo, hi, 20260921_int64, x2, fmin2, rtol=1.0e-12_real64, &
                             max_gen=300, info=info2)
         call check(error, info%neval < info2%neval, &
-                   "a loose ftol must stop the search before a tight one does")
+                   "a loose rtol must stop the search before a tight one does")
         if (allocated(error)) return
 
         ! 4. A polish that cannot improve leaves the population's own best in place. On a

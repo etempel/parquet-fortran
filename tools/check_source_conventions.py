@@ -3316,6 +3316,177 @@ KDE_OPTIONAL_ORDER = (
 STATS_OPTIONAL_BLOCKS = ("n_valid", "retain", "sigma", "is_valid", "unit")
 
 
+
+#: The only tolerance names a solver entry point may take. An ALLOW-LIST, so a new spelling fails
+#: loudly rather than being absorbed: that is the safe direction for a list of this kind.
+SOLVER_TOLERANCES = ("rtol", "atol", "ctol", "merge_tol")
+
+
+def check_solver_vocabulary():
+    """The four callback-driven solver modules share one vocabulary, and it is derived, not listed.
+
+    `parquet_integrate`, `parquet_root`, `parquet_optimize` and `parquet_prima` take a function the
+    caller supplies and work on it until a stopping rule fires. A caller who has learned one should
+    have learned the shape of the others, and the names below are the shape. The design record is
+    the solver-vocabulary feature document; the durable statement of the rule is
+    `.claude/rules/api-conventions.md`, "Solver entry points".
+
+    **The scope is DERIVED rather than enumerated**, so a solver entry point added later -- in these
+    four modules or in a fifth -- is covered without editing this check. A solver entry point is a
+    procedure declared in `src/*.f90` that has BOTH an optional `info` dummy of a `pf_*_info` type
+    AND a `context` dummy. The `info` clause finds the solvers: the only `pf_*_info` types in the
+    library are the three solver outcome types, and it catches `pf_minimize_multistart`, which has
+    no `max_neval` of its own. `pf_local_run`, whose `info` is required rather than
+    optional, is outside the scope this way, and falls under clause 5 alone.
+
+    **Two further conditions keep the private WORKERS out**, because "public" in the Fortran sense
+    is not the same as "public API" and both kinds of worker are reachable by the naive rule:
+
+    * a `context` dummy. `finish_run` in `parquet_prima_common` is listed in a `public ::` so the
+      three PRIMA drivers can call it, and it takes an optional `pf_optimize_info`; but it is an
+      internal worker with no caller-facing context, and clause 3 would fail on it.
+    * the `module` prefix on the declaration, or the name in a `public ::` of the same file. Every
+      entry point is declared `module subroutine`/`module function` in its spec's interface block
+      and restated the same way in its submodule. `integrate_impl`, the driver's own worker, is a
+      plain `subroutine` inside a submodule's `contains` -- private to the submodule tree -- and
+      takes both a `context` and an optional `pf_integrate_info`, so nothing else would exclude it.
+
+    The clauses:
+
+    1. a dummy whose name ends in `tol` is one of `rtol`, `atol`, `ctol`, `merge_tol`;
+    2. `rtol` precedes `atol` where both exist;
+    3. `converged` and `info` are present, in that order, and `context` is the LAST dummy;
+    4. `max_neval`, where an entry point has one, is a default `integer`, `intent(in)`, `optional`;
+    5. every abstract interface named by a `deferred` binding, in a module that declares a solver
+       entry point, names its first dummy `self`. The plain-function interfaces have no passed
+       object and are outside this clause.
+
+    **It fails when it finds no solver entry point at all**, as
+    `check_prima_sums_are_the_ordered_sum` does: a renamed type or a reworded declaration must not
+    be able to turn this into a check that passes by reading nothing.
+
+    **Verify it by breaking it, not by watching it pass.** Three mutations it must catch: `tol` back
+    as the name of one `pf_find_root` specific's `atol`; `context` moved before `info` in one
+    optimiser specific; `this` back in one abstract interface.
+    """
+    problems = []
+    entry_points = 0
+    interfaces_seen = 0
+
+    info_decl = re.compile(
+        r"type\s*\(\s*pf_\w*_info\s*\)(.*?)::\s*(.*)$", re.IGNORECASE)
+
+    for path in sorted(SRC.glob("*.f90")):
+        text = path.read_text()
+        rel = path.name
+        logical = _logical_lines(path)
+
+        # Names this file declares public, for the scope test below.
+        public_here = set()
+        for _, code in logical:
+            m = re.match(r"public\s*::\s*(.*)$", code, re.IGNORECASE)
+            if m:
+                public_here.update(n.strip().lower() for n in m.group(1).split(",") if n.strip())
+
+        # ---- the solver entry points in this file ----
+        declares_entry_point = False
+        for index, (lineno, code) in enumerate(logical):
+            m = PROC_DECL.match(code)
+            if not m:
+                continue
+            name, arglist = m.group(1), m.group(2)
+            args = [a.strip().lower() for a in arglist.split(",") if a.strip()]
+            if "context" not in args:
+                continue
+            # the declaration block is every logical line up to this procedure's `end`
+            body = []
+            for _, later in logical[index + 1:]:
+                if re.match(r"end\s+(subroutine|function)\b", later, re.IGNORECASE):
+                    break
+                body.append(later)
+            has_optional_info = False
+            for decl in body:
+                d = info_decl.search(decl)
+                if d and "optional" in d.group(1).lower() and "info" in d.group(2).lower():
+                    has_optional_info = True
+                    break
+            if not has_optional_info:
+                continue
+            # A submodule-local worker is neither `module`-prefixed nor public; see the note above.
+            if not code.lower().startswith("module ") and name.lower() not in public_here:
+                continue
+
+            entry_points += 1
+            declares_entry_point = True
+            where = "%s:%d: %s" % (rel, lineno, name)
+
+            # 1. the tolerance allow-list
+            for arg in args:
+                if arg.endswith("tol") and arg not in SOLVER_TOLERANCES:
+                    problems.append(
+                        "%s: takes `%s`; a solver entry point's tolerances are %s "
+                        "(api-conventions.md, Solver entry points)"
+                        % (where, arg, ", ".join("`%s`" % n for n in SOLVER_TOLERANCES)))
+
+            # 2. rtol before atol
+            if "rtol" in args and "atol" in args and args.index("rtol") > args.index("atol"):
+                problems.append("%s: `atol` precedes `rtol`; the relative tolerance comes first"
+                                % where)
+
+            # 3. converged, then info, and context last
+            for required in ("converged", "info"):
+                if required not in args:
+                    problems.append("%s: has no `%s` dummy; every solver entry point answers both "
+                                    "the short way and the long way" % (where, required))
+            if "converged" in args and "info" in args \
+                    and args.index("converged") > args.index("info"):
+                problems.append("%s: `info` precedes `converged`; the short answer comes first"
+                                % where)
+            if args[-1] != "context":
+                problems.append("%s: `context` is not the last dummy (found `%s`)"
+                                % (where, args[-1]))
+
+            # 4. the budget's kind
+            if "max_neval" in args:
+                budget = [d for d in body if re.search(r"::\s*max_neval\b", d, re.IGNORECASE)]
+                if not budget:
+                    problems.append("%s: takes `max_neval` but declares no such dummy" % where)
+                else:
+                    decl = budget[0]
+                    head = decl.split("::")[0].lower()
+                    if not re.match(r"\s*integer\s*(,|$)", head):
+                        problems.append("%s: `max_neval` is not a DEFAULT integer (%s)"
+                                        % (where, head.strip()))
+                    for attr in ("intent(in)", "optional"):
+                        if attr not in head.replace(" ", ""):
+                            problems.append("%s: `max_neval` is not `%s`" % (where, attr))
+
+        # ---- 5. the passed object of every deferred binding's interface ----
+        if not declares_entry_point:
+            continue
+        deferred = set(re.findall(r"procedure\s*\(\s*(\w+)\s*\)\s*,\s*deferred",
+                                  text, re.IGNORECASE))
+        for _, code in logical:
+            m = PROC_DECL.match(code)
+            if not m or m.group(1).lower() not in {d.lower() for d in deferred}:
+                continue
+            interfaces_seen += 1
+            first = [a.strip().lower() for a in m.group(2).split(",") if a.strip()]
+            if first and first[0] != "self":
+                problems.append(
+                    "%s: abstract interface `%s` names its passed object `%s`; an extension has to "
+                    "repeat that name, so it is `self` (api-conventions.md, Solver entry points)"
+                    % (rel, m.group(1), first[0]))
+
+    if entry_points == 0:
+        problems.append("no solver entry point found in src/*.f90: this check has come up empty -- "
+                        "re-aim it before trusting its silence")
+    if interfaces_seen == 0:
+        problems.append("no deferred-binding interface found beside a solver entry point: "
+                        "this check has come up empty -- re-aim it before trusting its silence")
+    return problems
+
+
 def check_stats_optional_argument_order():
     """Every `parquet_stats` procedure declares its optionals in one canonical order.
 
@@ -9301,6 +9472,7 @@ CHECKS = (
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),
+    ("the four solver modules share one vocabulary", check_solver_vocabulary),
     ("parquet_transform stays Arrow-free", check_parquet_transform_stays_arrow_free),
     ("parquet_kde stays Arrow-free", check_parquet_kde_stays_arrow_free),
     ("every sum in the vendored PRIMA tier is the ordered one", check_prima_sums_are_the_ordered_sum),

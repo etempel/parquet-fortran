@@ -255,12 +255,12 @@ contains
     end function k_bump_exact
 
     !> Evaluates `exp(-rate*x)`, whose integral over `[0, 1]` is `(1 - exp(-rate))/rate`.
-    function k_decay_eval(this, x) result(f)
-        class(k_decay), intent(inout) :: this !! the integrand object
+    function k_decay_eval(self, x) result(f)
+        class(k_decay), intent(inout) :: self !! the integrand object
         real(real64), intent(in)      :: x    !! point at which to evaluate
         real(real64)                  :: f    !! the integrand value
 
-        f = exp(-this%rate*x)
+        f = exp(-self%rate*x)
 
     end function k_decay_eval
 
@@ -397,7 +397,7 @@ contains
         integer, intent(in)          :: repeats    !! integrations inside one timed round
         character(len=*), intent(in) :: tag        !! names the case in the report
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: best, t0, t1, keep, r
         integer                   :: j, k, n
 
@@ -438,7 +438,7 @@ contains
         integer, intent(in) :: rounds  !! timed rounds; the best is kept
         integer, intent(in) :: repeats !! integrations inside one timed round
 
-        type(pf_integration_points) :: pts
+        type(pf_integrate_points) :: pts
         real(real64)                :: best, t0, t1, keep, r
         integer                     :: j, k
 
@@ -574,10 +574,10 @@ contains
         real(real64), intent(in)     :: want      !! the closed form over [a, b]
         integer, intent(in)          :: reference !! `dqagi`'s count, or 0 where it has none
 
-        type(pf_integration_info) :: info
+        type(pf_integrate_info) :: info
         real(real64)              :: r
 
-        r = pf_integrate(fn, a, b, pf_tolerance(1.0e-10_real64, 1.0e-14_real64), info=info)
+        r = pf_integrate(fn, a, b, rtol=1.0e-10_real64, atol=1.0e-14_real64, info=info)
 
         if (reference > 0) then
             print '(a,a,i9,i9,es11.2,a,i8,f8.2)', "  ", tag, info%neval, info%npanels, &
@@ -610,13 +610,12 @@ contains
         real(real64), intent(in)     :: want    !! the closed form over [a, b]
         real(real64), intent(in)     :: cuts(:) !! the breakpoints, bracketing the feature
 
-        type(pf_tolerance)        :: tol
-        type(pf_integration_info) :: plain, cut
+        type(pf_integrate_info) :: plain, cut
         real(real64)              :: r_plain, r_cut
 
-        tol = pf_tolerance(1.0e-10_real64, 1.0e-14_real64)
-        r_plain = pf_integrate(fn, a, b, tol, info=plain)
-        r_cut = pf_integrate(fn, a, b, tol, breakpoints=cuts, info=cut)
+        r_plain = pf_integrate(fn, a, b, 1.0e-10_real64, atol=1.0e-14_real64, info=plain)
+        r_cut = pf_integrate(fn, a, b, 1.0e-10_real64, atol=1.0e-14_real64, breakpoints=cuts, &
+                             info=cut)
 
         print '(a,a,i8,es11.2,i8,es11.2,f8.2,a)', "  ", tag, &
             plain%neval, abs(r_plain - want)/abs(want), &

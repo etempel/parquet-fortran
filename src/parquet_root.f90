@@ -22,7 +22,7 @@
 !! takes part in the sign test like any other value, and a bracket with an infinite end is bisected
 !! rather than interpolated through until that end becomes finite. A NaN has no sign, so there is
 !! no answer to return, and it aborts. `pf_integrate` reports the same event as a status instead
-!! (`PF_INT_BAD_VALUE`); the difference is deliberate, because a quadrature can say where the bad
+!! (`PF_INT_NONFINITE`); the difference is deliberate, because a quadrature can say where the bad
 !! value was and let a sweep carry on, while a root finder has no sign to carry on from.
 !!
 !! **No evaluation order overflows.** A bracket may lie anywhere in the finite range and the
@@ -40,7 +40,7 @@
 !!
 !! **The function is an object or a plain function.** An object extending `pf_rootfun` carries its
 !! parameters as components and may update them from `eval` (a call counter, a cache); a
-!! `procedure(pf_root_func)` is the parameterless form. Either way the callback must be a MODULE
+!! `procedure(pf_rootfun_func)` is the parameterless form. Either way the callback must be a MODULE
 !! procedure or a type-bound procedure -- never an internal procedure, which flang cannot pass at
 !! all and which gfortran implements with an executable stack.
 !!
@@ -54,7 +54,7 @@ module parquet_root
     implicit none
     private
 
-    public :: pf_rootfun, pf_rootfun_eval, pf_root_func
+    public :: pf_rootfun, pf_rootfun_eval, pf_rootfun_func
     public :: pf_bracket_expansion, pf_root_info, pf_root_history
     public :: pf_find_root
     public :: PF_EXPAND_NONE, PF_EXPAND_UP, PF_EXPAND_DOWN, PF_EXPAND_BOTH
@@ -106,30 +106,30 @@ module parquet_root
         !!
         !! The passed-object dummy is `intent(inout)` so that an extension may keep a call counter
         !! or a cache; an extension must declare the same intent.
-        function pf_rootfun_eval(this, x) result(y)
+        function pf_rootfun_eval(self, x) result(f)
             import :: pf_rootfun, real64
             implicit none
-            class(pf_rootfun), intent(inout) :: this !! the function object, which may update
+            class(pf_rootfun), intent(inout) :: self !! the function object, which may update
             real(real64), intent(in)         :: x    !! where to evaluate
-            real(real64)                     :: y    !! f(x)
+            real(real64)                     :: f    !! f(x)
         end function pf_rootfun_eval
 
         !> Evaluates a plain, parameterless function at one point.
         !!
         !! Must be a module procedure, never an internal one.
-        function pf_root_func(x) result(y)
+        function pf_rootfun_func(x) result(f)
             import :: real64
             implicit none
             real(real64), intent(in) :: x !! where to evaluate
-            real(real64)             :: y !! f(x)
-        end function pf_root_func
+            real(real64)             :: f !! f(x)
+        end function pf_rootfun_func
 
     end interface
 
-    !> Wraps a plain `pf_root_func` as a `pf_rootfun`, so the solver has one function shape.
+    !> Wraps a plain `pf_rootfun_func` as a `pf_rootfun`, so the solver has one function shape.
     !! Private: the plain-function specific builds one and delegates; callers never see it.
     type, extends(pf_rootfun) :: func_rootfun
-        procedure(pf_root_func), nopass, pointer :: fp => null() !! the wrapped function
+        procedure(pf_rootfun_func), nopass, pointer :: fp => null() !! the wrapped function
     contains
         procedure :: eval => func_rootfun_eval !! Calls the wrapped function.
     end type func_rootfun
@@ -177,14 +177,14 @@ module parquet_root
     !! Brent step.
     !!
     !! Filled only when `pf_find_root` is called with `history=`. Grown geometrically and
-    !! **trimmed to `n` on output**, as `pf_optimize_history` and `pf_integration_points` are, so
+    !! **trimmed to `n` on output**, as `pf_optimize_history` and `pf_integrate_points` are, so
     !! `x(1:n)` and `f(1:n)` are the whole record and `size(x) == n`.
     type :: pf_root_history
         integer                   :: n = 0 !! records in use; `x` and `f` are valid in `1:n`
         real(real64), allocatable :: x(:)  !! every point evaluated, in order
         real(real64), allocatable :: f(:)  !! the value returned there
     contains
-        procedure :: append => root_history_append !! Appends one record, growing geometrically.
+        procedure :: add => root_history_add !! Adds one record, growing geometrically.
     end type pf_root_history
 
     ! ---- the public generic -------------------------------------------------------------------
@@ -195,7 +195,7 @@ module parquet_root
     !> Finds a root of `f` in `[a, b]` by Brent's method, widening the bracket first if asked to.
     !!
     !! ```
-    !! call pf_find_root(f, a, b, x, [expand], [tol], [rtol], [max_neval], [converged], [info], &
+    !! call pf_find_root(f, a, b, x, [expand], [rtol], [atol], [max_neval], [converged], [info], &
     !!                   [history], [context])
     !! ```
     !!
@@ -204,7 +204,7 @@ module parquet_root
     !! argument is named here instead:
     !!
     !! * `f` -- the function: a `class(pf_rootfun)` object carrying its own parameters, or a
-    !!   plain `procedure(pf_root_func)` function. Must be a module procedure or a type-bound
+    !!   plain `procedure(pf_rootfun_func)` function. Must be a module procedure or a type-bound
     !!   procedure of an object, never an internal procedure.
     !! * `a`, `b` -- the bracket, `real64`: both finite, `a < b`, and `b - a` finite. Their values
     !!   need not differ in sign when `expand` asks for an expansion.
@@ -212,11 +212,12 @@ module parquet_root
     !!   point on `PF_ROOT_OK`, the best point reached on `PF_ROOT_LIMIT`, and the end of the last
     !!   bracket with the smaller `|f|` on `PF_ROOT_NO_BRACKET`.
     !! * `expand` -- optional `pf_bracket_expansion`, the growth policy; default no expansion.
-    !! * `tol` -- optional absolute tolerance on `x`, `real64`, default 0.
     !! * `rtol` -- optional relative tolerance on `x`, `real64`, default and floor `4*epsilon`; a
-    !!   smaller value is raised to the floor. The search stops when the bracket around the root
-    !!   is no wider than `2*t`, with `t = 2*epsilon*|x| + max(tol, rtol*|x|)/2`, so `x` is within
-    !!   `2*t` of the root: about eight units of `epsilon*|x|` under the defaults.
+    !!   smaller value is raised to the floor.
+    !! * `atol` -- optional absolute tolerance on `x`, `real64`, default 0. The search stops when
+    !!   the bracket around the root is no wider than `2*t`, with
+    !!   `t = 2*epsilon*|x| + max(atol, rtol*|x|)/2`, so `x` is within `2*t` of the root: about
+    !!   eight units of `epsilon*|x|` under the defaults.
     !! * `max_neval` -- optional budget on function evaluations, the expansion's included, default
     !!   200. Reaching it is `PF_ROOT_LIMIT`, not an error.
     !! * `converged` -- optional `logical`, `intent(out)`: `info%status == PF_ROOT_OK`.
@@ -228,7 +229,7 @@ module parquet_root
     interface pf_find_root
 
         !> The function as an object.
-        module subroutine find_root_obj(f, a, b, x, expand, tol, rtol, max_neval, converged, info, &
+        module subroutine find_root_obj(f, a, b, x, expand, rtol, atol, max_neval, converged, info, &
                                         history, context)
             implicit none
             class(pf_rootfun), intent(inout)                 :: f         !! the function
@@ -236,8 +237,8 @@ module parquet_root
             real(real64), intent(in)                         :: b         !! bracket, upper end
             real(real64), intent(out)                        :: x         !! the root
             type(pf_bracket_expansion), intent(in), optional :: expand    !! the growth policy
-            real(real64), intent(in), optional               :: tol       !! absolute tolerance
             real(real64), intent(in), optional               :: rtol      !! relative tolerance
+            real(real64), intent(in), optional               :: atol      !! absolute tolerance
             integer, intent(in), optional                    :: max_neval !! evaluation budget; a
                                                                           !! bracketed solve takes
                                                                           !! tens, never huge(1)
@@ -248,16 +249,16 @@ module parquet_root
         end subroutine find_root_obj
 
         !> The function as a plain module procedure.
-        module subroutine find_root_func(f, a, b, x, expand, tol, rtol, max_neval, converged, info, &
+        module subroutine find_root_func(f, a, b, x, expand, rtol, atol, max_neval, converged, info, &
                                          history, context)
             implicit none
-            procedure(pf_root_func)                          :: f         !! the function
+            procedure(pf_rootfun_func)                       :: f         !! the function
             real(real64), intent(in)                         :: a         !! bracket, lower end
             real(real64), intent(in)                         :: b         !! bracket, upper end
             real(real64), intent(out)                        :: x         !! the root
             type(pf_bracket_expansion), intent(in), optional :: expand    !! the growth policy
-            real(real64), intent(in), optional               :: tol       !! absolute tolerance
             real(real64), intent(in), optional               :: rtol      !! relative tolerance
+            real(real64), intent(in), optional               :: atol      !! absolute tolerance
             integer, intent(in), optional                    :: max_neval !! evaluation budget; a
                                                                           !! bracketed solve takes
                                                                           !! tens, never huge(1)
@@ -274,19 +275,19 @@ module parquet_root
     interface
 
         !> Appends one `(x, f)` record, growing the arrays geometrically.
-        module subroutine root_history_append(this, x, f)
+        module subroutine root_history_add(this, x, f)
             implicit none
             class(pf_root_history), intent(inout) :: this !! record appended to
             real(real64), intent(in)              :: x    !! the point evaluated
             real(real64), intent(in)              :: f    !! the value returned there
-        end subroutine root_history_append
+        end subroutine root_history_add
 
         !> Evaluates the wrapped plain function.
-        module function func_rootfun_eval(this, x) result(y)
+        module function func_rootfun_eval(self, x) result(f)
             implicit none
-            class(func_rootfun), intent(inout) :: this !! the wrapper, never updated
+            class(func_rootfun), intent(inout) :: self !! the wrapper, never updated
             real(real64), intent(in)           :: x    !! where to evaluate
-            real(real64)                       :: y    !! f(x)
+            real(real64)                       :: f    !! f(x)
         end function func_rootfun_eval
 
     end interface

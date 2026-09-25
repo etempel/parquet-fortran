@@ -37,7 +37,7 @@ Signatures on this page show optional arguments in square brackets, with the com
 bracket:
 
 ```fortran
-call pf_find_root(f, a, b, x, [expand], [tol], [rtol], [max_neval], [converged], [info], &
+call pf_find_root(f, a, b, x, [expand], [rtol], [atol], [max_neval], [converged], [info], &
                   [history], [context])
 ```
 
@@ -45,7 +45,7 @@ call pf_find_root(f, a, b, x, [expand], [tol], [rtol], [max_neval], [converged],
 
 Two ways to supply it, and the choice is about parameters rather than taste.
 
-**A plain function** matching `pf_root_func` — one `real64` in, one `real64` out — is the short
+**A plain function** matching `pf_rootfun_func` — one `real64` in, one `real64` out — is the short
 form, for a function that needs nothing but `x`.
 
 **An object extending `pf_rootfun`** carries its parameters as components. Extend the type, add
@@ -60,11 +60,11 @@ contains
     procedure :: eval => kepler_eval
 end type kepler
 
-function kepler_eval(this, x) result(y)
-    class(kepler), intent(inout) :: this
+function kepler_eval(self, x) result(f)
+    class(kepler), intent(inout) :: self
     real(real64), intent(in)     :: x
-    real(real64)                 :: y
-    y = x - this%eccentricity*sin(x) - this%mean_anomaly
+    real(real64)                 :: f
+    f = x - self%eccentricity*sin(x) - self%mean_anomaly
 end function kepler_eval
 ```
 
@@ -79,10 +79,9 @@ k%eccentricity = 0.3_real64
 call pf_find_root(k, 0.0_real64, 2.0_real64*acos(-1.0_real64), ecc_anomaly)
 ```
 
-**The callback must be a module procedure or a type-bound procedure, never an internal one.** An
-internal procedure passed as an actual argument is a hard crash under one of this project's
-compilers and makes the binary demand an executable stack under another. An object is the
-supported way to carry context; a module variable is the other.
+**The callback must be a module procedure or a type-bound procedure, never an internal one**, and
+one object per thread — see [Solver conventions](solvers.html#the-function-you-supply), which
+states both rules once for all four solver modules.
 
 **Your function must not return a NaN.** A NaN has no sign, so a root finder has nothing to do
 with it, and `pf_find_root` stops the program with `pf_find_root: the function returned a NaN`.
@@ -161,23 +160,23 @@ end if
 
 ## Tolerances
 
-`tol` is an absolute tolerance on `x`, default 0. `rtol` is a relative one, default `4*epsilon`,
-which is also its floor: a smaller value, zero included, is raised to it. The search stops when
+`rtol` is a relative tolerance on `x`, default `4*epsilon`, which is also its floor: a smaller
+value, zero included, is raised to it. `atol` is an absolute one, default 0. The search stops when
 the bracket around the root is no wider than `2*t`, with
 
 ```
-t = 2*epsilon*|x| + max(tol, rtol*|x|)/2
+t = 2*epsilon*|x| + max(atol, rtol*|x|)/2
 ```
 
 so `x` is within `2*t` of the root: about eight units of `epsilon*|x|` under the defaults, which is
 full precision at any magnitude. A root near `1e-9` comes back with the same relative accuracy as
-a root near 1 — no absolute floor is hiding in the defaults. A looser `tol` or `rtol` stops
+a root near 1 — no absolute floor is hiding in the defaults. A looser `rtol` or `atol` stops
 sooner, which is worth having when each evaluation is costly.
 
 **A root at exactly zero is the one place a relative tolerance cannot help**: the bracket around it
 cannot become narrow relative to `|x|`. A simple root there is usually hit exactly, because the
 interpolation lands on it; a multiple root, `x**3` say, is approached one bisection at a time and
-spends the budget. Pass a `tol` when the root may be zero.
+spends the budget. Pass an `atol` when the root may be zero.
 
 ## Budget and outcome
 
@@ -245,9 +244,9 @@ the first evaluation — bar the last row, which is about your function:
 |---|---|
 | `a` or `b` NaN or infinite, or `a >= b` | `the bracket must satisfy a < b with finite ends` |
 | `b - a` overflows | `the bracket width must be finite` |
-| `tol` NaN, infinite or negative | `tol must be a non-negative finite number` |
-| `rtol` NaN, infinite or negative | `rtol must be a non-negative finite number` |
-| `max_neval < 1` | `max_neval must be at least 1` |
+| `rtol` NaN, infinite or negative | `rtol must be a finite, non-negative number` |
+| `atol` NaN, infinite or negative | `atol must be a finite, non-negative number` |
+| `max_neval < 1` | `max_neval must be positive` |
 | `expand%mode` not a `PF_EXPAND_*` code | `expand%mode must be one of PF_EXPAND_NONE, PF_EXPAND_UP, PF_EXPAND_DOWN, PF_EXPAND_BOTH` |
 | `expand%factor` NaN, infinite or not above 1 | `expand%factor must be a finite number greater than 1` |
 | `expand%max_tries < 0` | `expand%max_tries must not be negative` |

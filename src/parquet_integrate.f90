@@ -16,8 +16,8 @@
 !!
 !! **What the INTEGRAND does is never a contract violation.** An integrand that returns a NaN or
 !! an infinity is the caller's own function misbehaving on the caller's own data, so it ends the
-!! integration rather than the process: `PF_INT_BAD_VALUE`, `converged = .false.`, and
-!! `info%non_finite_at` carrying the point it happened at. A caller sweeping a parameter grid
+!! integration rather than the process: `PF_INT_NONFINITE`, `converged = .false.`, and
+!! `info%nonfinite_at` carrying the point it happened at. A caller sweeping a parameter grid
 !! keeps the sweep and can say which parameter broke.
 !!
 !! **Thread safety is by construction.** The module has no variable that is not a `parameter`;
@@ -58,12 +58,12 @@ module parquet_integrate
     private
 
     public :: pf_integrand, pf_integrand_eval, pf_integrand_func
-    public :: pf_tolerance, pf_integration_points, pf_integration_info
+    public :: pf_integrate_points, pf_integrate_info
     public :: pf_integrate, pf_infinity
     public :: PF_INT_OK, PF_INT_LIMIT, PF_INT_ROUNDOFF, PF_INT_BAD_INTEGRAND
-    public :: PF_INT_NO_CONVERGENCE, PF_INT_DIVERGENT, PF_INT_BAD_VALUE
+    public :: PF_INT_NO_CONVERGENCE, PF_INT_DIVERGENT, PF_INT_NONFINITE
 
-    ! ---- status codes, the values of pf_integration_info%status ----------------------------
+    ! ---- status codes, the values of pf_integrate_info%status ----------------------------
 
     integer, parameter :: PF_INT_OK = 0             !! requested accuracy achieved
     integer, parameter :: PF_INT_LIMIT = 1          !! `max_neval` reached before the tolerance was
@@ -71,7 +71,7 @@ module parquet_integrate
     integer, parameter :: PF_INT_BAD_INTEGRAND = 3  !! extremely bad behaviour at some point
     integer, parameter :: PF_INT_NO_CONVERGENCE = 4 !! round-off in the extrapolation table
     integer, parameter :: PF_INT_DIVERGENT = 5      !! probably divergent, or slowly convergent
-    integer, parameter :: PF_INT_BAD_VALUE = 6      !! the integrand returned a NaN or an infinity
+    integer, parameter :: PF_INT_NONFINITE = 6      !! the integrand returned a NaN or an infinity
 
     ! ---- internal parameters, not part of the public surface -------------------------------
 
@@ -215,10 +215,10 @@ module parquet_integrate
         !!
         !! The passed-object dummy is `intent(inout)` so that an extension may keep a call counter
         !! or a cache; an extension must declare the same intent.
-        function pf_integrand_eval(this, x) result(f)
+        function pf_integrand_eval(self, x) result(f)
             import :: pf_integrand, real64
             implicit none
-            class(pf_integrand), intent(inout) :: this !! the integrand object, which may update
+            class(pf_integrand), intent(inout) :: self !! the integrand object, which may update
             real(real64), intent(in)           :: x    !! point at which to evaluate
             real(real64)                       :: f    !! integrand value at `x`
         end function pf_integrand_eval
@@ -245,15 +245,19 @@ module parquet_integrate
 
     ! ---- tolerances, the record and the outcome ----------------------------------------------
 
-    !> Relative and absolute tolerance together, for the specifics that take one object rather
-    !! than a bare `rtol`. At least one of the two must be positive.
+    !> The two tolerances as one object, for the driver to carry down to the engine and to divide
+    !! among the pieces of a `breakpoints` call. At least one of the two must be positive.
+    !!
+    !! PRIVATE: a caller passes `rtol` and `atol` as separate arguments of `pf_integrate`. The type
+    !! exists because the piecewise path integrates each of `n` pieces to `atol/n`, so the pair
+    !! travels together through the driver, the walk and the engine.
     !!
     !! `atol` is what makes an integral whose true value is near zero converge: a relative
     !! tolerance on a result of `1e-30` asks for an accuracy no arithmetic can deliver.
-    type :: pf_tolerance
+    type :: tolerance_pair
         real(real64) :: rtol = 0.0_real64 !! relative tolerance on the result
         real(real64) :: atol = 0.0_real64 !! absolute tolerance, for an integral near zero
-    end type pf_tolerance
+    end type tolerance_pair
 
     !> Every point of the FINAL PARTITION at which the integrand was evaluated, with the weight
     !! that point carries and the value the integrand returned.
@@ -264,22 +268,22 @@ module parquet_integrate
     !! half-length of the subinterval and any change-of-variable factor. The record is the final
     !! partition, not a log of every evaluation -- a bisected subinterval's own 21 points are
     !! superseded by its two children's 42, and summing both would count the region twice.
-    type :: pf_integration_points
+    type :: pf_integrate_points
         integer                   :: n = 0 !! points in use; `x`, `w` and `f` are valid in `1:n`
         real(real64), allocatable :: x(:)  !! abscissae, in the caller's `x`
         real(real64), allocatable :: w(:)  !! weights, including every change-of-variable factor
         real(real64), allocatable :: f(:)  !! integrand values at `x`
     contains
         procedure :: append => points_append !! Appends another record to this one.
-    end type pf_integration_points
+    end type pf_integrate_points
 
     !> What happened, for a caller who wants more than `converged`.
     !!
-    !! `non_finite_at` is the one component that means nothing on its own: it is the point the
+    !! `nonfinite_at` is the one component that means nothing on its own: it is the point the
     !! integrand returned a NaN or an infinity at, and it is defined only when `status` is
-    !! `PF_INT_BAD_VALUE`. On every other status it stays zero, which is a point like any other
+    !! `PF_INT_NONFINITE`. On every other status it stays zero, which is a point like any other
     !! and so must never be read as "no bad value" -- the status is what says that.
-    type :: pf_integration_info
+    type :: pf_integrate_info
         integer      :: status = PF_INT_OK              !! one of the `PF_INT_*` codes
         logical      :: converged = .true.              !! `status == PF_INT_OK`
         logical      :: extrapolated = .false.          !! the result came from the epsilon table
@@ -288,9 +292,9 @@ module parquet_integrate
         integer      :: neval = 0                       !! integrand evaluations, counted
         integer      :: nsub = 0                        !! subintervals in the final partition
         integer      :: npanels = 0                     !! walk panels used; 1 for a finite range
-        real(real64) :: non_finite_at = 0.0_real64      !! where the integrand returned a non-finite
-                                                        !! value; read only on `PF_INT_BAD_VALUE`
-    end type pf_integration_info
+        real(real64) :: nonfinite_at = 0.0_real64      !! where the integrand returned a non-finite
+                                                        !! value; read only on `PF_INT_NONFINITE`
+    end type pf_integrate_info
 
     !> The first non-finite integrand value a call met, carried out of the rule rather than
     !! aborted on.
@@ -298,7 +302,7 @@ module parquet_integrate
     !! Private, and threaded through the engine as one `intent(inout)` argument in place of the
     !! `context` the screen used to abort with. `seen` false means every evaluation so far
     !! returned a finite number; once it is true the engine stops at its next check and the driver
-    !! turns it into `PF_INT_BAD_VALUE`. The FIRST such point is kept, not the last: it is the one
+    !! turns it into `PF_INT_NONFINITE`. The FIRST such point is kept, not the last: it is the one
     !! a caller can reason about, since everything after it may be a consequence.
     type :: bad_value
         logical      :: seen = .false.  !! an evaluation returned a NaN or an infinity
@@ -310,10 +314,8 @@ module parquet_integrate
     !> Integrates `f` over `[a, b]`, adaptively, to the tolerance asked for.
     !!
     !! ```
-    !! res = pf_integrate(f, a, b, rtol, [max_neval], [converged], [info], [points], [context], &
-    !!                    [log_base], [extrapolate], [max_panels], [breakpoints])
-    !! res = pf_integrate(f, a, b, tol,  [max_neval], [converged], [info], [points], [context], &
-    !!                    [log_base], [extrapolate], [max_panels], [breakpoints])
+    !! res = pf_integrate(f, a, b, rtol, [atol], [max_neval], [log_base], [extrapolate], &
+    !!                    [max_panels], [breakpoints], [converged], [info], [points], [context])
     !! ```
     !!
     !! Either bound may be an infinity, which is how the four ranges are spelled:
@@ -338,17 +340,20 @@ module parquet_integrate
     !!   first panel the integrand is not negligible on and then steps outward a factor of e at a
     !!   time, so a feature far along the range is found rather than fallen between two abscissae.
     !!   Both bounds the same infinity aborts.
-    !! * `rtol` -- relative tolerance, `real64`. Convergence is `abserr <= max(atol, rtol*|res|)`.
-    !! * `tol` -- a `pf_tolerance` supplying `rtol` and `atol` together, in place of `rtol`.
+    !! * `rtol` -- relative tolerance, `real64`, required. Convergence is
+    !!   `abserr <= max(atol, rtol*|res|)`. An `rtol` below `50*epsilon` needs a positive `atol`.
+    !! * `atol` -- optional absolute tolerance, `real64`, default 0. It is what makes an integral
+    !!   whose true value is near zero converge, since a relative tolerance on a result of `1e-30`
+    !!   asks for an accuracy no arithmetic can deliver. At least one of the two must be positive.
     !! * `max_neval` -- optional budget on integrand evaluations, default 100000. Reaching it is
     !!   `PF_INT_LIMIT` and `converged = .false.`, not an error. The count never exceeds it on a
     !!   finite range, with or without `breakpoints`, provided the budget covers one rule
     !!   application per piece (21 evaluations each).
     !! * `converged` -- optional `logical`, `intent(out)`: `info%status == PF_INT_OK`.
-    !! * `info` -- optional `type(pf_integration_info)`, `intent(out)`: status, error estimate,
+    !! * `info` -- optional `type(pf_integrate_info)`, `intent(out)`: status, error estimate,
     !!   evaluation count, subinterval count, the plain partition sum, and -- on
-    !!   `PF_INT_BAD_VALUE` alone -- the point the integrand returned a non-finite value at.
-    !! * `points` -- optional `type(pf_integration_points)`, `intent(out)`: every abscissa, weight
+    !!   `PF_INT_NONFINITE` alone -- the point the integrand returned a non-finite value at.
+    !! * `points` -- optional `type(pf_integrate_points)`, `intent(out)`: every abscissa, weight
     !!   and value of the final partition. Recorded only when this argument is present.
     !! * `context` -- optional text appended to any abort message, to identify the call site.
     !!   Capped at 100 characters.
@@ -378,93 +383,52 @@ module parquet_integrate
     !!   integrated to `rtol` of itself and to `atol/n_pieces`, so the sum meets both tolerances
     !!   whenever every piece does; `converged` is the conjunction.
     !!
-    !! There is no optional SCALAR `real64` argument in the list and there must never be one: an
-    !! optional dummy counts against the margin that distinguishes the `rtol` specifics from the
-    !! `tol` specifics (`fortran-gotchas.md`), so `atol` travels inside `pf_tolerance` and
-    !! `abserr` inside `pf_integration_info`. `breakpoints` is the one real in the list and is
-    !! safe because RANK is part of what distinguishes two specifics: a rank-1 dummy can never be
-    !! mistaken for the scalar `rtol`.
+    !! An optional scalar `real64` such as `atol` is safe here because the two specifics differ in
+    !! their FIRST argument -- a data object against a procedure -- exactly as `pf_find_root`'s do,
+    !! so no later dummy is asked to tell them apart.
     interface pf_integrate
 
-        !> Integrand as an object, tolerance as a bare `rtol`.
-        module function integrate_obj_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                           context, log_base, extrapolate, max_panels, breakpoints) result(res)
+        !> Integrand as an object carrying its own parameters.
+        module function integrate_obj(f, a, b, rtol, atol, max_neval, log_base, extrapolate, &
+                                      max_panels, breakpoints, converged, info, points, context) result(res)
             implicit none
             class(pf_integrand), intent(inout)                  :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
             real(real64), intent(in)                            :: b          !! upper bound
             real(real64), intent(in)                            :: rtol       !! relative tolerance
-            integer, intent(in), optional                       :: max_neval  !! evaluation budget
-            logical, intent(out), optional                      :: converged  !! status is OK
-            type(pf_integration_info), intent(out), optional    :: info       !! what happened
-            type(pf_integration_points), intent(out), optional  :: points     !! the record
-            character(len=*), intent(in), optional              :: context    !! call-site text
+            real(real64), intent(in), optional                  :: atol       !! absolute tolerance
+            integer, intent(in), optional                       :: max_neval  !! evaluation budget; at most huge(1)/42
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
             integer, intent(in), optional                       :: max_panels !! walk panel cap
             real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
-            real(real64)                                        :: res        !! the integral
-        end function integrate_obj_rtol
-
-        !> Integrand as an object, tolerance as a `pf_tolerance`.
-        module function integrate_obj_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                          context, log_base, extrapolate, max_panels, breakpoints) result(res)
-            implicit none
-            class(pf_integrand), intent(inout)                  :: f          !! the integrand
-            real(real64), intent(in)                            :: a          !! lower bound
-            real(real64), intent(in)                            :: b          !! upper bound
-            type(pf_tolerance), intent(in)                      :: tol        !! both tolerances
-            integer, intent(in), optional                       :: max_neval  !! evaluation budget
             logical, intent(out), optional                      :: converged  !! status is OK
-            type(pf_integration_info), intent(out), optional    :: info       !! what happened
-            type(pf_integration_points), intent(out), optional  :: points     !! the record
+            type(pf_integrate_info), intent(out), optional    :: info       !! what happened
+            type(pf_integrate_points), intent(out), optional  :: points     !! the record
             character(len=*), intent(in), optional              :: context    !! call-site text
-            logical, intent(in), optional                       :: log_base   !! integrate in log x
-            logical, intent(in), optional                       :: extrapolate !! epsilon table
-            integer, intent(in), optional                       :: max_panels !! walk panel cap
-            real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
             real(real64)                                        :: res        !! the integral
-        end function integrate_obj_tol
+        end function integrate_obj
 
-        !> Integrand as a plain function, tolerance as a bare `rtol`.
-        module function integrate_func_rtol(f, a, b, rtol, max_neval, converged, info, points, &
-                                            context, log_base, extrapolate, max_panels, breakpoints) result(res)
+        !> Integrand as a plain, parameterless function.
+        module function integrate_func(f, a, b, rtol, atol, max_neval, log_base, extrapolate, &
+                                       max_panels, breakpoints, converged, info, points, context) result(res)
             implicit none
             procedure(pf_integrand_func)                        :: f          !! the integrand
             real(real64), intent(in)                            :: a          !! lower bound
             real(real64), intent(in)                            :: b          !! upper bound
             real(real64), intent(in)                            :: rtol       !! relative tolerance
-            integer, intent(in), optional                       :: max_neval  !! evaluation budget
-            logical, intent(out), optional                      :: converged  !! status is OK
-            type(pf_integration_info), intent(out), optional    :: info       !! what happened
-            type(pf_integration_points), intent(out), optional  :: points     !! the record
-            character(len=*), intent(in), optional              :: context    !! call-site text
+            real(real64), intent(in), optional                  :: atol       !! absolute tolerance
+            integer, intent(in), optional                       :: max_neval  !! evaluation budget; at most huge(1)/42
             logical, intent(in), optional                       :: log_base   !! integrate in log x
             logical, intent(in), optional                       :: extrapolate !! epsilon table
             integer, intent(in), optional                       :: max_panels !! walk panel cap
             real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
-            real(real64)                                        :: res        !! the integral
-        end function integrate_func_rtol
-
-        !> Integrand as a plain function, tolerance as a `pf_tolerance`.
-        module function integrate_func_tol(f, a, b, tol, max_neval, converged, info, points, &
-                                           context, log_base, extrapolate, max_panels, breakpoints) result(res)
-            implicit none
-            procedure(pf_integrand_func)                        :: f          !! the integrand
-            real(real64), intent(in)                            :: a          !! lower bound
-            real(real64), intent(in)                            :: b          !! upper bound
-            type(pf_tolerance), intent(in)                      :: tol        !! both tolerances
-            integer, intent(in), optional                       :: max_neval  !! evaluation budget
             logical, intent(out), optional                      :: converged  !! status is OK
-            type(pf_integration_info), intent(out), optional    :: info       !! what happened
-            type(pf_integration_points), intent(out), optional  :: points     !! the record
+            type(pf_integrate_info), intent(out), optional    :: info       !! what happened
+            type(pf_integrate_points), intent(out), optional  :: points     !! the record
             character(len=*), intent(in), optional              :: context    !! call-site text
-            logical, intent(in), optional                       :: log_base   !! integrate in log x
-            logical, intent(in), optional                       :: extrapolate !! epsilon table
-            integer, intent(in), optional                       :: max_panels !! walk panel cap
-            real(real64), intent(in), optional                  :: breakpoints(:) !! interior cuts
             real(real64)                                        :: res        !! the integral
-        end function integrate_func_tol
+        end function integrate_func
 
     end interface pf_integrate
 
@@ -497,14 +461,14 @@ module parquet_integrate
         !> Deep-copies another record onto the end of this one, growing this one to fit.
         module subroutine points_append(this, other)
             implicit none
-            class(pf_integration_points), intent(inout) :: this  !! record appended to
-            type(pf_integration_points), intent(in)     :: other !! record appended
+            class(pf_integrate_points), intent(inout) :: this  !! record appended to
+            type(pf_integrate_points), intent(in)     :: other !! record appended
         end subroutine points_append
 
         !> Evaluates the wrapped plain function.
-        module function func_integrand_eval(this, x) result(f)
+        module function func_integrand_eval(self, x) result(f)
             implicit none
-            class(func_integrand), intent(inout) :: this !! the wrapper, never updated
+            class(func_integrand), intent(inout) :: self !! the wrapper, never updated
             real(real64), intent(in)             :: x    !! point at which to evaluate
             real(real64)                         :: f    !! integrand value at `x`
         end function func_integrand_eval

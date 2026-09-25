@@ -589,7 +589,7 @@ contains
                 test_optimize_de_max_gen_zero_aborts), &
             new_unittest("DE refuses a constrained objective", &
                 test_optimize_de_constraints_not_honoured_aborts), &
-            new_unittest("ftol and atol both zero are refused as a pair", &
+            new_unittest("rtol and atol both zero are refused as a pair", &
                 test_optimize_de_no_tolerance_aborts), &
             new_unittest("a parquet_optimize refusal carries the caller's context", &
                 test_optimize_context_is_reported_aborts), &
@@ -597,10 +597,14 @@ contains
                 test_optimize_context_is_capped_aborts), &
             new_unittest("zero starts are refused", &
                 test_optimize_multistart_nstart_zero_aborts), &
-            new_unittest("a negative xtol is refused", &
-                test_optimize_multistart_xtol_negative_aborts), &
+            new_unittest("a negative merge_tol is refused", &
+                test_optimize_multistart_merge_tol_negative_aborts), &
             new_unittest("the multistart driver refuses a constrained objective by name", &
                 test_optimize_multistart_constraints_not_honoured_aborts), &
+            new_unittest("a negative pf_simplex_solver%max_neval is refused", &
+                test_optimize_simplex_solver_negative_budget_aborts), &
+            new_unittest("a negative pf_bobyqa_solver%max_neval is refused", &
+                test_prima_bobyqa_solver_negative_budget_aborts), &
             new_unittest("BOBYQA refuses a zero-length start", &
                 test_prima_size_zero_aborts), &
             new_unittest("BOBYQA refuses a NaN in the start point", &
@@ -824,7 +828,7 @@ contains
             new_unittest("pf_find_root refuses a bracket whose width overflows", &
                 test_root_bracket_width_aborts), &
             new_unittest("pf_find_root refuses a negative tol", &
-                test_root_negative_tol_aborts), &
+                test_root_negative_atol_aborts), &
             new_unittest("pf_find_root refuses a negative rtol", &
                 test_root_negative_rtol_aborts), &
             new_unittest("pf_find_root refuses a zero max_neval", &
@@ -3371,8 +3375,8 @@ contains
     subroutine test_optimize_tolerance_nonfinite_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "optimize_tolerance_nonfinite", expect_abort=.true., &
-            failure_message="a NaN ftol was expected to error stop", &
-            required_stderr="ftol must be a finite, non-negative number")
+            failure_message="a NaN rtol was expected to error stop", &
+            required_stderr="rtol must be a finite, non-negative number")
     end subroutine test_optimize_tolerance_nonfinite_aborts
     !
     subroutine test_optimize_scalar_bad_bracket_aborts(error)
@@ -3421,7 +3425,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "optimize_simplex_no_tolerance", expect_abort=.true., &
             failure_message="two zero tolerances were expected to error stop", &
-            required_stderr="at least one of ftol and atol must be positive")
+            required_stderr="at least one of rtol and atol must be positive")
     end subroutine test_optimize_simplex_no_tolerance_aborts
     !
     subroutine test_optimize_simplex_nan_start_aborts(error)
@@ -3518,8 +3522,8 @@ contains
     subroutine test_optimize_de_no_tolerance_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "optimize_de_no_tolerance", expect_abort=.true., &
-            failure_message="ftol and atol both zero were expected to error stop", &
-            required_stderr="at least one of ftol and atol must be positive")
+            failure_message="rtol and atol both zero were expected to error stop", &
+            required_stderr="at least one of rtol and atol must be positive")
     end subroutine test_optimize_de_no_tolerance_aborts
     !
     subroutine test_optimize_context_is_reported_aborts(error)
@@ -3543,12 +3547,30 @@ contains
             required_stderr="nstart must be positive")
     end subroutine test_optimize_multistart_nstart_zero_aborts
     !
-    subroutine test_optimize_multistart_xtol_negative_aborts(error)
+    subroutine test_optimize_multistart_merge_tol_negative_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_scenario_exit_status_and_stderr(error, "optimize_multistart_xtol_negative", expect_abort=.true., &
-            failure_message="a negative xtol was expected to error stop", &
-            required_stderr="xtol must be a finite, non-negative number")
-    end subroutine test_optimize_multistart_xtol_negative_aborts
+        call check_scenario_exit_status_and_stderr(error, "optimize_multistart_merge_tol_negative", expect_abort=.true., &
+            failure_message="a negative merge_tol was expected to error stop", &
+            required_stderr="merge_tol must be a finite, non-negative number")
+    end subroutine test_optimize_multistart_merge_tol_negative_aborts
+    !
+    ! The BINDING's name is asserted, type-qualified, because the two solver objects give the same
+    ! message and only the name says which refused.
+    subroutine test_optimize_simplex_solver_negative_budget_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "optimize_simplex_solver_negative_budget", &
+            expect_abort=.true., &
+            failure_message="a negative pf_simplex_solver%max_neval was expected to error stop", &
+            required_stderr="pf_simplex_solver%run: max_neval must not be negative")
+    end subroutine test_optimize_simplex_solver_negative_budget_aborts
+    !
+    subroutine test_prima_bobyqa_solver_negative_budget_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "prima_bobyqa_solver_negative_budget", &
+            expect_abort=.true., &
+            failure_message="a negative pf_bobyqa_solver%max_neval was expected to error stop", &
+            required_stderr="pf_bobyqa_solver%run: max_neval must not be negative")
+    end subroutine test_prima_bobyqa_solver_negative_budget_aborts
     !
     ! The entry point's OWN name is asserted, not only the refusal text: the local solver refuses
     ! the same objective a moment later, so a scenario keyed on the exit status alone -- or on the
@@ -3817,19 +3839,19 @@ contains
         call check_root_scenario(error, "root_bracket_width", "the bracket width must be finite")
     end subroutine test_root_bracket_width_aborts
     !
-    subroutine test_root_negative_tol_aborts(error)
+    subroutine test_root_negative_atol_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_root_scenario(error, "root_negative_tol", "tol must be a non-negative finite number")
-    end subroutine test_root_negative_tol_aborts
+        call check_root_scenario(error, "root_negative_atol", "atol must be a finite, non-negative number")
+    end subroutine test_root_negative_atol_aborts
     !
     subroutine test_root_negative_rtol_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_root_scenario(error, "root_negative_rtol", "rtol must be a non-negative finite number")
+        call check_root_scenario(error, "root_negative_rtol", "rtol must be a finite, non-negative number")
     end subroutine test_root_negative_rtol_aborts
     !
     subroutine test_root_bad_max_neval_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-        call check_root_scenario(error, "root_bad_max_neval", "max_neval must be at least 1")
+        call check_root_scenario(error, "root_bad_max_neval", "max_neval must be positive")
     end subroutine test_root_bad_max_neval_aborts
     !
     subroutine test_root_bad_expansion_mode_aborts(error)

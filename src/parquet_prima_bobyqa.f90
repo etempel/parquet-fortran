@@ -54,7 +54,7 @@ contains
     ! one descendant of the module that declares its interface).
     module procedure prima_func_objective_eval
 
-        f = this%fun(x)
+        f = self%fun(x)
 
     end procedure prima_func_objective_eval
 
@@ -152,7 +152,7 @@ contains
         !
         ! No `cstrv`: BOBYQA honours its bounds at every point it evaluates, so a bound violation
         ! is not a thing the caller has to be told about and `PF_OPT_INFEASIBLE` cannot arise.
-        call finish_run(prima_info, st, n, info, history)
+        call finish_run(prima_info, st, n, converged=converged, info=info, history=history)
 
     contains
 
@@ -174,7 +174,7 @@ contains
     ! form gfortran 15 gives the `procedure(pf_objective_func)` dummy an implicit interface and
     ! refuses the pointer assignment below with "Explicit interface required for 'f'".
     module subroutine minimize_bobyqa_func(f, x, fmin, lower, upper, rhobeg, rhoend, npt, &
-                                           scale, ftarget, max_neval, info, history, context)
+                                           scale, ftarget, max_neval, converged, info, history, context)
         implicit none
         procedure(pf_objective_func)                     :: f          !! the objective
         real(real64), intent(inout)                      :: x(:)       !! start in, minimum out
@@ -186,7 +186,8 @@ contains
         integer, intent(in), optional                    :: npt        !! interpolation points
         real(real64), intent(in), optional               :: scale(:)   !! per-coordinate scale
         real(real64), intent(in), optional               :: ftarget    !! stop at this value
-        integer, intent(in), optional                    :: max_neval  !! evaluation budget
+        integer, intent(in), optional                    :: max_neval  !! evaluation budget; at most huge(1)/2
+        logical, intent(out), optional                   :: converged !! the run's own rule fired
         type(pf_optimize_info), intent(out), optional    :: info       !! what happened
         type(pf_optimize_history), intent(out), optional :: history    !! every evaluation
         character(len=*), intent(in), optional           :: context    !! call-site text
@@ -194,8 +195,10 @@ contains
         type(prima_func_objective) :: obj !! wraps the plain function as an objective object
 
         obj%fun => f
-        call minimize_bobyqa_obj(obj, x, fmin, lower, upper, rhobeg, rhoend, npt, scale, ftarget, &
-                                 max_neval, info, history, context)
+        call minimize_bobyqa_obj(obj, x, fmin, lower=lower, upper=upper, rhobeg=rhobeg, &
+                                 rhoend=rhoend, npt=npt, scale=scale, ftarget=ftarget, &
+                                 max_neval=max_neval, converged=converged, info=info, &
+                                 history=history, context=context)
 
     end subroutine minimize_bobyqa_func
 
@@ -204,19 +207,24 @@ contains
         real(real64) :: sc(size(x)), rhobeg_use
         integer :: maxfun_use
 
-        if (this%scale_from_box) then
+        if (self%scale_from_box) then
             ! Every coordinate spans one unit in `y`, so the radii are fractions of the box.
             sc = upper - lower
-            rhobeg_use = this%rhobeg_fraction
+            rhobeg_use = self%rhobeg_fraction
         else
             sc = ONE
-            rhobeg_use = this%rhobeg_fraction * minval(upper - lower)
+            rhobeg_use = self%rhobeg_fraction * minval(upper - lower)
         end if
-        maxfun_use = this%max_neval
-        if (maxfun_use <= 0) maxfun_use = MAXFUN_DIM_DFT * size(x)
+        ! `0` is the engine's own default, `500*n`. A NEGATIVE value was read as that default too
+        ! until now, which is a silently adjusted argument of exactly the kind this tier's refusals
+        ! exist to prevent; it is refused here, as `pf_simplex_solver%run` refuses one.
+        if (self%max_neval < 0) call prima_abort("pf_bobyqa_solver%run", &
+                                                 "max_neval must not be negative")
+        maxfun_use = self%max_neval
+        if (maxfun_use == 0) maxfun_use = MAXFUN_DIM_DFT * size(x)
 
-        call minimize_bobyqa_obj(obj, x, fmin, lower=lower, upper=upper, rhobeg=rhobeg_use, &
-                                 rhoend=this%rhoend, scale=sc, max_neval=maxfun_use, info=info)
+        call minimize_bobyqa_obj(f, x, fmin, lower=lower, upper=upper, rhobeg=rhobeg_use, &
+                                 rhoend=self%rhoend, scale=sc, max_neval=maxfun_use, info=info)
 
     end procedure bobyqa_solver_run
 

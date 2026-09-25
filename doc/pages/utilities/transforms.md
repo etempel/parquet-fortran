@@ -134,17 +134,19 @@ call pf_idst(sc, result)
 ```
 
 **Leaving the shift out does not fail loudly.** It returns a result of the right shape and
-magnitude, computed at the wrong frequencies throughout. On one worked example — a local-linear
-boundary correction over 512 cells — the odd convolution agrees with a direct summation to
-`7.2e-06` relative rms with the shift and to `4.1e-01` without it: five orders of magnitude, with
-nothing in the output to say which you got. Assert the composition against a direct sum on a small
-case rather than eyeballing the result.
+magnitude, computed at the wrong frequencies throughout. On a local-linear boundary correction over
+a few hundred cells, the odd convolution agrees closely with a direct summation when the shift is
+there and not at all when it is left out — several orders of magnitude apart, with nothing in the
+output to say which you got. Assert the composition against a direct sum on a small case rather
+than eyeballing the result.
 
 ## Values the transform does not screen
 
 The transform only multiplies and adds; it never compares a data value.
 
-- A NaN anywhere in the input makes every output value NaN, and raises no floating-point exception.
+- A NaN anywhere in the input makes every output value NaN, and raises none of the three exceptions
+  a build can stop on — no invalid, no overflow, no division by zero. (`IEEE_INEXACT` is raised by
+  the transform's own arithmetic whatever the input, so it says nothing about the data.)
 - An infinity makes output values infinite or NaN, and can raise `IEEE_INVALID` on the way.
 - A sequence large enough that `n` times its largest magnitude approaches `huge` can overflow.
 
@@ -155,9 +157,9 @@ last two end the program. Screen the input first if it can hold either.
 
 Every abort message begins with the procedure's name — `pf_dct: `, `pf_idct: `, `pf_dst: `,
 `pf_idst: ` or `pf_next_pow2: ` — and the four transforms add ` (context: ...)` when `context=` was
-given. `context` is capped at 100 characters. A refused `pf_dst` call names `pf_dst`, never the
-cosine transform it is built on. These are caller-contract violations, checked before anything is
-transformed:
+given. `context` is capped at 100 characters, then `...`. A refused `pf_dst` call names `pf_dst`,
+never the cosine transform it is built on. These are caller-contract violations, checked before
+anything is transformed:
 
 | Condition | Message |
 |---|---|

@@ -3237,7 +3237,7 @@ def check_parquet_root_stays_arrow_free():
 def check_parquet_transform_stays_arrow_free():
     """`use parquet_transform` must not reach parquet_bindings.
 
-    The discrete cosine transform reaches no reader, no writer and no setting: the module imports
+    The cosine and sine transforms reach no reader, no writer and no setting: the module imports
     the INTRINSIC module `iso_fortran_env` and nothing else, which is what makes
     `use parquet_transform` cost two Fortran files. It has nothing to print -- its only output path
     is `error stop` -- so the obvious import to add, `parquet_settings` for a verbosity knob, has
@@ -3248,6 +3248,86 @@ def check_parquet_transform_stays_arrow_free():
     return _check_stays_arrow_free(
         "parquet_transform",
         "Transforming a sequence must not require the Arrow stack.")
+
+
+def check_parquet_transform_holds_no_state():
+    """`parquet_transform` declares no module-level variable that is not a `parameter`.
+
+    `doc/pages/utilities/transforms.md`'s "Thread safety" section tells the reader to transform
+    "from as many threads as you like, each on its own arrays", and gives the mechanism rather than
+    a promise: the module "has no variable that is not a compile-time constant, and each call
+    allocates its own workspace". `doc/pages/operating/thread-safety.md` repeats it by listing this
+    tier among those that "share no state between calls", which is why that page carries no rule
+    for it.
+
+    **The regression this catches is a plausible one, and it would be silent.** The engine builds a
+    twiddle table of `n/2` cosines on every call and the page says in its own words that "nothing is
+    cached between calls"; caching that table in a module `save` variable is the obvious
+    optimisation and would make every concurrent call race over it. Nothing else in the tree would
+    notice: the answer is unchanged single-threaded, no test calls a transform from inside a
+    parallel region, and a data race is a flaky detector even where one does.
+
+    Checked over the module and its submodule, across the SPECIFICATION part only -- the interface
+    bodies in `parquet_transform.f90` are full of dummy-argument declarations, which are not module
+    state, so every `interface`/`end interface` region is skipped.
+    """
+    problems = []
+    for name in ("parquet_transform.f90", "parquet_transform_core.f90"):
+        path = SRC / name
+        if not path.is_file():
+            return ["check_parquet_transform_holds_no_state: src/%s is missing -- this check has "
+                    "gone blind" % name]
+        lines = stripped_lines(path)
+
+        # The specification part: up to the module-level `contains`, or to `end module` /
+        # `end submodule` where there is none -- `parquet_transform.f90` is a spec-only module
+        # whose every body lives in the submodule, so it has no `contains` at all.
+        end = None
+        for i, code in enumerate(lines):
+            if re.match(r"^\s*contains\s*$", code, re.I) or \
+               re.match(r"^\s*end\s*(sub)?module\b", code, re.I):
+                end = i
+                break
+        if end is None:
+            return ["check_parquet_transform_holds_no_state: found neither a module-level "
+                    "`contains` nor an `end module` in src/%s -- this check has gone blind" % name]
+
+        depth, parameters = 0, 0
+        for i, code in enumerate(lines[:end]):
+            if re.match(r"^\s*(abstract\s+)?interface\b", code, re.I):
+                depth += 1
+                continue
+            if re.match(r"^\s*end\s*interface\b", code, re.I):
+                depth -= 1
+                continue
+            if depth > 0 or "::" not in code:
+                continue
+            attrs = code.split("::", 1)[0]
+            # A declaration, as opposed to an access or binding statement (`public ::`, and the
+            # `procedure ::`/`generic ::` of a type's contains block).
+            if not re.match(r"^\s*(integer|real|double\s+precision|complex|logical|character"
+                            r"|type\s*\(|class\s*\()", attrs, re.I):
+                continue
+            if re.search(r"\bparameter\b", attrs, re.I):
+                parameters += 1
+                continue
+            problems.append(
+                "    src/%s:%d declares module-level state, which this module promises it has "
+                "none of:\n      %s" % (name, i + 1, code.strip()))
+        if depth != 0:
+            return ["check_parquet_transform_holds_no_state: interface nesting in src/%s did not "
+                    "close (depth %d) -- this check has gone blind" % (name, depth)]
+        if parameters == 0:
+            return ["check_parquet_transform_holds_no_state: found no module-level `parameter` in "
+                    "src/%s, so the scan never reached its declarations -- this check has gone "
+                    "blind" % name]
+
+    if problems:
+        return ["`parquet_transform` must hold no state between calls: the guide page promises "
+                "reentrancy and gives 'no variable that is not a compile-time constant' as the "
+                "reason, and nothing else would catch a cached twiddle table\n"
+                "(check_parquet_transform_holds_no_state):\n" + "\n".join(problems)]
+    return []
 
 
 def check_parquet_kde_stays_arrow_free():
@@ -10533,6 +10613,7 @@ CHECKS = (
     ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),
     ("the four solver modules share one vocabulary", check_solver_vocabulary),
     ("parquet_transform stays Arrow-free", check_parquet_transform_stays_arrow_free),
+    ("parquet_transform holds no state", check_parquet_transform_holds_no_state),
     ("parquet_kde stays Arrow-free", check_parquet_kde_stays_arrow_free),
     ("every sum in the vendored PRIMA tier is the ordered one", check_prima_sums_are_the_ordered_sum),
     ("parquet_stats and parquet_kde optionals each follow one canonical order",

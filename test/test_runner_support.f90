@@ -273,6 +273,15 @@ contains
     !> collapsed to a team of one would be reported rather than pass. Serially it costs well under a
     !> second.
     !>
+    !> "transform_omp" is excluded for the same nested-team reason: parquet_transform holds no
+    !> variable that is not a parameter, and the suite demonstrates that by running all four
+    !> transforms over four hundred different sequences on a whole team at once and requiring the
+    !> serial bits back exactly. Its second test asserts the team size and that every sequence was
+    !> really transformed, so a region that collapsed to a team of one would be reported rather
+    !> than pass -- there the concurrent arm is a second serial arm and agreement means nothing.
+    !> `check_parquet_transform_holds_no_state` is the static half of the same claim. Serially it
+    !> costs well under a second.
+    !>
     !> "cosmology_omp" is excluded for the same nested-team reason: parquet_cosmology's only
     !> module variables are the two test-only debug hooks, which this suite deliberately never
     !> touches, and it demonstrates the absence of any other shared state by reading one built
@@ -432,6 +441,7 @@ contains
             .or. name == "cosmology_serial" &
             .or. name == "index_omp" .or. name == "index_strings" &
             .or. name == "integrate_omp" .or. name == "interpolate_omp" .or. name == "optimize_omp" &
+            .or. name == "transform_omp" &
             .or. name == "cosmology_omp" &
             .or. name == "prima_omp" .or. name == "sphere_omp" .or. name == "kde_serial" .or. name == "kde_omp" &
             .or. name == "stats" .or. name == "table_join_hash")

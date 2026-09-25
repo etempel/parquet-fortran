@@ -27,6 +27,7 @@ program run_tester_pf
     use test_index, only : collect_tests_index
     use test_integrate, only : collect_tests_integrate
     use test_integrate_omp, only : collect_tests_integrate_omp
+    use test_transform_omp, only : collect_tests_transform_omp
     use test_cosmology, only : collect_tests_cosmology, collect_tests_cosmology_serial
     use test_cosmology_omp, only : collect_tests_cosmology_omp
     use test_cosmology_config, only : collect_tests_cosmology_config, &
@@ -75,6 +76,7 @@ program run_tester_pf
         new_testsuite("cosmology_config", collect_tests_cosmology_config), &
         new_testsuite("cosmology_config_serial", collect_tests_cosmology_config_serial), &
         new_testsuite("integrate_omp", collect_tests_integrate_omp), &
+        new_testsuite("transform_omp", collect_tests_transform_omp), &
         new_testsuite("interpolate", collect_tests_interpolate), &
         new_testsuite("interpolate_omp", collect_tests_interpolate_omp), &
         new_testsuite("optimize", collect_tests_optimize), &

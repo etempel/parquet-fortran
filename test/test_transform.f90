@@ -30,7 +30,16 @@ module test_transform
     use testdrive, only : new_unittest, unittest_type, error_type, check
     use parquet_transform
     use iso_fortran_env, only : real64, int64
-    use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan
+    use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
+                                             ieee_get_flag, ieee_set_flag, ieee_usual, &
+                                             ieee_support_flag, ieee_underflow
+#ifndef __flang__
+    ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
+    ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
+    use, intrinsic :: ieee_arithmetic, only : ieee_support_halting, ieee_get_halting_mode, &
+                                             ieee_set_halting_mode, ieee_overflow, ieee_invalid, &
+                                             ieee_divide_by_zero
+#endif
 
     implicit none
     private
@@ -221,7 +230,9 @@ contains
             new_unittest("a NaN reaches every value of either sine transform", &
                          test_dst_propagates_a_nan), &
             new_unittest("a cosine transform in and an inverse sine out give an odd convolution", &
-                         test_dst_composes_with_dct) &
+                         test_dst_composes_with_dct), &
+            new_unittest("a NaN raises no halting exception, where an infinity and huge do", &
+                         test_transform_extreme_inputs_raise_the_documented_flags) &
             ]
 
     end subroutine collect_tests_transform
@@ -1152,6 +1163,112 @@ contains
         end if
 
     end function pairwise_sum
+
+    !> **The guide page's whole "Values the transform does not screen" section**, which nothing
+    !! asserted before: what each of its three exceptional inputs RAISES, not only what it returns.
+    !!
+    !! The page promises a NaN raises none of the three exceptions a build can stop on. Read over
+    !! all five IEEE flags that promise is false and always was: `IEEE_INEXACT` is raised by every
+    !! transform of two values or more, whatever the input, because the twiddle factors' `cos` and
+    !! `sin` are inexact. So the assertion is over `ieee_usual` -- the three halting exceptions --
+    !! exactly as `test_root_extreme_calls_raise_no_flag` (`test/test_root.f90`) does, and the page
+    !! says so in as many words. (`parquet_skycoord` may promise the stronger thing because it
+    !! SCREENS a NaN before any arithmetic; this module deliberately screens nothing, which is what
+    !! its section is called.)
+    !!
+    !! **The negative controls are the section's other two bullets, in this same test**: an
+    !! infinite input must raise something, and a sequence near `huge` must too. Without them a
+    !! test that read the flags wrongly -- cleared and never re-read, or read an array nothing
+    !! writes -- would pass by reading zeros for every arm. They assert THAT a flag was raised and
+    !! never WHICH: which exception a site raises is not portable (`fortran-gotchas.md`).
+    !!
+    !! Held off, read and restored in this body and never in a helper: F2018 17.3 restores the
+    !! halting modes on return from any procedure, and quietens a flag signalling on entry to one
+    !! until it returns, so a helper would change and see nothing.
+    subroutine test_transform_extreme_inputs_raise_the_documented_flags(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: N = 16
+        real(real64) :: x(N), y(N), nan, inf
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual))
+        logical :: on_nan(size(ieee_usual)), on_inf(size(ieee_usual)), on_huge(size(ieee_usual))
+        logical :: uf_ok, uf_was
+        integer :: k
+
+        nan = ieee_value(1.0_real64, ieee_quiet_nan)
+        inf = ieee_value(1.0_real64, ieee_positive_inf)
+
+        ! UNDERFLOW is saved and put back beside them but never asserted on: these inputs are
+        ! extreme by construction and may underflow harmlessly. Naming the kind is load-bearing --
+        ! the bare `ieee_support_flag(ieee_underflow)` is false under nagfor (`fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+
+        ! Arm 1: a NaN at four different positions, through all four entry points.
+        call ieee_set_flag(ieee_usual, .false.)
+        do k = 1, N, 5
+            call fill_uniform(x, 9100 + k)
+            x(k) = nan
+            call pf_dct(x, y)
+            call pf_idct(x, y)
+            call pf_dst(x, y)
+            call pf_idst(x, y)
+        end do
+        call ieee_get_flag(ieee_usual, on_nan)
+
+        ! Arm 2, the first negative control: an infinity in the input.
+        call ieee_set_flag(ieee_usual, .false.)
+        call fill_uniform(x, 9200)
+        x(3) = inf
+        call pf_dct(x, y)
+        call ieee_get_flag(ieee_usual, on_inf)
+
+        ! Arm 3, the second: y(1) is 2*n times the mean, so a sequence at a quarter of huge runs
+        ! off the top of the range.
+        call ieee_set_flag(ieee_usual, .false.)
+        x = huge(1.0_real64)/4.0_real64
+        call pf_dct(x, y)
+        call ieee_get_flag(ieee_usual, on_huge)
+
+        call ieee_set_flag(ieee_usual, saved .or. on_nan .or. on_inf .or. on_huge)
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+
+        call check(error, .not. any(on_nan), &
+                   "a NaN input raised overflow, invalid or divide-by-zero in one of the four transforms")
+        if (allocated(error)) return
+        call check(error, any(on_inf), &
+                   "an infinite input must raise one: without that the NaN arm above proves nothing")
+        if (allocated(error)) return
+        call check(error, any(on_huge), &
+                   "a sequence near huge must raise one, or the overflow the page documents is not real")
+
+    end subroutine test_transform_extreme_inputs_raise_the_documented_flags
+
+#ifndef __flang__
+    !> Can overflow, invalid and divide-by-zero all be held off around a call?
+    !!
+    !! nagfor halts on the three by default, so a regression that raised one would take the whole
+    !! runner down before the test could assert anything. This inquiry is the only part of the
+    !! bracket a helper may carry (see the test above).
+    function traps_can_be_held() result(can)
+        logical :: can !! `ieee_support_halting` holds for overflow, invalid and divide-by-zero
+
+        can = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid) &
+            .and. ieee_support_halting(ieee_divide_by_zero)
+
+    end function traps_can_be_held
+#endif
 
     !> Fills `x` with values on `(-1, 1)`, exact in binary, from MINSTD (Park and Miller's
     !! `s = 48271*s mod (2**31 - 1)`): the same values under every compiler, zero-mean, and with no

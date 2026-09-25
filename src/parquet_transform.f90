@@ -48,10 +48,11 @@
 !! broken.
 !!
 !! **No value is screened.** The transform only multiplies and adds, and never compares a data
-!! value. A NaN anywhere in the input makes every output value NaN and raises nothing. An infinity
-!! makes output values infinite or NaN and can raise `IEEE_INVALID` on the way, and a sequence
-!! large enough that `n` times its largest magnitude approaches `huge` can overflow; under nagfor's
-!! default `-ieee=stop` either ends the program.
+!! value. A NaN anywhere in the input makes every output value NaN and raises none of the three
+!! exceptions a build can stop on; `IEEE_INEXACT` is raised by the arithmetic itself, whatever the
+!! input. An infinity makes output values infinite or NaN and can raise `IEEE_INVALID` on the way,
+!! and a sequence large enough that `n` times its largest magnitude approaches `huge` can overflow;
+!! under nagfor's default `-ieee=stop` either ends the program.
 !!
 !! **Thread safety is by construction.** The module has no variable that is not a `parameter`, and
 !! each call allocates its own workspace, so concurrent calls on distinct arrays are independent.

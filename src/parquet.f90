@@ -91,11 +91,12 @@
 !>                          function of one real64 variable on a bracket, with
 !>                          the bracket widened first under a growth policy the
 !>                          caller states (`pf_bracket_expansion`).
-!>   * `parquet_transform` -- `pf_dct` and `pf_idct`: the discrete cosine
-!>                          transform (type II) of a real64 sequence whose
-!>                          length is a power of two, and its inverse,
-!>                          unnormalised or orthonormal, with `pf_is_pow2` and
-!>                          `pf_next_pow2` for choosing that length.
+!>   * `parquet_transform` -- `pf_dct`, `pf_idct`, `pf_dst` and `pf_idst`: the
+!>                          discrete cosine and sine transforms (type II) of a
+!>                          real64 sequence whose length is a power of two, and
+!>                          their inverses, unnormalised or orthonormal, with
+!>                          `pf_is_pow2` and `pf_next_pow2` for choosing that
+!>                          length.
 !>   * `parquet_kde`     -- `pf_kde`: a one-dimensional kernel density estimate
 !>                          over a retained sample, with its density, CDF,
 !>                          quantiles and a curve answered exactly anywhere.

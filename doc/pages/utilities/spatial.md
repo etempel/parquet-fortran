@@ -400,20 +400,20 @@ count.
 **How the library finds the candidates.** About each point the walk is the cylinder itself: the
 cells along that point's own line of sight, `2 * b_perp` across, and in distance from the observer
 the range the stored points within `b_par` of its `los` occupy — within the largest `b_par`, when
-`%pairs_within_los` is given one per point — so a survey's far end,
-where a redshift interval spans less distance than at its near end, walks a shorter cylinder.
-Without `los=` that range is `b_par` either side. The walked cylinder is padded by the little a
-partner's own line of sight can carry it outside the point's — a factor `2 D_far / (D + D_far)` on
-the radius and `b_perp**2 / (2 D)` at the near end, both computed per point — so no pair is missed,
-and the exact test above then keeps the cylinder and discards the rest. A point walks its covering
-ball instead when that is the cheaper walk: one so close to the observer that its padded cylinder
-would be longer than the ball is wide, or one whose ball is no wider than a cell and so touches at
-most two cells per axis. The cylinder walk tests a small multiple of the pairs it keeps where a ball walk tests
-hundreds to over a thousand times as many; on a sparse survey the cell the cells-per-point cap
-allows is far wider than the cylinder, so the time saved is a fraction of that, and
-`bench/benchmark_spatial.sh` with `MODE=los` measures both on your own data. **Give `%build` `radius = b_perp`**: the cell follows the
-cylinder's cross-section. `L`, how fast the distance from the observer changes with `los`, is still
-measured from the data at `%build` — the steepest slope over pairs of points at least a
+`%pairs_within_los` is given one per point — so a survey's far end, where a redshift interval spans
+less distance than at its near end, walks a shorter cylinder. Without `los=` that range is `b_par`
+either side. The walked cylinder is padded by the little a partner's own line of sight can carry it
+outside the point's — a factor `2 D_far / (D + D_far)` on the radius and `b_perp**2 / (2 D)` at the
+near end, both computed per point — so no pair is missed, and the exact test above then keeps the
+cylinder and discards the rest. A point walks its covering ball instead when that is the cheaper
+walk: one so close to the observer that its padded cylinder would be longer than the ball is wide,
+or one whose ball is no wider than a cell and so touches at most two cells per axis. The cylinder
+walk tests a small multiple of the pairs it keeps where a ball walk tests hundreds to over a
+thousand times as many; on a sparse survey the cell the cells-per-point cap allows is far wider
+than the cylinder, so the time saved is a fraction of that, and `bench/benchmark_spatial.sh` with
+`MODE=los` measures both on your own data. **Give `%build` `radius = b_perp`**: the cell follows
+the cylinder's cross-section. `L`, how fast the distance from the observer changes with `los`, is
+still measured from the data at `%build` — the steepest slope over pairs of points at least a
 hundred-thousandth of `los`'s range apart, with the spread `g` of pairs closer than that — and is
 what the two warnings below read. Without `los=`, `L` is exactly one and `g` zero.
 
@@ -506,10 +506,11 @@ call sky%count_all_within_sky(1.0_real64, counts)            ! counts only
 ```
 
 Each takes one angular radius or one per point, threads with `threads=`, and behaves exactly as its
-Euclidean twin — including the [directed and symmetric](#directed-and-symmetric-are-different-questions)
-split, which survives the change of units unchanged: the chord is strictly increasing in the angle,
-so `max(chord_i, chord_j)` is the chord of `max(deg_i, deg_j)` and a pair qualifies when the wider
-of the two apertures reaches the other object.
+Euclidean twin — including the
+[directed and symmetric](#directed-and-symmetric-are-different-questions) split, which survives the
+change of units unchanged: the chord is strictly increasing in the angle, so
+`max(chord_i, chord_j)` is the chord of `max(deg_i, deg_j)` and a pair qualifies when the wider of
+the two apertures reaches the other object.
 
 `combine=` works here too, and **its rules are stated on the angles, in degrees** — `sep <=
 (deg_i + deg_j)/2` for `PF_LINK_MEAN`, not the mean of the two chords the index works in
@@ -628,21 +629,28 @@ The result is exact. A ball grows until it holds at least `k` points, after whic
 are exactly the `k` smallest of what that ball returned — every point closer than the `k`-th is
 inside the ball by construction. The starting radius comes from the density the index measured when
 it was built, and each miss rescales from the count it actually saw, so on ordinary data the
-expansion converges in one or two rounds.
+expansion converges in one or two rounds. An index given an explicit `cell=` measured no density —
+the probe it replaces is where that happens — and starts from the cell side instead, a radius that
+does not grow with `k`, so a large `k` there pays a few more rounds.
 
 The query point need not be one of the catalogue's own: a point coincident with a stored row simply
 finds it at distance zero.
 
-**The starting radius is the catalogue's MEAN density, which a strongly clustered field is not.**
-A query in a void then starts far too small and pays several expansions before the ball holds `k`
-points, and one landing in a clump converges at once but sorts everything the ball held before
-keeping `k` — so on a field of dense clumps in mostly empty space, `%nearest` costs several times
-what it costs on a uniform catalogue of the same size, and more as `k` grows. The answer is exact
-either way. Two things avoid it: `%kth_distance` below, whose sweep carries each point's converged
-radius into the next and so does not re-derive it from the mean; and a `%within` at a radius you
-already know, where a fixed radius is what you actually want.
-`bench/benchmark_spatial_crosslib.sh` times `%nearest` on a uniform and on a clumped catalogue
-side by side.
+**The starting radius comes from ONE density for the whole catalogue, and a strongly clustered
+field does not have one.** That density is measured from the median occupied cell the tuner buckets
+the points into, so on a clumped field it describes the inside of a clump rather than the empty
+space between them. A query in a void then starts far too small and pays expansion after expansion
+before the ball holds `k` points, while one landing in a clump converges at once but sorts
+everything the ball held before keeping `k` — so on a field of dense clumps in mostly empty space
+`%nearest` can cost well over an order of magnitude more than it costs on a uniform catalogue of
+the same size. The expansions are worst at the smallest `k`, since a larger `k` asks for a larger
+ball to begin with, but the penalty does not go away as `k` grows: the larger ball holds more of
+the clump it lands in. The answer is exact either way. Two things avoid it: `%kth_distance` below,
+whose sweep carries each point's converged radius into the next instead of starting from that one
+density again; and a `%within` at a radius you already know, where a fixed radius is what you
+actually want. `bench/benchmark_spatial_crosslib.sh` times `%nearest` on a uniform, a mildly
+clustered and a tightly clumped catalogue side by side, printing the ball expansions per query
+beside each time.
 
 ### Every point's k-th neighbour distance
 
@@ -778,8 +786,8 @@ collision would mean silently answering about the old positions.
 
 A bulk query also **re-tunes itself** when the radius it has been given would choose a very
 different cell from the one the index was built with, and says so once per index. The message is
-advice rather than a warning, so `parquet_set_verbosity("silent")` silences it along with every other
-piece of advice the library gives.
+advice rather than a warning, so `parquet_set_verbosity("silent")` silences it along with every
+other piece of advice the library gives.
 
 ## Threading and settings
 

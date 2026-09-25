@@ -6352,16 +6352,16 @@ def check_bracket_convention():
     check that enumerates names.
 
     **This is a consistency rule, not a correctness one**, and it was proposed on that footing
-    (`feature_doc_U9.md`, Q1): a mis-spelled bracket makes a page inconsistent rather than false,
-    which is the class `feature_doc.md` section 8 otherwise declines. What carries it is that the
-    convention consumed hand work in four consecutive review units and its documented audit was
-    demonstrably partial.
+    during a documentation review: a mis-spelled bracket makes a page inconsistent rather than
+    false, which is the class such a review otherwise declines to act on. What carries it is that
+    the convention consumed hand work in four consecutive review units and its documented audit
+    was demonstrably partial.
 
     **Deliberately NOT scanned: `CHANGELOG.md`.** Its `[Unreleased]` section carries six
     occurrences of the old spelling. They are left alone because a changelog entry is governed by
     its own rules and `/review-doc` B8 allows only a factual correction there -- a notation change
-    is not one. Widening this check to that file is a separate decision, recorded in
-    `feature_doc_U9.md` rather than taken here.
+    is not one. Widening this check to that file is a separate decision, and is left to one rather
+    than taken here.
     """
     problems = []
     pages = sorted((REPO_ROOT / "doc" / "pages").rglob("*.md"))
@@ -10506,7 +10506,78 @@ def check_every_serial_suite_records_its_reason():
     return problems
 
 
+def check_spatial_cell_caps_are_named_from_their_parameters():
+    """The two cells-per-point ceilings read the same in the parameter, the advice and the page.
+
+    `spatial_max_cells_per_point` (occupied cells per point) and `spatial_max_box_cells_per_point`
+    (cells of the bounding box per point) are the two ceilings a coarsened grid obeys. Three places
+    state them and only ONE computes with them: the parameter declarations in
+    `src/parquet_spatial.f90`; the coarsening advice in `src/parquet_spatial_build.f90`, which
+    writes both figures into its message as literal text; and `doc/pages/utilities/spatial.md`,
+    which tells the reader they are "the figures the coarsening warning names when it fires".
+
+    **Change either parameter and the other two go quietly wrong.** The grid obeys the new ceiling,
+    the user is told the old number, and nothing fails: `test_two_ceilings_bind` hardcodes its own
+    `3/10` and `4` as well, so the suite agrees with the message rather than with the parameter.
+    Nobody reads an advice string against a declaration two files away.
+
+    Written to read the NARROWEST source -- the two parameter declarations -- and to FAIL rather
+    than pass when it cannot find them, the advice, or the page's ceiling bullet. A check that
+    enumerates figures and goes blind is worse than no check.
+    """
+    decl = SRC / "parquet_spatial.f90"
+    build = SRC / "parquet_spatial_build.f90"
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "spatial.md"
+    for path in (decl, build, page):
+        if not path.is_file():
+            return ["%s: not found -- this check needs updating" % path.relative_to(REPO_ROOT)]
+
+    text = decl.read_text(encoding="utf-8")
+    wanted = {}
+    for name in ("spatial_max_cells_per_point", "spatial_max_box_cells_per_point"):
+        found = re.search(r"::\s*%s\s*=\s*([0-9]+(?:\.[0-9]*)?)_real64" % name, text)
+        if found is None:
+            return ["src/parquet_spatial.f90: %s is not declared as a real64 parameter -- this "
+                    "check has gone blind" % name]
+        wanted[name] = "%g" % float(found.group(1))
+
+    # Each figure is matched where it is SAID, never merely somewhere nearby: the page carries
+    # "0.3" in five places, so a window-wide search passes a page whose ceiling bullet was changed.
+    def named_before(text, anchor, value, where):
+        found = re.search(r"([0-9]+(?:\.[0-9]*)?) %s" % re.escape(anchor), text)
+        if found is None:
+            return ["%s: no %r to read a ceiling from -- this check has gone blind and needs "
+                    "re-pointing at the wording that replaced it" % (where, anchor)]
+        if found.group(1) != value:
+            return ["%s: says %s before %r, but the parameter is %s -- a reader is told a ceiling "
+                    "the grid no longer obeys" % (where, found.group(1), anchor, value)]
+        return []
+
+    problems = []
+    advice = re.search(r'"([^"]*occupied cells[^"]*)"', build.read_text(encoding="utf-8"))
+    if advice is None:
+        return ["src/parquet_spatial_build.f90: no coarsening advice naming occupied cells -- "
+                "this check has gone blind"]
+    said = advice.group(1)
+    where = "src/parquet_spatial_build.f90 (the coarsening advice)"
+    problems += named_before(said, "occupied cells", wanted["spatial_max_cells_per_point"], where)
+    problems += named_before(said, "cells of the bounding box per point",
+                             wanted["spatial_max_box_cells_per_point"], where)
+
+    flat = " ".join(page.read_text(encoding="utf-8").split())
+    where = "doc/pages/utilities/spatial.md"
+    problems += named_before(flat, "occupied cells per point",
+                             wanted["spatial_max_cells_per_point"], where)
+    problems += named_before(flat, "cells of the bounding box per point",
+                             wanted["spatial_max_box_cells_per_point"], where)
+    problems += named_before(flat, "per point, counting every pixel",
+                             wanted["spatial_max_cells_per_point"], where)
+    return problems
+
+
 CHECKS = (
+    ("the spatial cell caps are named from their parameters",
+     check_spatial_cell_caps_are_named_from_their_parameters),
     ("the comment stripper's fast paths agree with its loop",
      check_comment_stripper_fast_paths_agree),
     ("every instruction citation names the file that carries the topic",

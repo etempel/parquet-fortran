@@ -753,7 +753,7 @@ contains
         ! FLAGLESS `fpm build` selects, the debug and release profiles both passing `-O0` or
         ! `-fp-model=precise` instead -- the compiler rewrites a division by a loop-invariant
         ! denominator back into a multiply by its reciprocal, which is the exact formulation
-        ! this kernel was moved AWAY from (feature_spatial_report.md 13.1). `volatile` removes
+        ! this kernel was deliberately moved AWAY from. `volatile` removes
         ! the premise of that rewrite rather than arguing with it: the value may change between
         ! references, so no reciprocal can be hoisted out of the candidate loop. The cost is an
         ! L1 load per candidate. Pinned by `test_axis_zero_radius_finds_the_axis`, which reports
@@ -1372,7 +1372,12 @@ contains
             r = spatial_shell_safety * (real(kk + 1_int64, kind=real64) / (cd * self%rho)) &
                 ** (1.0_real64 / real(dm, kind=real64))
         else
-            r = self%cell_side ! GCOVR_EXCL_LINE
+            ! No density was measured, which is what an explicit `cell=` means: it skips the
+            ! probe, and `spatial_choose_cell` is the only writer of `%rho`. The cell side is
+            ! the one length the index still knows. It does not scale with `kk`, so a large
+            ! `kk` pays a round or two more here than on a tuned index
+            ! (`test_nearest_start_without_a_measured_density`).
+            r = self%cell_side
         end if
         if (.not. (r > 0.0_real64)) r = 1.0_real64
         if (r > rcap) r = rcap

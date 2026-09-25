@@ -305,7 +305,9 @@ contains
             new_unittest("nside= is honoured, and the resolution probe can be stopped", &
                          test_healpix_nside_forced), &
             new_unittest("a disc outgrowing the walk's run buffer still answers identically", &
-                         test_healpix_run_buffer_overflow) &
+                         test_healpix_run_buffer_overflow), &
+            new_unittest("an explicit cell= leaves nearest no measured density to start from", &
+                         test_nearest_start_without_a_measured_density) &
             ]
     end subroutine collect_tests_parquet_spatial_serial
 
@@ -2948,6 +2950,80 @@ contains
         call check(error, rounds_tiny > rounds_big, &
             "a tiny start must take more rounds, which is what proves the ball expanded at all")
     end subroutine test_nearest_shell_start_does_not_change_answers
+
+    !> `%nearest` on an index built with an explicit `cell=` starts from the CELL SIDE, because
+    !> nothing ever measured a density: `%build` zeroes `%rho` through `spatial_clear_worker`, and
+    !> the only writer of it is `spatial_choose_cell`, which an explicit `cell=` skips.
+    !>
+    !> **The discriminator is how the round count answers `k`, not the round count itself.** A
+    !> start derived from a measured density grows with `k`, so the rounds stay flat as `k` rises;
+    !> a fixed cell side does not, so they rise. A build whose `cell=` path fell back to the tuned
+    !> start would keep both flat and fail BOTH assertions below -- which is the only thing
+    !> separating this from a test that merely calls `%nearest` twice. The answers are asserted
+    !> identical either way first, since the starting radius must never change one.
+    !>
+    !> The cell is coarse enough to pass both ceilings unclamped, which `%cell_size()` asserts, so
+    !> the fixed start really is the value passed rather than something the clamp chose.
+    subroutine test_nearest_start_without_a_measured_density(error)
+        type(error_type), allocatable, intent(out) :: error !! set when an assertion fails.
+        real(real64), allocatable :: x(:), y(:), z(:)
+        type(pf_spatial_index) :: tuned, fixed
+        integer(int64) :: tuned_rows(200), fixed_rows(200), m_t, m_f, q, k
+        integer(int64) :: r_fixed_small, r_fixed_large, r_tuned_large
+        real(real64) :: tuned_d(200), fixed_d(200), qp(3, 8)
+        integer(int32), parameter :: K_SMALL = 5_int32, K_LARGE = 200_int32
+        real(real64), parameter :: CELL = 0.0625_real64
+
+        do q = 1_int64, 8_int64
+            qp(1, q) = 0.30_real64 + 0.05_real64 * real(q, real64)
+            qp(2, q) = 0.35_real64 + 0.04_real64 * real(q, real64)
+            qp(3, q) = 0.40_real64 + 0.03_real64 * real(q, real64)
+        end do
+        call make_cloud(20000_int64, 1.0_real64, .false., x, y, z)
+        call tuned%build(x, y, z, radius=0.05_real64)
+        call fixed%build(x, y, z, radius=0.05_real64, cell=CELL)
+        call check(error, abs(fixed%cell_size() - CELL) <= 1.0e-12_real64, &
+            "the fixture's cell= must survive both ceilings, or the fixed start is not the one under test")
+        if (allocated(error)) return
+
+        ! The starting radius changes rounds, never answers -- asserted at the larger k, where the
+        ! two starts differ most.
+        do q = 1_int64, 8_int64
+            m_t = tuned%nearest(qp(:, q), K_LARGE, tuned_rows, dist=tuned_d)
+            m_f = fixed%nearest(qp(:, q), K_LARGE, fixed_rows, dist=fixed_d)
+            call check(error, m_t == m_f, "both builds must find the same number of neighbours")
+            if (allocated(error)) return
+            do k = 1_int64, min(m_t, int(K_LARGE, int64))
+                call check(error, tuned_rows(k) == fixed_rows(k) .and. &
+                    abs(tuned_d(k) - fixed_d(k)) <= 1.0e-12_real64, &
+                    "an explicit cell= must not change which neighbours %nearest returns, or their order")
+                if (allocated(error)) return
+            end do
+        end do
+
+        call parquet_debug_reset_spatial_counters()
+        do q = 1_int64, 8_int64
+            m_f = fixed%nearest(qp(:, q), K_SMALL, fixed_rows)
+        end do
+        r_fixed_small = parquet_debug_spatial_shell_rounds()
+        call parquet_debug_reset_spatial_counters()
+        do q = 1_int64, 8_int64
+            m_f = fixed%nearest(qp(:, q), K_LARGE, fixed_rows)
+        end do
+        r_fixed_large = parquet_debug_spatial_shell_rounds()
+        call parquet_debug_reset_spatial_counters()
+        do q = 1_int64, 8_int64
+            m_t = tuned%nearest(qp(:, q), K_LARGE, tuned_rows)
+        end do
+        r_tuned_large = parquet_debug_spatial_shell_rounds()
+        call parquet_debug_reset_spatial_counters()
+
+        call check(error, r_fixed_large > r_fixed_small, &
+            "a start fixed at the cell side must take more rounds for a larger k, since it does not scale with k")
+        if (allocated(error)) return
+        call check(error, r_fixed_large > r_tuned_large, &
+            "and more rounds than the tuned start at that k, which is what says no density was measured")
+    end subroutine test_nearest_start_without_a_measured_density
 
     !> `%nearest_sky` against a haversine sort, and `%nearest` on a periodic index.
     subroutine test_nearest_sky_and_periodic(error)

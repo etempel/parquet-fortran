@@ -109,7 +109,11 @@ contains
             new_unittest("DE accepts an explicit f_weight, rtol and max_neval and honours each", &
                          test_de_explicit_knobs), &
             new_unittest("the guide's overshoot bounds hold for all three engines, and bind", &
-                         test_guide_budget_overshoot_bounds) &
+                         test_guide_budget_overshoot_bounds), &
+            new_unittest("cr = 0 still moves the trial, because one coordinate is forced", &
+                         test_de_zero_crossover_still_moves), &
+            new_unittest("the polish is counted in neval and left out of the record", &
+                         test_de_polish_is_counted_not_recorded) &
             ]
 
     end subroutine collect_tests_optimize
@@ -1558,6 +1562,109 @@ contains
     !! **Two negative controls per engine.** Each case asserts the run evaluated at least its
     !! unavoidable minimum, so doing nothing cannot pass a bound; and each engine must somewhere in
     !! the sweep actually reach its cap, counted through `PF_OPT_LIMIT` and required non-zero.
+    !> `cr = 0` is a usable crossover probability, not a null search.
+    !!
+    !! `optimization.md`'s "A whole box, with no start point" says one coordinate, drawn afresh
+    !! each time, always comes from the mutant, so even `cr = 0` moves the trial rather than
+    !! reproducing its parent. That is `take = (u < cr_use .or. j == jrand)` in `u_or_forced`
+    !! (`src/parquet_optimize_de.f90`), the standard binomial-crossover forcing of DE/rand/1/bin.
+    !! Without it a `cr`
+    !! of zero would make every trial a copy of its parent, every selection a tie, and the whole
+    !! run a re-report of its initial population -- and the page would be recommending a range
+    !! whose lower end does nothing.
+    !!
+    !! The observable is the value: at `cr = 0` the run must get BELOW the best of its own initial
+    !! population. **The negative control is that same initial population**, obtained by giving
+    !! the identical call a budget of exactly `np`, which spends itself on the first pass and
+    !! leaves `fmin` at the best individual of the Latin hypercube. Without the control the first
+    !! assertion has no reference and passes against any value at all.
+    subroutine test_de_zero_crossover_still_moves(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: first_pass, full
+        real(real64) :: x0(3), x(3), f0, fmin, lo(3), hi(3)
+        integer, parameter :: NP = 12 !! population size
+        !> A budget of exactly one pass over the population, which is what makes the control arm
+        !! stop with `fmin` at the best individual of the initial hypercube. Named separately from
+        !! `NP` although it is the same number: passing one name at two argument positions is what
+        !! `check_no_aliased_output_argument` refuses, since it cannot resolve the dummies'
+        !! intents through a generic.
+        integer, parameter :: ONE_PASS = NP
+        character(len=160) :: msg
+
+        lo = -3.0_real64
+        hi = 3.0_real64
+
+        ! The control: a budget of exactly `np` is spent by the initial population, so the loop
+        ! exits on its first budget test and `f0` is the best individual of the hypercube.
+        call pf_minimize_de(origin_sphere, lo, hi, 2026_int64, x0, f0, np=NP, cr=0.0_real64, &
+                            rtol=0.0_real64, atol=1.0e-12_real64, max_neval=ONE_PASS, &
+                            info=first_pass)
+        call check(error, first_pass%neval, NP, "the control must stop after the initial population")
+        if (allocated(error)) return
+        call check(error, first_pass%status, PF_OPT_LIMIT, "and stop because its budget ran out")
+        if (allocated(error)) return
+
+        ! The same call with room to run. Every trial differs from its parent in exactly one
+        ! coordinate, which is enough to descend a separable objective.
+        call pf_minimize_de(origin_sphere, lo, hi, 2026_int64, x, fmin, np=NP, cr=0.0_real64, &
+                            rtol=0.0_real64, atol=1.0e-12_real64, max_gen=4000, info=full)
+        write(msg, '(a, es12.5, a, es12.5)') "cr = 0 must improve on its initial population: " // &
+            "best of the hypercube ", f0, ", best after the run ", fmin
+        call check(error, fmin < 0.5_real64*f0, trim(msg))
+        if (allocated(error)) return
+        call check(error, full%neval > NP, "and it must have run past the initial population")
+        if (allocated(error)) return
+        call check(error, full%converged, "a separable objective converges even one coordinate " // &
+            "at a time")
+
+    end subroutine test_de_zero_crossover_still_moves
+
+    !> `polish=` adds its evaluations to `info%neval` and adds no row to `history`.
+    !!
+    !! `optimization.md` says the polish's evaluations "are counted, not recorded, so `history`
+    !! still holds one row per generation". The record is written by the generation loop --
+    !! `history%add(pop(:,ib), fpop(ib))` once before it and once per generation -- and
+    !! `polish_in_box` runs after the loop has ended, contributing only
+    !! `neval = neval + polish_info%neval` (`src/parquet_optimize_de.f90`). So the row count stays
+    !! `niter + 1` however much the polish spends.
+    !!
+    !! The negative control is the same run WITHOUT `polish=`: its `neval` must be the smaller of
+    !! the two, or the polish did nothing and the row-count assertion is about a run that never
+    !! polished.
+    subroutine test_de_polish_is_counted_not_recorded(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
+        type(pf_optimize_info) :: plain, polished
+        type(pf_optimize_history) :: rec_plain, rec_polished
+        real(real64) :: xa(2), xb(2), fa, fb, lo(2), hi(2)
+        character(len=160) :: msg
+
+        ! Few enough generations that the simplex has real work to do, so its evaluations are a
+        ! visible share of the total.
+        lo = -3.0_real64
+        hi = 3.0_real64
+        call pf_minimize_de(rosenbrock, lo, hi, 4_int64, xa, fa, np=20, max_gen=30, &
+                            info=plain, history=rec_plain)
+        call pf_minimize_de(rosenbrock, lo, hi, 4_int64, xb, fb, np=20, max_gen=30, &
+                            polish=.true., info=polished, history=rec_polished)
+
+        call check(error, polished%neval > plain%neval, &
+            "the control: polishing must spend evaluations, or nothing below is being tested")
+        if (allocated(error)) return
+        call check(error, rec_plain%n, plain%niter + 1, &
+            "an unpolished record is one row per generation plus one for the starting population")
+        if (allocated(error)) return
+        write(msg, '(a, i0, a, i0, a, i0)') "the polish adds no row: niter ", polished%niter, &
+            ", rows ", rec_polished%n, ", neval ", polished%neval
+        call check(error, rec_polished%n == polished%niter + 1, trim(msg))
+        if (allocated(error)) return
+        call check(error, rec_polished%n, rec_plain%n, &
+            "so both runs record the same number of rows while their evaluation counts differ")
+        if (allocated(error)) return
+        call check(error, size(rec_polished%f), rec_polished%n, &
+            "and the record still comes back trimmed to the rows in use")
+
+    end subroutine test_de_polish_is_counted_not_recorded
+
     subroutine test_guide_budget_overshoot_bounds(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 

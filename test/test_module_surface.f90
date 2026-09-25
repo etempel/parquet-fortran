@@ -1674,6 +1674,19 @@ module test_module_surface_optimize
         procedure :: eval => surface_objective_eval !! `(x - 2)**2`, counting the call.
     end type surface_objective
 
+    !> A CONSTRAINED objective, extended through `use parquet_optimize` alone.
+    !!
+    !! `optimization.md` says `pf_constrained_objective` is DECLARED in this module -- so that
+    !! every engine here can see one coming and refuse it -- rather than in `parquet_prima`, which
+    !! only re-exports it. No engine of this module may be handed one, so the bindings are called
+    !! directly; extending the type at all is what proves the claim.
+    type, extends(pf_constrained_objective) :: surface_constrained
+    contains
+        procedure :: eval => surface_constrained_eval  !! `(x - 2)**2`.
+        procedure :: n_constraints => surface_count    !! one constraint.
+        procedure :: constraints => surface_constr     !! `x - 1 <= 0`.
+    end type surface_constrained
+
 contains
 
     !> `(x - 2)**2`, counting the call.
@@ -1695,10 +1708,21 @@ contains
         type(pf_optimize_history) :: record
         type(pf_simplex_solver)   :: solver
         type(surface_objective)   :: obj
-        real(real64)              :: xs, fs, x(1), fmin, lower(1), upper(1)
+        type(surface_constrained) :: constrained
+        real(real64)              :: xs, fs, x(1), fmin, lower(1), upper(1), c(1)
         real(real64), allocatable :: population(:,:)
         logical                   :: ok
         character(len=:), allocatable :: verbosity, stream
+        ! The four abstract interfaces and the abstract solver type, NAMED through this import
+        ! alone: every one is declared here, and no call below would reach any of them. They are
+        ! nullified rather than initialised in place, because a local with an initialiser is
+        ! implicitly `save` and this suite runs concurrently.
+        procedure(pf_objective_eval), pointer   :: eval_p
+        procedure(pf_objective_func), pointer   :: func_p
+        procedure(pf_constraint_count), pointer :: count_p
+        procedure(pf_constraint_eval), pointer  :: constr_p
+        procedure(pf_local_run), pointer        :: run_p
+        class(pf_local_solver), allocatable     :: any_solver
 
         what = ""
 
@@ -1776,12 +1800,81 @@ contains
             if (len_trim(verbosity) == 0) what = "parquet_get_verbosity"
         end if
 
+        ! `pf_constrained_objective`, declared HERE rather than in `parquet_prima`. No engine of
+        ! this module accepts one -- handing it over is an `error stop` -- so the bindings are
+        ! called directly.
+        if (what == "") then
+            if (constrained%n_constraints() /= 1) what = "pf_constrained_objective%n_constraints"
+            if (what == "") then
+                call constrained%constraints([0.5_real64], c)
+                if (c(1) > 0.0_real64) what = "pf_constrained_objective%constraints"
+            end if
+        end if
+
+        ! `pf_objective_func` as a NAME: a plain callback is accepted by shape, so the interface
+        ! itself is only exercised by declaring something of it. The pointer is called, so the
+        ! declaration is not dead.
+        if (what == "") then
+            func_p => offset_square
+            if (abs(func_p([2.0_real64])) > 0.0_real64) what = "pf_objective_func"
+        end if
+
+        ! `pf_local_solver` and its deferred `run`, through the ABSTRACT type -- which is how
+        ! `pf_minimize_multistart` reaches whichever solver it was given.
+        if (what == "") then
+            allocate(any_solver, source=solver)
+            x = [5.0_real64]
+            obj%calls = 0
+            call any_solver%run(obj, x, fmin, lower, upper, info)
+            if (abs(x(1) - 2.0_real64) > 1.0e-3_real64) what = "pf_local_solver%run"
+        end if
+
+        ! The three remaining interfaces, named and nothing more: no procedure in this file has a
+        ! matching passed-object dummy, so declaring one of each is the only way to name them.
+        nullify(eval_p)
+        nullify(count_p)
+        nullify(constr_p)
+        nullify(run_p)
+        if (what == "" .and. associated(eval_p)) what = "pf_objective_eval"
+        if (what == "" .and. associated(count_p)) what = "pf_constraint_count"
+        if (what == "" .and. associated(constr_p)) what = "pf_constraint_eval"
+        if (what == "" .and. associated(run_p)) what = "pf_local_run"
+
         ! The remaining status codes are reachable by name through this import alone.
         if (what == "" .and. PF_OPT_LIMIT == PF_OPT_TARGET) what = "PF_OPT_LIMIT"
         if (what == "" .and. PF_OPT_NONFINITE == PF_OPT_ROUNDOFF) what = "PF_OPT_NONFINITE"
         if (what == "" .and. PF_OPT_INFEASIBLE == PF_OPT_OK) what = "PF_OPT_INFEASIBLE"
 
     end subroutine check_optimize_surface
+
+    !> `(x - 2)**2` for the constrained type.
+    function surface_constrained_eval(self, x) result(f)
+        class(surface_constrained), intent(inout) :: self !! the objective
+        real(real64), intent(in)                  :: x(:) !! the point
+        real(real64)                              :: f    !! the objective value
+
+        f = (x(1) - 2.0_real64)**2
+
+    end function surface_constrained_eval
+
+    !> How many constraint values `constraints` fills.
+    function surface_count(self) result(m)
+        class(surface_constrained), intent(in) :: self !! the objective
+        integer                                :: m    !! the number of constraints
+
+        m = 1
+
+    end function surface_count
+
+    !> `x - 1 <= 0`.
+    subroutine surface_constr(self, x, c)
+        class(surface_constrained), intent(inout) :: self !! the objective
+        real(real64), intent(in)                  :: x(:) !! the point
+        real(real64), intent(out)                 :: c(:) !! the constraint values
+
+        c(1) = x(1) - 1.0_real64
+
+    end subroutine surface_constr
 
     !> `(x - 2)**2` in one variable, whose minimiser is `2`. A module procedure, because a
     !! callback in this library is never an internal one.
@@ -1881,6 +1974,18 @@ contains
         real(real64)                    :: x(1), fmin, lower(1), upper(1), c(1)
         real(real64)                    :: a_ineq(1, 1), b_ineq(1)
         logical                         :: ok
+        ! The four abstract interfaces and the abstract solver type, NAMED through this import
+        ! alone. `prima.md` says this module re-exports every shared name `parquet_optimize`
+        ! declares, and these five are the ones no call below would reach: a name dropped from
+        ! `parquet_prima`'s `public ::` list stops this file compiling, which is the assertion.
+        ! They are nullified rather than initialised in place, because a local with an
+        ! initialiser is implicitly `save` and this suite runs concurrently.
+        procedure(pf_objective_eval), pointer   :: eval_p
+        procedure(pf_objective_func), pointer   :: func_p
+        procedure(pf_constraint_count), pointer :: count_p
+        procedure(pf_constraint_eval), pointer  :: constr_p
+        procedure(pf_local_run), pointer        :: run_p
+        class(pf_local_solver), allocatable     :: any_solver
 
         what = ""
         a_ineq(1, 1) = 1.0_real64
@@ -1954,6 +2059,34 @@ contains
             if (abs(x(1) - 1.0_real64) > 1.0e-5_real64) what = "pf_minimize_cobyla"
             if (what == "" .and. info%status == PF_OPT_INFEASIBLE) what = "PF_OPT_INFEASIBLE"
         end if
+
+        ! `pf_objective_func` as a NAME, not just as a matching procedure: a plain callback is
+        ! accepted by shape, so the interface itself is only exercised by declaring something of
+        ! it. The pointer is called, so the declaration is not dead.
+        if (what == "") then
+            func_p => prima_offset_square
+            if (abs(func_p([2.0_real64])) > 0.0_real64) what = "pf_objective_func"
+        end if
+
+        ! `pf_local_solver` and its deferred `run`, reached through the ABSTRACT type rather than
+        ! through `pf_bobyqa_solver` directly -- which is how `pf_minimize_multistart` reaches it.
+        if (what == "") then
+            allocate(any_solver, source=solver)
+            x = [5.0_real64]
+            call any_solver%run(obj, x, fmin, lower, upper, info)
+            if (abs(x(1) - 2.0_real64) > 1.0e-5_real64) what = "pf_local_solver%run"
+        end if
+
+        ! The three remaining interfaces, named and nothing more: no procedure in this file has a
+        ! matching passed-object dummy, so declaring one of each is the only way to name them.
+        nullify(eval_p)
+        nullify(count_p)
+        nullify(constr_p)
+        nullify(run_p)
+        if (what == "" .and. associated(eval_p)) what = "pf_objective_eval"
+        if (what == "" .and. associated(count_p)) what = "pf_constraint_count"
+        if (what == "" .and. associated(constr_p)) what = "pf_constraint_eval"
+        if (what == "" .and. associated(run_p)) what = "pf_local_run"
 
         ! The remaining status codes are reachable by name through this import alone.
         if (what == "" .and. PF_OPT_LIMIT == PF_OPT_TARGET) what = "PF_OPT_LIMIT"

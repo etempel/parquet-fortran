@@ -99,7 +99,7 @@ contains
                          "violating point", test_cobyla_infeasible), &
             new_unittest("info%cstrv is measured in the caller's units, feasible or not", &
                          test_cstrv_is_in_the_callers_units), &
-            new_unittest("the six calls of the guide's worked example reproduce their answers", &
+            new_unittest("the tier's six worked calls reproduce their analytic answers", &
                          test_guide_examples), &
             new_unittest("a start with coordinates on both bounds keeps them and still converges", &
                          test_bobyqa_start_on_bounds), &
@@ -124,7 +124,9 @@ contains
             new_unittest("LINCOA minimises a strongly non-quadratic objective under a constraint", &
                          test_lincoa_non_quadratic), &
             new_unittest("the guide's overshoot bound holds for all three engines, and binds", &
-                         test_guide_budget_overshoot_bounds)]
+                         test_guide_budget_overshoot_bounds), &
+            new_unittest("a narrow box pulls BOBYQA's default radii down together", &
+                         test_bobyqa_default_radii_follow_the_box)]
 
     end subroutine collect_tests_prima
 
@@ -1276,10 +1278,22 @@ contains
 
     end subroutine test_cstrv_is_in_the_callers_units
 
-    !> The six calls of `feature_optimizer.md` 5.9, which the guide page prints.
+    !> The six worked calls of `feature_optimizer.md` 5.9, of which `prima.md` prints one.
     !!
-    !! Structural figures, not measurements (Q13): each answer is the analytic one worked out on
-    !! the page, so the page and the code cannot drift apart without this failing.
+    !! Structural figures, not measurements (Q13): every answer below is analytic, so it is a
+    !! reference rather than a recorded output.
+    !!
+    !! **What this does and does not mirror.** Call 3 is the guide's own two-variable LINCOA
+    !! example, verbatim but for the objective's name, and calls 4 and 6 are the problems its
+    !! COBYLA sections describe in prose -- the unit disc, and the disc against `x1 >= 2`, which
+    !! have no point in common. Calls 1, 2 and 5 are this tier's own worked problems and appear on
+    !! no page. So this is NOT a mirrored example in the sense
+    !! `.claude/skills/review-doc.md` B8 means: editing it does not oblige an edit to the page.
+    !! The page's other printed calls -- its first BOBYQA call, its `scale=` call and its
+    !! `pf_bobyqa_solver` call -- are exercised in substance by the tests above (`scale=` by
+    !! `a scale= run reproduces the hand-scaled objective bit for bit`, the solver by
+    !! `pf_bobyqa_solver finds both wells under the multistart driver`) rather than reproduced
+    !! call for call anywhere.
     subroutine test_guide_examples(error)
         type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
 
@@ -1446,6 +1460,87 @@ contains
                    "the two arms differ in units, not in the well they find")
 
     end subroutine test_bobyqa_solver_unscaled
+
+    !> A box narrower than four pulls BOBYQA's default `rhobeg` down, and `rhoend` with it.
+    !!
+    !! `prima.md`'s "The two radii" says the default `rhobeg` is `1` except that
+    !! `pf_minimize_bobyqa` takes a quarter of the narrowest distance between the bounds where that
+    !! is less than `1`, and that the default `rhoend` is then scaled down in the same proportion.
+    !! That is `rhobeg_use = max(EPS, min(RHOBEG_DFT, minval(hi - lo)/4))` and
+    !! `rhoend_use = max(EPS, min((RHOEND_DFT/RHOBEG_DFT)*rhobeg_use, RHOEND_DFT))` in
+    !! `parquet_prima_bobyqa.f90`. Both halves matter to a caller: a `rhobeg` of `1` on a box of
+    !! side `1` would trip this engine's own "rhobeg must not exceed half the narrowest distance
+    !! between the bounds", so the page's older flat "Default `1`" described a library that would
+    !! refuse its own default.
+    !!
+    !! **`info%rho` is the observable for both.** A run that ends normally comes down to `rhoend`,
+    !! so the final radius reports the `rhoend` that was in force, and that `rhoend` was derived
+    !! from the `rhobeg` this test cannot see directly. `0.25 * 1e-6` is exact in binary, so the
+    !! narrow arm's expected value is exactly `2.5e-7`. The assertions are written as a RELATIVE
+    !! tolerance of `1e-12` rather than as an equality: the value is exact here and on every
+    !! compiler tried, but `info%rho` is what the engine ended at rather than what the driver
+    !! computed, and a bit-equality assertion on that is a promise about the engine's last
+    !! reduction that nothing in this library makes. `1e-12` of `1e-6` is far below one ulp of it,
+    !! so nothing a wrong default could produce fits inside it -- the two mutations this test was
+    !! verified against gave `4e-7` and `1e-6`.
+    !!
+    !! Two negative controls, because the claim has two halves. **The box:** the same call over a
+    !! box of side `8`, where `minval(hi - lo)/4` is `2` and the `min` against `1` governs
+    !! instead, must end at the undiminished `1e-6` — without it the test passes against an engine
+    !! that always shrinks. **The proportionality:** the narrow box again with an EXPLICIT
+    !! `rhoend`, which is used as given and must NOT be scaled — without it the test passes
+    !! against an engine that scales every `rhoend`, caller-supplied or not.
+    subroutine test_bobyqa_default_radii_follow_the_box(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        real(real64) :: x(2), fmin, lower(2), upper(2)
+        real(real64) :: rho_narrow, rho_wide, rho_explicit
+        type(pf_optimize_info) :: info
+        character(len=160) :: msg
+
+        ! The start sits well inside both boxes, so honour_x0 has no room to shrink `rhobeg` for
+        ! a reason other than the box width -- which is the only reason under test.
+        ! Side 1: the default rhobeg is 1/4 and the default rhoend 1e-6 * 1/4.
+        x = [0.1_real64, 0.1_real64]
+        lower = -0.5_real64
+        upper = 0.5_real64
+        call pf_minimize_bobyqa(origin_sphere, x, fmin, lower=lower, upper=upper, info=info)
+        rho_narrow = info%rho
+        call check(error, info%status, PF_OPT_OK, "the narrow-box run must converge normally")
+        if (allocated(error)) return
+        write(msg, '(a, es13.6)') "a box of side 1 must default rhoend to 0.25e-6; info%rho is ", &
+            rho_narrow
+        call check(error, abs(rho_narrow - 2.5e-7_real64) <= 1.0e-12_real64*2.5e-7_real64, &
+                   trim(msg))
+        if (allocated(error)) return
+
+        ! Control 1: side 8, where `min(1, 8/4)` is 1 and neither radius is reduced.
+        x = [0.1_real64, 0.1_real64]
+        lower = -4.0_real64
+        upper = 4.0_real64
+        call pf_minimize_bobyqa(origin_sphere, x, fmin, lower=lower, upper=upper, info=info)
+        rho_wide = info%rho
+        write(msg, '(a, es13.6)') "a box of side 8 must leave rhoend at 1e-6; info%rho is ", rho_wide
+        call check(error, abs(rho_wide - 1.0e-6_real64) <= 1.0e-12_real64*1.0e-6_real64, trim(msg))
+        if (allocated(error)) return
+        call check(error, abs(4.0_real64*rho_narrow - rho_wide) <= 1.0e-12_real64*rho_wide, &
+                   "and the narrow box's radius must be exactly a quarter of the wide box's")
+        if (allocated(error)) return
+
+        ! Control 2: the narrow box again, with `rhoend` GIVEN. A caller's value is used as it
+        ! stands, so this one must not be scaled by the box at all.
+        x = [0.1_real64, 0.1_real64]
+        lower = -0.5_real64
+        upper = 0.5_real64
+        call pf_minimize_bobyqa(origin_sphere, x, fmin, lower=lower, upper=upper, &
+                                rhoend=1.0e-6_real64, info=info)
+        rho_explicit = info%rho
+        write(msg, '(a, es13.6)') "an explicit rhoend is used as given, not scaled by the box; " // &
+            "info%rho is ", rho_explicit
+        call check(error, abs(rho_explicit - 1.0e-6_real64) <= 1.0e-12_real64*1.0e-6_real64, &
+                   trim(msg))
+
+    end subroutine test_bobyqa_default_radii_follow_the_box
 
     !> An explicit `rhoend` with no `rhobeg` pulls COBYLA's default `rhobeg` up to `10*rhoend`.
     !!

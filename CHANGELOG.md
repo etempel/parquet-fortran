@@ -99,8 +99,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bounds and constraint matrices are transformed with it. `pf_bobyqa_solver` drives
   `pf_minimize_multistart` with BOBYQA from each start. Where PRIMA adjusts an invalid argument
   and warns, this refuses with a message. Shares `pf_objective`, `pf_constrained_objective`,
-  `pf_optimize_info` and `pf_optimize_history` with `parquet_optimize` and re-exports them. An
-  Arrow-free entry module. See
+  `pf_optimize_info`, `pf_optimize_history`, `pf_local_solver` and the `PF_OPT_*` status codes
+  with `parquet_optimize` and re-exports them all. An Arrow-free entry module. See
   [Powell's derivative-free solvers](doc/pages/utilities/prima.md).
 - **Kernel density estimation: `parquet_kde`.** `pf_kde` fits a one-dimensional density to an
   array it retains, `real64` or `real32`, or to a numeric `parquet_column`, and answers `%pdf`,

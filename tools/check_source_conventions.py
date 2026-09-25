@@ -4340,6 +4340,246 @@ def check_interpolate_aborts_documented():
             + "\n".join(problems)]
 
 
+
+def check_optimize_aborts_documented():
+    """Both optimisation pages must name the arguments and the limits their refusals are about.
+
+    `parquet_optimize` and `parquet_prima` refuse a call they cannot answer through one helper each
+    -- `optimize_abort` (`src/parquet_optimize_support.f90`) and `prima_abort`, reached as
+    `abort_here` or `state_abort` (`src/parquet_prima_common.f90`). `optimization.md` lists those
+    refusals in the "Caller mistakes abort too" bullet of "Important behaviour" and `prima.md` in
+    the bullet list under "When a call is refused"; a reader uses each as the complete account of
+    what is refused.
+
+    **Why this is worth a check.** The U6 review found two refusals missing from `prima.md`'s list
+    and one from `optimization.md`'s, with nothing comparing either side to the source.
+    CLAUDE.md, "A static check that enumerates names goes stale silently".
+
+    **Why this is not `check_interpolate_aborts_documented` again.** That one compares message TEXT,
+    which works because `interpolation.md` carries the messages in a table. These two pages
+    deliberately do not: they paraphrase, in prose, so that the list reads as advice rather than as
+    a transcript. There is no text to compare. What the two sides DO share is names and numbers, so
+    this check compares those:
+
+    1. **The subject of a refusal.** Every abort message of the shape `<name> must ...` names the
+       argument it is about, and `validate_tolerance` is handed its argument's name as a literal.
+       Each such name, where it is one of the arguments the two modules' `pf_minimize_*` interfaces
+       declare, must appear in that page's refusal list -- so a reader scanning for `max_neval` or
+       `rtol` finds the refusal that governs it.
+    2. **The limit a refusal states.** The tail after `must be in`, `must not exceed`,
+       `by more than` or `must be at least` is the bound itself -- `(0, 2]`, `huge(1)/2`,
+       `[n+2, (n+1)(n+2)/2]`, `2*epsilon` -- and must appear on the page. Not only in the refusal
+       list: a bound is often stated where its argument is described, which documents it just as
+       well.
+    3. **The reverse.** Every argument-shaped code span in a page's refusal list must be an argument
+       or a binding the two modules actually declare, so a renamed or deleted one is caught.
+
+    **What this check does NOT cover, deliberately.** A refusal whose message names no argument --
+    "at least one variable is required", "the start point must not contain NaN", the refusal of a
+    `pf_constrained_objective` -- has no mechanical handle on the page's prose, and inventing one
+    would mean an enumerated list of paraphrases, which goes stale exactly the way the page does.
+    Those are what step 2 of a page review is for. The check is a floor, not a ceiling.
+
+    **The narrowest part of the page that carries the claim**, per the campaign's SD9: the refusal
+    list alone for directions 1 and 3. The whole page for direction 2, because a bound belongs
+    wherever its argument is explained.
+
+    **Verify this check by breaking it, not by watching it pass**: drop an argument from a page's
+    refusal list, rename one in a message, or change a stated bound, and confirm it fails before
+    trusting a green run. It refuses to pass when a heading or bullet is gone, when either side
+    comes back empty, or when a file is missing.
+    """
+    pages = {
+        "optimize": REPO_ROOT / "doc" / "pages" / "utilities" / "optimization.md",
+        "prima": REPO_ROOT / "doc" / "pages" / "utilities" / "prima.md",
+    }
+    specs = {
+        "optimize": SRC / "parquet_optimize.f90",
+        "prima": SRC / "parquet_prima.f90",
+    }
+    sources = {
+        "optimize": sorted(SRC.glob("parquet_optimize*.f90")),
+        "prima": sorted(SRC.glob("parquet_prima*.f90")),
+    }
+    # The two files holding the abort helpers are named, not globbed: a glob that comes back one
+    # file short reads as a tier with fewer refusals, which is exactly how this check would go
+    # blind without saying so.
+    helpers = [SRC / "parquet_optimize_support.f90", SRC / "parquet_prima_common.f90"]
+    for f in list(pages.values()) + list(specs.values()) + helpers:
+        if not f.is_file():
+            return ["check_optimize_aborts_documented: %s is missing -- this check has gone blind"
+                    % f.name]
+    for tier, files in sources.items():
+        if not files:
+            return ["check_optimize_aborts_documented: no %s sources found -- this check has gone "
+                    "blind" % tier]
+
+    # ---- the names a page may use: the two modules' documented call surface ----
+    #
+    # Derived, never listed: the dummies of every `pf_minimize_*` generic, the components of every
+    # `pf_local_solver` extension, and the bindings of the two objective types. Single-character
+    # names (`a`, `b`, `x`, `f`) are dropped -- they match inside ordinary English ("a linear
+    # constraint must not ...") and would make direction 1 fire on prose.
+    arguments = set()
+    bindings = set()
+    for spec in specs.values():
+        text = spec.read_text()
+        # Every specific of every entry point, whether it sits inside a generic
+        # (`minimize_bobyqa_obj`) or stands alone (`pf_minimize_cobyla`, which takes an object and
+        # only an object and so has no generic to be a specific of).
+        for block in re.findall(r"\n        module subroutine (?:pf_)?minimize_\w+\(.*?"
+                                r"\n        end subroutine", text, re.S):
+            for line in block.split("\n"):
+                hit = re.match(r"\s*(?:class|type|real|integer|logical|character|procedure)\b"
+                               r"[^:]*::\s*([a-z_][a-z0-9_]*)", line)
+                if hit:
+                    arguments.add(hit.group(1))
+        for block in re.findall(r"\n    type, extends\(pf_local_solver\) :: \w+\n(.*?)\n    contains",
+                                text, re.S):
+            for line in block.split("\n"):
+                hit = re.match(r"\s*(?:real|integer|logical)\b[^:]*::\s*([a-z_][a-z0-9_]*)", line)
+                if hit:
+                    arguments.add(hit.group(1))
+        for line in text.split("\n"):
+            hit = re.match(r"\s*procedure\([a-z_]+\), deferred\s*::\s*([a-z_][a-z0-9_]*)", line)
+            if hit:
+                bindings.add(hit.group(1))
+    arguments = {n for n in arguments if len(n) > 1}
+    if not arguments:
+        return ["check_optimize_aborts_documented: no pf_minimize_* arguments were found in the "
+                "two spec files -- this check has gone blind"]
+    # A PARTIAL loss blinds it as thoroughly as an empty set, and reads as a tier with fewer
+    # arguments. Every entry point the two modules make public must have an interface block here.
+    public_entries, read_entries = set(), set()
+    for spec in specs.values():
+        text = spec.read_text()
+        for line in text.split("\n"):
+            if line.strip().startswith("public ::"):
+                public_entries |= {n.strip() for n in line.split("::", 1)[1].split(",")
+                                   if n.strip().startswith("pf_minimize_")}
+        read_entries |= set(re.findall(r"\n    interface (pf_minimize_\w+)\n", text))
+        read_entries |= set(re.findall(r"module subroutine (pf_minimize_\w+)\(", text))
+    if public_entries != read_entries:
+        return ["check_optimize_aborts_documented: %d of the %d public pf_minimize_* entry points "
+                "have an interface block this check can read (%s) -- it has gone blind"
+                % (len(read_entries), len(public_entries),
+                   ", ".join(sorted(public_entries ^ read_entries)))]
+
+    # ---- the source side: each tier's abort messages, their subjects and their limits ----
+    LIMIT_PHRASES = (" must be in ", " must not exceed ", " by more than ", " must be at least ")
+
+    def messages_of(files):
+        found = set()
+        for path in files:
+            text = re.sub(r"&\s*\n\s*&?", "", path.read_text())
+            for call in re.finditer(r"\b(?:optimize_abort|prima_abort|abort_here|state_abort)\s*\(",
+                                    text):
+                at, depth, body = call.end(), 1, ""
+                while at < len(text) and depth:
+                    ch = text[at]
+                    if ch == '"':
+                        close = text.index('"', at + 1)
+                        body += text[at:close + 1]
+                        at = close + 1
+                        continue
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                        if not depth:
+                            break
+                    body += ch
+                    at += 1
+                literals = re.findall(r'"([^"]*)"', body)
+                # The first literal of an `optimize_abort`/`prima_abort` call is the entry point.
+                if literals and literals[0].startswith(("pf_", "parquet_")):
+                    literals = literals[1:]
+                text_of = "".join(literals)
+                if " " in text_of:
+                    found.add(text_of)
+            # `validate_tolerance` is handed the argument's own name, so its message has no
+            # subject of its own to read.
+            for hit in re.finditer(r"validate_tolerance\(\s*\"[^\"]*\"\s*,\s*\"([a-z_][a-z0-9_]*)\"",
+                                   text):
+                found.add(hit.group(1) + " must be a finite, non-negative number")
+        return found
+
+    problems = []
+    for tier in ("optimize", "prima"):
+        msgs = messages_of(sources[tier])
+        if not msgs:
+            return ["check_optimize_aborts_documented: found no abort messages in the %s sources "
+                    "-- this check has gone blind" % tier]
+
+        page_text = pages[tier].read_text()
+        if tier == "prima":
+            heading = "## When a call is refused"
+            if heading not in page_text:
+                return ["doc/pages/utilities/prima.md: the %r heading is gone, so this check can no "
+                        "longer find the refusal list. Restore it or update this check." % heading]
+            # The BULLET LIST alone, not the prose under it: the paragraphs that follow are
+            # about what PRIMA adjusts where this library refuses, and they name upstream's own
+            # `honour_x0` and its sentinel, which the source does not declare as arguments.
+            lines, started = [], False
+            for line in page_text[page_text.index(heading) + len(heading):].splitlines():
+                if line.startswith("- "):
+                    started = True
+                elif started and not line.startswith(("  ", "- ")):
+                    break
+                if started:
+                    lines.append(line)
+            section = "\n".join(lines)
+        else:
+            opener = "- **Caller mistakes abort too**"
+            if opener not in page_text:
+                return ["doc/pages/utilities/optimization.md: the %r bullet is gone, so this check "
+                        "can no longer find the refusal list. Restore it or update this check."
+                        % opener]
+            tail = page_text[page_text.index(opener):]
+            end = tail.find("\n- ", 1)
+            section = tail if end < 0 else tail[:end]
+        if not section.strip():
+            return ["check_optimize_aborts_documented: the %s page's refusal list came back empty "
+                    "-- this check has gone blind" % tier]
+
+        # 1. every argument a refusal is about, named in the refusal list
+        subjects = set()
+        limits = set()
+        for msg in msgs:
+            head = msg.split(" must ", 1)[0] if " must " in msg else ""
+            subjects |= {w for w in re.findall(r"[a-z_][a-z0-9_]*", head) if w in arguments}
+            for phrase in LIMIT_PHRASES:
+                if phrase in msg:
+                    limits.add(msg.split(phrase, 1)[1].rstrip(".").strip())
+        if not subjects:
+            return ["check_optimize_aborts_documented: no refusal of the %s tier named one of its "
+                    "own arguments -- this check has gone blind" % tier]
+        for name in sorted(subjects):
+            if not re.search(r"(?<![a-z0-9_])%s(?![a-z0-9_])" % re.escape(name), section):
+                problems.append("    %s: `%s` is refused by the source and is not named in the "
+                                "page's refusal list" % (pages[tier].name, name))
+
+        # 2. every limit a refusal states, somewhere on that page
+        for limit in sorted(limits):
+            if len(limit) > 1 and limit not in page_text:
+                problems.append("    %s: the source refuses against %r and the page never states it"
+                                % (pages[tier].name, limit))
+
+        # 3. every argument-shaped code span in the refusal list must be a real name
+        for span in re.findall(r"`([^`]+)`", section):
+            if not re.fullmatch(r"[a-z][a-z0-9_]+", span):
+                continue
+            if span.startswith(("pf_", "parquet_")):
+                continue
+            if span not in arguments and span not in bindings:
+                problems.append("    %s: the refusal list names `%s`, which is not an argument or "
+                                "a binding either module declares" % (pages[tier].name, span))
+
+    if problems:
+        return ["the optimisation pages' refusal lists have drifted from what the source refuses "
+                "(check_optimize_aborts_documented):\n" + "\n".join(sorted(set(problems)))]
+    return []
+
 def check_integrate_status_codes_documented():
     """The status table of `integration.md` must list exactly the `PF_INT_*` codes the module has.
 
@@ -10170,6 +10410,7 @@ CHECKS = (
     ("integrate status codes documented", check_integrate_status_codes_documented),
     ("parquet_interpolate stays Arrow-free", check_parquet_interpolate_stays_arrow_free),
     ("interpolate aborts are documented", check_interpolate_aborts_documented),
+    ("optimisation aborts are documented", check_optimize_aborts_documented),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),

@@ -27,17 +27,18 @@ every step. COBYLA is local too, but its models — of the objective AND of ever
 LINEAR, which is what lets it handle a constraint of any shape and also why it converges slowly.
 
 - **A smooth objective in a handful of variables, with bounds** — `pf_minimize_bobyqa`. On smooth
-  test problems it costs a fraction of what the Nelder-Mead simplex costs — a small fraction on a
-  smooth convex one, a thirtieth on a sphere in ten variables, and about half on Rosenbrock — and a
-  hundredth to a thousandth of what differential evolution costs. Reach for it first when each
-  evaluation is expensive.
+  test problems in ten variables it costs a fraction of what the Nelder-Mead simplex costs — a
+  thirtieth on a sphere, about half on Rosenbrock — and a hundredth to a thousandth of what
+  differential evolution costs. The advantage grows with the dimension: in two variables the
+  simplex is its equal. `MODE=evals bench/benchmark_optimize.sh` is what measures this. Reach for
+  it first when each evaluation is expensive.
 - **The same, with linear constraints** — `pf_minimize_lincoa`, which is the same quadratic model
   with an active-set trust-region step. It is in the same class and no dearer per evaluation.
 - **A constraint that is not linear** — `pf_minimize_cobyla`, and only then. A linear model has no
   curvature, so it needs many more evaluations than the other two on the same objective; give it
   the work no other engine here can do.
-- **A rugged objective with many minima** — not this page.
-  [`pf_minimize_de`](optimization.html) searches a whole box and is not confined to one basin.
+- **A rugged objective with many minima** — not this page. [`pf_minimize_de`](optimization.html)
+  searches a whole box and is not confined to one basin.
 - **A few basins** — [`pf_minimize_multistart`](optimization.html) with a `pf_bobyqa_solver`,
   described below: BOBYQA from each of a spread of starts.
 - **One variable** — [`pf_minimize_scalar`](optimization.html), Brent's method on a bracket.
@@ -97,16 +98,19 @@ Every argument the three share means the same thing in each.
 ## Supplying the objective
 
 Exactly as for [`parquet_optimize`](optimization.html), under the rules
-[Solver conventions](solvers.html#the-function-you-supply) states once, and with the same types: `f` is either a
-plain module procedure matching `pf_objective_func`, or an object extending `pf_objective` with an
-`eval` binding, which is how an objective carries its own parameters — a data table, a model, a
-counter. Both reach the same engine through one generic. `parquet_prima` re-exports `pf_objective`,
-`pf_constrained_objective`, `pf_optimize_info` and `pf_optimize_history`, so a program that
-minimises and nothing else needs only this one import.
+[Solver conventions](solvers.html#the-function-you-supply) states once, and with the same types:
+`f` is either a plain module procedure matching `pf_objective_func`, or an object extending
+`pf_objective` with an `eval` binding, which is how an objective carries its own parameters — a
+data table, a model, a counter. Both reach the same engine through one generic. `parquet_prima`
+re-exports every shared name `parquet_optimize` declares — `pf_objective` and `pf_objective_eval`,
+`pf_objective_func`, `pf_constrained_objective` with `pf_constraint_count` and
+`pf_constraint_eval`, `pf_optimize_info`, `pf_optimize_history`, `pf_local_solver` with
+`pf_local_run`, and the six `PF_OPT_*` codes — so a program that minimises and nothing else needs
+only this one import.
 
-**`pf_minimize_cobyla` is the exception: its objective is an object and only an object**, because
-a plain function has nowhere to carry constraints. It extends `pf_constrained_objective` rather
-than `pf_objective`, adding the two bindings described under
+**`pf_minimize_cobyla` is the exception: its objective is an object and only an object**, because a
+plain function has nowhere to carry constraints. It extends `pf_constrained_objective` rather than
+`pf_objective`, adding the two bindings described under
 [Nonlinear constraints](#nonlinear-constraints-pf_minimize_cobyla) below.
 
 **The objective must return a finite value at every point the engine asks about.** A NaN or an
@@ -126,12 +130,12 @@ a non-finite value as "outside my domain" and carries on.
 ## Bounds
 
 `lower` and `upper` are optional and independent; absent means unbounded in that direction, and so
-does a magnitude at or beyond about `4e307`, which is what `+/-huge()` means here. With
-`pf_minimize_bobyqa`, **the bounds are honoured throughout**, not just at the end: no point that
-engine evaluates lies outside them, so an objective that is undefined outside its box is never
-asked about the outside. The other two engines are the subject of the paragraph below. Each pair
-must leave real room — `upper - lower` greater than `2*epsilon` — and the start point must lie
-inside.
+does a magnitude at or beyond a quarter of `huge()`, about `4.5e307`, which is what `+/-huge()`
+means here. With `pf_minimize_bobyqa`, **the bounds are honoured throughout**, not just at the end:
+no point that engine evaluates lies outside them, so an objective that is undefined outside its box
+is never asked about the outside. The other two engines are the subject of the paragraph below.
+Each pair must leave real room — `upper - lower` greater than `2*epsilon` — and the start point
+must lie inside.
 
 **The start point is used exactly as given.** BOBYQA needs the start to be at least `rhobeg` away
 from every bound it is not already on; PRIMA satisfies that by default by MOVING the start and
@@ -177,11 +181,10 @@ using for is the step: it moves inside the constraints rather than stepping out 
 back, so the iterates it accepts are feasible and the point it answers with is the best feasible
 point it evaluated. It does evaluate infeasible points on the way — its initial model and its
 geometry steps — so the objective must be defined wherever `rhobeg` can reach. PRIMA admits an
-infeasible start by RELAXING the
-right-hand sides to include it, and warns; this library refuses instead, because a relaxed `b` is
-a different problem and every violation reported afterwards would be measured against it. `x = 0`
-satisfies any system with a non-negative `b_ineq` and a zero `b_eq`, which is why the examples
-start there.
+infeasible start by RELAXING the right-hand sides to include it, and warns; this library refuses
+instead, because a relaxed `b` is a different problem and every violation reported afterwards would
+be measured against it. `x = 0` satisfies any system with a non-negative `b_ineq` and a zero
+`b_eq`, which is why the examples start there.
 
 **A quadratic with both kinds of constraint active** shows what the engine is doing. Minimising
 `|x - (1, 2, 3)|**2` subject to `x1 + x2 + x3 = 3` and `x1 >= 1`:
@@ -229,8 +232,9 @@ is worth checking twice, because getting it wrong does not raise anything: the s
 happily over the complement of the region you meant and returns a confident answer from the wrong
 side of the boundary.
 
-`n_constraints()` is read once per call and `c` is allocated to it; **the binding must fill
-exactly that many values.** Filling fewer leaves the rest undefined, and the engine will read
+`n_constraints()` is read at the start of a call and never per evaluation — twice, in fact, once
+to check it is not negative and once to size `c` — and `c` is allocated to it; **the binding must
+fill exactly that many values.** Filling fewer leaves the rest undefined, and the engine will read
 whatever is there as a violation or a satisfaction at random. The language cannot check this.
 
 Linear constraints may be given as arrays beside the nonlinear ones, in the form
@@ -268,9 +272,14 @@ arguments worth thinking about:
 
 - **`rhobeg`** is how far the first steps reach. PRIMA's advice: about a tenth of the greatest
   change you expect in any variable. Too small and the model is fitted to a neighbourhood that
-  tells it nothing; too large and the first points miss the structure entirely. Default `1`.
+  tells it nothing; too large and the first points miss the structure entirely. Default `1`, with
+  two exceptions: `pf_minimize_bobyqa` takes a quarter of the narrowest distance between the
+  bounds where that is less than `1`, since its own rule forbids a `rhobeg` above half of it; and
+  the two constrained engines take `10*rhoend` where you gave `rhoend` alone and that is more.
 - **`rhoend`** is the accuracy you are asking for in `x`. The run stops when the radius has come
-  down to it. Default `1e-6`.
+  down to it. Default `1e-6`, scaled down in proportion where the paragraph above left `rhobeg`
+  below `1`: over a box of side `1`, `pf_minimize_bobyqa` defaults to `rhobeg = 0.25` and
+  `rhoend = 2.5e-7`. `info%rho` is what the run actually ended at.
 
 Both are in the units of the variable the engine works in — which is `x` itself unless you pass
 `scale=`, and `y = x/scale` if you do. `rhoend` must be positive and no larger than `rhobeg`; a
@@ -409,7 +418,9 @@ each evaluation, so `info%neval` is at most the `max_neval` you passed. Reaching
 
 Every one of these is an `error stop` carrying the entry point, the reason and your `context=`:
 
+- fewer than one variable;
 - a start that is not finite, or lies outside the bounds;
+- a `lower` or `upper` whose size is not `size(x)`;
 - a bound that is a NaN;
 - a bound pair with no room between them;
 - `rhoend` above `rhobeg`, or either not finite and positive;
@@ -437,9 +448,9 @@ adjustment would be silent, and a silently adjusted argument is how a caller com
 asked for something they did not.
 
 **The one adjustment kept, besides `honour_x0`**, is upstream's own reading of a bound at or beyond
-about `4e307` in the engine's units: it means "no bound", and `+/-huge()` is the spelling a caller
-reaches for when their own bound argument is not optional. That is a sentinel rather than a number
-someone means literally, and recognising it before any arithmetic is also what keeps
+about `4.5e307` in the engine's units: it means "no bound", and `+/-huge()` is the spelling a
+caller reaches for when their own bound argument is not optional. That is a sentinel rather than a
+number someone means literally, and recognising it before any arithmetic is also what keeps
 `upper - lower` from overflowing.
 
 ## Attribution and licence
@@ -457,9 +468,15 @@ Clause, at commit `43863c69`. The algorithms are M. J. D. Powell's:
   by linear interpolation*, 1994. SciPy 1.16 replaced its own Fortran 77 COBYLA with a translation
   of this same PRIMA code.
 
-Each `src/parquet_prima_*.f90` file opens with PRIMA's licence text and a numbered list of what
-was changed in vendoring it — fixed kinds in place of the preprocessor, the printing layer
-removed, the development assertions removed, `pf_objective` in place of the procedure interface,
-`ieee_arithmetic` in place of the hand-rolled predicates, and a refusal in place of the moderated
-extreme barrier. The numerical content is upstream's, and a difference from upstream is a defect
-here unless that list says otherwise.
+`src/parquet_prima_linalg.f90` carries the licence text and the nine numbered deviations shared by
+the whole tier — fixed kinds in place of the preprocessor, the printing layer removed, the
+development assertions removed, `pf_objective` in place of the procedure interface,
+`ieee_arithmetic` in place of the hand-rolled predicates, a refusal in place of the moderated
+extreme barrier, only what the three solvers reach vendored at all, a one-pass `trueloc`, this
+repository's comment and line-length conventions, and an order-fixed `sum` in place of the
+intrinsic, whose order is the processor's. Every other vendored file opens with a provenance block
+naming the upstream files it came from, points at that list, and adds what changed beyond it.
+`pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla` have no such block: their
+three files replace PRIMA's own drivers rather than vendoring them, and each says where its
+defaults part from upstream's. The numerical content is upstream's, and a difference from upstream
+is a defect here unless the tier's list says otherwise.

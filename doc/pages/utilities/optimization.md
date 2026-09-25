@@ -18,6 +18,29 @@ not confined to one basin: `pf_minimize_de` is differential evolution over a see
 and `pf_minimize_multistart` runs a local engine from a spread of starts and counts the distinct
 minima it finds.
 
+## Which engine to reach for
+
+**One variable and a bracket**: Brent. It needs no step and no start point, and on a smooth
+function it is the cheapest thing here by a wide margin.
+
+**A smooth objective in a few variables, and a good start point**: the simplex. It handles a kink
+at the minimum, which a model-based solver would not, and it needs only values.
+
+**Several basins over a box, or a start point you cannot guess**: the multistart driver. A local
+engine converges to whichever basin it starts in and reports success for doing so, so the answer
+is to start in all of them; twenty starts over a two-variable box will usually find every basin
+wide enough to catch one, at a few thousand evaluations in total.
+
+**A rugged objective — many minima, or no useful start point at all**: `pf_minimize_de`. It costs
+a few times more evaluations than the multistart driver on a function both can solve, and it is the
+only one of the four that solves a function with thousands of local minima. On Rastrigin in five
+variables, thirty local runs from random starts found the global minimum none of the time; DE found
+it in tens of thousands of evaluations. `MODE=evals bench/benchmark_optimize.sh` is what measures
+the comparison.
+
+**A smooth objective where the last few digits matter**: DE with `polish=.true.`, which hands the
+best individual to the simplex, or DE followed by your own local run from the point it returned.
+
 ## Quick example
 
 ```fortran
@@ -97,6 +120,11 @@ this tier's own:
 
 - **The objective is evaluated at an array**, even in `pf_minimize_scalar`, where that array has
   one element. One objective then serves both engines.
+- **An objective carrying nonlinear constraints is refused here.** `pf_constrained_objective`
+  extends `pf_objective` with `n_constraints` and `constraints`, and is declared in this module so
+  that every engine which cannot honour those constraints can see one coming and refuse it rather
+  than minimise without them. The one engine that reads them is
+  [`pf_minimize_cobyla`](prima.html#nonlinear-constraints-pf_minimize_cobyla).
 
 ## One variable on a bracket
 
@@ -151,9 +179,10 @@ The initial population is a **Latin hypercube** — the box divided into `np` st
 one point per stratum, the strata permuted independently per coordinate — so every coordinate is
 covered evenly however small `np` is. Each generation then builds one trial point per individual
 from three others (`a + F*(b - c)`), crosses it with the incumbent at probability `cr`, and keeps
-whichever is better. A trial coordinate that lands outside the box is replaced by the midpoint
-between its parent's own coordinate and the bound it crossed, so nothing is ever placed on a bound
-and the spread that drives the search survives.
+whichever is better. One coordinate, drawn afresh each time, always comes from the mutant, so even
+`cr = 0` moves the trial rather than reproducing its parent. A trial coordinate that lands outside
+the box is replaced by the midpoint between its parent's own coordinate and the bound it crossed,
+so nothing is ever placed on a bound and the spread that drives the search survives.
 
 `np` defaults to `max(20, 10n)` and may not be below 4: the mutation needs three donors distinct
 from the individual being improved. `f_weight` is `F`, default `0.8`, in `(0, 2]`; `cr` is the
@@ -167,11 +196,13 @@ inside `rtol`/`atol` (`PF_OPT_OK`), `max_gen` generations, or `max_neval` evalua
 the generation budget is the binding one.
 
 `population` hands back the final population, one individual per column, and `history` the best
-individual of each generation — one record per generation, not one per evaluation.
+individual of each generation — one record per generation and one for the starting population, not
+one per evaluation.
 
 `polish` (off by default) finishes by running `pf_minimize_simplex` from the best individual, with
 a step of a thousandth of each coordinate's width and the same tolerances, and counts its
-evaluations in `info%neval`. It is worth reaching for when DE has found the right basin and you
+evaluations in `info%neval` — they are counted, not recorded, so `history` still holds one row per
+generation. It is worth reaching for when DE has found the right basin and you
 want the last few digits, which DE itself spends many generations on. **The polish minimises the
 objective seen through the box**, so the point it answers with is a point of the box even though
 the simplex itself is unbounded, and `fmin` is the value there. **It inherits the simplex's
@@ -189,7 +220,9 @@ its domain, with no guard of your own.
 
 The exception is a box where **nothing** is finite: that is `PF_OPT_NONFINITE`, `x` comes back as
 the box's centre, `fmin` and `info%spread` as `+Infinity` (never a NaN, so a caller's own
-comparison is safe), and `converged` is false.
+comparison is safe), and `converged` is false. `pf_minimize_multistart` answers the same way when
+no start comes back with a finite value, which needs a local solver that returns one rather than
+aborting.
 
 ## Many starts, one local engine
 
@@ -209,11 +242,13 @@ on the solver, not on `threads` — so two runs differing only in their local en
 basins and their results are comparable.
 
 `solver` is the local engine and its options, as an object: `pf_simplex_solver` ships here, and
-`pf_bobyqa_solver` will come from `parquet_prima`. Set a component to configure it; the default is
-a fresh `pf_simplex_solver()`, whose own defaults (`rtol = 0`, `atol = 1e-10`, `max_neval = 0`,
-`step_fraction = 0.1`) are a valid pair as they stand. In the solver object `max_neval = 0` means
-the engine's own default, which for the simplex is 5000, and a negative value is refused; `0`
-passed as an ARGUMENT to `pf_minimize_simplex` is still refused, because the rule is the object's.
+`pf_bobyqa_solver` comes from [`parquet_prima`](prima.html#bobyqa-under-the-multistart-driver).
+Either extends `pf_local_solver`, and so may an engine of your own. Set a component to configure
+it; the default is a fresh `pf_simplex_solver()`, whose own defaults (`rtol = 0`, `atol = 1e-10`,
+`max_neval = 0`, `step_fraction = 0.1`) are a valid pair as they stand. In the solver object
+`max_neval = 0` means the engine's own default, which for the simplex is 5000, and a negative value
+is refused; `0` passed as an ARGUMENT to `pf_minimize_simplex` is still refused, because the rule
+is the object's.
 
 ```fortran
 type(pf_simplex_solver) :: solver
@@ -229,17 +264,20 @@ result outside the box is possible.
 
 `merge_tol` decides what counts as one minimum: two results within `merge_tol*(upper - lower)` of
 each other in **every** coordinate are merged, walking the starts in index order. It defaults to
-`1e-3`.
-`info%nminima` counts basins only while `merge_tol` sits between the local solver's own accuracy
-relative to the box — about `1e-5` for the simplex — and the distance between two genuine minima:
-tighter, and one basin reached by several starts is counted several times; wider, and two basins
-are counted once. Set it to the scale you care about, and read `history` when the count has to be
-exact.
+`1e-3`. `info%nminima` counts basins only while `merge_tol` sits between the local solver's own
+accuracy relative to the box — about `1e-5` for the simplex — and the distance between two genuine
+minima: tighter, and one basin reached by several starts is counted several times; wider, and two
+basins are counted once. Set it to the scale you care about, and read `history` when the count has
+to be exact.
 
 `history` is the map: one record per start, its own minimum and value, before any merging. A row
 whose value is not one of the distinct minima is a start whose run hit its budget, and
 `info%nlimit` counts those. `info%niter` is the number of starts and `info%neval` the total over
 all of them.
+
+**The driver converges when any one of its starts does.** `info%status` is `PF_OPT_OK` as soon as
+one local run ends on its own stopping rule, and `PF_OPT_LIMIT` only when not one of them did;
+read `info%nlimit` against `info%niter` for how many spent their budget instead.
 
 ## Threads, and what each thread sees
 
@@ -259,9 +297,13 @@ with a finalizer is finalized once per clone. The clones are discarded when the 
 should be run at `threads = 1`.
 
 The count is clamped to what this process's CPU affinity allows, which can emit one notice per
-process naming `optimisation`; `parquet_set_verbosity("silent")` quiets it. A call from inside your
-own parallel region is honoured: with nesting off the team collapses to one thread, and the answer
-does not change.
+process naming `optimisation`; `parquet_set_verbosity("silent")` quiets it. **That notice is the
+only thing this module can print, and its two knobs are re-exported here** —
+`parquet_set_verbosity`, `parquet_get_verbosity`, `parquet_set_message_stream` and
+`parquet_get_message_stream` — so silencing it needs no second import; reaching for
+`parquet_settings` instead would put the Arrow stack back into a build this module keeps clear of
+it. A call from inside your own parallel region is honoured: with nesting off the team collapses to
+one thread, and the answer does not change.
 
 **What a team is worth depends on the objective's own cost.** `pf_minimize_de` synchronises the
 whole team once per generation and `pf_minimize_multistart` once per call, so a team pays for
@@ -311,13 +353,15 @@ reached by leaving an argument out.
 
 ## The evaluation budget and what `info` reports
 
-`max_neval` is a **soft** bound: it is tested once per engine step, so a run may overshoot it by
-one step — the simplex's `n+2`, one more Brent iteration, or one whole DE generation. It cannot be
-honoured below `n+1` in the simplex, or below `np` in DE, since the starting simplex or population
-has to be evaluated before the budget can be tested for the first time. Running out of budget is
-not an error: `info%status` is `PF_OPT_LIMIT`, `info%converged` is false, `x` and `fmin` hold the
-best point seen, and nothing is printed. `pf_minimize_multistart` has no `max_neval` of its own —
-the budget belongs to the solver object, and `info%nlimit` counts the runs that spent it.
+`max_neval` is a **soft** bound for the two engines that take a step at a time: the simplex may
+overshoot it by one step of `n+2` evaluations and `pf_minimize_de` by one whole generation of `np`.
+`pf_minimize_scalar` never overshoots — it tests the count before each evaluation, and an iteration
+costs exactly one. It cannot be honoured below `n+1` in the simplex, or below `np` in DE, since the
+starting simplex or population has to be evaluated before the budget can be tested for the first
+time. Running out of budget is not an error: `info%status` is `PF_OPT_LIMIT`, `info%converged` is
+false, `x` and `fmin` hold the best point seen, and nothing is printed. `pf_minimize_multistart`
+has no `max_neval` of its own — the budget belongs to the solver object, and `info%nlimit` counts
+the runs that spent it.
 
 `converged=` is the short answer, and every engine answers it: an optional `logical`,
 `intent(out)`, set on every path whether or not `info` was asked for, and always equal to
@@ -343,28 +387,6 @@ exactly that — so the final simplex is not the record's tail. What the record 
 whole search path, the best point (`minval(f(1:n))`, which equals `fmin`), and every vertex the run
 ever held.
 
-## Which engine to reach for
-
-**One variable and a bracket**: Brent. It needs no step and no start point, and on a smooth
-function it is the cheapest thing here by a wide margin.
-
-**A smooth objective in a few variables, and a good start point**: the simplex. It handles a kink
-at the minimum, which a model-based solver would not, and it needs only values.
-
-**Several basins over a box, or a start point you cannot guess**: the multistart driver. A local
-engine converges to whichever basin it starts in and reports success for doing so, so the answer
-is to start in all of them; twenty starts over a two-variable box will usually find every basin
-wide enough to catch one, at a few thousand evaluations in total.
-
-**A rugged objective — many minima, or no useful start point at all**: `pf_minimize_de`. It costs
-an order of magnitude more evaluations than the multistart driver on a function both can solve, and
-it is the only one of the four that solves a function with thousands of local minima. On Rastrigin
-in five variables, thirty local runs from random starts found the global minimum none of the time;
-DE found it in tens of thousands of evaluations.
-
-**A smooth objective where the last few digits matter**: DE with `polish=.true.`, which hands the
-best individual to the simplex, or DE followed by your own local run from the point it returned.
-
 ## Important behaviour
 
 - **`x` holds the best point found on return**, and `fmin` its value.
@@ -387,19 +409,21 @@ best individual to the simplex, or DE followed by your own local run from the po
   simplex make is a comparison of values and the answer would otherwise be silently wrong. The
   population engines treat one as a point outside the domain instead — see the DE section above,
   and note that `pf_minimize_multistart` inherits its solver's policy, not DE's.
-- **Caller mistakes abort too** (`error stop`, silently — nothing is logged first): a bracket that
-  is not `a < b` with finite ends, fewer than one variable, a `step` of the wrong size or
-  containing zero or NaN, a NaN in the start point, a negative or non-finite tolerance, both
-  tolerances zero, a budget that is not positive or exceeds `huge(1)/2`, a box whose sizes disagree
-  or whose bounds are not finite and ordered, a bracket or a box whose WIDTH is not finite
-  (`+/-1e308` is two finite bounds and an infinite width), `np` below 4, `f_weight` outside
-  `(0, 2]`, `cr`
-  outside `[0, 1]`, a `max_gen` or `nstart` below 1, a negative `merge_tol`, and a `threads` below 1.
-  Failure to converge is **not** one of these — it is reported through `info`. `context=` adds your
-  own text to any such message, capped at 100 characters.
-- **Nothing here is process-global.** No entry point reads a setting, and no call holds state
-  between calls, so separate minimisations may run concurrently — each at `threads = 1` when they
-  are already inside your own parallel region.
+- **Caller mistakes abort too** (`error stop`, silently — nothing is logged first): an objective
+  extending `pf_constrained_objective`, which no engine here honours, a bracket that is not `a < b`
+  with finite ends, fewer than one variable, a `step` of the wrong size or containing zero or NaN,
+  a NaN in the start point, an `rtol` or `atol` that is negative or non-finite, both of them zero,
+  a `max_neval` that is not positive or exceeds `huge(1)/2`, a `lower` or `upper` whose size
+  disagrees with the point's, bounds that are not finite and ordered, a bracket or a box whose
+  WIDTH is not finite (`+/-1e308` is two finite bounds and an infinite width), `np` below 4,
+  `f_weight` outside `(0, 2]`, `cr` outside `[0, 1]`, a `max_gen` or `nstart` below 1, a `threads`
+  below 1, and a `merge_tol` that is not a finite non-negative number. Failure to converge is
+  **not** one of these — it is reported through `info`. `context=` adds your own text to any such
+  message, capped at 100 characters.
+- **Nothing here is process-global.** No entry point takes its behaviour from a setting — the
+  verbosity pair above governs one notice and nothing else — and no call holds state between
+  calls, so separate minimisations may run concurrently, each at `threads = 1` when they are
+  already inside your own parallel region.
 
 ## Moving from qfeet's `minimize`
 
@@ -419,5 +443,5 @@ The simplex is a port, and the mapping is mechanical:
 step, so a migrated call reaches the same minimum by the same path — under a value-safe
 floating-point model, which every profile this library builds selects, and not under a model that
 reassociates arithmetic, where the two can part at one accept/reject decision and thereafter
-entirely. What changed is that a non-finite value from the objective now aborts mid-run rather than
-only in the starting simplex.
+entirely. The one behavioural difference is that a non-finite value from the objective aborts
+mid-run here, where qfeet's `minimize` refuses one only in the starting simplex.

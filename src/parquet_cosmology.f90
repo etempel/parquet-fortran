@@ -10,7 +10,7 @@
 !! dl = cosmo%luminosity_distance(z)                    ! Mpc, a whole column in one call
 !! ```
 !!
-!! Six families, all over `real64`:
+!! Seven families, all over `real64`:
 !!
 !! * **Distances** -- `%comoving_distance`, `%comoving_transverse_distance`,
 !!   `%luminosity_distance`, `%angular_diameter_distance`, `%comoving_distance_z1z2`,
@@ -46,7 +46,9 @@
 !! CPL factor `f_DE = x^(3(1 + w0 + wa)) exp(-3 wa z/x)`, and Komatsu's fit for massive neutrinos.
 !! `Om0` excludes massive neutrinos, which are counted in `Onu0`; `Tcmb0 = 0`, the default, switches
 !! radiation and neutrinos off entirely, as astropy's `FlatLambdaCDM(H0, Om0)` does. So a
-!! `"Planck18"` built here answers what astropy's `Planck18` answers, to about `1e-8`.
+!! `"Planck18"` built here answers what astropy's `Planck18` answers, to about `1e-11`; the
+!! agreement loosens to about `1e-7` for a radiation-free model at `z = 1e-8`, where astropy's own
+!! quadrature is working to an absolute tolerance on an integral that small.
 !! `tools/generate_cosmology_reference.py` derives the golden rows at 30 digits, and its
 !! `--self-test` holds every literal below to the double nearest the derived value.
 !!
@@ -177,8 +179,8 @@ module parquet_cosmology
     ! ---- The Aubourg et al. (2015) drag-scale fit, AS PUBLISHED ------------------------------
     !
     ! Physical Review D 92, 123516, equation (16). Every literal is the paper's own; the fit
-    ! replaced Eisenstein and Hu's `z_drag` here after CAMB showed the older combination 2.5% out
-    ! (`feature_cosmology_extra.md` section 3.2). `%r_drag` is the only binding that reads them,
+    ! replaced Eisenstein and Hu's `z_drag` here after CAMB showed the older combination 2.5% out.
+    ! `%r_drag` is the only binding that reads them,
     ! and `test/test_cosmology.f90` restates the whole formula from its own copies, so a
     ! transcribed exponent shows up as a disagreement rather than as a shared mistake.
 
@@ -490,7 +492,7 @@ module parquet_cosmology
         type(cosmology_params)  :: p                    !! the parameters as given
         type(cosmology_derived) :: d                    !! what `%init` derived from them
         character(len=:), allocatable :: label          !! the canonical name, or the caller's
-        ! The three FORWARD tables are quintic Hermite over the uniform grid: a value and an
+        ! The four FORWARD tables are quintic Hermite over the uniform grid: a value and an
         ! analytic slope at every node, and no abscissae, because the nodes are the integer
         ! lattice times `PFC_H` and the interval is found by one division. See `quintic_at`.
         real(real64), allocatable :: fv(:)              !! `D_C(zeta)/zeta` at the nodes

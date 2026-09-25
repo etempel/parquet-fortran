@@ -426,7 +426,7 @@ library does. Neither bound moves for an unreleased surface (A8).
 | README | an API-overview entry, a stale link into the guide, a claim the source contradicts |
 | CONTRIBUTING.md, CHANGELOG.md, CLAUDE.md and `.claude/rules/` | a stale link or anchor. A published changelog section: a dead link only. `[Unreleased]`: a factual correction (an argument the code lacks, a default the source contradicts); restructuring it or moving entries between groups is proposed |
 | `feature_risks.md` | a stale link or anchor only; never an entry, a number or a deletion |
-| source doc-comments | a wrong or stale doc-comment within the bounds |
+| source comments | a wrong or stale `!>`/`!!` doc-comment, or a plain `!` code comment, within the bounds |
 | generated sources | the same fix in the generator's template, regenerated, never in the emitted file |
 | tests | only a mirrored example and its assertions, together with the page; a new test is proposed |
 | scratch planning files | a broken link or anchor only; anything else needs approval |

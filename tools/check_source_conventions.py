@@ -2820,6 +2820,181 @@ def check_cosmology_config_names_match_the_library():
     return []
 
 
+def check_cosmology_config_keys_documented():
+    """The `[cosmology]` key table on the guide page is `CFG_KEYS`, in both directions.
+
+    `check_cosmology_config_keys_match_init` ties `CFG_KEYS` to `cosmology_init_params`' arguments,
+    and its own failure text asks whoever fixes it to update "its row in the guide page's key
+    table" -- but nothing reads that table. A key added to both source lists and not to the page is
+    then undocumented with every check green, and a row left on the page for a key the reader no
+    longer accepts sends a caller to write a key that is read and dropped.
+
+    Reads the NARROWEST part of the page that carries the claim: the table's FIRST column only. The
+    `note` column legitimately names `%is_flat()`, `%ob0()` and `%init`, and the prose around the
+    table names `ode0`, `ob0` and `m_nu` again when it explains which three have no absent value --
+    matching on the whole row or the whole section would accept a table that had lost a row.
+
+    FAILS rather than passes when it goes blind: a missing page, a missing heading, a table that
+    cannot be found under it, or an unreadable `CFG_KEYS` are each reported as needing this check
+    updated.
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "configuration-files.md"
+    cfg = REPO_ROOT / "src" / "parquet_cosmology_config.f90"
+    if not page.exists():
+        return ["doc/pages/utilities/configuration-files.md is missing -- this check needs "
+                "updating, and until it is nothing ties the [cosmology] key table to CFG_KEYS"]
+    keys = _fortran_char_array_literal(cfg, "CFG_KEYS")
+    if not keys:
+        return ["src/parquet_cosmology_config.f90: CFG_KEYS could not be read -- this check needs "
+                "updating, and until it is nothing ties it to the guide page's key table"]
+
+    lines = page.read_text(encoding="utf-8").split("\n")
+    anchor = "## A cosmology in a configuration file"
+    start = next((i for i, l in enumerate(lines) if l.strip() == anchor), None)
+    if start is None:
+        return ["doc/pages/utilities/configuration-files.md: the heading '%s' is gone -- this "
+                "check reads the key table under it and can no longer find it, so nothing compares "
+                "the table with CFG_KEYS. Update the check with the new heading." % anchor]
+    # the section runs to the next `## ` heading
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("## ")), len(lines))
+
+    documented, in_table = [], False
+    for line in lines[start:end]:
+        stripped = line.strip()
+        if stripped.startswith("| key |"):
+            in_table = True
+            continue
+        if in_table:
+            if not stripped.startswith("|"):
+                break
+            cell = stripped.split("|")[1].strip()
+            if set(cell) <= set("-: "):          # the delimiter row
+                continue
+            m = re.fullmatch(r"`([a-z_0-9]+)`", cell)
+            if m:
+                documented.append(m.group(1))
+    if not documented:
+        return ["doc/pages/utilities/configuration-files.md: no `| key | ...` table was found "
+                "under '%s', or its first column holds no `key` cells -- this check needs "
+                "updating, and until it is nothing compares the page with CFG_KEYS." % anchor]
+
+    want, got = set(k.strip() for k in keys), set(documented)
+    problems = []
+    for name in sorted(want - got):
+        problems.append(
+            "doc/pages/utilities/configuration-files.md: the [cosmology] key table has no row for "
+            "`%s`, which CFG_KEYS carries -- a caller cannot learn the key exists. Add the row, "
+            "with what an absent key means." % name)
+    for name in sorted(got - want):
+        problems.append(
+            "doc/pages/utilities/configuration-files.md: the [cosmology] key table has a row for "
+            "`%s`, which CFG_KEYS does not carry -- the reader would drop it. Remove the row, or "
+            "add the key to CFG_KEYS and to %%init." % name)
+    return problems
+
+
+def check_cosmology_named_documented():
+    """The eight named cosmologies: the one written-out list, and every page that counts them.
+
+    `utilities/cosmology.md` is the only page that writes the names out;
+    `utilities/configuration-files.md` says "the eight" six times and lists them nowhere, which is
+    why it links to `cosmology.md`. Two hand-written claims the code owns, and neither is tied to
+    it: a ninth cosmology, or a renamed one, leaves the written-out list quietly wrong and every
+    "the eight" quietly miscounting. `check_cosmology_config_names_match_the_library` ties
+    `CFG_NAMED` to `pfc_named_name` and reads no page.
+
+    Reads the NARROWEST part that carries each claim. For the list, the ONE sentence that
+    introduces it, found by its own anchor phrase plus its continuation -- not the page, because
+    every one of the eight appears elsewhere on it, so a page that had LOST a name would still
+    match. For the count, only the number word immediately before a "named cosmolog..."/"of the"
+    phrase, so ordinary prose containing a number is not read as a count.
+
+    An unreadable `CFG_NAMED`, a missing page, an anchor phrase that no longer matches, or a
+    sentence that turns out to name none of them each FAIL.
+    """
+    NUMBER_WORD = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
+                   8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+    cfg = REPO_ROOT / "src" / "parquet_cosmology_config.f90"
+    named = _fortran_char_array_literal(cfg, "CFG_NAMED")
+    if not named:
+        return ["src/parquet_cosmology_config.f90: CFG_NAMED could not be read -- this check needs "
+                "updating, and until it is nothing ties the guide pages to it"]
+    want = set(n.strip() for n in named)
+    word = NUMBER_WORD.get(len(want))
+    if word is None:
+        return ["src/parquet_cosmology_config.f90: CFG_NAMED holds %d names and this check only "
+                "spells counts up to %d -- update it." % (len(want), max(NUMBER_WORD))]
+
+    problems = []
+
+    # (1) the one written-out list
+    rel, anchor = "doc/pages/utilities/cosmology.md", "The named cosmologies are"
+    page = REPO_ROOT / rel
+    if not page.exists():
+        problems.append("%s is missing -- this check needs updating, and until it is nothing ties "
+                        "the written-out list of the eight to CFG_NAMED" % rel)
+    else:
+        lines = page.read_text(encoding="utf-8").split("\n")
+        hit = next((i for i, l in enumerate(lines) if anchor in l), None)
+        if hit is None:
+            problems.append(
+                "%s: the phrase '%s' is gone -- this check reads the list of named cosmologies "
+                "from that sentence and can no longer find it, so nothing compares the page with "
+                "CFG_NAMED. Update the check with the new wording." % (rel, anchor))
+        else:
+            blob = []
+            for line in lines[hit:]:
+                if not line.strip():
+                    break
+                blob.append(line)
+            found = set(re.findall(r"`(WMAP[0-9]+|Planck[0-9]+)`", " ".join(blob)))
+            if not found:
+                problems.append(
+                    "%s: the sentence at '%s' names no cosmology in backticks -- this check needs "
+                    "updating, and until it is nothing compares the page with CFG_NAMED."
+                    % (rel, anchor))
+            for name in sorted(want - found):
+                problems.append("%s: the sentence introducing the named cosmologies omits `%s`, "
+                                "which CFG_NAMED carries -- a reader cannot learn it can be "
+                                "selected." % (rel, name))
+            for name in sorted(found - want):
+                problems.append("%s: the sentence introducing the named cosmologies names `%s`, "
+                                "which CFG_NAMED does not carry -- selecting it fails with a "
+                                "message about h0." % (rel, name))
+
+    # (2) every page that COUNTS them without listing them
+    counted = 0
+    for rel in ("doc/pages/utilities/cosmology.md",
+                "doc/pages/utilities/configuration-files.md"):
+        page = REPO_ROOT / rel
+        if not page.exists():
+            problems.append("%s is missing -- this check needs updating, and until it is nothing "
+                            "ties its count of the named cosmologies to CFG_NAMED" % rel)
+            continue
+        text = page.read_text(encoding="utf-8")
+        for m in re.finditer(r"\b(?:the|of the)\s+([a-z]+)\s+(?=named cosmolog|are ever|\*\*beside\*\*|selects that|is written)",
+                             text):
+            counted += 1
+            if m.group(1) != word:
+                problems.append(
+                    "%s: '%s' counts the named cosmologies, but CFG_NAMED holds %d (`%s`). Every "
+                    "page that says how many there are moves with the list."
+                    % (rel, m.group(0).strip(), len(want), word))
+        for m in re.finditer(r"\bnot one of the ([a-z]+)\b", text):
+            counted += 1
+            if m.group(1) != word:
+                problems.append(
+                    "%s: 'not one of the %s' counts the named cosmologies, but CFG_NAMED holds %d "
+                    "(`%s`)." % (rel, m.group(1), len(want), word))
+    if counted == 0:
+        problems.append(
+            "no page was found counting the named cosmologies -- this check reads phrases of the "
+            "form 'the <number> named cosmologies' and 'not one of the <number>' and matched none, "
+            "so nothing ties those counts to CFG_NAMED. Update the check with the new wording.")
+    return problems
+
+
 def check_cosmology_drag_bracket_matches_the_oracle():
     """`%z_drag`'s bracket is the same two redshifts in the library and in its oracle.
 
@@ -9978,6 +10153,8 @@ CHECKS = (
     ("parquet_cosmology stays Arrow-free", check_parquet_cosmology_stays_arrow_free),
     ("parquet_cosmology_config stays Arrow-free", check_parquet_cosmology_config_stays_arrow_free),
     ("the [cosmology] section's keys are %init's arguments", check_cosmology_config_keys_match_init),
+    ("the [cosmology] key table is documented", check_cosmology_config_keys_documented),
+    ("the named cosmologies are listed once and counted right", check_cosmology_named_documented),
     ("parquet_cosmology_config's named list is the library's",
      check_cosmology_config_names_match_the_library),
     ("z_drag's bracket is the same in the library and its oracle",

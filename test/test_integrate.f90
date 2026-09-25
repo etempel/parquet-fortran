@@ -1881,8 +1881,7 @@ contains
         do budget = 1, 200
             select case (which)
             case (1)
-                POLY_DEGREE = 4
-                r = pf_integrate(poly_even, a, b, 1.0e-13_real64, max_neval=budget, info=info)
+                r = pf_integrate(poly_4, a, b, 1.0e-13_real64, max_neval=budget, info=info)
             case (2)
                 r = pf_integrate(inv_pow15, a, b, 1.0e-13_real64, max_neval=budget, info=info)
             case (4)
@@ -1974,9 +1973,8 @@ contains
         real(real64)            :: r, want, err30, err32
         character(len=200)      :: msg
 
-        POLY_DEGREE = 30
-        want = 2.0_real64/real(POLY_DEGREE + 1, real64)
-        r = pf_integrate(poly_even, -1.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=ONE_RULE, &
+        want = 2.0_real64/31.0_real64
+        r = pf_integrate(poly_30, -1.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=ONE_RULE, &
                          extrapolate=.false., info=info)
         call check(error, info%neval == ONE_RULE, &
                    "degree 30 must be settled in one rule application")
@@ -1987,9 +1985,8 @@ contains
         call check(error, err30 <= 8.0_real64*epsilon(1.0_real64), trim(msg))
         if (allocated(error)) return
 
-        POLY_DEGREE = 32
-        want = 2.0_real64/real(POLY_DEGREE + 1, real64)
-        r = pf_integrate(poly_even, -1.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=ONE_RULE, &
+        want = 2.0_real64/33.0_real64
+        r = pf_integrate(poly_32, -1.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=ONE_RULE, &
                          extrapolate=.false., info=info)
         err32 = abs(info%partition_integral - want)/want
         write(msg, '(a, es12.5, a, es12.5)') "and x**32 must NOT be exact, or the degree is " // &

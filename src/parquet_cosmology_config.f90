@@ -365,7 +365,7 @@ contains
     !> Refuses a section whose `name` is one of the eight and which also sets a model parameter.
     !!
     !! The two say different things and neither reading is safe: taking the name silently ignores
-    !! the parameters, and taking the parameters produces an object whose `%get_name()` claims a
+    !! the parameters, and taking the parameters produces an object whose `%get_name` claims a
     !! realization it does not have.
     subroutine refuse_named_with_parameters(sect, label, ctx)
         type(pf_toml), intent(in)    :: sect  !! the section being read

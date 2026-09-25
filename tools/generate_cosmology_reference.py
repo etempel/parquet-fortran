@@ -12,8 +12,8 @@ Emitted (COMMITTED to the repository, like every other generator's output):
 
   test/test_cosmology_vectors.f90  module `test_cosmology_vectors`: the model grid (the eight named
                                    cosmologies and twelve user-defined ones, with their derived
-                                   parameters); every quantity of section 4.2 of feature_cosmology.md
-                                   at twenty-five redshifts of each; and a block of
+                                   parameters); every quantity of `CQ_NAMES` below at
+                                   twenty-five redshifts of each; and a block of
                                    `D_A(z1, z2)` PAIRS, the one stage-1 binding no single-redshift
                                    row reaches.
 
@@ -149,7 +149,7 @@ def bits64(x):
 
 
 # ---------------------------------------------------------------------------------------------
-# The constants (section 4.7 of feature_cosmology.md). Each is the value the module carries, and
+# The constants. Each is the value the module carries, and
 # `--self-test` holds the module's literal to the double nearest the value here.
 # ---------------------------------------------------------------------------------------------
 
@@ -1515,7 +1515,7 @@ def self_test():
 # ---------------------------------------------------------------------------------------------
 
 #: Quantities astropy defines the same way at a BLUESHIFT. `distmod` and the angular scales are
-#: left out: their sign conventions are fixed by feature_cosmology.md section 4.2, not inherited.
+#: left out: this model fixes their sign conventions itself rather than inheriting them.
 NEGATIVE_SAFE = {"dc", "dm", "dl", "da", "tl", "age", "efunc", "hubble",
                  "om", "ode", "ok", "ogamma", "onu", "tcmb", "w", "de_density_scale",
                  "critical_density", "lookback_distance"}
@@ -1538,7 +1538,7 @@ AGE_ORACLE_CEILING = mp.mpf(1000)
 #: form differences two numbers that agree to sixteen digits, and at `z = 1e-8` it retains none.
 #: This model computes the same expression at 30 digits and is right, so the disagreement is
 #: astropy's; the rows are kept and simply not compared here. The library reaches them through the
-#: series of feature_cosmology.md section 4.2 for exactly the same reason.
+#: series `comoving_volume` uses below, for exactly the same reason.
 VOLUME_ORACLE_FLOOR = 1e-3
 
 
@@ -1704,8 +1704,8 @@ def verify_sound_libraries(ms):
     * A MASSIVE neutrino costs an order of magnitude. Massless models agree to `1.8e-06` against
       CAMB and `2.5e-07` against CLASS; one 0.06 eV species takes those to `9.0e-06` and `1.1e-05`.
       That is astropy's Komatsu fit for the massive density against each code's exact Fermi-Dirac
-      integration, not either integral drifting, and it is why `feature_cosmology_extra.md` section
-      3.2's headline numbers -- measured on five massless models -- are the massless ones. Both
+      integration, not either integral drifting, and it is why the headline numbers quoted on the
+      guide page -- measured on five massless models -- are the massless ones. Both
       classes are compared; the bound is set from the massive one and both worsts are printed.
     * The Aubourg FIT is only compared where the model is inside the range it was calibrated on.
       `Ob h^2` near `0.0224` and `Ocb h^2` near `0.1417` is what the paper fits over; a model six

@@ -668,6 +668,8 @@ contains
             call scenario_cosmology_config_missing_section()
         case ("cosmology_config_named_with_parameters")
             call scenario_cosmology_config_named_with_parameters()
+        case ("cosmology_config_array_of_tables")
+            call scenario_cosmology_config_array_of_tables()
         case ("cosmology_config_bad_type")
             call scenario_cosmology_config_bad_type()
         case ("cosmology_config_mnu_length")
@@ -5564,6 +5566,27 @@ contains
         call pf_cosmology_from_toml(conf, c)
         print '(a, l1)', "accepted a named cosmology given parameters too, built: ", c%is_initialised()
     end subroutine scenario_cosmology_config_named_with_parameters
+    !
+    !> A `[[cosmology]]` ARRAY of tables is not this section -- and `found=` does not soften it.
+    !!
+    !! `found=` is the opt-out for an ABSENT section. Reaching the refusal WITH it present is the
+    !! whole point: absence is a configuration choice and a name of the wrong shape is a
+    !! programming error, so only the first is answerable. A run that printed instead of aborting
+    !! would mean the shape had become answerable too.
+    subroutine scenario_cosmology_config_array_of_tables()
+        type(pf_toml) :: conf
+        type(pf_cosmology) :: c
+        logical :: there
+        character(len=1) :: nl
+
+        nl = new_line("a")
+        call pf_toml_loads(conf, '[general]' // nl // 'nproc = 1' // nl // &
+                                 '[[cosmology]]' // nl // 'name = "Planck18"' // nl // &
+                                 '[[cosmology]]' // nl // 'name = "WMAP9"' // nl, name = "run.toml")
+        call pf_cosmology_from_toml(conf, c, found = there)
+        print '(a, l1, a, l1)', "accepted a [[cosmology]] array of tables, found: ", there, &
+            ", built: ", c%is_initialised()
+    end subroutine scenario_cosmology_config_array_of_tables
     !
     !> A key of the wrong type is `parquet_toml`'s abort, with the offending line quoted.
     subroutine scenario_cosmology_config_bad_type()

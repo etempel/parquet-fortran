@@ -9,9 +9,11 @@ Arrow stack. `use parquet` brings it in too, so nothing here needs a second impo
 [Choosing a module](../operating/choosing-a-module.html) for what each entry module costs.
 
 The model is astropy's `w0waCDM`, with every constant and literal as astropy 8.0.1 writes them, so
-a `"Planck18"` built here answers what astropy's `Planck18` answers to about one part in a hundred
-million. Eight named cosmologies come ready; any flat, open, closed, `wCDM` or `w0waCDM` model of
-your own is a call away.
+a `"Planck18"` built here answers what astropy's `Planck18` answers to about a part in `1e11`.
+That is the agreement for a named cosmology; it loosens to about `1e-7` for a radiation-free model
+at `z = 1e-8`, where astropy's own quadrature is working to an absolute tolerance on an integral
+that small. Eight named cosmologies come ready; any flat, open, closed, `wCDM` or `w0waCDM` model
+of your own is a call away.
 
 ## Quick example
 
@@ -20,7 +22,13 @@ use parquet_cosmology
 use iso_fortran_env, only : real64
 
 type(pf_cosmology) :: cosmo
-real(real64), allocatable :: z(:), dl(:), mabs(:), vol(:)
+real(real64), allocatable :: z(:), mag(:), dl(:), mabs(:), vol(:)
+real(real64), parameter :: pi = 3.141592653589793_real64
+real(real64), parameter :: area_sr = 0.1524_real64  ! a survey of 500 square degrees
+integer :: i
+
+z   = [(0.05_real64*i, i = 1, 40)]                  ! your catalogue's columns
+mag = 19.0_real64 + 0.5_real64*z
 
 call cosmo%init("Planck18")
 dl   = cosmo%luminosity_distance(z)                 ! Mpc, the whole column in one call
@@ -86,12 +94,14 @@ call base%clone(shifted, h0=70.0_real64)          ! the same model, a different 
 
 `%clone` takes the same optional arguments `%init` does and fills every one you leave out from the
 source. A source that is flat because `ode0` was omitted is cloned the same way, so the copy of a
-flat model is flat whatever else changed.
+flat model is flat whatever else changed. The one combination it refuses is a `neff` that moves
+`floor(neff)` across a species boundary without an `m_nu` to match: the masses it would carry over
+are the wrong number of them, and `%init` says so.
 
 **A run's cosmology can come from its configuration file** rather than from parameters compiled
 into the program: `pf_cosmology_from_toml` builds one of these objects from the `[cosmology]`
 section of a TOML file, and `pf_cosmology_to_toml` writes one back. See
-[A cosmology in a configuration file](../utilities/configuration-files.html#a-cosmology-in-a-configuration-file).
+[A cosmology in a configuration file](configuration-files.html#a-cosmology-in-a-configuration-file).
 
 ## What it answers
 
@@ -125,7 +135,7 @@ across finds the same words; the two exceptions are forced by Fortran, which can
 | `%otot(z)` | `1 - Ok(z)`; EXACTLY one at every `z` for a flat model |
 | `%ob(z)`, `%odm(z)` | the baryon and cold-dark-matter density parameters; NaN when no `ob0` was given |
 | `%nu_relative_density(z)` | Komatsu's fit itself, `Onu(z)/Ogamma(z)` |
-| `%onu_species(z, v)` | `Onu(z)` split by species, summing to `%onu(z)` |
+| `%onu_species(z, v)` | `Onu(z)` split by species, summing to `%onu(z)`; `v` is an allocatable this allocates |
 | `%tcmb(z)` | the CMB temperature at `z`, in K |
 | `%tnu(z)` | the neutrino temperature at `z`, in K |
 | `%w(z)`, `%de_density_scale(z)` | the dark-energy equation of state, and its density in units of today's |
@@ -164,7 +174,7 @@ Three of these repay a closer look:
   over at the antipode. A negative distance therefore answers NaN rather than the blueshift that
   shares it. `%z_at_age` has no such trouble — the age falls monotonically with redshift — and it
   is solved on `ln(age)`, which is what lets it work at the top of the domain, where the age is
-  a fifth of an attosecond and `%age(0)` minus a lookback time would keep no digit of it.
+  about a quarter of a second and `%age(0)` minus a lookback time would keep no digit of it.
 
 `%clear` releases the tables and returns the object to unbuilt; it is harmless on a fresh one. A
 second `%init` simply replaces the object, which is how a program switches cosmology. Intrinsic
@@ -250,7 +260,7 @@ neutrino density against each code's exact integration, not this integral drifti
 
 **`%r_drag()` is a fit** — Aubourg et al. (2015), equation 16 — a closed form over `Om0 h²`,
 `Ob0 h²` and the massive-neutrino density, which knows nothing of `Tcmb0`, `w0` or curvature. It is
-right to about two parts in ten thousand for the Planck and WMAP cosmologies, so a caller reading
+right to about four parts in ten thousand for the Planck and WMAP cosmologies, so a caller reading
 `147.09` off it should read three digits and not sixteen. **Away from the parameters it was
 calibrated on it is much worse**: for a model carrying six times Planck's baryon density it is 15%
 from CAMB, while `%sound_horizon` for the same model is still right to `6e-06`. If your cosmology
@@ -292,12 +302,11 @@ table's own accuracy**: tens of nanoseconds inside the table, and microseconds t
 microseconds outside it, rising with how far outside you go —
 `bench/benchmark_cosmology.sh` measures both. A program that queries beyond `z = 1100` in a hot
 loop passes a larger `zmax=`; a program that never leaves `z < 1` may pass a smaller one and build
-faster, and one that never passes a negative redshift may pass `zmin=0` and skip about a third of
-the build. Either way the answers agree to the accuracy below.
+faster, and one that never passes a negative redshift may pass `zmin=0` and skip about a quarter
+of the build. Either way the answers agree to the accuracy below.
 
 The fourth integral is the absorption distance's, and it is built whether or not you ask for that
-binding, because the object is fixed once `%init` returns. It is about half the build's cost
-again; `zmin=0` gives back rather more than it takes.
+binding, because the object is fixed once `%init` returns.
 
 **Growth is the one quantity `zmax` does not move at all.** The growing mode is an attractor in
 the direction of time and only in that direction, so its table is built downward from the top of
@@ -311,7 +320,7 @@ expensive rather than merely slower: the other quantities lay one twenty-point p
 query well below `zmin` costs **tens to hundreds of microseconds** against tens of nanoseconds
 inside. The answer is the same either way — it is the same integrator — so this is a speed knob
 and nothing else: **a program that asks for growth below `z = -0.9` should pass a lower `zmin=`**,
-which puts every such query back on the table at a few nanoseconds apiece and costs a few more
+which puts every such query back on the table at tens of nanoseconds apiece and costs a few more
 milliseconds once, at `%init`. `bench/benchmark_cosmology.sh eval` prints both rows.
 
 `%zmax()` and `%zmin()` report what you asked for. Neither is a boundary: nothing is refused at
@@ -367,12 +376,16 @@ Three admitted inputs answer a signed infinity rather than a number:
   density parameters are zero — the limit, rather than one infinity divided by another.
 
 What aborts is a mistake with no sensible reading: evaluating a cosmology that was never built or
-has been cleared, a name that is not one of the eight, a parameter outside its admitted range
-(`h0` within `[1e-10, 1e10]`, `|w0|` and `|wa|` at most 3, `om0`, `tcmb0` and `neff` non-negative,
-`ob0` at most `om0`, `m_nu` of size `floor(neff)`, `zmax` positive and at most `1e10`), a density
-parameter absurd enough to overflow the arithmetic, or a model with no big bang — one whose
-`E(z)²` goes negative, which `%init` finds while it tabulates and reports with the redshift at
-which it happened. Pass `context=` to `%init` to have your own call site named in any such message.
+has been cleared, a name that is not one of the eight, a parameter outside its admitted range (`h0`
+within `[1e-10, 1e10]`, `|w0|` and `|wa|` at most 3, `om0`, `tcmb0` and `neff` non-negative, `ob0`
+at most `om0`, `ode0` finite, `m_nu` of size `floor(neff)` with every mass non-negative, `zmax`
+positive and at most `1e10`, `zmin` within `(-1, 0]`), a derived density parameter above `1e6` in
+magnitude, or a model with no big bang — one whose `E(z)²` goes negative, which `%init` finds while
+it tabulates and reports with the redshift at which it happened. One more refusal comes from the
+tabulation rather than from the model: where an integral cannot be brought to the module's own
+accuracy, `%init` stops naming the table, the interval it was working on and the integrator's
+status. Pass `context=` to `%init` to have your own call site named in any such message; it is
+capped at 100 characters.
 
 ## Accuracy
 
@@ -395,8 +408,8 @@ ABSOLUTELY rather than relatively, which is the honest statement for a rate betw
 `z = 1e10` it is `5e-7` and at a deep blueshift of a strongly evolving dark-energy model it falls
 through twenty decades, and neither of those carries relative digits worth quoting.
 
-Above about `z = 100` this module and CCL part company by around a part in a thousand, and the
-difference is CCL's initial condition rather than either implementation: CCL starts the equation
+Above about `z = 100` this module and CCL part company, and the difference is CCL's initial
+condition rather than either implementation: CCL starts the equation
 from the pure-matter growing mode `D = a` at `a = 1e-6`, which is inside the radiation era for any
 model with a CMB, and the transient that leaves has not fully decayed by recombination. This
 module starts from the exact matter-radiation growing mode instead, whose answer does not move
@@ -406,13 +419,16 @@ Three accuracy notes worth knowing before you rely on an answer:
 
 - **An inverse is only as well conditioned as the function it inverts.** `dD_C/dz` falls off
   steeply, so at the very top of the domain a distance carrying one unit in the last place fixes
-  the redshift only to about one part in ten. That is the mathematics, not the implementation:
+  the redshift only to about a part in `1e8`. That is the mathematics, not the implementation:
   `%comoving_distance(%z_at_comoving_distance(d))` recovers `d` to about `1e-15` over the whole
   domain, while the redshift itself round-trips that well only up to `z` of order a thousand.
   **`%z_at_lookback_time` runs out four decades sooner**, around `z = 1e6`: the lookback time
   saturates towards the age of the universe long before the comoving distance saturates towards
-  the horizon, so there is less left in it to name a redshift with. Both still recover the
-  QUANTITY that was asked for; it is the redshift that stops being determined.
+  the horizon, so there is less left in it to name a redshift with. By `z = 1e9` one unit in the
+  last place of a lookback time spans about one part in five of the redshift, and above there the
+  time has saturated outright: every redshift shares one `real64` and the inverse answers the one
+  it reaches first. Both still recover the QUANTITY that was asked for; it is the redshift that
+  stops being determined.
 - **`%comoving_distance_z1z2` and `%angular_diameter_distance_z1z2` of a CLOSE pair are integrated
   directly** rather than differenced, because differencing two tabulated distances keeps only the
   digits the pair's own span leaves. Two redshifts a part in `1e4` apart still pin their
@@ -430,9 +446,10 @@ are NaN unless an `ob0=` was given, because a missing baryon fraction is not a z
 
 ## Threads
 
-`%init` and `%clear` are the only bindings that write an object. Every other one is `pure`, so
-**one built cosmology may be evaluated from any number of threads at once**, and two cosmologies
-share nothing. The module has no variable a user's program can reach that is not a constant.
+`%init` and `%clear` are the only bindings that write the object they are called on. Every other
+one only reads it, and every one that takes a redshift is `pure elemental`, so **one built
+cosmology may be evaluated from any number of threads at once**, and two cosmologies share
+nothing. The module has no variable a user's program can reach that is not a constant.
 
 ```fortran
 call cosmo%init("Planck18")        ! once, before the region
@@ -454,8 +471,9 @@ re-`%init`ing it is a race in your program, and the library cannot see it.
 ## Limitations
 
 - `real64` only. A `real32` caller converts at the call.
-- Scalar `Om0`, `Ode0` and the CPL pair only: no arbitrary `w(z)`, no early dark energy, no
-  perturbations, no growth factor and no power spectrum.
+- Scalar `Om0`, `Ode0` and the CPL pair only: no arbitrary `w(z)` and no early dark energy. The
+  growth of structure is the scale-independent linear approximation above; there are no
+  perturbations beyond it and no power spectrum.
 - No comoving Cartesian coordinates. They are a sky direction times a comoving distance, three
   lines with [`parquet_skycoord`](skycoord.html) or [`parquet_sphere`](sphere.html), and importing
   either here would add its whole graph to every consumer of this one.

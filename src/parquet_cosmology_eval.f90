@@ -2,7 +2,7 @@
 !! closed forms over them, the five inverses and the three free redshift conversions.
 !!
 !! Nothing here writes an object, so every procedure may be called from any number of threads at
-!! once. The screens of `feature_cosmology.md` section 4.8 live here: a NaN is tested with
+!! once. The module's NaN screens live here: a NaN is tested with
 !! `x /= x` as its own statement BEFORE any ordered comparison, `min`/`max` or transcendental,
 !! because an ordered comparison against a quiet NaN raises `IEEE_INVALID` under gfortran and
 !! ends the process under nagfor's default `-ieee=stop`.
@@ -37,7 +37,7 @@ submodule (parquet_cosmology) parquet_cosmology_eval
         !! Panels in `b` the age tail takes. ONE is not enough: the radiation-to-matter transition
         !! sits at `b` of order 0.1 to 1, where a single panel is `1.4e-8` out for any model with
         !! radiation, and invisible both at `z >= 1100` (`b <= 0.03`) and without radiation. Eight
-        !! hold `6.6e-15` at every reachable `b_top` (`feature_cosmology.md` section 4.4).
+        !! hold `6.6e-15` at every reachable `b_top`.
 
     real(real64), parameter :: PFC_SOUND_PANEL = 1.0_real64
         !! The width in `v` of one panel of the sound horizon, `b = sound_c sinh(v)`. A WIDTH and

@@ -391,11 +391,13 @@ A run's cosmology is a run parameter, so it belongs in the run's `.toml` file be
 provenance and quality rules — while a cosmology describes the run that made it.
 
 `parquet_cosmology_config` is the module that joins this one to the cosmology tier, and it is a
-module of its own rather than part of either neighbour. `use parquet_cosmology_config` compiles 14
-of this library's Fortran files. Putting the two procedures in `parquet_cosmology` would make every
-consumer of a dependency-free numerical tier fetch toml-f, and putting them in `parquet_toml` would
-make every program that reads a configuration file compile the cosmology tier, its integrator and
-its interpolator; this way nothing anyone already imports grows.
+module of its own rather than part of either neighbour. The object it builds, and everything it
+answers, is [Distances and times in an expanding universe](cosmology.html).
+`use parquet_cosmology_config` compiles 14 of this library's Fortran files. Putting the two
+procedures in `parquet_cosmology` would make every consumer of a dependency-free numerical tier
+fetch toml-f, and putting them in `parquet_toml` would make every program that reads a
+configuration file compile the cosmology tier, its integrator and its interpolator; this way
+nothing anyone already imports grows.
 
 ```fortran
 use parquet_cosmology, only: pf_cosmology
@@ -493,7 +495,9 @@ the section named in it.
 Two shapes are refused rather than guessed at. A `name` that is one of the eight **beside** a model
 parameter is fatal: `name = "Planck18"` with `om0 = 0.25` means two different cosmologies, and
 neither reading is safe. And a `[[cosmology]]` array of tables is not this section; a program that
-wants several cosmologies gives each its own table and passes `section=`.
+wants several cosmologies gives each its own table and passes `section=`. A `found=` does not
+soften that one, because a name of the wrong shape is a programming error rather than a
+configuration choice — the same line the rest of this page draws.
 
 ### Which cosmology did this run use?
 
@@ -516,7 +520,7 @@ are not a cosmological constant.
 cannot be trusted to mean the realization — `%init` lets any model be labelled `"Planck18"`. What
 the file records is the numbers the run used, which is what stays true if the eight are ever
 re-frozen against a newer astropy; the label is what is given up. Read that file back and you get
-the same model, answering the same numbers, with `%get_name()` saying `custom`.
+the same model, answering the same numbers, with `%get_name` saying `custom`.
 
 One more consequence worth knowing before you meet it: **a key the file sets but your program never
 read is absent from a saved file.** A `[cosmology]` key this feature does not know survives in the

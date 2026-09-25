@@ -735,6 +735,8 @@ contains
                 test_cosmology_config_missing_section_aborts), &
                 new_unittest("a named cosmology given parameters as well aborts", &
                 test_cosmology_config_named_with_parameters_aborts), &
+                new_unittest("a [[cosmology]] array of tables aborts even with found=", &
+                test_cosmology_config_array_of_tables_aborts), &
                 new_unittest("a [cosmology] key of the wrong type aborts", &
                 test_cosmology_config_bad_type_aborts), &
                 new_unittest("an m_nu of the wrong length in a file aborts", &
@@ -4265,6 +4267,19 @@ contains
             failure_message="a configuration with no [cosmology] section was expected to error stop", &
             required_stderr="config section not found")
     end subroutine test_cosmology_config_missing_section_aborts
+    !
+    !> `found=` answers for an ABSENT section; a section of the wrong SHAPE is still fatal.
+    !!
+    !! The guide says so on `doc/pages/utilities/configuration-files.md`, and nothing asserted it.
+    !! The message is `parquet_toml`'s, because that is where the shape is decided.
+    subroutine test_cosmology_config_array_of_tables_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "cosmology_config_array_of_tables", &
+            expect_abort=.true., &
+            failure_message="a [[cosmology]] array of tables was expected to error stop even " // &
+                            "with found= present", &
+            required_stderr="config name is not a section: cosmology")
+    end subroutine test_cosmology_config_array_of_tables_aborts
     !
     !> The one message this module writes itself.
     subroutine test_cosmology_config_named_with_parameters_aborts(error)

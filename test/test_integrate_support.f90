@@ -40,7 +40,8 @@ module test_integrate_support
     public :: inv_sqrt, inv_sqrt_exact, mild_pow, mild_pow_exact
     public :: divergent_pow, divergent_pow_finite_part
     public :: scaled_runge, exp_profile
-    public :: zero_then_bump, zero_then_bump_exact, inv_square, poly_even
+    public :: zero_then_bump, zero_then_bump_exact, inv_square
+    public :: poly_4, poly_30, poly_32
 
     !> Where `zero_then_bump` stops being identically zero. Below it the integrand is an EXACT
     !! zero, which is what `negligible` needs to be true (it measures a panel against the panel's
@@ -50,10 +51,6 @@ module test_integrate_support
     real(real64), parameter, public :: ZTB_CENTRE = 2.0e-3_real64
     !> Half-width of `zero_then_bump`'s bump.
     real(real64), parameter, public :: ZTB_HALF = 2.0e-4_real64
-    !> Degree `poly_even` raises its argument to. A module variable so that one fixture can serve
-    !! a sweep over degrees; the tests using it are serial.
-    integer, public :: POLY_DEGREE = 4
-
     !> Half-width of `compact_bump`'s support, which is centred on `BUMP_CENTRE`.
     real(real64), parameter, public :: BUMP_HALF = 0.006_real64
     !> Centre of `compact_bump`; its support is `[1, 1.012]`.
@@ -757,16 +754,44 @@ contains
 
     end function inv_square
 
-    !> `x**POLY_DEGREE`, for testing the degree the 21-point rule is exact to.
+    !> `x**4`, `x**30` and `x**32`: the degrees the 21-point rule's exactness is tested at.
     !!
-    !! The integral over `[-1, 1]` is `2/(POLY_DEGREE + 1)` for an even degree and zero for an odd
-    !! one, so the tests sweep even degrees.
-    function poly_even(x) result(f)
+    !! The integral over `[-1, 1]` is `2/(degree + 1)`, and zero for an odd degree, which is why
+    !! the degrees here are even.
+    !!
+    !! **Each degree is its own procedure, with the exponent written in.** They were one
+    !! `poly_even` reading a public `POLY_DEGREE`, whose comment said "the tests using it are
+    !! serial" -- and they were not: `test_guide_budget_overshoot_bounds` and
+    !! `test_rule_is_exact_to_degree_31` are both in the concurrent `integrate` suite, which
+    !! test-drive dispatches with `!$omp parallel do`, and there is no serial integrate suite.
+    !! The sweep sets 4 two hundred times while the degree test sets 30, so the degree test
+    !! integrated `x**4` and reported a relative error of exactly 5.2 against `2/31`, about one
+    !! run in four. A shared mutable a callback reads cannot be made safe by a comment; the fix is
+    !! not to have one (`.claude/rules/testing.md`, and CLAUDE.md on nondeterministic results).
+    function poly_4(x) result(f)
         real(real64), intent(in) :: x !! point at which to evaluate
         real(real64)             :: f !! the integrand value
 
-        f = x**POLY_DEGREE
+        f = x**4
 
-    end function poly_even
+    end function poly_4
+
+    !> `x**30`. See `poly_4` for why the degree is written in rather than shared.
+    function poly_30(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x**30
+
+    end function poly_30
+
+    !> `x**32`. See `poly_4` for why the degree is written in rather than shared.
+    function poly_32(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x**32
+
+    end function poly_32
 
 end module test_integrate_support

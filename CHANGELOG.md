@@ -171,7 +171,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `WMAP5`, `WMAP3`, `WMAP1`, matched without regard to case) or from parameters of your own —
   `h0`, `om0`, and optionally `ode0` (absent means flat, with `Ok0` exactly zero), `tcmb0`, `neff`,
   `m_nu`, `ob0`, `w0` and `wa` — on astropy's `w0waCDM` definition with astropy 8.0.1's own
-  constants and Komatsu fit, so a `"Planck18"` agrees with astropy's to about `1e-8`. Every
+  constants and Komatsu fit, so a `"Planck18"` agrees with astropy's to about `1e-11`. Every
   binding that takes a redshift is `pure elemental`, so a whole column converts in one call:
   `%comoving_distance`, `%comoving_transverse_distance`, `%luminosity_distance`,
   `%angular_diameter_distance`, `%angular_diameter_distance_z1z2`, `%lookback_time`, `%age`,
@@ -213,7 +213,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bindings that write an object, so one built cosmology may be evaluated from any number of
   threads at once. The free functions `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` need no
   cosmology and keep their digits where the obvious forms lose them. Arrow-free, settings-free and
-  silent.
+  silent. See
+  [Distances and times in an expanding universe](doc/pages/utilities/cosmology.md).
 - **A cosmology from a configuration file: `parquet_cosmology_config`.**
   `pf_cosmology_from_toml` builds a `pf_cosmology` from the `[cosmology]` section of a TOML
   configuration file and `pf_cosmology_to_toml` writes one back into a document, so a run's

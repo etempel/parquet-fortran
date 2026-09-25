@@ -90,7 +90,9 @@ contains
             new_unittest("section= puts a second cosmology in a table of its own", &
                 test_section_argument_names_the_table), &
             new_unittest("a context longer than the cap is carried capped and elided", &
-                test_a_long_context_is_capped) &
+                test_a_long_context_is_capped), &
+            new_unittest("what a real64 looks like in the file, and where it stops meaning anything", &
+                test_guide_toml_number_text) &
             ]
 
     end subroutine collect_tests_cosmology_config
@@ -235,6 +237,60 @@ contains
     ! ================================================================================
 
     !> Every model of the reference grid survives a write, a dump, a load and a read.
+    !> What a `real64` looks like in the file, and the one magnitude at which it stops meaning
+    !! anything.
+    !!
+    !! The text is toml-f's, not this library's, and `doc/pages/utilities/configuration-files.md`
+    !! states it because the limit is INVISIBLE: seventeen significant digits above `1e3` and
+    !! sixteen AFTER the decimal point below it, so `h0 = 67.66` round-trips bit for bit while a
+    !! value under about `5e-17` is written `0.0000000000000000` and read back as exactly zero with
+    !! no diagnostic anywhere. A toml-f bump could move either half and nothing else here would
+    !! fail: the round-trip tests all compare ANSWERS at `ROUND_TRIP_TOL`, which such a change
+    !! would still meet.
+    !!
+    !! The CONTROL is the second assertion. Were the text lossless, `wa = 1e-18` would come back as
+    !! `1e-18` and the "exactly zero" check would fail -- so the test cannot pass by the file
+    !! simply carrying everything.
+    subroutine test_guide_toml_number_text(error)
+        type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
+        type(pf_toml) :: doc, conf
+        type(pf_cosmology) :: c, back
+        character(len=*), parameter :: path = "test_run/cosmology_config_number_text.toml"
+        character(len=400) :: line
+        integer :: u, ios
+        logical :: seen_h0
+
+        call c%init(h0 = 67.66_real64, om0 = 0.30966_real64, wa = 1.0e-18_real64, name = "numbers")
+        call pf_toml_new(doc, path)
+        call pf_cosmology_to_toml(c, doc)
+        call pf_toml_dump(doc, path)
+        call pf_toml_close(doc)
+
+        seen_h0 = .false.
+        open (newunit = u, file = path, status = "old", action = "read")
+        do
+            read (u, '(a)', iostat = ios) line
+            if (ios /= 0) exit
+            if (index(line, "h0 = 67.6599999999999966") > 0) seen_h0 = .true.
+        end do
+        close (u)
+        call check(error, seen_h0, "toml-f must write an h0 of 67.66 as 67.6599999999999966: " // &
+            "sixteen digits after the decimal point, which is what makes it round-trip")
+        if (allocated(error)) return
+
+        call pf_toml_load(conf, path)
+        call pf_cosmology_from_toml(conf, back)
+        call pf_toml_close(conf)
+        call check(error, back%h0() == c%h0(), "h0 must come back bit for bit")
+        if (allocated(error)) return
+        call check(error, back%om0() == c%om0(), "om0 must come back bit for bit")
+        if (allocated(error)) return
+        call check(error, back%wa() == 0.0_real64, &
+            "a wa of 1e-18 must come back as exactly zero: the guide's warning that a value " // &
+            "below about 5e-17 is written 0.0000000000000000 with no diagnostic")
+
+    end subroutine test_guide_toml_number_text
+
     subroutine test_round_trip_answers_agree(error)
         type(error_type), allocatable, intent(out) :: error  !! test-drive's error slot.
         type(pf_toml) :: doc, conf

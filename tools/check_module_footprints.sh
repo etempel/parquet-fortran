@@ -268,7 +268,7 @@ FACADE_EXCLUDES="parquet_sorting_oracle.f90 parquet_table_example.f90 parquet_co
 #                                  no facade: a caller that wants a cosmology from a configuration
 #                                  file names this module, exactly as it already names
 #                                  parquet_toml, and `use parquet` stays clear of a pairing only
-#                                  some programs want (feature_cosmology_config.md section 4).
+#                                  some programs want.
 
 if [ "$mode" = "check" ] && [ -z "$only" ]; then
     _got_parquet="$work/got_parquet"

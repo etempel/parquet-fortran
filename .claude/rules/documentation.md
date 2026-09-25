@@ -87,8 +87,8 @@ Working rules:
   bullet.** Two spaces silently ends the list; a missing blank line swallows the following bullets
   as lazy continuation. Probe by counting `<li>` in the rendered HTML against `^- ` in the source.
   Usually the right move is promoting the bullet to a `###` heading.
-- **Code-fence tags**: `fortran`, `bash`, `yaml`, or bare (program output, plain-text diagrams). A
-  MAML block takes a bare fence or `yaml`; never `maml`.
+- **Code-fence tags**: `fortran`, `bash`, `yaml`, `toml`, or bare (program output, plain-text
+  diagrams). A MAML block takes a bare fence or `yaml`; never `maml`.
 - **Diagrams are plain text** inside a code fence, never Mermaid.
 - README.md carries three dynamic `gitlab.4most.eu` badges; `tools/prep_github_mirroring.sh` swaps
   them when mirroring.

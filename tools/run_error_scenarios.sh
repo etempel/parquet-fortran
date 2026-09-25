@@ -1829,6 +1829,7 @@ scenarios=(
     "cosmology_init_table_not_converged:1"
     "cosmology_config_missing_section:1"
     "cosmology_config_named_with_parameters:1"
+    "cosmology_config_array_of_tables:1"
     "cosmology_config_bad_type:1"
     "cosmology_config_mnu_length:1"
     "cosmology_config_out_of_range:1"

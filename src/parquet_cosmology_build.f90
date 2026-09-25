@@ -136,7 +136,7 @@ contains
         integer      :: i
         character(len=:), allocatable :: num, num2
 
-        ! -- the arguments, in the order section 5.4 of feature_cosmology.md tabulates them ----
+        ! -- the arguments, in the order `cosmology_init_params` declares them ---------------
 
         if (.not. ieee_is_finite(h0) .or. h0 < PFC_H0_MIN .or. h0 > PFC_H0_MAX) then
             call pf_to_str(h0, num)

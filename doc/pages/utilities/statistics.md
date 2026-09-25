@@ -142,7 +142,7 @@ before the common argument block and are, in order:
 |---|---|
 | `n_valid` | how many elements were in the population — the same number `pf_count_valid` returns |
 | `mean` | the (weighted) mean |
-| `variance` / `stddev` | the variance and its square root, both honouring `ddof` |
+| `variance` / `stddev` | the variance and its square root, both honouring `ddof` — the two part company only on a sample scaled to the end of the representable range, where [the standard deviation is representable and the variance is not](#accuracy-is-a-documented-property-not-an-implementation-detail) |
 | `sem` | the **standard error of the mean**, `stddev / sqrt(n_eff)` — how precisely the mean itself is determined, not how spread the values are |
 | `skewness` / `kurtosis` | the standardised third and fourth moments |
 | `vsum` | the (weighted) **sum of the values**, `sum(w*x)` |
@@ -168,7 +168,8 @@ correct `0` and `vmin` is a NaN, so testing all ten would report a failure to a 
 only for the sum and got the right answer. The three counts are always defined and are not tested.
 
 The one-shot forms are `pf_sum`, `pf_mean`, `pf_variance`, `pf_stddev`, `pf_sem`, `pf_skewness` and
-`pf_kurtosis`. Each is that same engine with one output, so they agree with `pf_moments` bit for bit.
+`pf_kurtosis`. Each is that same engine with one output, so they agree with `pf_moments` bit for
+bit.
 
 **An `integer(int64)` population is exact only while every value is.** Every kind widens to
 `real64` on the way in — that is what makes all six return the same bits — so a value above `2⁵³`
@@ -250,12 +251,12 @@ answer is worse than an absent one, so those procedures do not take it.
 The rule is the reference libraries' own: a procedure here takes `weights` exactly where numpy,
 scipy or pandas offers a weighted form of the same statistic.
 
-**Takes `weights`** — `pf_count_valid`, `pf_sum`, `pf_mean`, `pf_gmean`, `pf_hmean`, `pf_variance`,
-`pf_stddev`, `pf_sem`, `pf_skewness`, `pf_kurtosis`, `pf_moments`, `pf_median`, `pf_quantile`,
-`pf_quantiles`, `pf_iqr`, `pf_trim_mean`, `pf_percentile_of_score`, `pf_mad`, `pf_describe`,
-`pf_cov`, `pf_corr` (Pearson only), `pf_mode`, `pf_bucketize`, `pf_histogram`, `pf_bin_edges`,
-`pf_bin_linear` (which no reference library offers; its `weights` are `pf_histogram`'s), and
-`pf_stats%compute`/`%update`.
+**Takes `weights`** — `pf_count_valid`, `pf_sum`, `pf_mean`, `pf_gmean`, `pf_hmean`,
+`pf_probit_mean`, `pf_variance`, `pf_stddev`, `pf_sem`, `pf_skewness`, `pf_kurtosis`, `pf_moments`,
+`pf_median`, `pf_quantile`, `pf_quantiles`, `pf_iqr`, `pf_trim_mean`, `pf_percentile_of_score`,
+`pf_mad`, `pf_probit_scale`, `pf_describe`, `pf_cov`, `pf_corr` (Pearson only), `pf_mode`,
+`pf_bucketize`, `pf_histogram`, `pf_bin_edges`, `pf_bin_linear` (which no reference library offers;
+its `weights` are `pf_histogram`'s), and `pf_stats%compute`/`%update`.
 
 **Does not, and the argument is absent rather than ignored** — so passing one is a compile error
 rather than something to discover at run time:
@@ -265,6 +266,7 @@ rather than something to discover at run time:
 | `pf_zscore` | scipy's `zscore` has no weighted form. A weighted mean over an unweighted scale, or both weighted, are different standardisations and neither leaves the output with unit variance under every convention |
 | `pf_sigma_clipped_stats` | astropy's `sigma_clipped_stats` has none either; a weighted scale estimator inside an iterative clip is a further definitional choice |
 | `pf_cumsum`, `pf_cumprod`, `pf_cummax`, `pf_cummin` | pandas' `cum*` are per-element by nature. A weighted running sum is `pf_cumsum(w*x)`, written at the call site, and the other three have no weighted meaning worth choosing between |
+| `pf_normal_scores`, `pf_probit_fit` | no reference library defines a weighted plotting position, and both are per-order-statistic rather than per-value. `pf_probit_scale` does take `weights`, because it reads two quantiles, which this module already defines a weighted meaning for |
 | `pf_corr(method="spearman")` | no reference library defines a weighted midrank; passing `weights` with that token aborts rather than inventing one |
 
 `pf_bucketize` takes `weights` for one reason only: a zero weight has to remove an element there
@@ -295,8 +297,8 @@ n_eff = W**2 / W2               weight_type="reliability"  (the default; Kish's)
 ```
 
 With every weight equal both are exactly `n_valid`, which is why the choice only has to be made for
-data that is actually weighted. The **variance divisor is not `n_eff - ddof`** — it is `W` reduced by
-`ddof` scaled to the convention:
+data that is actually weighted. The **variance divisor is not `n_eff - ddof`** — it is `W` reduced
+by `ddof` scaled to the convention:
 
 ```
 variance = M2 / (W - ddof)                    weight_type="frequency"
@@ -353,6 +355,24 @@ A second consequence of the fixed block tree is that **the answer does not depen
 count**: the decomposition is a function of the population size alone and never of who walks it. See
 [Threading](#threading) below.
 
+**A sample scaled to either end of the representable range is answered rather than abandoned.**
+Where the plain sum of squared deviations is not a finite positive number, the deviations are
+rescaled by the largest of them and the sum retaken; every other answer is the plain accumulation's,
+to the last bit. What that buys is the **standard deviation**, which is representable over a far
+wider range of samples than the variance is — so on a sample of magnitude `1e200` `pf_stddev`
+answers an ordinary number while `pf_variance` answers `+Infinity`, both with `ok = .true.`, because
+no `real64` holds that variance. **`pf_stddev` is therefore not always `sqrt(pf_variance)`**: take
+the spread from `pf_stddev` and the two agree wherever both are representable. At the other end the
+variance underflows to exactly `0` for a population that genuinely has spread, once the true value
+falls below the smallest `real64`; `pf_stddev` is unaffected there too.
+
+**`pf_cov` and `pf_corr` have no rescaled recomputation**, because a pair has no single scale to
+rescale by. Where a centred sum is not representable they answer a quiet NaN with `ok = .false.`
+rather than ending the process, so a caller who has scaled both samples that far reads the spread
+off `pf_variance` or `pf_stddev` per sample. The two documented identities are unaffected:
+`pf_cov(x, x)` is answered by running the variance itself and `pf_corr(x, x)` from the pairing, so
+both hold at every scale.
+
 ### When a statistic is undefined
 
 An undefined answer is a **quiet NaN**, and `ok=` reports it — never an abort. `ok` is `.true.`
@@ -366,6 +386,7 @@ exactly when the value beside it is not a NaN.
 | fewer than 3 (skewness) or 4 (kurtosis) elements, bias-corrected | that statistic is NaN |
 | contains `+Inf` (or only `-Inf`) | `sum` and `mean` are that infinity with `ok = .true.`; every central moment is NaN |
 | contains **both** `+Inf` and `-Inf` | `sum` and `mean` are NaN too |
+| scaled so far that a centred sum is not representable (`pf_cov`, `pf_corr`) | NaN with `ok = .false.`, where the single-variable family still answers — see [Accuracy is a documented property](#accuracy-is-a-documented-property-not-an-implementation-detail) |
 | fewer than 2 survivors (`pf_probit_fit`) | `loc`, `sigma` and `corr` are all NaN |
 | every value identical (`pf_probit_fit`) | `sigma` exactly `0`, `loc` that value, `corr` NaN |
 | a value outside `[0, 1]` (`pf_probit_mean`) | NaN — it is not a probability |
@@ -397,9 +418,9 @@ tolerance — it is exact equality, and it follows from the fixed block tree abo
 reduced by the same serial code and the blocks are combined in index order, so who computed which
 block is not observable in the result.
 
-With no `threads=`, the count comes from the same rule the sorting family uses — the
-`sort_threads` setting (`parquet_set_sort_threads`), capped by the processors actually available,
-and **1 inside a caller's own parallel region**, so a per-group loop that is already parallel does not nest teams.
+With no `threads=`, the count comes from the same rule the sorting family uses — the `sort_threads`
+setting (`parquet_set_sort_threads`), capped by the processors actually available, and **1 inside a
+caller's own parallel region**, so a per-group loop that is already parallel does not nest teams.
 There is deliberately no separate statistics thread setting; one question has one answer.
 
 Four things worth knowing before reaching for `threads=`:
@@ -653,9 +674,9 @@ call s%print(name="mag")
 `pf_describe` is `%compute` followed by `%prepare_order`: **one pair of traversals and one
 ordering**, after which the count, the mean, the standard deviation, the extremes and every quantile
 are reads. Its `ok=` is `.false.` for exactly the two populations that leave every tier-A query on
-the object a NaN — one that is empty after the exclusions, and one that kept a NaN under
-`skipnan = .false.` — so it is the one thing about the result a caller cannot read off the object
-itself, which carries the counts but no `%ok()`. `%print` renders the block pandas' `describe()` prints:
+the object a NaN — one that is empty after the exclusions, and one that kept a NaN under `skipnan =
+.false.` — so it is the one thing about the result a caller cannot read off the object itself, which
+carries the counts but no `%ok()`. `%print` renders the block pandas' `describe()` prints:
 
 ```
 pf_stats mag
@@ -759,8 +780,8 @@ call pf_corr(mag, redshift, r, method="spearman")     ! Pearson over midranks
 
 **Pairwise-complete, and that is the only defensible rule.** A pair enters the population only when
 both of its elements are usable: neither null, neither NaN, and the pair's weight non-zero. Handling
-nullness independently per array would leave a covariance between vectors of different lengths, which
-is not a number. `n_null` and `n_nan` therefore count **pairs** here, not elements.
+nullness independently per array would leave a covariance between vectors of different lengths,
+which is not a number. `n_null` and `n_nan` therefore count **pairs** here, not elements.
 
 `is_valid=` is one mask over both samples. A caller holding a separate mask per column passes
 `mask_x .and. mask_y`, which says what it does at the call site.
@@ -781,12 +802,12 @@ where a population holding an infinity has every central moment NaN. It applies 
 holds the infinity: a covariance is a statistic of the pair, so there is no half of it left to
 report. `pf_variance(y)` is what to call for a property of `y` alone.
 
-**`pf_corr` has neither `ddof` nor `weight_type`** — the `ddof` in the covariance and the two in
-the standard deviations cancel exactly, and the two weight conventions differ only in the count
-`ddof` is charged against, so neither argument could ever change the answer. Spearman is Pearson over **midranks**: each
-run of equal values receives the mean of the sorted positions it spans, so it measures any monotone
-relationship rather than a linear one. `weights` with `method="spearman"` **aborts**: a weighted
-midrank is a further definitional choice that no reference library makes.
+**`pf_corr` has neither `ddof` nor `weight_type`** — the `ddof` in the covariance and the two in the
+standard deviations cancel exactly, and the two weight conventions differ only in the count `ddof`
+is charged against, so neither argument could ever change the answer. Spearman is Pearson over
+**midranks**: each run of equal values receives the mean of the sorted positions it spans, so it
+measures any monotone relationship rather than a linear one. `weights` with `method="spearman"`
+**aborts**: a weighted midrank is a further definitional choice that no reference library makes.
 
 **Both arrays must be the same kind.** Six specifics rather than thirty-six; a caller mixing kinds
 writes `real(x, real64)`.
@@ -806,8 +827,8 @@ An **excluded** element has no standardised value, and there are two ways to lea
 practice, since a NaN propagates through whatever the caller does next.
 
 `ok = .false.` has **two** causes and deliberately does not distinguish them: a null was written out
-as a NaN, or the population's variance was zero and *every* output is NaN. `n_null` separates them at
-no cost — it is `0` in the second case — so a second flag would be another thing to document and
+as a NaN, or the population's variance was zero and *every* output is NaN. `n_null` separates them
+at no cost — it is `0` in the second case — so a second flag would be another thing to document and
 reset for no new information.
 
 ## `pf_normal_scores` — rankits, the x-axis of a Q-Q plot
@@ -829,8 +850,8 @@ values receives the mean of the sorted positions it spans.
 ### The result depends on the ORDER and nothing else
 
 Any strictly monotone transform of the values leaves the scores **bit for bit identical** —
-`pf_normal_scores(x)` and `pf_normal_scores(exp(x))` are the same array. That is worth knowing before
-reaching for it: the scores carry the *ranking* of the population, not its shape, so scaling,
+`pf_normal_scores(x)` and `pf_normal_scores(exp(x))` are the same array. That is worth knowing
+before reaching for it: the scores carry the *ranking* of the population, not its shape, so scaling,
 shifting or log-transforming the input first is wasted work.
 
 Ranks are taken over the **survivors**, never over the whole array, so excluding a quarter of the
@@ -1060,9 +1081,9 @@ more. Compare them with a tolerance, and take the total itself from `pf_sum`, wh
 accurate of the two.
 
 **`out` must not be `values`.** There is no in-place form: passing one array to both arguments
-associates it with an `intent(in)` and an `intent(out)` dummy at once, which the standard forbids and
-no compiler here diagnoses. The scan would in fact survive it, reading element *i* before writing
-element *i* — which is exactly what makes the mistake worth naming rather than leaving to be
+associates it with an `intent(in)` and an `intent(out)` dummy at once, which the standard forbids
+and no compiler here diagnoses. The scan would in fact survive it, reading element *i* before
+writing element *i* — which is exactly what makes the mistake worth naming rather than leaving to be
 discovered.
 
 There is no `weights` argument: a weighted running sum is `pf_cumsum(w*x)`, and the other three
@@ -1141,8 +1162,8 @@ and `codes(i) == 0` says it per element; that is the 1-based spelling of `pd.cut
 
 A **NaN reaches no bin under either `skipnan`, and only the accounting differs**: skipped, it is an
 exclusion and lands in `n_nan`; kept, it is a value that matches no bin and lands in `n_outside`.
-Every comparison against a NaN is false, so "which bin does it join" has one answer, and the argument
-only decides whether the population was asked the question at all.
+Every comparison against a NaN is false, so "which bin does it join" has one answer, and the
+argument only decides whether the population was asked the question at all.
 
 A **zero-weight** element is in none of the three counts. It has left the population, exactly as it
 does everywhere else in this module, so it is not an element that failed to reach a bin.
@@ -1232,12 +1253,12 @@ inside the grid up to the rounding of the additions into each grid point, and ex
 whenever those additions are exact.
 
 **When to reach for it.** A histogram assigns each value wholly to one bin, which leaves an error
-proportional to the bin width in anything smooth computed from the counts — a kernel density
-estimate, a convolution, a spectrum. Linear binning's error on the same data and grid is
-proportional to the width's *square*. Reach for `pf_bin_linear` when the binned sample is an
-intermediate, and for `pf_histogram` when the counts themselves are the answer. It is also the
-mass-conserving counterpart of linear interpolation: `pf_interp_1d` reads a grid at a point, and
-this writes a point onto a grid.
+proportional to the bin width in anything smooth computed from the counts — a [kernel density
+estimate](kernel-density.html), a convolution, a spectrum. Linear binning's error on the same data
+and grid is proportional to the width's *square*. Reach for `pf_bin_linear` when the binned sample
+is an intermediate, and for `pf_histogram` when the counts themselves are the answer. It is also
+the mass-conserving counterpart of linear interpolation: [`pf_interp_1d`](interpolation.html) reads
+a grid at a point, and this writes a point onto a grid.
 
 **The grid is checked more strictly than `pf_histogram`'s edges.** It must hold at least two
 points, be strictly increasing and contain no NaN, as edges must, and in addition:
@@ -1285,9 +1306,9 @@ That whole line costs the same two traversals `s%mean()` alone would.
 ### Three lifecycles
 
 **`%compute(values, [retain], [is_valid], [weights], [weight_type], [skipnan])`** summarises a
-resident array, of any of the six things
-[`values` may be](#what-values-may-be). This is the usual entry point, and it discards whatever the object held, so one
-`pf_stats` can be reused across a loop of groups without `%clear` in between.
+resident array, of any of the six things [`values` may be](#what-values-may-be). This is the usual
+entry point, and it discards whatever the object held, so one `pf_stats` can be reused across a loop
+of groups without `%clear` in between.
 
 **`%init([retain], [weight_type], [skipnan])` then a loop of `%update(values, [is_valid],
 [weights])`** accumulates a population that never exists in memory at once — a row-group loop over
@@ -1328,9 +1349,9 @@ declared inside the region is miscompiled by at least one supported compiler.
 
 The exactness is worth being concrete about: a retained `%update` loop and a retained `%merge` both
 recompute the moments by the same two-pass algorithm over the concatenated survivors, so the result
-is bit for bit what `%compute` over the concatenated input gives — not "as close as the merge formula
-claims". The recomputation is **deferred until something is asked of the object**, so folding a
-hundred partials costs one recomputation rather than a hundred.
+is bit for bit what `%compute` over the concatenated input gives — not "as close as the merge
+formula claims". The recomputation is **deferred until something is asked of the object**, so
+folding a hundred partials costs one recomputation rather than a hundred.
 
 Every accumulator in one `%merge` must agree on `retain`, and on `weight_type`; a mismatch aborts.
 Merging an accumulator that holds no population aborts too, while merging one that holds an *empty*
@@ -1366,11 +1387,11 @@ into a NaN-propagating one would produce a number describing neither convention.
 
 `%gmean`, `%hmean` and `%probit_mean` are the three queries that need the *retained values* rather
 than the accumulator, so they **abort on a streaming accumulator** (`retain = .false.`), exactly as
-the order statistics do — and, unlike those, they order nothing. A log-sum is a fifth quantity the four
-central moments do not contain, and accumulating it in the hot loop would charge a transcendental
-per element to every population that never asks for one. Both answer exactly what the one-shot
-`pf_gmean`/`pf_hmean`/`pf_probit_mean` would over the same population, including the domain rules:
-NaN for a negative value anywhere, and exactly `0` when any value is `0`.
+the order statistics do — and, unlike those, they order nothing. A log-sum is a fifth quantity the
+four central moments do not contain, and accumulating it in the hot loop would charge a
+transcendental per element to every population that never asks for one. Both answer exactly what the
+one-shot `pf_gmean`/`pf_hmean`/`pf_probit_mean` would over the same population, including the domain
+rules: NaN for a negative value anywhere, and exactly `0` when any value is `0`.
 
 `%probit_fit` and `%probit_scale` are order statistics and go the other way: they build tier B on
 first use and read it thereafter, so a median followed by a fit and a scale is **one** ordering.
@@ -1456,12 +1477,13 @@ method, kind, scale, center, out_valid, n_null, n_nan, n_outside, ok, threads
 Four short blocks sit either side of it and are part of the same sequence: an *output* prefix
 `n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, vmax, count, modes`, which
 `pf_moments` and `pf_mode` declare before the inputs (`pf_mode`'s `count` and `modes` are its two,
-and `pf_probit_fit`'s optional `corr` closes that block); the object-lifecycle pair
-`retain, consume`, which only `pf_stats`' own `%compute`, `%init` and `%merge` take; the rule block
-`sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep, converged, right,
-density, prob`, whose entries say what the operation IS and are taken by `pf_sigma_clipped_stats`,
-the binning pair and `pf_probit_scale`; and the `unit`/`name` pair, which only `%print` takes. A block used by one procedure is not a contradiction — every other procedure omits
-it, and omission is exactly what a subsequence permits.
+and `pf_probit_fit`'s optional `corr` closes that block); the object-lifecycle pair `retain,
+consume`, which only `pf_stats`' own `%compute`, `%init` and `%merge` take; the rule block `sigma,
+sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep, converged, right, density,
+prob`, whose entries say what the operation IS and are taken by `pf_sigma_clipped_stats`, the
+binning pair and `pf_probit_scale`; and the `unit`/`name` pair, which only `%print` takes. A block
+used by one procedure is not a contradiction — every other procedure omits it, and omission is
+exactly what a subsequence permits.
 
 A procedure omits the ones it has no use for and never reorders the rest. In Fortran the order of
 optional arguments is part of the public contract — a caller may pass them positionally — so this is
@@ -1492,13 +1514,13 @@ with — but it is the one thing to check when moving a call between the two.
 
 ## What it costs to import
 
-`use parquet_stats` compiles this module, `parquet_sorting`'s files and the leaf `parquet_utils`
-— 29 of this library's Fortran files — and its Fortran graph never reaches the Parquet C++ bindings. That is narrower than
-"no C++": `link` is a package-level key in `fpm.toml`, so the C++ wrapper is still compiled and
-Arrow still linked whichever module you import. No `use` statement makes the *package* Arrow-free.
-The statistics that need an order take it from `pf_argsort` and `pf_nth_element` rather than
-carrying a second sorting implementation, and `pf_normal_scores` takes `Phi⁻¹` from `pf_probit`
-rather than carrying a second one of those. `parquet_utils` is a leaf — it imports only the
-intrinsic `iso_fortran_env` and `ieee_arithmetic` — so that edge adds one file and nothing beneath
-it. See [Choosing a module](../operating/choosing-a-module.html)
-for the measured figure and for what every other import costs.
+`use parquet_stats` compiles this module, `parquet_sorting`'s files and the leaf `parquet_utils` —
+29 of this library's Fortran files — and its Fortran graph never reaches the Parquet C++ bindings.
+That is narrower than "no C++": `link` is a package-level key in `fpm.toml`, so the C++ wrapper is
+still compiled and Arrow still linked whichever module you import. No `use` statement makes the
+*package* Arrow-free. The statistics that need an order take it from `pf_argsort` and
+`pf_nth_element` rather than carrying a second sorting implementation, and `pf_normal_scores` takes
+`Phi⁻¹` from `pf_probit` rather than carrying a second one of those. `parquet_utils` is a leaf — it
+imports only the intrinsic `iso_fortran_env` and `ieee_arithmetic` — so that edge adds one file and
+nothing beneath it. See [Choosing a module](../operating/choosing-a-module.html) for the measured
+figure and for what every other import costs.

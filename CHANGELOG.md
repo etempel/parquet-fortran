@@ -327,6 +327,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`, at every scale. Both identities
+  are documented without qualification and were lost on a sample scaled to the end of the
+  representable range: the centred sums overflow to `Inf` and their re-centring correction leaves
+  `Inf - Inf`, so all three came back NaN together and the correlation answered a NaN with
+  `ok = .false.` A diagonal or anti-diagonal pair is now answered from the pairing itself, as
+  `pf_cov` already answered a diagonal pair by running the variance. A constant sample, and one
+  holding an infinity, still answer a NaN with `ok = .false.`, which is what this page's non-finite
+  rules say; nothing else about `pf_corr` changes, to the last bit.
+  [Array statistics](doc/pages/utilities/statistics.md#pf_cov-and-pf_corr--two-samples).
 - `pf_stddev`, `pf_variance`, `pf_sem` and `pf_moments` answer a sample scaled to either end of the
   representable range. The sum of squared deviations overflows above a magnitude of about `1e150`
   and underflows to zero below about `1e-170`, so a standard deviation an ordinary `real64` holds

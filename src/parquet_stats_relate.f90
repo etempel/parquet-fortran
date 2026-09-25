@@ -229,6 +229,78 @@ contains
         end if
     end procedure nscore_position
 
+    !> Is this pair one sample against itself (`+1`), against its own negation (`-1`), or neither?
+    !!
+    !! `corr_f64`'s shortcut, and the reason the two perfect correlations survive a scale at which
+    !! the centred sums cannot be formed. `stats_pair_is_diagonal` answers the `+1` half for
+    !! `cov_f64` and for `stats_pair_moments`; this one adds the `-1` half and reports both in one
+    !! walk, so a correlation pays a single pass rather than two.
+    !!
+    !! Neither array can hold a NaN -- `pair_compact` drops any pair holding one -- so `/=` is an
+    !! ordinary comparison here, and an infinity compares equal to itself and raises nothing. An
+    !! all-zero sample satisfies BOTH tests, since `0 == -0`; `+1` is returned and
+    !! `pair_is_correlatable` then refuses it, which is the documented answer for a constant sample.
+    pure function pair_diagonal_sign(kx, ky, m) result(res)
+        real(real64), intent(in) :: kx(:)   !! the surviving first-sample values.
+        real(real64), intent(in) :: ky(:)   !! the surviving second-sample values, paired.
+        integer(int64), intent(in) :: m     !! how many pairs survived.
+        integer :: res                      !! +1 diagonal, -1 anti-diagonal, 0 neither.
+        integer(int64) :: i
+        logical :: same, opposite
+
+        same = .true.
+        opposite = .true.
+        do i = 1_int64, m
+            if (kx(i) /= ky(i)) same = .false.
+            if (ky(i) /= -kx(i)) opposite = .false.
+            if (.not. same .and. .not. opposite) then
+                res = 0
+                return
+            end if
+        end do
+        res = 0
+        if (same) then
+            res = 1
+        else if (opposite) then
+            res = -1
+        end if
+
+    end function pair_diagonal_sign
+
+    !> Does `kx(1:m)` have a correlation defined for it -- finite throughout, and not constant?
+    !!
+    !! The two conditions `corr_f64`'s shortcut must establish before answering `+1` or `-1`, and
+    !! each is a documented answer rather than a safety margin. A **constant** sample has zero
+    !! variance, so there is nothing to correlate and the answer is a quiet NaN with
+    !! `ok = .false.`. A sample holding an **infinity** leaves the whole pair undefined, which is
+    !! the rule `stats_pair_moments` applies and the guide's non-finite table states; answering
+    !! `+1` for it would make the shortcut disagree with the long way round.
+    !!
+    !! **Constancy is tested directly rather than through the variance**, which is a deviation
+    !! worth its line: the variance of a sample scaled to `1e-180` UNDERFLOWS to zero although the
+    !! sample has spread, so a variance test would have left the identity failing at the small end
+    !! exactly as it failed at the large one. `kx(i) /= kx(1)` cannot under- or overflow.
+    !!
+    !! No early exit on the first varying element: every element still has to be screened for an
+    !! infinity, so the walk is O(m) whenever it is reached at all. It is reached only for a pair
+    !! that is already known to be diagonal or anti-diagonal.
+    pure function pair_is_correlatable(kx, m) result(res)
+        real(real64), intent(in) :: kx(:)   !! the surviving values of one sample.
+        integer(int64), intent(in) :: m     !! how many survived.
+        logical :: res                      !! .true. when every value is finite and not all are equal.
+        integer(int64) :: i
+        logical :: varies
+
+        res = .false.
+        varies = .false.
+        do i = 1_int64, m
+            if (abs(kx(i)) > huge(0.0_real64)) return
+            if (kx(i) /= kx(1_int64)) varies = .true.
+        end do
+        res = varies
+
+    end function pair_is_correlatable
+
     !> The midranks of `v(1:m)`: each run of equal values gets the mean of the positions it spans.
     !!
     !! **This is not a second ranking implementation.** The expensive half of ranking is the sort,
@@ -347,6 +419,7 @@ contains
         real(real64), allocatable :: kx(:), ky(:), kw(:), rx(:), ry(:)
         real(real64) :: mx, my, sxx, sxy, syy, w_sum, w_sq, den
         integer(int64) :: m, nnull, nnan
+        integer :: sgn
         logical :: spearman
 
         call corr_method("pf_corr", method, present(weights), spearman)
@@ -356,6 +429,33 @@ contains
         r = stats_nan()
         if (present(ok)) ok = .false.
         if (m == 0_int64) return
+
+        ! **A sample against itself, or against its own negation, is answered here rather than
+        ! computed**, which is what makes the two documented identities hold at EVERY scale.
+        ! `cov_f64` above hands a diagonal pair to `variance_f64` for the same reason; without the
+        ! same shortcut here, the identity was lost exactly where the pair moments cannot be
+        ! formed: pass two squares deviations of order `1e200` into `+Infinity`, the re-centring
+        ! correction overflows too, and `sxx = qxx(1) - dx*dx*w_sum` is `Inf - Inf`. All three
+        ! centred sums go NaN together, the screen below fires, and `pf_corr(x, x)` answered a NaN
+        ! where the guide, this module's own doc-comment and `test/test_stats.f90:3760` all say
+        ! exactly 1. The equal-sums fork below is NOT redundant: it still answers a pair shifted by
+        ! a constant, which is not diagonal and whose three sums do coincide.
+        !
+        ! Both conditions are required and neither is the other. The pair must be diagonal or
+        ! anti-diagonal, and the sample must be one this module defines a correlation FOR: a
+        ! constant sample has no variance to correlate, and a sample holding an infinity is
+        ! documented as undefined for the whole pair (the non-finite table in
+        ! doc/pages/utilities/statistics.md). The tests are NESTED rather than `.and.`-ed, since
+        ! `.and.` does not short-circuit and the finiteness scan is O(m): a genuinely two-sample
+        ! call leaves `pair_diagonal_sign` on its first element and never pays for it.
+        sgn = pair_diagonal_sign(kx, ky, m)
+        if (sgn /= 0) then
+            if (pair_is_correlatable(kx, m)) then
+                r = real(sgn, real64)
+                if (present(ok)) ok = .true.
+                return
+            end if
+        end if
 
         if (spearman) then
             ! Pearson over midranks, which is the definition rather than an approximation to it.

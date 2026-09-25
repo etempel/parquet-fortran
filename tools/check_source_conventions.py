@@ -3731,6 +3731,142 @@ def check_stats_optional_order_documented():
             % (", ".join(only_page) or "-", ", ".join(only_src) or "-"))
     return problems
 
+
+def check_stats_weights_documented():
+    """The guide's two `weights` lists must name exactly the procedures the source gives one.
+
+    `doc/pages/utilities/statistics.md`, under "Which procedures take `weights`, and why the rest
+    do not", writes out both sides of a partition of `parquet_stats`' generics: the ones that take
+    a `weights` dummy and the ones that deliberately do not. Both read as exhaustive -- the
+    section's own heading promises "the rest" -- and a reader uses the pair to decide whether a
+    call will compile.
+
+    **Why this is worth a check.** It had drifted by FOUR procedures and stayed wrong for three
+    weeks: `pf_probit_mean` and `pf_probit_scale` take `weights` and were on neither list, and
+    `pf_normal_scores` and `pf_probit_fit` take none and were on neither either. The page's own
+    prose describes all four correctly in their own sections, so the enumeration disagreed with
+    the page around it and nothing compared either with the source. That is CLAUDE.md's
+    "A static check that enumerates names goes stale silently", met in the wild.
+
+    **Membership, not order**, unlike `check_stats_optional_order_documented` next door: these are
+    two sets, and the page groups them for reading rather than in any fixed sequence.
+
+    Two shapes the page uses and this check must tolerate, both present today: the "does not" side
+    names `pf_corr(method="spearman")`, which is a token of an already-listed generic rather than
+    a generic of its own, and one row names two procedures at once. So every `pf_*` name is read
+    out of each side and anything that is not a generic of `parquet_stats` is ignored --
+    `pf_corr` included on that side, since it appears on both for different reasons.
+
+    **Verify this check by breaking it, not by watching it pass**: delete one name from either
+    list and confirm it fails before trusting a green run. It refuses to pass when either anchor
+    stops matching, when either side comes back empty, or when the page or the spec is missing,
+    since all of those mean it has gone blind rather than that the page is clean.
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "statistics.md"
+    spec = SRC / "parquet_stats.f90"
+    if not page.is_file():
+        return ["check_stats_weights_documented: %s is missing -- this check has gone blind"
+                % page.name]
+    if not spec.is_file():
+        return ["check_stats_weights_documented: %s is missing -- this check has gone blind"
+                % spec.name]
+    text = page.read_text()
+    head = "### Which procedures take `weights`, and why the rest do not"
+    if head not in text:
+        return ["doc/pages/utilities/statistics.md: the heading %r is gone, so this check can no "
+                "longer find the lists it compares. Restore it or update this check." % head]
+    start = text.index(head)
+    rest = text.find("\n### ", start + 1)
+    if rest == -1:
+        rest = text.find("\n## ", start + 1)
+    section = text[start:rest if rest != -1 else len(text)]
+
+    # The two sides, each introduced by its own bold lead-in. "Takes" runs to the "Does not"
+    # lead-in; "does not" runs to the end of its table, which the next blank line after the last
+    # table row ends.
+    marks = [("takes", r"\*\*Takes `weights`\*\*"), ("lacks", r"\*\*Does not, and the argument")]
+    spans, problems = {}, []
+    for (name, pattern), nxt in zip(marks, marks[1:] + [(None, None)]):
+        m = re.search(pattern, section)
+        if m is None:
+            problems.append(
+                "doc/pages/utilities/statistics.md: the %r list's anchor no longer matches, so "
+                "this check can no longer see it. Either restore the wording or update "
+                "check_stats_weights_documented; do not leave it unmatched." % name)
+            continue
+        end = len(section)
+        if nxt[1] is not None:
+            m2 = re.search(nxt[1], section)
+            if m2 is not None:
+                end = m2.start()
+        spans[name] = section[m.end():end]
+    if problems:
+        return problems
+
+    # Every generic of the module, and which of them declares a `weights` dummy. The spec is the
+    # authority; the interface bodies are read with their continuations joined.
+    body = re.sub(r"&\s*\n\s*", "", spec.read_text())
+    args = dict((m.group(1), [a.strip() for a in m.group(2).split(",")])
+                for m in re.finditer(r"module (?:subroutine|function) (\w+)\(([^)]*)\)", body))
+    generic, current = {}, None
+    for line in spec.read_text().splitlines():
+        g = re.match(r"\s*interface (pf_\w+)", line)
+        if g:
+            current = g.group(1)
+        p = re.match(r"\s*module procedure (\w+)", line)
+        if p and current and p.group(1) in args:
+            generic.setdefault(current, set()).add("weights" in args[p.group(1)])
+    if not generic:
+        return ["check_stats_weights_documented: no `pf_*` generic was recognised in %s -- this "
+                "check has gone blind" % spec.name]
+    mixed = sorted(g for g, v in generic.items() if len(v) > 1)
+    if mixed:
+        return ["src/parquet_stats.f90: %s declare `weights` on some specifics and not others, "
+                "which the guide's two lists cannot express. Say so on the page and teach this "
+                "check the exception." % ", ".join(mixed)]
+    src_takes = set(g for g, v in generic.items() if True in v)
+    src_lacks = set(generic) - src_takes
+
+    # The "takes" side is one prose list and every name in it is a claim. The "does not" side is a
+    # TABLE, and only its first column names procedures -- the `why` column legitimately cites
+    # others (`pf_cumsum(w*x)`, and `pf_probit_scale`, which does take them), so reading the whole
+    # row would make the page contradict itself for saying why.
+    documented = {"takes": set(re.findall(r"`(pf_\w+)", spans["takes"]))}
+    first_cells = []
+    for line in spans["lacks"].splitlines():
+        line = line.strip()
+        if not line.startswith("|") or set(line) <= set("|-: "):
+            continue
+        first_cells.append(line.strip("|").split("|")[0])
+    documented["lacks"] = set(re.findall(r"`(pf_\w+)", " ".join(first_cells)))
+    for name in ("takes", "lacks"):
+        documented[name] = set(n for n in documented[name] if n in generic)
+        if not documented[name]:
+            problems.append("doc/pages/utilities/statistics.md: the %r list came back empty -- "
+                            "this check has gone blind on it" % name)
+    if problems:
+        return problems
+
+    # `pf_corr` is named on both sides on purpose (Pearson takes weights, Spearman refuses them),
+    # so it is judged by the source alone and excused from the "listed twice" test below.
+    both = (documented["takes"] & documented["lacks"]) - {"pf_corr"}
+    if both:
+        problems.append("doc/pages/utilities/statistics.md: %s appear on BOTH `weights` lists"
+                        % ", ".join(sorted(both)))
+    for name, want in (("takes", src_takes), ("lacks", src_lacks)):
+        got = documented[name] if name == "takes" else documented[name] - {"pf_corr"}
+        want = want if name == "takes" else want - {"pf_corr"}
+        missing = sorted(want - got)
+        extra = sorted(got - want)
+        if missing or extra:
+            problems.append(
+                "doc/pages/utilities/statistics.md: the %r `weights` list disagrees with "
+                "src/parquet_stats.f90.\n    on the page and not in the source: %s\n"
+                "    in the source and not on the page: %s"
+                % (name, ", ".join(extra) or "-", ", ".join(missing) or "-"))
+    return problems
+
+
 def check_facade_inventory_matches_its_use_lines():
     """`src/parquet.f90`'s doc-comment inventory must name every module it bare-`use`s.
 
@@ -9425,6 +9561,7 @@ CHECKS = (
      check_agg_vocabulary_matches_its_documentation),
     ("the guide's canonical optional-argument order matches the checker's",
      check_stats_optional_order_documented),
+    ("the guide's two `weights` lists match the source", check_stats_weights_documented),
     ("print_settings matches its documentation", check_print_settings_documented),
     ("every setting is actually read", check_settings_are_read),
     ("no direct printing outside the emit channels", check_no_direct_printing),

@@ -328,7 +328,9 @@ contains
         ! Add a further part rather than growing either.
         extremes = [ &
             new_unittest("the pair statistics answer a sample scaled to the end of the range", &
-                test_pair_moments_at_an_extreme_scale_do_not_abort) &
+                test_pair_moments_at_an_extreme_scale_do_not_abort), &
+            new_unittest("the two perfect correlations hold at every scale, and only where defined", &
+                test_perfect_correlations_at_every_scale) &
             ]
         linear = [ &
             new_unittest("pf_bin_linear matches its definition written out, to the bit where exact", &
@@ -7144,6 +7146,96 @@ contains
     !> `pf_cov(x, x) == pf_variance(x)` identity survives the scale, and the SPEARMAN correlation
     !> -- which is taken over midranks and so cannot overflow -- is bit-identical to the unscaled
     !> sample's, because a rank is scale-free.
+    !> `pf_corr(x, x)` is 1 and `pf_corr(x, -x)` is -1 at EVERY scale, and only where defined.
+    !!
+    !! The guide, `pf_corr`'s own doc-comment and `test_corr_perfect` all state the two identities
+    !! without qualification, and `test_corr_perfect` pins them on an ordinary fixture only. They
+    !! used to fail at both ends of the representable range: at `1e200` pass two's squared
+    !! deviations overflow, all three centred sums come back NaN together and `corr_f64` returned
+    !! the NaN it was primed with. `corr_f64` now answers a diagonal or anti-diagonal pair from
+    !! the pairing itself.
+    !!
+    !! **The negative controls are the point of this test**, since a shortcut that answered `1`
+    !! unconditionally would pass the identity arms alone. Three samples must still come back NaN
+    !! with `ok = .false.`: a constant one at the same scale, one holding an infinity, and a
+    !! single-element one -- none of them has a correlation defined, and the first two are the two
+    !! conditions `pair_is_correlatable` tests. A genuinely two-sample pair at an ordinary scale
+    !! must still be answered the long way round, or the shortcut has swallowed the general case.
+    subroutine test_perfect_correlations_at_every_scale(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
+        real(real64), allocatable :: x0(:), x(:)
+        real(real64) :: r, rc, inf
+        real(real64), parameter :: SCALES(3) = &
+            [1.0_real64, 1.0e200_real64, 1.0e-180_real64]
+        integer :: k
+        integer(int64) :: n
+        logical :: ok, uf_supported, uf_entry
+
+        ! An extreme fixture by design: see `test_spread_at_extreme_scales` for why the underflow
+        ! flag is saved and put back, and why the inquiry names the kind.
+        uf_supported = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_supported) call ieee_get_flag(ieee_underflow, uf_entry)
+
+        scaled: block
+            call golden_fixture(200_int64, x0)
+            n = size(x0, kind=int64)
+            allocate(x(n))
+            do k = 1, size(SCALES)
+                x = x0 * SCALES(k)
+                ! The two identities, exactly -- not to a tolerance.
+                call pf_corr(x, x, r, ok=ok)
+                call check(error, ok .and. r == 1.0_real64, &
+                    "pf_corr(x, x) must be exactly 1 at every scale")
+                if (allocated(error)) exit scaled
+                call pf_corr(x, -x, r, ok=ok)
+                call check(error, ok .and. r == -1.0_real64, &
+                    "pf_corr(x, -x) must be exactly -1 at every scale")
+                if (allocated(error)) exit scaled
+                ! And under Spearman, whose midranks cannot overflow whatever the scale is.
+                call pf_corr(x, x, r, method="spearman", ok=ok)
+                call check(error, ok .and. r == 1.0_real64, &
+                    "the Spearman correlation of a sample with itself must be exactly 1 too")
+                if (allocated(error)) exit scaled
+
+                ! NEGATIVE CONTROL 1: a CONSTANT sample at the same scale has no variance to
+                ! correlate. A shortcut answering the pairing alone would report 1 here.
+                call pf_corr(spread(SCALES(k), 1, int(n)), spread(SCALES(k), 1, int(n)), rc, ok=ok)
+                call check(error, (.not. ok) .and. rc /= rc, &
+                    "a constant sample must stay a NaN with ok = .false., at every scale")
+                if (allocated(error)) exit scaled
+            end do
+
+            ! NEGATIVE CONTROL 2: an INFINITY leaves the whole pair undefined, which is what the
+            ! guide's non-finite table says and what the long way round answers.
+            inf = ieee_value(0.0_real64, ieee_positive_inf)
+            x = x0
+            x(1) = inf
+            call pf_corr(x, x, rc, ok=ok)
+            call check(error, (.not. ok) .and. rc /= rc, &
+                "a sample holding an infinity must stay a NaN with ok = .false.")
+            if (allocated(error)) exit scaled
+
+            ! NEGATIVE CONTROL 3: one pair is a constant sample by another name.
+            call pf_corr([2.0_real64], [2.0_real64], rc, ok=ok)
+            call check(error, (.not. ok) .and. rc /= rc, &
+                "a one-element sample has no correlation and must stay a NaN")
+            if (allocated(error)) exit scaled
+
+            ! NEGATIVE CONTROL 4: the general case must still be computed, not shortcut. Two
+            ! samples that are neither equal nor negatives of one another, at an ordinary scale.
+            call pf_corr(x0, x0 * 3.0_real64 + 1.0_real64, r, ok=ok)
+            call check(error, ok .and. r == 1.0_real64, &
+                "a positive affine image is still a correlation of 1, computed the long way")
+            if (allocated(error)) exit scaled
+            call pf_corr(x0, abs(x0), r, ok=ok)
+            call check(error, ok .and. r < 1.0_real64 .and. r > -1.0_real64, &
+                "a genuinely two-sample pair must be answered strictly inside [-1, 1]")
+        end block scaled
+
+        if (uf_supported) call ieee_set_flag(ieee_underflow, uf_entry)
+
+    end subroutine test_perfect_correlations_at_every_scale
+
     subroutine test_pair_moments_at_an_extreme_scale_do_not_abort(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64), allocatable :: x0(:), y0(:), x(:), y(:)

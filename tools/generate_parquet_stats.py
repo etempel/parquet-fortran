@@ -102,10 +102,17 @@ SPEC_HEAD = BANNER + """!> Array statistics over plain Fortran arrays -- the `pf
 !! `tools/check_module_footprints.sh` fails if it grows.
 !!
 !! **The optional-argument order is a permanent compatibility contract.** Every procedure here
-!! declares its optional dummies as a SUBSEQUENCE of one canonical sequence --
-!! `is_valid, weights, weight_type, ddof, bias, excess, skipnan, method, scale, center, out_valid,`
-!! `converged, n_null, n_nan, ok, threads` -- so that a reader who has seen one signature has seen
-!! them all. `check_stats_optional_argument_order` enforces it against this file.
+!! declares its optional dummies as a SUBSEQUENCE of one canonical sequence, whose main run is
+!! `is_valid, weights, weight_type, ddof, bias, excess, skipnan, method, kind, scale, center,`
+!! `out_valid, n_null, n_nan, n_outside, ok, threads` -- so that a reader who has seen one
+!! signature has seen them all. Four smaller blocks sit around it: the output prefix
+!! `n_valid, mean, variance, stddev, sem, skewness, kurtosis, vsum, vmin, vmax, count, modes, corr`,
+!! the object-lifecycle pair `retain, consume`, the rule block
+!! `sigma, sigma_lower, sigma_upper, maxiters, cenfunc, stdfunc, n_clipped, keep, converged, right,`
+!! `density, prob`, and `%print`'s `unit, name`. `STATS_OPTIONAL_ORDER` in
+!! `tools/check_source_conventions.py` is the sequence itself;
+!! `check_stats_optional_argument_order` enforces it against this file and
+!! `check_stats_optional_order_documented` against `doc/pages/utilities/statistics.md`.
 !!
 !! **The family's standing rules**, stated once here rather than in thirty doc-comments:
 !!
@@ -2255,8 +2262,12 @@ RELATE_DOC = {
         "deliberately **no `ddof`**: the one in the covariance and the two in the standard",
         "deviations cancel exactly, so the argument could never change the answer.",
         "",
-        "`pf_corr(x, x)` is exactly `1` for any non-constant sample, under either method. A",
-        "constant sample has zero variance and gives a quiet NaN with `ok = .false.`."],
+        "`pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`, for any finite",
+        "non-constant sample, under either method and at any SCALE: both are answered from the",
+        "pairing itself rather than computed, so neither depends on the centred sums being",
+        "representable. A constant sample has zero variance and gives a quiet NaN with",
+        "`ok = .false.`, and so does one holding an infinity, which leaves the whole pair",
+        "undefined."],
     "pf_zscore": [
         "Standardises a population in place of the caller's own loop -- `scipy.stats.zscore`.",
         "",

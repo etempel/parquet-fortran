@@ -4902,7 +4902,12 @@ contains
     end subroutine scenario_compact_string_write_chunk_requires_scalar_column
 
     !> A STRING_VIEW column reads into a compact parquet_string_column correctly -- values, nulls
-    !> and lengths all intact.
+    !> and lengths all intact, on the whole-column path AND on the row-group-scoped one.
+    !>
+    !> Both paths are asserted because each converts the view array itself: the whole-column read
+    !> REPLACES the cache entry (recache_coerced_string_view) while the chunked read has nothing
+    !> to replace and pins the freshly cast array on the handle instead
+    !> (parquet_read_string_column_chunk_buffers). Either one alone leaves the other untested.
     !>
     !> This USED to assert the opposite. The compact path hands Fortran an offsets/data/validity
     !> triple straight from the Arrow array (extract_string_buffers), and a view array has neither
@@ -4926,7 +4931,7 @@ contains
         end interface
 
         type(parquet_reader) :: reader
-        type(parquet_string_column) :: col
+        type(parquet_string_column) :: col, chunk
         character(len=:), allocatable :: text
         character(len=*), parameter :: out_file = "test_run/error_scenario_string_view_compact.parquet"
 
@@ -4937,6 +4942,11 @@ contains
         ! Read a second time: the cast REPLACES the cache entry, so this one finds a
         ! LARGE_STRING array already there and must give the identical answer.
         call parquet_read_column(reader, "sv", col)
+        ! And once ROW-GROUP SCOPED. That path has its own copy of the conversion
+        ! (parquet_read_string_column_chunk_buffers), because a row-group chunk is not what
+        ! column_cache holds -- there is nothing to replace, so the freshly cast array is
+        ! pinned on the handle instead. The whole-column reads above prove nothing about it.
+        call parquet_read_column_chunk(reader, "sv", 1_int64, chunk)
         call parquet_close_reader(reader)
 
         ! The fixture is "short", "", Null, a 39-byte value, then "exactly12chr" -- deliberately
@@ -4958,6 +4968,23 @@ contains
         call col%get(5, text)
         if (text /= "exactly12chr") error stop "string_view compact read: row 5 (inline boundary) wrong"
         if (col%null_count() /= 1_int64) error stop "string_view compact read: wrong null count"
+
+        ! The chunked read covers the same five rows (one row group), so every assertion above
+        ! holds for it too -- asserted separately rather than compared against `col`, which
+        ! would pass just as happily if both paths were wrong in the same way.
+        if (chunk%size() /= 5_int64) error stop "string_view chunk read: wrong row count"
+        call chunk%get(1, text)
+        if (text /= "short") error stop "string_view chunk read: row 1 wrong"
+        call chunk%get(2, text)
+        if (text /= "") error stop "string_view chunk read: row 2 (empty string) wrong"
+        if (.not. chunk%is_null(3)) error stop "string_view chunk read: row 3 lost its null"
+        if (chunk%is_null(2)) error stop "string_view chunk read: an empty string became a null"
+        call chunk%get(4, text)
+        if (text /= "this value exceeds twelve bytes for sure") &
+            error stop "string_view chunk read: row 4 (non-inline value) wrong"
+        call chunk%get(5, text)
+        if (text /= "exactly12chr") error stop "string_view chunk read: row 5 (inline boundary) wrong"
+        if (chunk%null_count() /= 1_int64) error stop "string_view chunk read: wrong null count"
     end subroutine scenario_string_view_compact_read
 
     !> parquet_date: set with a month outside 1..12 aborts.

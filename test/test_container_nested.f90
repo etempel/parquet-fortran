@@ -68,6 +68,7 @@ contains
             new_unittest("every remaining nested shape reads", test_read_every_nested_shape), &
             new_unittest("deep_nested reads at depth three", test_read_deep_nested), &
             new_unittest("a descent path reads as an ordinary column", test_descent_path_reads), &
+            new_unittest("a descent suffix that does not apply is refused", test_descent_path_refusals), &
             new_unittest("a row-group-scoped nested read agrees with the whole column", &
                 test_nested_chunk_matches_whole) &
             ]
@@ -803,6 +804,7 @@ contains
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
         integer(int32) :: xs(3)
+        character(len=8) :: ks(3)
         character(len=:), allocatable :: shp
         call parquet_open_reader(r, NEST)
         call check(error, parquet_column_exists(r, "list_of_struct[]"), "a descent path resolves")
@@ -817,8 +819,64 @@ contains
         ! A descent path is NOT listed, deliberately -- it resolves without being advertised.
         call check(error, .not. name_is_listed(r, "list_of_struct[]"), &
             "a descent path is not enumerated by parquet_get_column_names")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        !
+        ! The MAP half of the grammar, and the reason it is asserted beside the list half rather
+        ! than instead of it: `{key}` and `{value}` walk their own arm of the schema step, and a
+        ! map has TWO leaves under it where a list has one. This fixture holds three entries
+        ! spread over rows of 1, 0 and 2, so the entry count differs from the row count and a
+        ! path resolved in the wrong coordinate system cannot pass by arithmetic accident.
+        call check(error, parquet_column_exists(r, "map_of_struct{key}"), "a map key path resolves")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call parquet_read_column(r, "map_of_struct{key}", ks)
+        call check(error, trim(ks(1)) == "a" .and. trim(ks(2)) == "b" .and. trim(ks(3)) == "c", &
+            "the flattened map keys read in entry order")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call parquet_read_column(r, "map_of_struct{value}.x", xs)
+        call check(error, all(xs == [1_int32, 2_int32, 3_int32]), &
+            "the flattened map value field reads in entry order")
         call parquet_close_reader(r)
     end subroutine test_descent_path_reads
+
+    !> The descent grammar's REFUSALS: a suffix that does not apply to the type it is written
+    !! against, and a brace token that is neither `key` nor `value`.
+    !!
+    !! Each is answered by `parquet_column_exists` returning `.false.`, which is the contract
+    !! `struct_path_exists` and `resolve_struct_path` must agree on -- a name probed as present
+    !! and then aborting on read is strictly worse than an honest refusal (see
+    !! `struct_path_exists`' own comment in `src/parquet_wrapper.cpp`). The positive case is
+    !! asserted in the same test: a refusal test alone passes just as happily against a probe
+    !! that refuses everything.
+    subroutine test_descent_path_refusals(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_reader) :: r
+        call parquet_open_reader(r, NEST)
+        ! The control: the same two suffixes, written against types they DO apply to.
+        call check(error, parquet_column_exists(r, "list_col[]"), "[] applies to a list column")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call check(error, parquet_column_exists(r, "map_col{key}"), "{key} applies to a map column")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        ! `[]` twice over a list<int32>: the first step lands on the int32 element, and no
+        ! list-shaped type is left for the second.
+        call check(error, .not. parquet_column_exists(r, "list_col[][]"), &
+            "[] does not apply to a scalar list element")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        ! `{key}`/`{value}` against a list: the map arm of the schema step refuses a non-map.
+        call check(error, .not. parquet_column_exists(r, "list_col{key}"), &
+            "{key} does not apply to a list column")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call check(error, .not. parquet_column_exists(r, "list_col{value}"), &
+            "{value} does not apply to a list column")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        ! A brace token the grammar does not define at all -- the path is MALFORMED rather than
+        ! unresolvable, which is a different arm of the parse from the two above.
+        call check(error, .not. parquet_column_exists(r, "map_col{bogus}"), &
+            "an unknown brace token makes the path malformed")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call check(error, .not. parquet_column_exists(r, "map_col{}"), &
+            "an empty brace token makes the path malformed")
+        call parquet_close_reader(r)
+    end subroutine test_descent_path_refusals
 
     !> Whether `parquet_get_column_names` advertises `name`.
     function name_is_listed(r, name) result(res)
@@ -840,11 +898,19 @@ contains
     !! set -- and the leaf set is where a nested read can silently go wrong: asking for one leaf of
     !! a struct yields a perfectly well-formed struct array with one field instead of all of them.
     !! Comparing the two is what catches that; neither alone can.
+    !!
+    !! One shape per arm of the Parquet-side leaf walk: a list of structs, a container held as a
+    !! struct field (both directions of nesting), and a MAP, whose step is two hops through the
+    !! `entries` struct rather than one -- reached both through the map reader and through an
+    !! explicit `{key}`/`{value}` descent path.
     subroutine test_nested_chunk_matches_whole(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_reader) :: r
         type(parquet_list_column) :: whole, chunk
         type(parquet_struct_column) :: swhole, schunk
+        type(parquet_map_column) :: mwhole, mchunk
+        integer(int32) :: xs(3)
+        character(len=8) :: ks(3)
         character(len=:), allocatable :: kw, kc
         call parquet_open_reader(r, NEST)
         call parquet_read_column(r, "list_of_struct", whole)
@@ -885,6 +951,34 @@ contains
         if (allocated(error)) then; call parquet_close_reader(r); return; end if
         call check(error, schunk%size() == swhole%size(), &
             "struct_of_map: and on the row count")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        !
+        ! A MAP whose payload is itself a container. Its chunked read descends to
+        ! `map_of_struct{value}` with the row group attached, which is the one shape that asks
+        ! the Parquet-side leaf walk for a MAP step -- a map node has one child, the `entries`
+        ! struct, and the key and the value are that child's two children, so the step is two
+        ! hops where a list's is one. Getting it wrong yields an entries struct with one field
+        ! instead of two, which reads as a well-formed map that has lost its values.
+        call parquet_read_column(r, "map_of_struct", mwhole)
+        call parquet_read_column_chunk(r, "map_of_struct", 1_int64, mchunk)
+        call mwhole%kind_text(kw)
+        call mchunk%kind_text(kc)
+        call check(error, kw == kc, "map_of_struct: the two reads agree on the nested spelling: "//kw//" vs "//kc)
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call check(error, mchunk%nrows() == mwhole%nrows() .and. &
+            mchunk%total_entries() == mwhole%total_entries(), &
+            "map_of_struct: and on the row and entry counts")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        !
+        ! The same two map steps reached through an explicit DESCENT PATH rather than through the
+        ! map reader, one for each of `{key}` and `{value}`, since the two are separate steps.
+        call parquet_read_column_chunk(r, "map_of_struct{key}", 1_int64, ks)
+        call check(error, trim(ks(1)) == "a" .and. trim(ks(3)) == "c", &
+            "a row-group-scoped map key path reads the keys")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call parquet_read_column_chunk(r, "map_of_struct{value}.x", 1_int64, xs)
+        call check(error, all(xs == [1_int32, 2_int32, 3_int32]), &
+            "a row-group-scoped map value path reads the values")
         call parquet_close_reader(r)
     end subroutine test_nested_chunk_matches_whole
 

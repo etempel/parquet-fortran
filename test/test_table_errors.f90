@@ -2743,7 +2743,8 @@ contains
     end subroutine test_compact_string_write_chunk_requires_scalar_column_aborts
 
     !> A STRING_VIEW column read into a compact parquet_string_column round-trips: values, the
-    !> null, and the row count. This test asserted the OPPOSITE until the compact path learned to
+    !> null, and the row count -- on the whole-column path and on the row-group-scoped one, which
+    !> converts the view array through its own code. This test asserted the OPPOSITE until the compact path learned to
     !> convert a view array to large_utf8 first -- so it is converted rather than deleted, which is
     !> what its own former doc-comment could not tell anyone to do, since the rule requiring a
     !> refusal test to say what replaces it post-dated it.

@@ -50,7 +50,9 @@ contains
             new_unittest("map write per row group matches a whole write", test_chunked_matches), &
             new_unittest("map write preserves duplicate keys and their order", test_duplicates_survive), &
             new_unittest("map write of a row-masked column keeps the survivors", test_row_mask), &
-            new_unittest("map declared but never written closes with zero rows", test_empty_at_close) &
+            new_unittest("map declared but never written closes with zero rows", test_empty_at_close), &
+            new_unittest("a declared-nullable map column is nullable at every level", &
+                test_declared_nullable_every_level) &
             ]
     end subroutine collect_tests_parquet_map_write
 
@@ -330,6 +332,55 @@ contains
         call maps_equal(mc, back, same, why)
         call check(error, same, "a schema-declared map column round-trips: "//why)
     end subroutine test_maml_declaration
+
+    !> A map column named by `extra: nullable_cols:`/`%set_nullable` is written nullable at the ROW
+    !! level and at the VALUE level, whatever the values contain.
+    !!
+    !! Same contract, and the same reason, as the struct counterpart in test_struct_write.f90: the
+    !! whole-column write otherwise decides from the values in hand, so one schema produced two file
+    !! layouts depending on the batch. A map has exactly two null levels -- the row and each value,
+    !! the key being non-nullable by Arrow's own MapType -- so a declaration reaching only the row
+    !! level would leave the value level disagreeing between two writes of the same schema.
+    !!
+    !! The undeclared column is the control, and both are written with NO nulls anywhere: without it
+    !! a writer that declared everything nullable would pass, and with nulls present the values
+    !! alone would already have produced a nullable value field.
+    subroutine test_declared_nullable_every_level(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_schema) :: sch
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        type(parquet_map_column), target :: dec, ctl
+        character(len=*), parameter :: path = "test_run/map_write_declared_nullable.parquet"
+        logical :: drow, dval, crow, cval
+
+        call sch%init("maps_declared_nullable")
+        call sch%add_field("d", "map[int32]")
+        call sch%add_field("c", "map[int32]")
+        call parquet_parse_maml(sch)
+        call sch%set_nullable("d")
+        call dec%init(PK_INT32)
+        call dec%append_row(["k"], [3_int32])
+        call ctl%init(PK_INT32)
+        call ctl%append_row(["k"], [4_int32])
+        call parquet_open_writer(w, path, sch)
+        call parquet_write_column(w, "d", dec)
+        call parquet_write_column(w, "c", ctl)
+        call parquet_close_writer(w)
+        call parquet_open_reader(r, path)
+        call parquet_get_column_nullable(r, "d", drow)
+        call parquet_get_column_nullable(r, "d{value}", dval)
+        call parquet_get_column_nullable(r, "c", crow)
+        call parquet_get_column_nullable(r, "c{value}", cval)
+        call parquet_close_reader(r)
+        call check(error, drow, "a declared map column is nullable at the row level")
+        if (allocated(error)) return
+        call check(error, dval, "and at the value level")
+        if (allocated(error)) return
+        call check(error, .not. crow, "the undeclared control stays non-nullable at the row level")
+        if (allocated(error)) return
+        call check(error, .not. cval, "and at the value level")
+    end subroutine test_declared_nullable_every_level
 
     !> Writing row group by row group produces the same column as one whole-column write.
     subroutine test_chunked_matches(error)

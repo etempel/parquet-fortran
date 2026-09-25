@@ -60,7 +60,9 @@ contains
             new_unittest("struct write per row group matches a whole write", test_chunked_matches), &
             new_unittest("struct null row's field values do not survive a round trip", &
                 test_null_row_fields_do_not_survive), &
-            new_unittest("struct write of a row-masked column keeps the survivors", test_row_mask) &
+            new_unittest("struct write of a row-masked column keeps the survivors", test_row_mask), &
+            new_unittest("a declared-nullable struct column is nullable at every level", &
+                test_declared_nullable_every_level) &
             ]
     end subroutine collect_tests_parquet_struct_write
 
@@ -371,6 +373,56 @@ contains
         call structs_equal(sc, back, same, why)
         call check(error, same, "a schema-declared struct column round-trips: "//why)
     end subroutine test_maml_declaration
+
+    !> A struct column named by `extra: nullable_cols:`/`%set_nullable` is written nullable at the
+    !! ROW level and at every FIELD level, whatever the values contain.
+    !!
+    !! That is what the declaration is for: the whole-column write otherwise decides from the values
+    !! in hand, so a null-free batch produced a non-nullable field and a later batch of the same
+    !! shape did not -- one schema, two file layouts. A struct has 1 + M null levels rather than one,
+    !! so a declaration that reached only the row level would still leave the fields disagreeing
+    !! between two writes of the same schema.
+    !!
+    !! The undeclared column is the control, and both are written with NO nulls anywhere: without it
+    !! a writer that declared everything nullable would pass, and with nulls present the values
+    !! alone would already have produced a nullable field.
+    subroutine test_declared_nullable_every_level(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_schema) :: sch
+        type(parquet_writer) :: w
+        type(parquet_reader) :: r
+        type(parquet_struct_column), target :: dec, ctl
+        character(len=*), parameter :: path = "test_run/struct_write_declared_nullable.parquet"
+        logical :: drow, dv, dnm, crow, cv, cnm
+        call sch%init("structs_declared_nullable")
+        call sch%add_field("d", "struct")
+        call sch%add_field("c", "struct")
+        call parquet_parse_maml(sch)
+        call sch%set_nullable("d")
+        call dec%init(["v  ", "nm "], [PK_INT32, PK_STRING])
+        call dec%append_row(); call dec%set_field(1, "v", 3_int32); call dec%set_field(1, "nm", "abc")
+        call ctl%init(["v  ", "nm "], [PK_INT32, PK_STRING])
+        call ctl%append_row(); call ctl%set_field(1, "v", 4_int32); call ctl%set_field(1, "nm", "def")
+        call parquet_open_writer(w, path, sch)
+        call parquet_write_column(w, "d", dec)
+        call parquet_write_column(w, "c", ctl)
+        call parquet_close_writer(w)
+        call parquet_open_reader(r, path)
+        call parquet_get_column_nullable(r, "d", drow)
+        call parquet_get_column_nullable(r, "d.v", dv)
+        call parquet_get_column_nullable(r, "d.nm", dnm)
+        call parquet_get_column_nullable(r, "c", crow)
+        call parquet_get_column_nullable(r, "c.v", cv)
+        call parquet_get_column_nullable(r, "c.nm", cnm)
+        call parquet_close_reader(r)
+        call check(error, drow, "a declared struct column is nullable at the row level")
+        if (allocated(error)) return
+        call check(error, dv .and. dnm, "and at every field level")
+        if (allocated(error)) return
+        call check(error, .not. crow, "the undeclared control stays non-nullable at the row level")
+        if (allocated(error)) return
+        call check(error, .not. (cv .or. cnm), "and at every field level")
+    end subroutine test_declared_nullable_every_level
 
     !> Writing row group by row group produces the same column as one whole-column write.
     subroutine test_chunked_matches(error)

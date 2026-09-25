@@ -81,7 +81,13 @@ contains
             new_unittest("get_column_shape reports the container shape", test_column_shape), &
             new_unittest("get_column_type still reports the element type", test_column_type_unchanged), &
             new_unittest("reading a list column twice replaces rather than appends", test_read_twice_replaces), &
-            new_unittest("a map under a struct resolves; an intermediate struct does not", test_map_stays_unreadable) &
+            new_unittest("a map under a struct resolves; an intermediate struct does not", test_map_stays_unreadable), &
+            new_unittest("total_elements counts the SURVIVING rows under a transform", &
+                test_total_elements_under_a_transform), &
+            new_unittest("print_stat measures a list column from its decoded array", &
+                test_print_stat_measures_a_list_column), &
+            new_unittest("a [] descent path flattens a large_list as it does a list", &
+                test_descent_path_on_a_large_list) &
             ]
     end subroutine collect_tests_parquet_list_read
 
@@ -1124,5 +1130,164 @@ contains
             "while its own leaf does, at depth two")
         call parquet_close_reader(r)
     end subroutine test_map_stays_unreadable
+
+    !> `parquet_get_column_total_elements` on a ragged column counts the rows the caller can still
+    !! see, not the rows the file holds.
+    !!
+    !! The footer cannot answer this question at all -- a leaf's `num_values` counts SLOTS, and a
+    !! null or empty row occupies one -- so the count is summed from the offsets, one row group at a
+    !! time. A mask or a permutation breaks that bound: measuring per row group would count elements
+    !! of rows the transform removed, so the whole-column path (which applies the transform) is what
+    !! answers instead. Both halves of that condition are exercised here, and the untransformed
+    !! answer is the control: without it a branch that always returned the file's total would pass
+    !! the sorted arm, and one that always returned the survivors' total would pass the sampled arm.
+    subroutine test_total_elements_under_a_transform(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error.
+        type(parquet_reader) :: r
+        type(parquet_sortkey) :: srt
+        type(parquet_filter) :: flt
+        type(parquet_list_column), target :: lc
+        integer(int64) :: whole, sampled, sorted, emptied, survivors
+
+        ! The control. ragged holds mod(r,4)+1 elements a row over 16 rows: 4*(1+2+3+4) = 40.
+        call parquet_open_reader(r, WIDTHS)
+        call parquet_get_column_total_elements(r, "ragged", whole)
+        call parquet_close_reader(r)
+        call check(error, whole == 40_int64, "the untransformed column holds 40 elements")
+        if (allocated(error)) return
+
+        ! A MASK. The answer must agree with what a read of the same reader hands back, which is an
+        ! independent count of the same thing: the read sums the surviving rows' own lengths.
+        call parquet_open_reader(r, WIDTHS, sample_fraction=0.5_real64, sample_seed=12345_int64)
+        call parquet_get_column_total_elements(r, "ragged", sampled)
+        call parquet_read_column(r, "ragged", lc)
+        survivors = lc%total_elements()
+        call parquet_close_reader(r)
+        call check(error, sampled > 0_int64 .and. sampled < whole, &
+            "a half sample must drop some elements but not all")
+        if (allocated(error)) return
+        call check(error, sampled == survivors, &
+            "and must agree with the surviving rows' own lengths")
+        if (allocated(error)) return
+
+        ! A PERMUTATION. It reorders rows without removing any, so the total is unchanged -- which is
+        ! the property, and is what a branch measuring the wrong coordinate system would break.
+        call srt%add("scalar asc")
+        call parquet_open_reader(r, WIDTHS, sort_by=srt)
+        call parquet_get_column_total_elements(r, "ragged", sorted)
+        call parquet_close_reader(r)
+        call check(error, sorted == whole, "a permutation removes no rows, so the total is unchanged")
+        if (allocated(error)) return
+
+        ! A mask that keeps NOTHING. The whole-column path then has no array to measure at all, so
+        ! the answer is 0 rather than the file's total -- the degenerate end of the same branch, and
+        ! the one a caller reaches by writing a selective filter.
+        call flt%add("scalar > 99999")
+        call parquet_open_reader(r, WIDTHS, filter=flt)
+        call parquet_get_column_total_elements(r, "ragged", emptied)
+        call parquet_close_reader(r)
+        call check(error, emptied == 0_int64, "a filter matching nothing leaves no elements to count")
+    end subroutine test_total_elements_under_a_transform
+
+    !> `%print_stat` measures a list column's width from the DECODED array, so it is the one path
+    !! that asks a decoded list array its own width -- and the only one that can be handed an EMPTY
+    !! one.
+    !!
+    !! Both offset widths are covered, because the measurement has a separate arm per width and
+    !! nothing else here reaches either: `parquet_get_col_size` answers a list column from the footer
+    !! and a row-group scan, never from a decoded array, and element mode refuses a ragged column
+    !! outright (its width is 1 by contract, which no row but the shortest matches).
+    !!
+    !! Four inputs, two readers: a ragged `list` and a ragged `large_list`, whose rows disagree so
+    !! the width is 1; then the same two columns with every row filtered away, where the decoded
+    !! array has no offsets to measure at all.
+    !!
+    !! **What each half of the test can assert.** `print_stat` PRINTS its width and returns nothing,
+    !! and `message_stream` takes only `"stdout"` or `"stderr"`, so an in-process test cannot read
+    !! it back -- the printed text belongs to the out-of-process print_stat scenarios. What is
+    !! asserted here is the same width through `parquet_get_col_size`, which answers it by a
+    !! different route, plus the row counts, so a read that quietly returned nothing cannot make
+    !! either half vacuous; `print_stat` itself is asserted only by completing.
+    subroutine test_print_stat_measures_a_list_column(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error.
+        type(parquet_reader) :: r
+        type(parquet_filter) :: flt
+        type(parquet_list_column), target :: lc, lb
+        integer(int32) :: wn, ww
+
+        ! The ragged arms: 12 rows of mod(r,4)+1 elements, so no uniform width exists.
+        call parquet_open_reader(r, PAYLOADS)
+        call parquet_read_column(r, "i32", lc)
+        call parquet_read_column(r, "big", lb)
+        call check(error, lc%size() == 12_int64 .and. lb%size() == 12_int64, &
+            "both ragged columns must have read their 12 rows")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        ! The width itself, through the query that returns one. This is the SAME question print_stat
+        ! answers below and a different code path to it (the footer screen and the row-group scan,
+        ! never a decoded array), so the two are asserted together: this half pins the value, and the
+        ! close below is what exercises the decoded-array measurement, whose answer is printed rather
+        ! than returned and so can only be asserted by the call completing.
+        call parquet_get_col_size(r, "i32", wn)
+        call parquet_get_col_size(r, "big", ww)
+        call check(error, wn == 1 .and. ww == 1, &
+            "a ragged column's width is 1 by contract, on both offset widths")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call parquet_close_reader(r, print_stat=.true.)
+
+        ! The empty arms: the same two columns with no surviving row.
+        call flt%add("rowid > 9999")
+        call parquet_open_reader(r, PAYLOADS, filter=flt)
+        call parquet_read_column(r, "i32", lc)
+        call parquet_read_column(r, "big", lb)
+        call check(error, lc%size() == 0_int64 .and. lb%size() == 0_int64, &
+            "the filter must have removed every row, or the columns are not empty")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        ! Still 1, not 0: the footer screen settles a ragged column's width before the masked branch
+        ! is reached, and the footer describes the file's rows whatever the filter kept. Pinned here
+        ! because "the column is empty" and "the column has no uniform width" are different answers
+        ! and it would be easy to make the first override the second.
+        call parquet_get_col_size(r, "i32", wn)
+        call parquet_get_col_size(r, "big", ww)
+        call check(error, wn == 1 .and. ww == 1, &
+            "emptying a ragged column with a filter does not change its width")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call parquet_close_reader(r, print_stat=.true.)
+    end subroutine test_print_stat_measures_a_list_column
+    !> `<col>[]` reads a large_list column's elements as an ordinary flat column, exactly as it does
+    !! a plain list column's.
+    !!
+    !! The descent slices the child array to the range these rows cover, and the slicing arithmetic
+    !! has a separate arm per offset width -- so the plain `list` arm every other descent test
+    !! reaches says nothing about the int64 one. `big` and `i32` carry byte-identical data in the two
+    !! widths, which is what makes them comparable; the expected values are still written out rather
+    !! than taken from `i32` alone, or two arms wrong in the same way would agree.
+    subroutine test_descent_path_on_a_large_list(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error.
+        type(parquet_reader) :: r
+        integer(int32) :: wide(30), narrow(30)
+        integer(int32) :: want(30)
+        integer :: row, e, k
+
+        ! Row r (0-based) holds mod(r,4)+1 elements, element e being r*100 + e.
+        k = 0
+        do row = 0, 11
+            do e = 0, mod(row, 4)
+                k = k + 1
+                want(k) = int(row * 100 + e, int32)
+            end do
+        end do
+        call check(error, k == 30, "the twelve rows hold 30 elements between them")
+        if (allocated(error)) return
+
+        call parquet_open_reader(r, PAYLOADS)
+        call check(error, parquet_column_exists(r, "big[]"), "a large_list descent path resolves")
+        if (allocated(error)) then; call parquet_close_reader(r); return; end if
+        call parquet_read_column(r, "big[]", wide)
+        call parquet_read_column(r, "i32[]", narrow)
+        call parquet_close_reader(r)
+        call check(error, all(wide == want), "the large_list descent path flattens in row order")
+        if (allocated(error)) return
+        call check(error, all(narrow == want), "and so does its plain list twin")
+    end subroutine test_descent_path_on_a_large_list
 
 end module test_list_read

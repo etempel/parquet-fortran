@@ -1058,10 +1058,13 @@ contains
     !
     !> Asks BOTH engines about every ordered pair, and checks the total-order properties.
     !!
-    !! The C++ side is reached through two test-only hooks in src/parquet_wrapper.cpp, declared
+    !! The C++ side is reached through four test-only hooks in src/parquet_wrapper.cpp, declared
     !! locally here because that is how every `parquet_debug_*` hook is reached and it keeps them
-    !! out of src/parquet_bindings.f90. Their rows are 0-BASED (the C++ internal convention), so
-    !! each index is passed as `i - 1`; the Fortran side is 1-based throughout.
+    !! out of src/parquet_bindings.f90. The per-pair pair take rows 0-BASED (the C++ internal
+    !! convention), so each index is passed as `i - 1`; the Fortran side is 1-based throughout.
+    !! The other two are the BATCHED sweeps, whose checksums are asserted beside their Fortran
+    !! twins' -- nothing in the library calls either, so without this they have no caller a test
+    !! run reaches, and the benchmark that does call them would compare two meaningless numbers.
     !!
     !! The three property checks are what the C++ side cannot be asked about, and they are the
     !! reason this is not merely a two-way diff: irreflexivity, antisymmetry, and that `less` agrees
@@ -1092,11 +1095,29 @@ contains
                 integer(c_long_long), value :: nk      !! leading keys taking part.
                 integer(c_long_long) :: r              !! -1/0/+1, or -2 when no key was added.
             end function c_dbg_keys_compare
+            function c_sweep_less(handle, nrows, nreps) &
+                    bind(C, name="parquet_debug_sort_sweep_less_cpp") result(r)
+                import :: c_ptr, c_long_long
+                type(c_ptr), value :: handle           !! the C++ builder handle.
+                integer(c_long_long), value :: nrows   !! rows per pass.
+                integer(c_long_long), value :: nreps   !! passes.
+                integer(c_long_long) :: r              !! checksum, or -1 when unusable.
+            end function c_sweep_less
+            function c_sweep_compare(handle, nrows, nreps, nk) &
+                    bind(C, name="parquet_debug_sort_sweep_compare_cpp") result(r)
+                import :: c_ptr, c_long_long
+                type(c_ptr), value :: handle           !! the C++ builder handle.
+                integer(c_long_long), value :: nrows   !! rows per pass.
+                integer(c_long_long), value :: nreps   !! passes.
+                integer(c_long_long), value :: nk      !! leading keys taking part.
+                integer(c_long_long) :: r              !! checksum, or -1 when unusable.
+            end function c_sweep_compare
         end interface
         integer(int64) :: a, b
         logical :: fl, cl, fl_rev
         integer :: fc, cc
         integer(int64) :: sweep_less, sweep_cmp !! the two batched hooks' answers over this fixture.
+        integer(int64) :: csweep_less, csweep_cmp !! the C++ twins' answers over the same fixture.
         type(pf_sort_keys) :: empty_keys        !! never `%add`ed to, for the unusable-input arms.
         !
         ! ---- the two BATCHED comparator hooks, against an oracle that shares none of their code ----
@@ -1125,6 +1146,27 @@ contains
             call check(error, sweep_cmp == 0_int64, &
                 label // ": the batched compare-sweep must sum to zero by antisymmetry")
             if (allocated(error)) return
+            ! The C++ twins of the same two hooks, against the same combinatorial oracle -- and then
+            ! against the Fortran answers, which is the equality the benchmark's whole C++-versus-
+            ! Fortran comparison rests on ("their returned checksums must match, which is what
+            ! proves they did the same work", parquet_debug_sort_sweep_less_cpp's own comment). The
+            ! oracle comes first deliberately: two sweeps that walked the same WRONG pairs would
+            ! agree with each other and with nothing else.
+            csweep_less = int(c_sweep_less(builder, int(n, c_long_long), int(n - 1_int64, c_long_long)), int64)
+            call check(error, csweep_less == n * (n - 1_int64) / 2_int64, &
+                label // ": the C++ less-sweep must count each unordered pair exactly once")
+            if (allocated(error)) return
+            call check(error, csweep_less == sweep_less, &
+                label // ": the C++ and Fortran less-sweeps must return the same checksum")
+            if (allocated(error)) return
+            csweep_cmp = int(c_sweep_compare(builder, int(n, c_long_long), &
+                int(n - 1_int64, c_long_long), int(nkeys, c_long_long)), int64)
+            call check(error, csweep_cmp == 0_int64, &
+                label // ": the C++ compare-sweep must sum to zero by antisymmetry")
+            if (allocated(error)) return
+            call check(error, csweep_cmp == sweep_cmp, &
+                label // ": the C++ and Fortran compare-sweeps must return the same checksum")
+            if (allocated(error)) return
         end if
         ! Both unusable-input arms, since a hook that answered -1 unconditionally would satisfy
         ! every assertion above by never running at all: an empty key set, and a row count with no
@@ -1141,6 +1183,15 @@ contains
         if (allocated(error)) return
         call check(error, parquet_debug_sort_sweep_compare(keys, 1_int64, 1_int64, nkeys) == -1_int64, &
             label // ": the compare-sweep must decline a single row too")
+        if (allocated(error)) return
+        ! The C++ twins decline the same way, for the same reason: a hook that answered -1
+        ! unconditionally would satisfy every equality above by never running.
+        call check(error, c_sweep_less(builder, 1_c_long_long, 1_c_long_long) == -1_c_long_long, &
+            label // ": the C++ less-sweep must decline a single row, which has no pair to compare")
+        if (allocated(error)) return
+        call check(error, c_sweep_compare(builder, 1_c_long_long, 1_c_long_long, &
+            int(nkeys, c_long_long)) == -1_c_long_long, &
+            label // ": the C++ compare-sweep must decline a single row too")
         if (allocated(error)) return
         !
         do a = 1_int64, n

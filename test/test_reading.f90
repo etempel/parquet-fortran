@@ -136,6 +136,8 @@ contains
                 test_column_type_narrowest_lossless_mapping), &
             new_unittest("an encoding wrapper does not hide a column's shape", &
                 test_encoding_wrapper_shape), &
+            new_unittest("a [] descent path flattens a fixed_size_list column", &
+                test_descent_path_on_a_vector_column), &
             new_unittest("a dictionary column (a pandas category) reports its VALUE type", &
                 test_dictionary_type_query), &
             new_unittest("a dictionary column reads exactly like its plain twin", &
@@ -3649,6 +3651,35 @@ contains
     !! query ever started peeling with `unwrap_encoding_layers` (which strips every wrapper) the
     !! tensor assertion below is what would catch it. The dictionary cases pandas actually
     !! produces have their own fixture, `test/fixtures/dictionary_types.parquet`.
+    !> `<col>[]` reads a FIXED_SIZE_LIST column's elements as an ordinary flat column.
+    !!
+    !! The descent slices the child array to the range these rows cover, and a fixed-size list has
+    !! no offsets buffer to slice by -- the range is `offset * width` for `length * width` elements,
+    !! computed rather than read. That arm is reached by no other read: the vector reads take the
+    !! whole child array, and the `[]` tests elsewhere descend into variable-length lists, whose
+    !! offsets are what they slice by. A row-major read of the same column is asserted beside it as
+    !! the control, so a descent that happened to return the right COUNT of wrong values fails.
+    subroutine test_descent_path_on_a_vector_column(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_reader) :: reader
+        integer(int32) :: flat(12), rows(4, 3)
+        integer :: i
+
+        call parquet_open_reader(reader, "test/fixtures/encoded_types.parquet")
+        call check(error, parquet_column_exists(reader, "vec_col[]"), &
+            "a fixed_size_list descent path resolves")
+        if (allocated(error)) then; call parquet_close_reader(reader); return; end if
+        call parquet_read_column(reader, "vec_col[]", flat)
+        call parquet_read_column(reader, "vec_col", rows)
+        call parquet_close_reader(reader)
+        ! Three rows of four consecutive int32 starting at 0: the flattened order is row-major.
+        call check(error, all([(flat(i) == int(i - 1, int32), i = 1, 12)]), &
+            "the descent path flattens the vector column in row-major order")
+        if (allocated(error)) return
+        call check(error, all(reshape(rows, [12]) == flat), &
+            "and agrees element for element with a row-major read of the same column")
+    end subroutine test_descent_path_on_a_vector_column
+
     subroutine test_encoding_wrapper_shape(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_reader) :: reader

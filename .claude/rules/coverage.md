@@ -100,6 +100,14 @@ GCC's gcov and `llvm-cov gcov` attribute hits differently for `case`/`default:` 
 `}` after `return`, a lambda's parameter line, and continuation lines of a chained statement, so CI
 and a local `coverage_cpp.sh` disagree on the same commit. Conventions:
 
+- **A closing `}` shows uncovered exactly when the function returns a non-trivial class BY VALUE**
+  (a `std::vector`, a struct holding one): the only code GCC leaves on that line is the
+  exception-cleanup landing pad. A scalar-returning function's `}` gets no counter at all, so it
+  never appears. Confirm with a three-function standalone probe before reading one as a gap.
+- **Which continuation line of a multi-line call carries the counter differs between GCC builds**,
+  so exclude the WHOLE statement with a `START`/`STOP` block rather than tagging the one line that
+  shows uncovered today; otherwise the next toolchain moves the gap one line and leaves a stale
+  exclusion behind.
 - `GCOVR_EXCL_STOP` is on its own comment-only line, never trailing code (real gcovr does not
   exclude a `STOP` line carrying code; the local script does, so it passes locally and fails in CI).
 - A `case`/`catch`/`default:` label directly outside a `START`/`STOP` block is moved inside it.

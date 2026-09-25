@@ -877,6 +877,8 @@ contains
                 test_sample_mask_build_error_aborts), &
             new_unittest("a sample mask whose length disagrees with the file's row count aborts", &
                 test_sample_mask_length_mismatch_aborts), &
+            new_unittest("pre-evaluated filter leaves describing the wrong row count abort", &
+                test_filter_pre_leaf_row_count_mismatch_aborts), &
             new_unittest("string length query on a non-string column aborts", &
                 test_string_length_on_non_string_column_aborts), &
             new_unittest("writing columns with mismatched row counts aborts", &
@@ -4785,6 +4787,44 @@ contains
         call check(error, saw_message, &
             "the abort must name both the mask's length and the file's row count")
     end subroutine test_sample_mask_length_mismatch_aborts
+
+    !> parquet_reader_set_filter's twin of the guard above, for the verdict array a set-valued
+    !> (`in`/`not_in`) clause hands over: it is indexed by PHYSICAL row, and the counts it was built
+    !> from must be the file's own.
+    !>
+    !> Unreachable through the public API for the same reason -- parquet_prepare_set_leaves derives
+    !> both counts from a freshly opened private reader on the same file -- so the scenario arms it
+    !> with parquet_debug_set_force_pre_leaf_mismatch. See
+    !> `scenario_filter_pre_leaf_row_count_mismatch` (test/error_scenarios_io.f90) for what the
+    !> misalignment would cost if the guard were removed.
+    subroutine test_filter_pre_leaf_row_count_mismatch_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer :: exitstat, cmdstat
+        character(len=:), allocatable :: out_file, err_file
+        logical :: saw_control, saw_message
+
+        call run_error_scenario("filter_pre_leaf_row_count_mismatch", exitstat, cmdstat, out_file, err_file)
+
+        call check(error, cmdstat == 0, "failed to invoke the error_scenarios helper binary")
+        if (allocated(error)) return
+        call check(error, exitstat /= 0, &
+            "pre-evaluated filter leaves disagreeing with the file's row count were expected to abort")
+        if (allocated(error)) return
+
+        ! The negative control comes FIRST, for the same reason it does above: a guard that fired on
+        ! every set-valued clause would pass the assertion above just as happily.
+        call scenario_capture_contains(out_file, err_file, &
+            "control: the set-valued open succeeded with the row-count hook clear", saw_control)
+        call check(error, saw_control, &
+            "the identical open must succeed with the row-count hook clear, or the abort below " // &
+            "proves only that the guard fires, not that it fires for the right reason")
+        if (allocated(error)) return
+
+        call scenario_capture_contains(out_file, err_file, &
+            "pre-evaluated filter leaves describe 5 row(s) in 1 row group(s)", saw_message)
+        call check(error, saw_message, &
+            "the abort must name what the leaves describe as well as what the file holds")
+    end subroutine test_filter_pre_leaf_row_count_mismatch_aborts
 
     !> parquet_reader_get_string_length's `default:` fallback for a column that isn't
     !> string-like/LIST-typed at all -- reached via a plain `throw`, not report_fatal_error, but

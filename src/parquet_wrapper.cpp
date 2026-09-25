@@ -149,6 +149,14 @@
 static std::atomic<bool> g_fatal_claimed{false};
 
 // Returns only for the FIRST thread to reach a fatal path; every later one parks forever.
+//
+// GCOVR_EXCL'd, both of these: they run on every fatal path and only on a fatal path, and that
+// path ends in the std::_Exit below, which skips the atexit-registered gcov flush -- so the
+// process that demonstrably executed them writes no .gcda at all. Collateral of the same
+// mechanism the standalone report_fatal_error lines rest on (see this file's header note and
+// `.claude/rules/coverage.md`), not a separate gap: every `concurrent_calls_into_shared_*`
+// scenario exercises the park, and every aborting scenario exercises fatal_exit.
+// GCOVR_EXCL_START
 static void claim_fatal_path_or_park()
 {
 	if (!g_fatal_claimed.exchange(true, std::memory_order_acq_rel)) return;
@@ -161,6 +169,7 @@ static void claim_fatal_path_or_park()
 	std::fflush(stderr);
 	std::_Exit(134);
 }
+// GCOVR_EXCL_STOP
 
 // Monotonic source of the per-thread ownership tokens above. Never reused and
 // never 0, so 0 unambiguously means "this handle is idle".
@@ -953,7 +962,7 @@ extern "C"
 			}
 		}
 		return live;
-	}
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: the closing brace of a function returning a non-trivial class BY VALUE carries only the exception-cleanup landing pad, so it shows uncovered even though the covered `return` above proves the body ran.
 
 	// Test-only: how many rows the mask most recently installed in this process spans -- see
 	// parquet_debug_get_row_mask_length, far below, for why this is process-global rather than read
@@ -1701,44 +1710,75 @@ extern "C"
 		return nullptr; // GCOVR_EXCL_LINE -- every enumerator is covered above.
 	}
 
+	// Appends every leaf beneath `node`, in schema order -- which is already ascending by column
+	// index. Children are pushed in reverse so that popping yields that order.
+	static void append_subtree_leaf_indices(const parquet::arrow::SchemaField *node, std::vector<int> &out)
+	{
+		std::vector<const parquet::arrow::SchemaField *> stack{node};
+		while (!stack.empty())
+		{
+			const parquet::arrow::SchemaField *top = stack.back();
+			stack.pop_back();
+			if (top->is_leaf())
+			{
+				out.push_back(static_cast<int>(top->column_index));
+				continue;
+			}
+			for (size_t i = top->children.size(); i > 0; --i)
+			{
+				stack.push_back(&top->children[i - 1]);
+			}
+		}
+	}
+
 	static void resolve_chunk_leaf_indices(const ParquetReaderHandle *reader_handle, int top_level_idx,
 		const std::vector<PathSegment> &child_path, std::vector<int> &out)
 	{
 		const parquet::arrow::SchemaField *current = &reader_handle->manifest.schema_fields[top_level_idx];
-		for (const auto &segment : child_path) current = manifest_step(current, segment);
 		out.clear();
+		// A MAP the path steps THROUGH contributes BOTH halves of its entries struct, not just the
+		// half the path continues into. Arrow rebuilds a MapArray only when the key and the value
+		// are both present; with either missing it hands back a list<struct<...>> of whichever half
+		// was asked for -- a well-formed array of the wrong type, which then reaches
+		// unwrap_struct_path's map step, whose static_pointer_cast<MapArray> reads members that
+		// array does not have. The symptom is a SIGSEGV inside arrow::Array::Slice, not a
+		// diagnosable error, and it is reached by an ordinary chunked read of a map whose value is
+		// a container (read_map_impl descends to `<name>{value}` with the row group attached).
+		// Measured on test/fixtures/map_list_types.parquet with Arrow 24: the value leaves alone
+		// give `list<struct<value: struct<x: int32>>>` and the key leaf alone gives
+		// `list<struct<key: string>>`, while the two together give `map<string, struct<x: int32>>`.
+		for (const auto &segment : child_path)
+		{
+			if (segment.step == PathStep::MapKey || segment.step == PathStep::MapValue)
+			{
+				append_subtree_leaf_indices(current, out);
+			}
+			current = manifest_step(current, segment);
+		}
 		// A STRUCT joins MAP in needing EVERY leaf beneath it since Phase 7, and only through a
 		// descent path: `list_of_struct[]` is read as a struct column, so a single-leaf read would
 		// hand back a struct array with one field instead of all of them -- the same silent
-		// well-formed-but-wrong shape the map comment below describes.
+		// well-formed-but-wrong shape the map comment above describes.
 		if (current->field->type()->id() == arrow::Type::MAP ||
 			current->field->type()->id() == arrow::Type::STRUCT)
 		{
-			// Every leaf beneath the map -- its key and its value, and more than two for a nested
-			// value, which a `map<string,struct<...>>` read genuinely reaches. Children are pushed in reverse so that popping
-			// yields schema order, which is already ascending by column index.
-			std::vector<const parquet::arrow::SchemaField *> stack{current};
-			while (!stack.empty())
-			{
-				const parquet::arrow::SchemaField *node = stack.back();
-				stack.pop_back();
-				if (node->is_leaf())
-				{
-					out.push_back(static_cast<int>(node->column_index));
-					continue;
-				}
-				for (size_t i = node->children.size(); i > 0; --i)
-				{
-					stack.push_back(&node->children[i - 1]);
-				}
-			}
-			return;
+			// Every leaf beneath the destination -- a map's key and value, and more than two for a
+			// nested value, which a `map<string,struct<...>>` read genuinely reaches.
+			append_subtree_leaf_indices(current, out);
 		}
-		while (!current->is_leaf())
+		else
 		{
-			current = &current->children[0];
+			while (!current->is_leaf())
+			{
+				current = &current->children[0];
+			}
+			out.push_back(static_cast<int>(current->column_index));
 		}
-		out.push_back(static_cast<int>(current->column_index));
+		// A map step's own contribution overlaps the destination's whenever the path continues into
+		// that map, so the union has to be made unique -- ReadRowGroup is handed one ascending list
+		// with no repeats, which is what it was always handed before.
+		std::sort(out.begin(), out.end());
+		out.erase(std::unique(out.begin(), out.end()), out.end());
 	}
 
 	static int64_t resolve_single_leaf_index(
@@ -1961,8 +2001,9 @@ extern "C"
 				throw std::runtime_error(std::string("Failed to build empty array for column: ") + name);
 			}
 			return empty.ValueOrDie();
-			// GCOVR_EXCL_STOP
 		}
+		// GCOVR_EXCL_STOP -- the brace above closes a body that always returns or throws, so it is
+		// as unreachable as the body; the STOP sits below it rather than above for that reason.
 		// Several chunks (the function comment lists the three sources). A dictionary column's
 		// chunks were decoded above, so what reaches here is always plain value-typed arrays; a
 		// string column over the int32 ceiling is widened first, since Concatenate cannot rebuild
@@ -2637,13 +2678,17 @@ extern "C"
 				int64_t hi = std::min(lo + chunk_size, n);
 				int64_t elems = list_array_value_offset(array.get(), hi) - list_array_value_offset(array.get(), lo);
 				if (elems <= limit) continue;
+				// GCOVR_EXCL_START -- reached only on the fatal path below, whose _Exit discards the
+				// whole process's gcov data; the name string and the loop's closing brace are the
+				// same collateral as the report_fatal_error lines themselves.
 				std::string name = c < fields.size() && fields[c] ? fields[c]->name() : std::string("(unnamed)");
-				report_fatal_error(context, "column '" + name + "': chunk_size (" + std::to_string(chunk_size) + // GCOVR_EXCL_LINE
-					") would put " + std::to_string(elems) + " list elements in one row group, exceeding " + // GCOVR_EXCL_LINE
-					std::to_string(kArrowInt32ListElementCountLimit) + ", the maximum per-row-group element count " // GCOVR_EXCL_LINE
-					"Arrow/Parquet's list-column level generation supports -- pass a smaller chunk_size to " // GCOVR_EXCL_LINE
-					"parquet_open_writer, or omit it to auto-size safely"); // GCOVR_EXCL_LINE
+				report_fatal_error(context, "column '" + name + "': chunk_size (" + std::to_string(chunk_size) +
+					") would put " + std::to_string(elems) + " list elements in one row group, exceeding " +
+					std::to_string(kArrowInt32ListElementCountLimit) + ", the maximum per-row-group element count "
+					"Arrow/Parquet's list-column level generation supports -- pass a smaller chunk_size to "
+					"parquet_open_writer, or omit it to auto-size safely");
 			}
+			// GCOVR_EXCL_STOP
 		}
 	}
 
@@ -5349,9 +5394,19 @@ extern "C"
 		std::iota(perm.begin(), perm.end(), static_cast<int64_t>(0));
 		std::sort(perm.begin(), perm.end(), SortRowLess{&keys});
 		return perm;
-	}
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: the closing brace of a function returning a non-trivial class BY VALUE carries only the exception-cleanup landing pad, so it shows uncovered even though the covered `return` above proves the body ran.
 
-	// The engine's entry point: 0-based permutation of [0, n) putting the rows in key order.
+	// The engine's SERIAL entry point: 0-based permutation of [0, n) putting the rows in key order.
+	//
+	// **Nothing in this translation unit calls it.** Every bind(C) driver goes through
+	// sort_build_permutation_threaded, which resolves the counting path itself rather than
+	// delegating here -- deliberately, so that its own serial fallback does not re-run
+	// sort_counting_candidate's O(n) range scan (see sort_comparison_permutation's comment).
+	// It stays as the reference this file's own sort contract is stated in terms of
+	// (`.claude/rules/reader-writer.md`, "The sort engine") and as the shape the Fortran
+	// engine's serial entry point mirrors (`sort_build_permutation`, src/parquet_argsort.f90),
+	// which is what test_sorting.f90's serial-versus-threaded pair is written against.
+	// GCOVR_EXCL_START -- no caller in this translation unit; see above.
 	static std::vector<int64_t> sort_build_permutation(const std::vector<SortKeyData> &keys, int64_t n)
 	{
 		sort_check_keys_finalized(keys, n, "sort_build_permutation");
@@ -5362,6 +5417,7 @@ extern "C"
 		}
 		return sort_comparison_permutation(keys, n);
 	}
+	// GCOVR_EXCL_STOP
 
 	// ---- Parallel sorting ----
 	//
@@ -6374,7 +6430,7 @@ extern "C"
 			if (path_has_descent(parse_column_path(name).segments))
 			{
 				report_fatal_error("parquet_reader_set_qc",
-					std::string("a descent path is not a qc target: ") + name +
+					std::string("a descent path is not a qc target: ") + name + // GCOVR_EXCL_LINE -- continuation of the report_fatal_error above; the fatal _Exit discards the process's gcov data.
 					" (qc: and parquet_filter apply to scalar leaves only)"); // GCOVR_EXCL_LINE
 			}
 
@@ -7642,6 +7698,16 @@ extern "C"
 	// side effect of evaluating its own clause) so it's consistent with every other column.
 	// Returns 0 on success; on failure, returns 1 and writes a human-readable reason into err_out
 	// (truncated to err_cap).
+
+	// Test-only: makes the pre-evaluated-leaf row-count guard in parquet_reader_set_filter below
+	// reject a count that is in fact correct (it compares against total_nrows + 1 while set).
+	// The guard is UNREACHABLE through the public API -- see its own comment -- and this is what
+	// makes it testable. Reached only through the local bind(C) interface in
+	// test/error_scenarios_io.f90; its setter, parquet_debug_set_force_pre_leaf_mismatch, sits
+	// with the other debug setters far below. Safe as a plain bool for the same reason every
+	// other g_debug_* flag is: only the isolated scenario subprocess ever sets it.
+	static bool g_debug_force_pre_leaf_mismatch = false;
+
 	// Adds the elapsed time since `t0` to one of the phase counters above, and returns a fresh mark.
 	// A function rather than a macro so it can be stepped through, and taking the counter by
 	// reference so a new phase costs one line at the call site.
@@ -7683,16 +7749,21 @@ extern "C"
 		// That is checked here rather than trusted: the reader has three coordinate systems
 		// (physical, live after the screen, surviving after the mask), and a leaf sliced in the
 		// wrong one is misaligned by exactly a pruned row group's length while still producing a
-		// plausible row count. Same check, same reason, as parquet_reader_set_sample's own.
+		// plausible row count. Same check, same reason, as parquet_reader_set_sample's own -- and,
+		// like that one, unreachable through the public API (parquet_prepare_set_leaves,
+		// parquet_read.f90, takes both numbers from a freshly opened private reader on the same
+		// file, which carries no transform), so g_debug_force_pre_leaf_mismatch is what makes it
+		// testable rather than defensive code no fixture can reach.
 		if (n_pre > 0)
 		{
-			if (pre_rows != reader_handle->total_nrows || pre_groups != reader_handle->num_row_groups)
+			int64_t want_rows = reader_handle->total_nrows + (g_debug_force_pre_leaf_mismatch ? 1 : 0);
+			if (pre_rows != want_rows || pre_groups != reader_handle->num_row_groups)
 			{
 				std::snprintf(err_out, static_cast<size_t>(err_cap),
 					"pre-evaluated filter leaves describe %lld row(s) in %lld row group(s), "
 					"but the file has %lld row(s) in %lld row group(s)",
 					static_cast<long long>(pre_rows), static_cast<long long>(pre_groups),
-					static_cast<long long>(reader_handle->total_nrows),
+					static_cast<long long>(want_rows),
 					static_cast<long long>(reader_handle->num_row_groups));
 				return 1;
 			}
@@ -9108,7 +9179,7 @@ extern "C"
 		sort_builder_set_valid(key, valid, n);
 		sort_key_finalize(key);
 		return key;
-	}
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: the closing brace of a function returning a non-trivial class BY VALUE carries only the exception-cleanup landing pad, so it shows uncovered even though the covered `return` above proves the body ran.
 
 	// Writes the 1-BASED permutation of a single integer key into `perm_out` (sized n by the
 	// caller). Boolean and every temporal kind arrive here too, reduced to their stored integers.
@@ -9237,7 +9308,7 @@ extern "C"
 		sort_builder_set_valid(key, valid, n);
 		sort_key_finalize(key);
 		return key;
-	}
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: the closing brace of a function returning a non-trivial class BY VALUE carries only the exception-cleanup landing pad, so it shows uncovered even though the covered `return` above proves the body ran.
 
 	// Writes the first `count` entries of the 1-based permutation of an integer key into `perm_out`.
 	// `count` is clamped to n, so asking for more than exists returns all of it.
@@ -9385,8 +9456,14 @@ extern "C"
 		case arrow::Type::UINT64: return kElemFamilyInt64;
 		// Mapped on the type ID alone -- deliberately no precision/scale awareness, so
 		// decimal(9,0) answers float64 like every other decimal rather than int32.
+		// GCOVR_EXCL_START -- permanently dead: Arrow reads every decimal column back as a
+		// Decimal128Array or a Decimal256Array whatever its declared precision, so no fixture can
+		// present a DECIMAL32/DECIMAL64 type id here -- the same fact that makes decimal_value_at's
+		// two narrow arms dead (`.claude/rules/coverage.md`). Kept so that an Arrow which did hand
+		// one back would still be answered correctly.
 		case arrow::Type::DECIMAL32: return kElemFamilyFloat64;
 		case arrow::Type::DECIMAL64: return kElemFamilyFloat64;
+		// GCOVR_EXCL_STOP
 		case arrow::Type::DECIMAL128: return kElemFamilyFloat64;
 		case arrow::Type::DECIMAL256: return kElemFamilyFloat64;
 		case arrow::Type::HALF_FLOAT: return kElemFamilyFloat32;
@@ -9426,10 +9503,26 @@ extern "C"
 		switch (type->id())
 		{
 		case arrow::Type::LIST: return kElemFamilyList;
+		// GCOVR_EXCL_START -- untested compat backstop: this function is only ever asked about a
+		// CONTAINER'S CHILD type (a list's element, a map's value, a struct's field), and nothing
+		// this library writes puts a large_list there -- effective_list_offset_limit widens a
+		// TOP-LEVEL list column only, and a nested container cannot be written at all. A
+		// third-party file carrying struct<x: large_list<...>> reaches it, which is why it stays.
 		case arrow::Type::LARGE_LIST: return kElemFamilyList;
+		// GCOVR_EXCL_STOP
 		case arrow::Type::MAP: return kElemFamilyMap;
 		case arrow::Type::STRUCT: return kElemFamilyStruct;
+		// GCOVR_EXCL_START -- every route that can reach this arm ends by aborting, so the
+		// process that ran it writes no gcov data (the report_fatal_error mechanism; see this
+		// file's header note). Four of the five callers ask only after arrow_leaf_family has
+		// already declined, and answering "none" again is what makes them refuse: the list and
+		// map shape queries call report_fatal_error, and parquet_get_column_families hands the
+		// zero on to struct_field_kind, which error stops. The fifth,
+		// parquet_reader_get_map_value_type_name, answers "unknown" instead of aborting, but it
+		// needs a map<string, T> whose T is neither a leaf family nor a container -- a shape this
+		// library cannot write and no fixture carries.
 		default: return kElemFamilyNone;
+		// GCOVR_EXCL_STOP
 		}
 	}
 
@@ -12563,7 +12656,7 @@ extern "C"
 		}
 		report_fatal_error(context, std::string("type mismatch for column: ") + name +
 			" (expected list/large_list/fixed_size_list, got " + array->type()->ToString() + ")"); // GCOVR_EXCL_LINE
-	}
+	} // GCOVR_EXCL_LINE -- gcov attribution artifact: unreachable brace after the [[noreturn]] call above, and this function returns a non-trivial class by value, so nothing but the exception-cleanup landing pad is attributed here.
 
 	// The value type a list column's elements read into -- its child field's type, taken from the
 	// SCHEMA rather than from any decoded array, so a shape query never has to read data it does
@@ -12573,7 +12666,7 @@ extern "C"
 		auto id = field->type()->id();
 		if (id != arrow::Type::LIST && id != arrow::Type::LARGE_LIST && id != arrow::Type::FIXED_SIZE_LIST)
 		{
-			return nullptr;
+			return nullptr; // GCOVR_EXCL_LINE -- the one caller (parquet_read_list_shape) turns this into report_fatal_error, whose _Exit discards the process's gcov data.
 		}
 		return field->type()->field(0)->type();
 	}
@@ -13398,7 +13491,7 @@ extern "C"
 		if (!is_string_like_type(key_type->id()))
 		{
 			report_fatal_error(context, std::string("unsupported map key type for column: ") + name +
-				" (" + key_type->ToString() + "); only string keys are supported");
+				" (" + key_type->ToString() + "); only string keys are supported"); // GCOVR_EXCL_LINE -- continuation of the report_fatal_error above; the fatal _Exit discards the process's gcov data.
 		}
 		auto value_type = map_value_type(resolved.leaf_field);
 		int32_t family = arrow_leaf_family(value_type);
@@ -13407,7 +13500,7 @@ extern "C"
 		if (family == kElemFamilyNone)
 		{
 			report_fatal_error(context, std::string("unsupported map value type for column: ") + name +
-				" (" + value_type->ToString() + ")");
+				" (" + value_type->ToString() + ")"); // GCOVR_EXCL_LINE -- continuation of the report_fatal_error above; the fatal _Exit discards the process's gcov data.
 		}
 		*value_family_out = family;
 		*unit_out = 0;
@@ -14530,10 +14623,16 @@ static void check_map_entries_fit_arrow_limit(int64_t nentries, const std::strin
 {
 	int64_t limit = effective_map_offset_limit();
 	if (nentries <= limit) return;
+	// GCOVR_EXCL_START -- the fatal _Exit below discards the whole process's gcov data, so no line
+	// of this statement can ever register. The WHOLE statement is excluded rather than the one
+	// continuation line that shows uncovered today: which of them carries gcov's counter differs
+	// between GCC builds (CI's names a different line from a GCC 15 one), and every line of it is
+	// equally unreachable without the abort.
 	report_fatal_error(context, "column '" + name + "': " + std::to_string(nentries) +
 		" map entries exceed " + std::to_string(kArrowInt32OffsetLimit) +
 		", the maximum an int32 map offsets buffer can address; Arrow has no large_map to widen"
 		" into, so this column cannot be written (split it across more row groups)");
+	// GCOVR_EXCL_STOP
 }
 
 // The map field: `map<key_type, value_type>`, with the ROW and the VALUE nullability decided by
@@ -15731,10 +15830,16 @@ extern "C"
 	// the override exercises a WIDENING (large_list), here it exercises an abort, because Arrow has
 	// no large_map to widen into. Safe as a process-global for the same reason: the scenario that
 	// sets it runs as its own isolated subprocess. <= 0 restores the real limit.
-	void parquet_debug_set_map_offset_limit(int64_t n)
+	//
+	// GCOVR_EXCL'd: same reasoning as parquet_debug_set_col_size_limit below --
+	// scenario_map_entry_limit always ends by aborting via check_map_entries_fit_arrow_limit's
+	// report_fatal_error, which discards the whole process's gcov data, so this setter never
+	// shows as covered although it is genuinely called every time.
+	void parquet_debug_set_map_offset_limit(int64_t n) // GCOVR_EXCL_START
 	{
 		g_debug_map_offset_limit = n;
 	}
+	// GCOVR_EXCL_STOP
 
 	// Test-only: overrides g_debug_col_size_limit (see its own comment) so
 	// test/error_scenarios.f90's scenario_col_size_overflow can exercise the
@@ -15922,6 +16027,17 @@ extern "C"
 	void parquet_debug_set_force_sample_len_mismatch(int enable)
 	{
 		g_debug_force_sample_len_mismatch = (enable != 0);
+	}
+
+	// Forces parquet_reader_set_filter's pre-evaluated-leaf row-count guard to reject a count
+	// that is in fact correct (it compares against total_nrows + 1 while set). The guard is
+	// UNREACHABLE through the public API -- parquet_prepare_set_leaves derives pre_rows from a
+	// freshly opened private reader on the same file, so the two values cannot differ -- and
+	// this hook is what makes it testable rather than defensive code no fixture can reach. See
+	// error_scenarios_io.f90's filter_pre_leaf_row_count_mismatch.
+	void parquet_debug_set_force_pre_leaf_mismatch(int enable)
+	{
+		g_debug_force_pre_leaf_mismatch = (enable != 0);
 	}
 
 	// Test-only: returns g_debug_physical_column_read_count (see its own comment) -- lets

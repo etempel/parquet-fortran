@@ -532,6 +532,8 @@ contains
             new_unittest("a chunk_size within the element ceiling writes normally", &
                 test_list_write_ceiling_ok), &
             new_unittest("the large_list write path round-trips", test_list_write_large_list_roundtrip), &
+            new_unittest("a list column's large_utf8 string child round-trips", &
+                test_list_write_large_string_child), &
             new_unittest("a streamed column that crosses the offset threshold keeps one width", &
                 test_list_write_large_list_chunked), &
             new_unittest("parquet_logging refuses every configuration mistake", &
@@ -2085,6 +2087,17 @@ contains
         call check_scenario_exit_status(error, "list_write_large_list_roundtrip", expect_abort=.false., &
             failure_message="the large_list write path was expected to round-trip cleanly")
     end subroutine test_list_write_large_list_roundtrip
+
+    !> A `list<string>` whose byte payload cannot fit int32 offsets writes and reads its child
+    !! through the 64-bit arm.
+    !!
+    !! See `scenario_list_write_large_string_child` (test/error_scenarios_analysis.f90) for why the
+    !! round trip is the assertion and why the threshold is shrunk rather than met.
+    subroutine test_list_write_large_string_child(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        call check_scenario_exit_status(error, "list_write_large_string_child", expect_abort=.false., &
+            failure_message="a list column's large_utf8 string child was expected to round-trip cleanly")
+    end subroutine test_list_write_large_string_child
 
     !> Two row groups either side of the int32 offsets threshold. The streamed path assembles every
     !! chunk with the type its FIELD already carries, fixed by the first row group; recomputing the

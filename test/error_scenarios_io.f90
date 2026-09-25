@@ -914,6 +914,8 @@ contains
             call scenario_sample_mask_build_error()
         case ("sample_mask_length_mismatch")
             call scenario_sample_mask_length_mismatch()
+        case ("filter_pre_leaf_row_count_mismatch")
+            call scenario_filter_pre_leaf_row_count_mismatch()
         case ("string_length_on_non_string_column")
             call scenario_string_length_on_non_string_column()
         case ("write_row_count_mismatch")
@@ -9024,6 +9026,59 @@ contains
         call parquet_open_reader(reader, out_file, sample_fraction=0.5_real64, sample_seed=5_int64)
         print '(a)', "unexpectedly opened a sampled reader despite the forced mask-length mismatch"
     end subroutine scenario_sample_mask_length_mismatch
+
+    !> parquet_reader_set_filter's pre-evaluated-leaf row-count guard (parquet_wrapper.cpp): the
+    !> verdict array a set-valued (`in`/`not_in`) clause hands over is indexed by PHYSICAL row, and
+    !> the row and row-group counts it was built from must be the file's own.
+    !>
+    !> The guard CANNOT fire through the public API -- parquet_prepare_set_leaves (parquet_read.f90)
+    !> derives both counts from a freshly opened PRIVATE reader on the same file, which carries no
+    !> transform of its own, so they are the physical ones by construction. It exists because the
+    !> reader has three coordinate systems (physical, live after the statistics screen, surviving
+    !> after the mask) and a verdict array sliced in the wrong one is misaligned by exactly a pruned
+    !> row group's length while still producing a plausible row count -- a silent wrong answer, not
+    !> a crash. The debug hook below is what makes it testable instead of defensive code no fixture
+    !> can reach: it makes the guard expect one row MORE than the file has, so the correct payload
+    !> Fortran built is rejected.
+    !>
+    !> The control arm matters as much as the abort: the same open runs cleanly with the hook clear
+    !> first, which is what proves the guard is not simply firing on every set-valued clause.
+    subroutine scenario_filter_pre_leaf_row_count_mismatch()
+        interface
+            subroutine parquet_debug_set_force_pre_leaf_mismatch(enable) &
+                bind(C, name="parquet_debug_set_force_pre_leaf_mismatch")
+                use iso_c_binding, only : c_int
+                integer(c_int), value :: enable !! nonzero makes the guard expect one row too many; 0 restores.
+            end subroutine parquet_debug_set_force_pre_leaf_mismatch
+        end interface
+
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        type(parquet_filter) :: filt
+        integer(int32) :: v(5) = [1, 2, 3, 4, 5]
+        integer(int64) :: nrows
+        character(len=*), parameter :: out_file = &
+            "test_run/error_scenario_filter_pre_leaf_row_count_mismatch.parquet"
+
+        call parquet_open_writer(writer, out_file)
+        call parquet_write_column(writer, "v", v)
+        call parquet_close_writer(writer)
+
+        ! Negative control: with the hook clear the identical set-valued open must succeed, and must
+        ! match the two rows it names -- an open that matched nothing would pass a bare status check.
+        call filt%add_in("v", [2_int32, 4_int32])
+        call parquet_open_reader(reader, out_file, filter=filt)
+        call parquet_get_nrows(reader, nrows)
+        call parquet_close_reader(reader)
+        if (nrows /= 2_int64) then
+            error stop "control: the set-valued filter must keep exactly two rows with the hook clear"
+        end if
+        print '(a)', "control: the set-valued open succeeded with the row-count hook clear"
+
+        call parquet_debug_set_force_pre_leaf_mismatch(1)
+        call parquet_open_reader(reader, out_file, filter=filt)
+        print '(a)', "unexpectedly applied a set-valued filter despite the forced row-count mismatch"
+    end subroutine scenario_filter_pre_leaf_row_count_mismatch
 
     !> parquet_reader_get_string_length's `default:` fallback
     !> (parquet_wrapper.cpp) for a column that isn't string-like/LIST/LARGE_LIST/FIXED_SIZE_LIST

@@ -3,8 +3,8 @@
 # only for src/parquet_wrapper.cpp.
 #
 # Usage:
-#   tools/coverage_cpp.sh              # full run_tester suite + all error_scenarios
-#   tools/coverage_cpp.sh reading      # only the "reading" run_tester testsuite
+#   tools/coverage_cpp.sh              # every test runner + all error_scenarios
+#   tools/coverage_cpp.sh reading      # only the "reading" testsuite, in whichever runner has it
 #
 # Notes:
 # - This script needs a C++ toolchain/config that can build parquet_wrapper.cpp,
@@ -25,6 +25,33 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+# The suite -> runner map, derived from the runners' own registrations -- the same helper
+# tools/coverage.sh uses, and for the same reason: a suite named on the command line may live in
+# any of test/run_tester*.f90, and `fpm test run_tester -- <suite>` for a suite another runner
+# registers prints the available list and exits nonzero. `sed` rather than `grep -o`, for BSD grep.
+runner_for_suite() {
+    local want="$1" f name
+    for f in "$ROOT_DIR"/test/run_tester*.f90; do
+        for name in $(sed -n 's/.*new_testsuite("\([a-z_0-9]*\)".*/\1/p' "$f"); do
+            if [ "$name" = "$want" ]; then
+                basename "$f" .f90
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+if [ "$#" -gt 0 ]; then
+    if ! COVERAGE_RUNNER="$(runner_for_suite "$1")"; then
+        echo "tools/coverage_cpp.sh: no test runner registers a suite named '$1'." >&2
+        echo "Known suites:" >&2
+        sed -n 's/.*new_testsuite("\([a-z_0-9]*\)".*/  \1/p' "$ROOT_DIR"/test/run_tester*.f90 \
+            | sort >&2
+        exit 1
+    fi
+fi
 
 detect_arrow_prefix() {
     # Prefer explicit/local installs first, then common package-manager roots.
@@ -185,6 +212,13 @@ if [[ "$(basename "$CXX_PATH")" == clang++* ]]; then
     else
         echo "Warning: clang coverage runtime not found; link may fail." >&2
     fi
+else
+    # GCC's --coverage needs libgcov at the final link, and here the Fortran half is NOT
+    # instrumented (tools/coverage.sh is the pass that does that), so nothing else puts it on the
+    # link line: every executable fails with `undefined reference to __gcov_init/__gcov_exit/
+    # __gcov_merge_add` in src_parquet_wrapper.cpp.o. Passed as the DRIVER flag rather than as
+    # `-lgcov`, which fpm places ahead of the archive that needs it and the linker then discards.
+    export FPM_LDFLAGS="${FPM_LDFLAGS:-} --coverage"
 fi
 
 echo "Cleaning previous C++ coverage build directory: $FPM_BUILD_DIR" >&2
@@ -213,16 +247,44 @@ cleanup_coverage_build() {
 }
 trap cleanup_coverage_build EXIT
 
-echo "Building + running run_tester with coverage instrumentation..." >&2
-fpm test run_tester -- "$@"
+if [ "$#" -eq 0 ]; then
+    # EVERY runner, not just run_tester. The suites are split across test/run_tester*.f90 by
+    # compile time and by what each can be built with, and run_tester_cpp is where almost
+    # everything that touches src/parquet_wrapper.cpp lives (writing, reading, the filter, the
+    # sort, the container reads and writes). Running run_tester alone reports about two thirds of
+    # the file uncovered and cannot be compared with CI's figure at all.
+    #
+    # Drop any capture directory an earlier run left behind, for the same reason tools/coverage.sh
+    # does: run_tester_errors' priming reads "this scenario has a capture" as "this scenario has
+    # run", and a stale directory would make that false, silently, for every scenario it holds.
+    rm -rf test_run/.primed
+
+    # PARQUET_TEST_PRIME_JOBS=1 is the bound on concurrent .gcda merges corrupting a file
+    # (`... .gcda: not a gcov data file`; the milder form silently flips lines between covered and
+    # uncovered). Priming is what reaches those files from `nproc` processes at once, so it has to
+    # be set before the runner loop, not on the error-scenario pass below.
+    export PARQUET_TEST_PRIME_JOBS="${PARQUET_TEST_PRIME_JOBS:-1}"
+
+    echo "Building + running every test runner with coverage instrumentation..." >&2
+    for runner in "$ROOT_DIR"/test/run_tester*.f90; do
+        runner="$(basename "$runner" .f90)"
+        echo "  ... $runner" >&2
+        fpm test "$runner"
+    done
+else
+    echo "Building + running $COVERAGE_RUNNER -- $1 with coverage instrumentation..." >&2
+    fpm test "$COVERAGE_RUNNER" -- "$@"
+fi
 
 if [ "$#" -eq 0 ]; then
-    echo "Running tools/run_error_scenarios.sh for additional error-path coverage..." >&2
-    # Serial for the same reason tools/coverage.sh runs them serially -- see the long comment at
-    # that script's own call site. Hundreds of concurrent workers merging into one set of shared
-    # .gcda files corrupts them, and the milder form of the damage silently under-reports rather
-    # than failing. The C++ half writes into the same tree, so it has the same exposure.
-    RUN_ERROR_SCENARIOS_JOBS="${RUN_ERROR_SCENARIOS_JOBS:-1}" \
+    echo "Running tools/run_error_scenarios.sh for the error paths priming did not reach..." >&2
+    # RUN_ERROR_SCENARIOS_SKIP_PRIMED, and the serial default, for exactly the reasons
+    # tools/coverage.sh gives at its own call site: run_tester_errors above has already spawned
+    # every `scenarios=(...)` entry from this instrumented tree, so replaying the list measures
+    # nothing, while the `concurrency_scenarios=(...)` array it does not read is worth running.
+    # Asking "does this one have a capture?" runs exactly the scenarios priming missed.
+    RUN_ERROR_SCENARIOS_SKIP_PRIMED=1 \
+        RUN_ERROR_SCENARIOS_JOBS="${RUN_ERROR_SCENARIOS_JOBS:-1}" \
         "$ROOT_DIR/tools/run_error_scenarios.sh" >&2 || true
 fi
 

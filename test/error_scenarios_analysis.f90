@@ -304,6 +304,8 @@ contains
             call scenario_list_write_ceiling_ok()
         case ("list_write_large_list_roundtrip")
             call scenario_list_write_large_list_roundtrip()
+        case ("list_write_large_string_child")
+            call scenario_list_write_large_string_child()
         case ("list_write_large_list_chunked")
             call scenario_list_write_large_list_chunked()
         case ("sorting_nth_out_of_range")
@@ -7674,6 +7676,78 @@ contains
         if (size(v) /= 3) error stop "the large_list write lost an element"
         if (v(1) /= 30_int32 .or. v(3) /= 32_int32) error stop "the large_list write lost a value"
     end subroutine scenario_list_write_large_list_roundtrip
+
+    !> Proves the arrow::large_utf8() PAYLOAD arm of a list column round-trips: the child array of a
+    !> `list<string>` whose byte payload cannot fit int32 offsets is built with 64-bit offsets, and
+    !> read back through the same widened accessor.
+    !>
+    !> The list counterpart of scenario_large_string_roundtrip, one level down: that one widens a
+    !> whole string COLUMN, this one widens a list column's string CHILD, which is a separate
+    !> builder and a separate measurement on the way back (a list column's payload byte total is
+    !> read from the child's own offsets, and that read has one arm per offset width). A genuine
+    !> >2 GiB payload is far too large for the suite, so the threshold is shrunk through
+    !> parquet_debug_set_string_offset_limit -- safe as a process-global for the same reason: this
+    !> scenario is its own isolated subprocess.
+    !>
+    !> Nothing a caller can observe distinguishes the two widths, so the round trip is the assertion:
+    !> a child built with int64 offsets and read as int32 would hand back garbage, and one measured
+    !> with the wrong arm would abort on the byte-count check inside the fill call.
+    subroutine scenario_list_write_large_string_child()
+        interface
+            subroutine parquet_debug_set_string_offset_limit(n) &
+                bind(C, name="parquet_debug_set_string_offset_limit")
+                use iso_c_binding, only : c_int64_t
+                integer(c_int64_t), value :: n !! byte threshold to use instead of 2^31-1; <=0 restores it.
+            end subroutine parquet_debug_set_string_offset_limit
+        end interface
+        type(parquet_writer) :: writer
+        type(parquet_reader) :: reader
+        ! TARGET on `back`: %view hands back a handle whose %col points at it, and F2018 15.5.2.4
+        ! leaves that pointer UNDEFINED on return when the actual argument is not a target. Only
+        ! nagfor's -C=dangling sees it (`.claude/rules/fortran-gotchas.md`, "nagfor-specific gotchas").
+        type(parquet_list_column) :: lc
+        type(parquet_list_column), target :: back
+        type(parquet_list_row) :: row
+        character(len=:), allocatable :: es(:)
+        character(len=:), allocatable :: shape, arrow_type
+        ! 5 + 5 + 7 + 5 + 4 = 26 bytes of payload against a 20-byte ceiling, so the child must widen.
+        call parquet_debug_set_string_offset_limit(20_int64)
+        call lc%init(PK_STRING)
+        call lc%append_row([character(len=7) :: "alpha", "bravo"])
+        call lc%append_null_row()
+        call lc%append_row([character(len=7) :: "charlie", "delta", "echo"])
+        call parquet_open_writer(writer, "test_run/error_scenario_list_large_string.parquet")
+        call parquet_write_column(writer, "lst", lc)
+        call parquet_close_writer(writer)
+        call parquet_debug_set_string_offset_limit(0_int64)
+
+        call parquet_open_reader(reader, "test_run/error_scenario_list_large_string.parquet")
+        call parquet_get_column_shape(reader, "lst", shape)
+        call parquet_get_column_arrow_type(reader, "lst", arrow_type)
+        call parquet_read_column(reader, "lst", back)
+        call parquet_close_reader(reader)
+        if (shape /= "list") error stop "a list column with a large_utf8 child must still report shape 'list'"
+        ! The one query that NAMES the stored type, and the reason this scenario is not merely a
+        ! round trip: 26 bytes fit int32 offsets perfectly well, so a writer that ignored the
+        ! shrunk ceiling and built a plain utf8 child would round-trip just as cleanly. This is what
+        ! makes the widening itself observable.
+        if (index(arrow_type, "large_string") == 0) then
+            error stop "the shrunk string-offset ceiling must have widened the list child to " // &
+                "large_utf8, and the stored type says: " // arrow_type
+        end if
+        if (back%size() /= 3_int64) error stop "the large_utf8 child write did not round-trip its rows"
+        if (.not. back%is_null(2_int64)) error stop "the large_utf8 child write lost a null row"
+        row = back%view(1_int64)
+        call row%get(es)
+        if (size(es) /= 2) error stop "the large_utf8 child write lost an element of row 1"
+        if (trim(es(1)) /= "alpha" .or. trim(es(2)) /= "bravo") &
+            error stop "the large_utf8 child write lost a value of row 1"
+        row = back%view(3_int64)
+        call row%get(es)
+        if (size(es) /= 3) error stop "the large_utf8 child write lost an element of row 3"
+        if (trim(es(1)) /= "charlie" .or. trim(es(3)) /= "echo") &
+            error stop "the large_utf8 child write lost a value of row 3"
+    end subroutine scenario_list_write_large_string_child
 
     !> The large_list arm across TWO row groups, where the first is narrow enough for int32 offsets
     !> and the second is not. This is the case that makes the streamed path's rule -- assemble every

@@ -351,6 +351,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `%build_from` of `parquet_column` and `parquet_string_column`.
 - `pf_index_pool%compact` releases the pool's list of freed indexes: a compacted pool holds one bit
   per index below its watermark instead of 8 bytes per free index.
+- A row-group-scoped read that descends through a `MAP` no longer crashes:
+  `parquet_read_column_chunk` of a map column whose value is itself a container, and of a `{key}` or
+  `{value}` descent path, return the same values their whole-column forms do.
 - Many other minor fixes and improvements.
 
 ## [v2.4.0] - 2026-09-14

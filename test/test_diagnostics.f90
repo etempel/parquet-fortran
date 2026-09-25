@@ -83,6 +83,52 @@ module test_diagnostics
             import :: c_long_long
             integer(c_long_long) :: res !! accumulated copy-loop nanoseconds.
         end function parquet_debug_get_string_read_copy_nanos
+        !> Zeroes the read-time sort's five phase timers and its two column counts.
+        subroutine parquet_debug_reset_sort_phase_nanos() &
+            bind(C, name="parquet_debug_reset_sort_phase_nanos")
+        end subroutine parquet_debug_reset_sort_phase_nanos
+        !> Nanoseconds the read-time sort spent reporting its key's family and size to Fortran.
+        function parquet_debug_get_sort_info_nanos() result(res) &
+            bind(C, name="parquet_debug_get_sort_info_nanos")
+            import :: c_long_long
+            integer(c_long_long) :: res !! accumulated key-info nanoseconds.
+        end function parquet_debug_get_sort_info_nanos
+        !> Nanoseconds spent materialising the key again inside the fetch call.
+        function parquet_debug_get_sort_bind_nanos() result(res) &
+            bind(C, name="parquet_debug_get_sort_bind_nanos")
+            import :: c_long_long
+            integer(c_long_long) :: res !! accumulated key-bind nanoseconds.
+        end function parquet_debug_get_sort_bind_nanos
+        !> Nanoseconds spent copying that key into Fortran-owned buffers.
+        function parquet_debug_get_sort_copy_nanos() result(res) &
+            bind(C, name="parquet_debug_get_sort_copy_nanos")
+            import :: c_long_long
+            integer(c_long_long) :: res !! accumulated key-copy nanoseconds.
+        end function parquet_debug_get_sort_copy_nanos
+        !> Nanoseconds spent building the Arrow permutation array from Fortran's answer.
+        function parquet_debug_get_sort_perm_nanos() result(res) &
+            bind(C, name="parquet_debug_get_sort_perm_nanos")
+            import :: c_long_long
+            integer(c_long_long) :: res !! accumulated permutation-build nanoseconds.
+        end function parquet_debug_get_sort_perm_nanos
+        !> Nanoseconds the permutation install spent on the column cache.
+        function parquet_debug_get_sort_take_nanos() result(res) &
+            bind(C, name="parquet_debug_get_sort_take_nanos")
+            import :: c_long_long
+            integer(c_long_long) :: res !! accumulated install nanoseconds.
+        end function parquet_debug_get_sort_take_nanos
+        !> Columns the permutation install re-Took in place since the last reset.
+        function parquet_debug_get_sort_take_columns() result(res) &
+            bind(C, name="parquet_debug_get_sort_take_columns")
+            import :: c_long_long
+            integer(c_long_long) :: res !! columns Taken.
+        end function parquet_debug_get_sort_take_columns
+        !> Columns the permutation install dropped from the cache since the last reset.
+        function parquet_debug_get_sort_released_columns() result(res) &
+            bind(C, name="parquet_debug_get_sort_released_columns")
+            import :: c_long_long
+            integer(c_long_long) :: res !! columns released.
+        end function parquet_debug_get_sort_released_columns
         !> Nanoseconds the last threaded sort spent in `phase` (0, 1 or 2); 0 for anything else.
         function parquet_debug_get_sort_phase_ns(phase) result(res) &
             bind(C, name="parquet_debug_get_sort_phase_ns")
@@ -127,7 +173,9 @@ contains
             new_unittest("the padded string read's two phase timers record", &
                 test_string_read_phase_timers), &
             new_unittest("the threaded sort's phase timers record, and reject a bad phase", &
-                cpp_test_sort_phase_timers) &
+                cpp_test_sort_phase_timers), &
+            new_unittest("the read-time sort's five phase timers each record their own phase", &
+                test_read_sort_phase_timers) &
             ]
     end subroutine collect_tests_diagnostics
     !
@@ -277,6 +325,74 @@ contains
         if (allocated(error)) return
         call check(error, p2 > 0_int64, "the last-merge-round phase timer must record its phase")
     end subroutine test_sort_phase_timers
+    !
+    !> All five READ-TIME sort phases must move across one sorted open, and the install has to be
+    !! shown to have run at all.
+    !!
+    !! These are the `parquet_open_reader(..., sort_by=)` phases -- key info, key bind, the copy into
+    !! Fortran-owned buffers, building the Arrow permutation, and what the install then does with the
+    !! column cache -- and they are a different family from `cpp_test_sort_phase_timers` above, which
+    !! times the C++ engine's own chunk sorts and merge rounds. Nothing in the library reads either
+    !! set, so a `charge_phase` call that stopped being wired up would look like a phase that costs
+    !! nothing: the most misleading answer a diagnostic can give, and invisible to every other test.
+    !!
+    !! All five are asserted separately, for the same reason the filter's three are: one live timer
+    !! must not be able to cover for four dead ones. The install's own phase is paired with the two
+    !! COLUMN COUNTS, because a Take count of 0 cannot tell "the install ran and released the key"
+    !! from "the install never ran" -- only the pair distinguishes them.
+    subroutine test_read_sort_phase_timers(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
+        type(parquet_reader) :: reader
+        type(parquet_sortkey) :: srt
+        integer, parameter :: N = 20000
+        integer(int32), allocatable :: back(:)
+        integer(int64) :: info, bind_, copy, perm, take, taken, released
+        character(len=*), parameter :: f = "test_run/diag_read_sort_phases.parquet"
+        !
+        call write_numeric_fixture(f, N)
+        !
+        call parquet_debug_reset_sort_phase_nanos()
+        call check(error, parquet_debug_get_sort_info_nanos() == 0_c_long_long .and. &
+            parquet_debug_get_sort_bind_nanos() == 0_c_long_long .and. &
+            parquet_debug_get_sort_copy_nanos() == 0_c_long_long .and. &
+            parquet_debug_get_sort_perm_nanos() == 0_c_long_long .and. &
+            parquet_debug_get_sort_take_nanos() == 0_c_long_long .and. &
+            parquet_debug_get_sort_take_columns() == 0_c_long_long .and. &
+            parquet_debug_get_sort_released_columns() == 0_c_long_long, &
+            "reset must zero all five read-sort phase timers and both column counts")
+        if (allocated(error)) return
+        !
+        allocate(back(N))
+        call srt%add("v desc")
+        call parquet_open_reader(reader, f, sort_by=srt)
+        call parquet_read_column(reader, "v", back)
+        call parquet_close_reader(reader)
+        ! The sort has to be a real one, or the timers would be measuring nothing: the fixture is
+        ! written ascending, so a descending read-time sort must reverse it.
+        call check(error, back(1) == int(N, int32) .and. back(N) == 1_int32, &
+            "the read-time sort must have reordered the rows, or the timers timed nothing")
+        if (allocated(error)) return
+        !
+        info = parquet_debug_get_sort_info_nanos()
+        bind_ = parquet_debug_get_sort_bind_nanos()
+        copy = parquet_debug_get_sort_copy_nanos()
+        perm = parquet_debug_get_sort_perm_nanos()
+        take = parquet_debug_get_sort_take_nanos()
+        taken = parquet_debug_get_sort_take_columns()
+        released = parquet_debug_get_sort_released_columns()
+        call check(error, info > 0_int64, "the key-info phase timer must record its phase")
+        if (allocated(error)) return
+        call check(error, bind_ > 0_int64, "the key-bind phase timer must record its phase")
+        if (allocated(error)) return
+        call check(error, copy > 0_int64, "the key-copy phase timer must record its phase")
+        if (allocated(error)) return
+        call check(error, perm > 0_int64, "the permutation-build phase timer must record its phase")
+        if (allocated(error)) return
+        call check(error, take > 0_int64, "the install phase timer must record its phase")
+        if (allocated(error)) return
+        call check(error, taken + released > 0_int64, &
+            "the install must have either Taken or released a column, or it never ran")
+    end subroutine test_read_sort_phase_timers
     !
     !> Writes an `n`-row single-column int32 file for the filter tests to filter over.
     subroutine write_numeric_fixture(fname, n)

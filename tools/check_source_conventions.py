@@ -3096,7 +3096,7 @@ def check_parquet_interpolate_stays_arrow_free():
 
     Interpolation reaches no reader, no writer and no setting: the module imports the INTRINSIC
     modules `iso_fortran_env` and `ieee_arithmetic` and nothing else, which is what makes
-    `use parquet_interpolate` cost three Fortran files. The obvious import to add is
+    `use parquet_interpolate` cost four Fortran files. The obvious import to add is
     `parquet_settings`, for a verbosity knob -- and the module has nothing to print, by design
     (every caller mistake is an `error stop`, and every answer a value), so it needs none.
 
@@ -4019,6 +4019,150 @@ def check_integrate_aborts_documented():
             "src/parquet_integrate_driver.f90.\n    on the page and not aborted by the source: %s\n"
             "    aborted by the source and not on the page: %s"
             % ("; ".join(extra) or "-", "; ".join(missing) or "-")]
+
+
+def check_interpolate_aborts_documented():
+    """The two abort tables of `interpolation.md` must carry the messages `interp_abort` builds.
+
+    `parquet_interpolate` refuses a call it cannot answer through one helper, `interp_abort`, from
+    `interp_1d_build` (`src/parquet_interpolate_1d.f90`) and `interp_2d_build`
+    (`src/parquet_interpolate_2d.f90`). `doc/pages/utilities/interpolation.md`'s "What aborts"
+    section writes both runs of messages out, sixteen rows for a table and seventeen for a grid, and
+    a reader uses them as the complete list of what is refused.
+
+    **Why this is worth a check.** Thirty-three rows of exact text, hand-kept, against two sources
+    that can be reworded independently; the campaign has already met one abort table that had
+    drifted (`kernel-density.md`, one row missing for as long as the binned method had existed).
+    CLAUDE.md, "A static check that enumerates names goes stale silently".
+
+    **Why this is not `check_integrate_aborts_documented` again.** That one compares whole string
+    literals, which works because `integrate_abort` is handed a complete message. Here a message is
+    BUILT -- `"is_valid has "//trim(interp_i2s(n))//" elements for "...` -- so the page's cells carry
+    `<m>` placeholders where a runtime value goes, and no whole literal exists to compare. This
+    check compares the LITERAL FRAGMENTS around those values instead: it joins each call's adjacent
+    `//` literals into fragments, splits each page cell on its placeholders, and asks that the
+    fragments appear in the cell in order. A fragment list is strictly more general than one
+    literal, so this shape would also cover `integration.md` if the two are ever merged.
+
+    **The narrowest part of the page that carries the claim**, per the campaign's SD9: the MESSAGE
+    column of the two tables, and within a cell only its first code span -- the message template.
+    The Refused column is prose about when a refusal fires, and a cell's later spans are prose about
+    the variants ("or the same of `y`"), neither of which the source owns.
+
+    **Why the axis is normalised.** A grid checks `x` and then `y` with the same message, and the
+    page deliberately writes the `x` form out and says "or the same of `y`" rather than repeating
+    seventeen rows. Requiring the `y` text verbatim would be requiring the page to say something it
+    has decided not to say, so both sides have their axis words folded to `x` before they are
+    compared. Folding does NOT blind the check to a reworded `y` message, which was the worry and
+    was measured: rewording only `y must be finite` to `y has to be finite` no longer matches the
+    fold, so the fragment is looked for as it stands and is reported. What survives the fold is a
+    `y` message reworded into some OTHER message the page already documents, which takes crossing
+    the two axes deliberately.
+
+    **Verify this check by breaking it, not by watching it pass**: reword a message on either side
+    and confirm it fails before trusting a green run. It refuses to pass when the heading is gone,
+    when either side comes back empty, or when a file is missing.
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "interpolation.md"
+    srcs = [SRC / "parquet_interpolate_1d.f90", SRC / "parquet_interpolate_2d.f90"]
+    for f in [page] + srcs:
+        if not f.is_file():
+            return ["check_interpolate_aborts_documented: %s is missing -- this check has gone "
+                    "blind" % f.name]
+
+    # `<h>`, `"<token>"` (the quotes come from `interp_quote`, not from a literal), and a rendered
+    # number such as `6.704E+153`, which `interp_r2s` produces at run time.
+    PLACEHOLDER = r'"?<[a-z_]+>"?|[0-9]\.[0-9]{3}E[+-][0-9]+'
+
+    def fold_axis(text):
+        """The y-axis spelling of every paired message, folded onto its x twin."""
+        for a, b in ((" along y ", " along x "), ("y must be ", "x must be "),
+                     ("y has a spacing of ", "x has a spacing of "), ("rescale y", "rescale x")):
+            text = text.replace(a, b)
+        return text
+
+    # ---- the source side: each interp_abort call's literal fragments, in order ----
+    want = set()
+    for src in srcs:
+        text = src.read_text()
+        # Join continuations so a message split over several lines is one string to scan.
+        joined = re.sub(r"&\s*\n\s*", "", text)
+        for call in re.findall(r"interp_abort\((.*?)\n", joined):
+            # Drop the first argument (the entry point) and keep what follows.
+            body = call.split(",", 1)[1] if "," in call else ""
+            frags, cur = [], ""
+            # A quoted literal continues the current fragment; anything else between two literals
+            # is a runtime value and ends it.
+            for piece in re.findall(r'"[^"]*"|\'[^\']*\'|[^"\']+', body):
+                if len(piece) >= 2 and piece[0] == piece[-1] and piece[0] in "\"'":
+                    cur += piece[1:-1]
+                elif piece.strip(" /&\n") == "":
+                    continue          # just the // between two literals
+                else:
+                    if cur:
+                        frags.append(cur)
+                    cur = ""
+            if cur:
+                frags.append(cur)
+            frags = [fold_axis(f) for f in frags if f.strip()]
+            if frags:
+                want.add(tuple(frags))
+    if not want:
+        return ["check_interpolate_aborts_documented: found no interp_abort messages in "
+                "src/parquet_interpolate_{1d,2d}.f90 -- this check has gone blind"]
+
+    # ---- the page side: the first code span of each message cell ----
+    text = page.read_text()
+    heading = "## What aborts"
+    if heading not in text:
+        return ["doc/pages/utilities/interpolation.md: the %r heading is gone, so this check can no "
+                "longer find the abort tables. Restore it or update this check." % heading]
+
+    section = fold_axis(text[text.index(heading):])
+    cells = []
+    for line in text[text.index(heading):].splitlines():
+        if line.startswith("##") and heading not in line:
+            break
+        if not line.startswith("|"):
+            continue
+        parts = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(parts) != 2 or parts[-1].startswith("---") or parts[-1] == "Message":
+            continue
+        span = re.match(r"`([^`]+)`", parts[-1])
+        if span:
+            cells.append(fold_axis(span.group(1)))
+    if not cells:
+        return ["doc/pages/utilities/interpolation.md: the abort tables' message column came back "
+                "empty -- this check has gone blind"]
+
+    def covers(frags, cell):
+        """Every fragment present in `cell`, in order."""
+        at = 0
+        for f in frags:
+            at = cell.find(f, at)
+            if at < 0:
+                return False
+            at += len(f)
+        return True
+
+    problems = []
+    # Source to page, over the whole section: `pf_interp`'s mismatched query sizes are documented in
+    # the prose under the tables rather than in a row, which documents them just as well.
+    for frags in sorted(want):
+        if not covers(frags, section):
+            problems.append("    aborted by the source and nowhere in the section: %s"
+                            % "<...>".join(frags))
+    # Page to source, over the table rows only: that column is what the source owns. The pieces are
+    # joined with nothing, because a source fragment is exactly the text between two runtime values.
+    for cell in cells:
+        pieces = [p for p in re.split(PLACEHOLDER, cell) if p.strip()]
+        if not any(covers(tuple(pieces), "".join(frags)) for frags in want):
+            problems.append("    on the page and aborted by neither source: %s" % cell)
+    if not problems:
+        return []
+    return ["doc/pages/utilities/interpolation.md: the abort tables disagree with the interp_abort "
+            "calls in src/parquet_interpolate_1d.f90 and src/parquet_interpolate_2d.f90.\n"
+            + "\n".join(problems)]
 
 
 def check_integrate_status_codes_documented():
@@ -9848,6 +9992,7 @@ CHECKS = (
     ("integrate aborts documented", check_integrate_aborts_documented),
     ("integrate status codes documented", check_integrate_status_codes_documented),
     ("parquet_interpolate stays Arrow-free", check_parquet_interpolate_stays_arrow_free),
+    ("interpolate aborts are documented", check_interpolate_aborts_documented),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),

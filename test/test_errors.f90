@@ -5530,13 +5530,19 @@ contains
     !> doc/pages/operating/thread-safety.md) -- not applied broadly to every scenario, since most
     !> diagnostic wording isn't a documented contract and shouldn't be
     !> locked down by regression tests.
-    subroutine check_scenario_exit_status_and_stderr(error, scenario, expect_abort, failure_message, required_stderr)
+    !>
+    !> `forbidden_stderr`, when given, must NOT appear in the capture. It is for a scenario whose
+    !> abort is only correct if the run reached it CLEANLY -- the text names the wrong ending, so
+    !> the assertion fails on a run that ends the wrong way while printing the right message.
+    subroutine check_scenario_exit_status_and_stderr(error, scenario, expect_abort, failure_message, required_stderr, &
+                                                     forbidden_stderr)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario, failure_message, required_stderr
+        character(len=*), intent(in), optional :: forbidden_stderr
         logical, intent(in) :: expect_abort
         character(len=:), allocatable :: out_file, err_file
         integer :: exitstat, cmdstat
-        logical :: aborted, found
+        logical :: aborted, found, present_when_forbidden
 
         ! The assertion below runs over BOTH captured streams, despite this procedure's name.
         ! That is deliberate and is what ~390 call sites want ("this text appeared somewhere"),
@@ -5573,6 +5579,14 @@ contains
 
         call check(error, found, &
             "expected stderr to contain '" // trim(required_stderr) // "' for scenario '" // trim(scenario) // "'")
+        if (allocated(error)) return
+
+        if (present(forbidden_stderr)) then
+            call scenario_capture_contains(out_file, err_file, forbidden_stderr, present_when_forbidden)
+            call check(error, .not. present_when_forbidden, &
+                "expected stderr NOT to contain '" // trim(forbidden_stderr) // "' for scenario '" // &
+                trim(scenario) // "'")
+        end if
     end subroutine check_scenario_exit_status_and_stderr
 
     !> Runs `scenario` capturing stdout and stderr SEPARATELY, and asserts `text` appears on the

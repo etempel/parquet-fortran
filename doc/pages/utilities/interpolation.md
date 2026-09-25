@@ -24,7 +24,7 @@ program interpolation_example
     use iso_fortran_env, only : real64
     implicit none
 
-    type(pf_interp_1d) :: curve, cubic, shape, line
+    type(pf_interp_1d) :: curve, cubic, monotone, line
     real(real64) :: x(6), y(6)
     integer :: i
 
@@ -34,12 +34,12 @@ program interpolation_example
 
     call curve%init(x, y)                        ! a natural cubic spline, the default
     call cubic%init(x, y, bc="not_a_knot")       ! a cubic spline that reproduces any cubic
-    call shape%init(x, y, method="pchip")        ! a cubic that never overshoots the data
+    call monotone%init(x, y, method="pchip")     ! a cubic that never overshoots the data
     call line%init(x, y, method="linear")
 
     print *, curve%eval(2.5_real64)              ! 6.2237 -- not the parabola's 6.25; see below
     print *, cubic%eval(2.5_real64)              ! 6.25
-    print *, shape%eval(2.5_real64)              ! 6.2396
+    print *, monotone%eval(2.5_real64)           ! 6.2396
     print *, line%eval(2.5_real64)               ! 6.5
     print *, curve%eval([1.5_real64, 5.5_real64])   ! 2.3421 and 30.3421, in one call
     print *, curve%eval(99.0_real64)             ! 36.0: beyond the table, the last ordinate
@@ -67,6 +67,8 @@ yq = pf_interp(x, y, xq, [method], [bc], [slopes], [outside], [is_valid], [conte
 
 call g%init(x, y, z, [method], [bc], [outside], [context])
 v  = g%eval(xq, yq)
+ok = g%is_initialised()
+call g%clear()
 zq = pf_interp(x, y, z, xq, yq, [method], [bc], [outside], [context])
 ```
 
@@ -103,6 +105,10 @@ call c%init(x, y, is_valid=valid)
 **A second `%init` replaces the table**, and there is nothing to free in between. `%clear` releases
 the table early and leaves the object unbuilt; `%is_initialised()` reports whether an object can be
 evaluated. Evaluating one that cannot is a fatal error, not a defined value.
+
+**An interpolant may be assigned.** Ordinary assignment copies it deeply, so the copy owns its own
+table and outlives the original; there is no finalizer to call and nothing is shared between the
+two. That is what lets you keep an array of them, or return one from a function.
 
 Tokens are matched without regard to case: `method="Linear"` is `method="linear"`. A token longer
 than 100 characters matches nothing.
@@ -172,7 +178,8 @@ its second derivatives grow as the ordinates over that square, so `%init` refuse
 points more than `2**511` apart, and one whose second derivatives overflow: over ordinates of order
 one, that is points closer than about `1e-154`. Rescale such a table first. `"linear"` and
 `"pchip"` have no such limit: over a table whose abscissae are all scaled by the same factor, from
-`1e-300` to `1e300`, they answer the same values at the queries scaled with them.
+`1e-300` to `1e300`, they answer the same values to rounding at the queries scaled with them — and
+bit for bit where the factor is a power of two, the only kind that scales a table exactly.
 
 ## Evaluating
 
@@ -232,8 +239,9 @@ answer then cannot pass for data.
 every policy and raising no IEEE flag, so a column holding NaNs can be interpolated as it stands.
 
 **An infinite query or limit is beyond the table in the direction of its sign.** `"clamp"` answers
-the end ordinate and a zero derivative, and integrates the end ordinate out to the infinity, which
-is an infinity of that ordinate's sign, or zero where the ordinate is zero. `"nan"` answers a NaN.
+the end ordinate and a zero derivative, and integrates the end ordinate out to the infinity: over a
+non-zero end ordinate that tail is an infinity of the ordinate's sign, and over an end ordinate of
+zero it contributes nothing, leaving the integral up to that end. `"nan"` answers a NaN.
 `"extrapolate"` answers whatever the end polynomial gives at an infinity, which is an infinity or a
 NaN. A NaN made by arithmetic on an infinity — that one, or an integral from one infinity to the
 other whose two ends extend with opposite signs — raises IEEE_INVALID, which ends a program built
@@ -293,7 +301,8 @@ stored ascending and answers exactly what the same grid given ascending answers.
 `method="pchip"` and `bc="clamped"` are refused on a grid. PCHIP's slopes depend on the data, so
 interpolating along one axis and then the other gives a different surface for each order, and a
 clamped surface would need a slope at every point of every edge. A grid object evaluates only; it
-has no `%derivative` or `%integral`, and `%init` takes no `is_valid=`.
+has no `%derivative` or `%integral`, and `%init` takes no `is_valid=`; `%is_initialised` and
+`%clear` answer and release as they do in one dimension.
 
 `%init` keeps its own copy of the grid and, for the bicubic spline, three more tables of the same
 size. An evaluation then costs a bracket search along each axis — a bisection, or arithmetic along
@@ -346,11 +355,11 @@ end do
 !$omp end parallel do
 ```
 
-Do not list a `pf_interp_1d` or a `pf_interp_2d` in a `private()` clause, where gfortran starts each
-thread's copy from garbage rather than from an unbuilt object, and do not declare one in a `block`
-inside the region, which ifx does not support for a type like these. `pf_interp` called from the loop is safe as
-well: its object is local to the call. See [Thread safety](../operating/thread-safety.html) for how
-this sits beside the rest of the library.
+Do not list a `pf_interp_1d` or a `pf_interp_2d` in a `private()` clause, where gfortran starts
+each thread's copy from garbage rather than from an unbuilt object, and do not declare one in a
+`block` inside the region, which ifx does not support for a type like these. `pf_interp` called
+from the loop is safe as well: its object is local to the call. See
+[Thread safety](../operating/thread-safety.html) for how this sits beside the rest of the library.
 
 ## What aborts
 
@@ -383,11 +392,11 @@ A grid is checked in its own order, below, with messages that begin `pf_interp_2
 | Refused | Message |
 |---|---|
 | a `z` not shaped `(size(x), size(y))` | `z must be shaped (size(x), size(y)): got (<a>, <b>) for (<nx>, <ny>)` |
-| an unknown `method` | `unknown method "<token>"; expected "linear" or "cubic"` |
 | `method="pchip"` | `method "pchip" is not offered in two dimensions` |
+| an unknown `method` | `unknown method "<token>"; expected "linear" or "cubic"` |
 | `bc` with `method="linear"` | `bc applies only to method "cubic"` |
-| an unknown `bc` | `unknown bc "<token>"; expected "natural" or "not_a_knot"` |
 | `bc="clamped"` | `bc "clamped" is not offered in two dimensions` |
+| an unknown `bc` | `unknown bc "<token>"; expected "natural" or "not_a_knot"` |
 | an unknown `outside` | `unknown outside "<token>"; expected "clamp", "extrapolate" or "nan"` |
 | fewer than two grid lines along `x`, then along `y`, or four for `bc="not_a_knot"` | `at least <k> points are needed along x for method "<method>"; got <n>`, or `along y`, the method followed by ` with bc "not_a_knot"` where that is the reason |
 | an `x` not strictly monotonic or holding a NaN, then a `y` | `x must be strictly increasing or strictly decreasing`, or the same of `y` |

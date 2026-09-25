@@ -18,6 +18,15 @@
 !! which answers `y(n)` directly, so that a knot's value never depends on a segment formula at its
 !! right end.
 submodule (parquet_interpolate) parquet_interpolate_1d
+    use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_overflow, ieee_invalid
+#if !defined(__flang__) && !defined(__FLANG)
+    ! The halting-mode trio lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc lacks, so
+    ! flang on macOS cannot LINK a reference to any of them (`fortran-gotchas.md`). Nothing is lost by
+    ! compiling them out: flang leaves the IEEE traps masked, so the overflow the hold-off below exists
+    ! for is already quiet there.
+    use, intrinsic :: ieee_arithmetic, only : ieee_support_halting, ieee_get_halting_mode, &
+        ieee_set_halting_mode
+#endif
 
     implicit none
 
@@ -536,6 +545,7 @@ contains
         character(len=:), allocatable :: quoted
         integer                       :: n, bc_code, need, i
         logical                       :: ascending
+        logical                       :: held, halt_ovf, halt_inv, flag_ovf, flag_inv
 
         ! Row 1: the two halves of the table pair up.
         if (size(x) /= size(y)) then
@@ -710,7 +720,43 @@ contains
                                   '; rescale x, or use method "linear" or "pchip"', context)
             end if
             allocate (this%d(n))
+            ! The solve below is ALLOWED to overflow: that is how a table whose spacing is far under
+            ! its ordinates' scale is detected, and the refusal on the other side of it is how the
+            ! overflow is reported. gfortran and ifx reach that refusal because an overflow is quiet
+            ! for them; nagfor unmasks the IEEE traps by default (`-ieee=stop`), so without this the
+            ! run dies inside `interp_spline_coeffs` and the documented message is never printed.
+            !
+            ! Held off HERE, in this procedure's own body, and not in a helper: F2018 17.3 restores
+            ! the halting modes on return from any procedure that changed them, so a `hold_traps()`
+            ! call would leave `-ieee=stop` armed -- the trap `fortran-gotchas.md` records, which
+            ! makes a masking attempt look as though NAG ignored it. `interp_spline_coeffs` is a
+            ! callee of this body and is covered. Both flags are put back as they were found,
+            ! because an overflow this module HANDLES must not surface as NAG's "Floating overflow
+            ! occurred" line at program exit; no table that BUILDS raises either of them, so putting
+            ! them back hides nothing from a caller that gets an object.
+            held = .false.
+#if !defined(__flang__) && !defined(__FLANG)
+            held = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid)
+            if (held) then
+                call ieee_get_halting_mode(ieee_overflow, halt_ovf)
+                call ieee_get_halting_mode(ieee_invalid, halt_inv)
+                call ieee_get_flag(ieee_overflow, flag_ovf)
+                call ieee_get_flag(ieee_invalid, flag_inv)
+                call ieee_set_halting_mode(ieee_overflow, .false.)
+                call ieee_set_halting_mode(ieee_invalid, .false.)
+            end if
+#endif
             call interp_spline_coeffs(this%x, this%y, bc_code, s1, sn, this%d)
+#if !defined(__flang__) && !defined(__FLANG)
+            ! The one exit of the held region: the finiteness test below reads exponent bits with
+            ! `transfer` and `iand` and raises nothing, so it needs no cover.
+            if (held) then
+                call ieee_set_halting_mode(ieee_overflow, halt_ovf)
+                call ieee_set_halting_mode(ieee_invalid, halt_inv)
+                call ieee_set_flag(ieee_overflow, flag_ovf)
+                call ieee_set_flag(ieee_invalid, flag_inv)
+            end if
+#endif
             ! Row 16: second derivatives that did not overflow in the solve, as they do over spacings far
             ! below the ordinates' scale.
             if (.not. interp_all_finite(this%d)) then

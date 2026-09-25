@@ -115,7 +115,9 @@ contains
             new_unittest("a grid of products interpolates as the product of two interpolants", &
                          test_grid_is_separable), &
             new_unittest("clamp, extrapolate and nan each answer as documented beyond a grid", &
-                         test_outside_policies_2d) &
+                         test_outside_policies_2d), &
+            new_unittest("every token is matched without regard to case, on both types and both one-shot forms", &
+                         test_tokens_fold_case) &
             ]
 
     end subroutine collect_tests_interpolate
@@ -329,6 +331,100 @@ contains
         end do
 
     end subroutine test_linear_is_exact_on_lines
+
+    !> Every token the module reads is matched without regard to case, as the guide page promises
+    !! ("Tokens are matched without regard to case"), on `method`, `bc` and `outside`, on both types
+    !! and on both one-shot forms.
+    !!
+    !! **What makes this a test rather than a demonstration.** Folding is one loop over `A`..`Z` in
+    !! `interp_fold_token`; deleting it leaves every lower-case call working, so nothing else in the
+    !! suite moves. The assertion is bit equality against the same object built with the lower-case
+    !! spelling -- not closeness -- because a fold that reached the wrong arm would answer a
+    !! DIFFERENT method's value, which is not a rounding away.
+    !!
+    !! **The negative control** is the other half: `"linearr"` differs from a known token by more
+    !! than case and must still be refused. It cannot be asserted here, since a refusal is an
+    !! `error stop`; the scenario `interpolate_unknown_method` owns it. What this test can hold, and
+    !! does, is that the mixed-case tokens do not all collapse onto one answer: `"LiNeAr"` and
+    !! `"PCHIP"` must disagree somewhere on this table. An implementation that accepted everything
+    !! and fell back to one method would pass the equality assertions and fail that one.
+    subroutine test_tokens_fold_case(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        real(real64), parameter :: X(6) = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64, 4.0_real64, 5.0_real64]
+        real(real64), parameter :: Y(6) = [0.0_real64, 1.0_real64, 0.0_real64, 2.0_real64, 1.0_real64, 3.0_real64]
+        real(real64), parameter :: Q(4) = [-1.5_real64, 0.5_real64, 3.25_real64, 7.0_real64]
+
+        type(pf_interp_1d) :: folded, plain
+        type(pf_interp_2d) :: gfolded, gplain
+        real(real64)       :: gz(6, 6), qx(3), qy(3)
+        integer            :: i, j
+
+        ! `method`, over a query inside the table and one beyond each end, under a policy whose own
+        ! token is mixed case too, so a fold that worked for one argument and not another is caught.
+        call folded%init(X, Y, method="LiNeAr", outside="ExTrApOlAtE")
+        call plain%init(X, Y, method="linear", outside="extrapolate")
+        call check(error, all(folded%eval(Q) == plain%eval(Q)), &
+                   'method="LiNeAr" with outside="ExTrApOlAtE" did not answer what the lower-case pair answers')
+        if (allocated(error)) return
+
+        ! `bc`, which only the cubic spline takes, and `slopes` with it.
+        call folded%init(X, Y, method="CUBIC", bc="Not_A_Knot")
+        call plain%init(X, Y, method="cubic", bc="not_a_knot")
+        call check(error, all(folded%eval(Q) == plain%eval(Q)), &
+                   'bc="Not_A_Knot" did not answer what bc="not_a_knot" answers')
+        if (allocated(error)) return
+
+        call folded%init(X, Y, bc="CLAMPED", slopes=TEST_SLOPES, outside="NAN")
+        call plain%init(X, Y, bc="clamped", slopes=TEST_SLOPES, outside="nan")
+        call check(error, all(ieee_is_nan(folded%eval(Q)) .eqv. ieee_is_nan(plain%eval(Q))), &
+                   'bc="CLAMPED" with outside="NAN" did not answer NaN where the lower-case pair does')
+        if (allocated(error)) return
+        call check(error, folded%eval(Q(2)) == plain%eval(Q(2)), &
+                   'bc="CLAMPED" did not answer what bc="clamped" answers inside the table')
+        if (allocated(error)) return
+
+        ! `pchip`, and the control: the folded tokens must not all reach one method.
+        call folded%init(X, Y, method="PCHIP")
+        call plain%init(X, Y, method="pchip")
+        call check(error, all(folded%eval(Q) == plain%eval(Q)), &
+                   'method="PCHIP" did not answer what method="pchip" answers')
+        if (allocated(error)) return
+        call plain%init(X, Y, method="LiNeAr")
+        call check(error, any(folded%eval(Q) /= plain%eval(Q)), &
+                   'method="PCHIP" and method="LiNeAr" answered alike everywhere, so the tokens reach one method')
+        if (allocated(error)) return
+
+        ! The one-shot form takes the same tokens through the same folder.
+        call check(error, all(pf_interp(X, Y, Q, method="PcHiP") == pf_interp(X, Y, Q, method="pchip")), &
+                   'pf_interp with method="PcHiP" did not answer what method="pchip" answers')
+        if (allocated(error)) return
+
+        ! A grid: `method` and `bc`, then its one-shot form.
+        do j = 1, 6
+            do i = 1, 6
+                gz(i, j) = Y(i)*X(j) + Y(j)
+            end do
+        end do
+        qx = [0.5_real64, 2.25_real64, 4.5_real64]
+        qy = [1.5_real64, 3.75_real64, 0.25_real64]
+        call gfolded%init(X, X, gz, method="CuBiC", bc="NOT_A_KNOT")
+        call gplain%init(X, X, gz, method="cubic", bc="not_a_knot")
+        call check(error, all(gfolded%eval(qx, qy) == gplain%eval(qx, qy)), &
+                   'a grid built with method="CuBiC", bc="NOT_A_KNOT" did not answer what the lower-case pair answers')
+        if (allocated(error)) return
+
+        call gfolded%init(X, X, gz, method="Linear", outside="CLAMP")
+        call gplain%init(X, X, gz, method="linear", outside="clamp")
+        call check(error, all(gfolded%eval(qx, qy) == gplain%eval(qx, qy)), &
+                   'a grid built with method="Linear", outside="CLAMP" did not answer what the lower-case pair answers')
+        if (allocated(error)) return
+
+        call check(error, all(pf_interp(X, X, gz, qx, qy, method="LINEAR") == &
+                              pf_interp(X, X, gz, qx, qy, method="linear")), &
+                   'pf_interp on a grid with method="LINEAR" did not answer what method="linear" answers')
+
+    end subroutine test_tokens_fold_case
 
     !> The natural cubic spline matches the exact model on every fixture -- values, both derivatives
     !! and integrals -- and the guide page's `x**2` example: `6.2237` at `2.5`, not the parabola's

@@ -4550,19 +4550,23 @@ contains
             "6.704E+153; rescale x, or use method ""linear"" or ""pchip""")
     end subroutine test_interpolate_spline_too_wide_aborts
     !
-    !> The refusal comes after the overflow it detects, so a build that traps on overflow ends there
-    !> first: nagfor's default `-ieee=stop` does, with its own message rather than the library's.
+    !> The refusal is detected FROM the overflow, so the solve that raises it runs with the overflow
+    !> and invalid halting modes held off and both flags put back (`interp_1d_build`). Two things
+    !> follow, and this asserts each: the run reaches the library's own message, which a build that
+    !> traps on overflow could not, and it leaves no raised flag behind.
+    !>
+    !> The forbidden text is gfortran's end-of-run note, the one runtime here that reports a flag
+    !> left raised; it is what fails if the restore is dropped. ifx and flang print no such note, so
+    !> on those the second assertion costs nothing and the first carries the test. Under nagfor the
+    !> FIRST assertion is the real one -- with the hold-off gone, `-ieee=stop` ends the scenario
+    !> inside the solve and the required message never appears.
     subroutine test_interpolate_spline_overflows_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-#ifdef NAGFOR
-        call skip_test(error, "nagfor's default -ieee=stop ends the scenario at the overflow inside the " // &
-            "spline's solve, which is the overflow the refusal detects, before the refusal is reached")
-        return
-#endif
         call check_scenario_exit_status_and_stderr(error, "interpolate_spline_overflows", expect_abort=.true., &
             failure_message="a cubic spline whose second derivatives overflow was expected to error stop", &
             required_stderr="pf_interp_1d%init: the cubic spline's second derivatives overflow, with x as closely " // &
-            "spaced as 1.000E-160; rescale the table, or use method ""linear"" or ""pchip""")
+            "spaced as 1.000E-160; rescale the table, or use method ""linear"" or ""pchip""", &
+            forbidden_stderr="IEEE_OVERFLOW_FLAG")
     end subroutine test_interpolate_spline_overflows_aborts
     !
     subroutine test_interpolate_2d_spline_too_wide_x_aborts(error)
@@ -4581,18 +4585,15 @@ contains
             "6.704E+153; rescale y, or use method ""linear""")
     end subroutine test_interpolate_2d_spline_too_wide_y_aborts
     !
-    !> Skipped under nagfor for the reason `test_interpolate_spline_overflows_aborts` gives.
+    !> The grid's mirror of `test_interpolate_spline_overflows_aborts`, which says what both assert.
+    !> Its three solves are held off together, so one escaped flag from any of them fails this.
     subroutine test_interpolate_2d_spline_overflows_aborts(error)
         type(error_type), allocatable, intent(out) :: error
-#ifdef NAGFOR
-        call skip_test(error, "nagfor's default -ieee=stop ends the scenario at the overflow inside the " // &
-            "spline's solve, which is the overflow the refusal detects, before the refusal is reached")
-        return
-#endif
         call check_scenario_exit_status_and_stderr(error, "interpolate_2d_spline_overflows", expect_abort=.true., &
             failure_message="a bicubic spline whose second derivatives overflow was expected to error stop", &
             required_stderr="pf_interp_2d%init: the bicubic spline's second derivatives overflow, with grid lines " // &
-            "as closely spaced as 1.000E-160; rescale the grid, or use method ""linear""")
+            "as closely spaced as 1.000E-160; rescale the grid, or use method ""linear""", &
+            forbidden_stderr="IEEE_OVERFLOW_FLAG")
     end subroutine test_interpolate_2d_spline_overflows_aborts
     !
     subroutine test_interpolate_long_token_aborts(error)

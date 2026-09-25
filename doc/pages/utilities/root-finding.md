@@ -140,9 +140,9 @@ neither end can move, the expansion ends as it does when `max_tries` runs out. N
 builds a bracket wider than the arithmetic can measure either, whatever the limits say.
 
 Either way, a sign change that was never found is `PF_ROOT_NO_BRACKET`, returned rather than
-aborted on, with `x` the end of the last bracket with the smaller `|f|` and `info%bracket_lo` and
-`info%bracket_hi` the last bracket tried. A caller can retry with a wider policy, or report that
-the data cannot support the answer.
+aborted on, with `x` the end of the last bracket with the smaller `|f|` — the lower end where the
+two are equal — and `info%bracket_lo` and `info%bracket_hi` the last bracket tried. A caller can
+retry with a wider policy, or report that the data cannot support the answer.
 
 The bracket search of the Improved Sheather-Jones bandwidth rule (`parquet_kde`'s default) is one
 object — start at the smallest `t` the rule accepts, `t_min`, double the bracket, stop at 1:
@@ -197,7 +197,7 @@ widened, because the policy was not what ran out: a bigger `max_neval` is the fi
 | `niter` | Brent iterations, after the bracket was found |
 | `nexpand` | expansion tries that evaluated something |
 | `froot` | `f` at the returned `x` |
-| `bracket_lo`, `bracket_hi` | the bracket Brent's method started from; on `PF_ROOT_NO_BRACKET`, or a budget spent while widening, the last bracket tried |
+| `bracket_lo`, `bracket_hi` | the bracket Brent's method started from; on `PF_ROOT_NO_BRACKET`, a budget spent while widening, or an exact zero found before Brent began, the last bracket tried |
 
 | Code | Means | `x` is | What to do |
 |---|---|---|---|
@@ -244,8 +244,8 @@ the first evaluation — bar the last row, which is about your function:
 |---|---|
 | `a` or `b` NaN or infinite, or `a >= b` | `the bracket must satisfy a < b with finite ends` |
 | `b - a` overflows | `the bracket width must be finite` |
-| `rtol` NaN, infinite or negative | `rtol must be a finite, non-negative number` |
 | `atol` NaN, infinite or negative | `atol must be a finite, non-negative number` |
+| `rtol` NaN, infinite or negative | `rtol must be a finite, non-negative number` |
 | `max_neval < 1` | `max_neval must be positive` |
 | `expand%mode` not a `PF_EXPAND_*` code | `expand%mode must be one of PF_EXPAND_NONE, PF_EXPAND_UP, PF_EXPAND_DOWN, PF_EXPAND_BOTH` |
 | `expand%factor` NaN, infinite or not above 1 | `expand%factor must be a finite number greater than 1` |
@@ -283,7 +283,7 @@ intermediate finite; the stopping tolerance carries the relative term `rtol*|x|`
 may be widened first. Where the values are ordinary the steps are `zeroin.f`'s.
 
 **Minimising `f(x)**2` or `abs(f(x))` is not a substitute.**
-[`pf_minimize_scalar`](../utilities/optimization.html#one-variable-on-a-bracket) is Brent's
+[`pf_minimize_scalar`](optimization.html#one-variable-on-a-bracket) is Brent's
 minimiser, the sibling of this method, and it minimises: near a minimum a function is flat to
 second order, so a minimiser locates its abscissa only to about the square root of `epsilon`, and
 squaring the residual halves the digits again — four or so, where this method delivers sixteen.

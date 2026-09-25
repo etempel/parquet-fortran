@@ -4580,6 +4580,122 @@ def check_optimize_aborts_documented():
                 "(check_optimize_aborts_documented):\n" + "\n".join(sorted(set(problems)))]
     return []
 
+def check_root_aborts_documented():
+    """The abort table of `root-finding.md` must carry `pf_find_root`'s messages, IN ORDER.
+
+    `pf_find_root` refuses every call it cannot answer from one procedure, `validate_call`
+    (`src/parquet_root_solve.f90`), as a run of `root_abort` calls in a fixed order, and aborts
+    once more from `evaluate` when the caller's function returns a NaN.
+    `doc/pages/utilities/root-finding.md`'s "What aborts" table writes every one of those messages
+    out verbatim, and a reader uses it as the complete list of what is refused.
+
+    **Why this is worth a check, and why it checks ORDER.** The source's own header says "The
+    validation order is the order of the guide page's table", so the table claims to be the order a
+    caller who breaks two contracts at once meets them in -- and the U7 review found it was not:
+    the page listed `rtol` above `atol` while `validate_call` checks `atol` first. Set equality
+    would have passed that page. Order is the narrowest reading of the claim the source makes, so
+    it is what is compared. CLAUDE.md, "A static check that enumerates names goes stale silently".
+
+    **The NaN row is the one exception, and the page says so** ("checked before the first
+    evaluation -- bar the last row, which is about your function"): it is aborted from `evaluate`,
+    not from `validate_call`, so it is required to be exactly the LAST row rather than to sit in
+    the validation run.
+
+    **The narrowest part of the page that carries the claim**, per the campaign's SD9: the MESSAGE
+    column only. The Condition column is prose about when a refusal fires and legitimately names
+    things the message does not (`b - a` overflows, "a limit NaN or infinite").
+
+    **Why this is not `check_integrate_aborts_documented` again.** That one compares an unordered
+    SET of whole literals, and `integrate_abort` is handed each message on one line. Here two
+    messages are split across a continuation with `//`, so the literals are joined first, and the
+    comparison is a sequence rather than a set.
+
+    **Verify this check by breaking it, not by watching it pass**: reword a message on either side,
+    delete a row, or swap two rows, and confirm it fails before trusting a green run. It refuses to
+    pass when the heading is gone, when either procedure can no longer be found, when either side
+    comes back empty, or when the page or the source is missing.
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "root-finding.md"
+    src = SRC / "parquet_root_solve.f90"
+    for f in (page, src):
+        if not f.is_file():
+            return ["check_root_aborts_documented: %s is missing -- this check has gone blind"
+                    % f.name]
+
+    # Join continuations so a message split over two lines is one string to scan.
+    joined = re.sub(r"&\s*\n\s*", "", src.read_text())
+
+    def messages_of(unit, kind):
+        """Every `root_abort` message inside one named program unit, in source order."""
+        m = re.search(r"\n *%s +%s\(.*?\n *end +%s +%s\b" % (kind, unit, kind, unit),
+                      joined, re.S)
+        if not m:
+            return None
+        out = []
+        for call in re.findall(r"root_abort\((.*?), *context\)", m.group(0), re.S):
+            # Adjacent literals joined by `//` are one message.
+            out.append("".join(re.findall(r'"([^"]*)"', call)))
+        return out
+
+    want = messages_of("validate_call", "subroutine")
+    if want is None:
+        return ["check_root_aborts_documented: no validate_call subroutine in %s -- this check has "
+                "gone blind" % src.name]
+    nan = messages_of("evaluate", "subroutine")
+    if nan is None:
+        return ["check_root_aborts_documented: no evaluate subroutine in %s -- this check has gone "
+                "blind" % src.name]
+    if not want:
+        return ["check_root_aborts_documented: found no root_abort messages in validate_call (%s) "
+                "-- this check has gone blind" % src.name]
+    if len(nan) != 1:
+        return ["check_root_aborts_documented: expected exactly one root_abort in evaluate (%s), "
+                "found %d -- this check has gone blind" % (src.name, len(nan))]
+    want = want + nan
+
+    text = page.read_text()
+    heading = "## What aborts"
+    if heading not in text:
+        return ["doc/pages/utilities/root-finding.md: the %r heading is gone, so this check can no "
+                "longer find the abort table. Restore it or update this check." % heading]
+
+    got = []
+    for line in text[text.index(heading):].splitlines():
+        if line.startswith("##") and heading not in line:
+            break
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 2 or cells[-1].startswith("---") or cells[-1] == "Message":
+            continue
+        cell = cells[-1]
+        if cell.startswith("`") and cell.endswith("`"):
+            got.append(cell[1:-1])
+
+    if not got:
+        return ["doc/pages/utilities/root-finding.md: the abort table's message column came back "
+                "empty -- this check has gone blind"]
+    if got == want:
+        return []
+
+    problems = []
+    for m in sorted(set(got) - set(want)):
+        problems.append("    on the page and aborted by neither procedure: %s" % m)
+    for m in sorted(set(want) - set(got)):
+        problems.append("    aborted by the source and not on the page: %s" % m)
+    if not problems:
+        # Same messages, wrong sequence: name the first row that is out of place.
+        for i, (g, w) in enumerate(zip(got, want), start=1):
+            if g != w:
+                problems.append("    row %d of the table is %r, but the source refuses %r there. "
+                                "The table's order is the validation order (the header of %s says "
+                                "so), so a caller breaking two contracts at once meets them in "
+                                "this order." % (i, g, w, src.name))
+                break
+    return ["doc/pages/utilities/root-finding.md: the abort table disagrees with the root_abort "
+            "calls in src/parquet_root_solve.f90.\n" + "\n".join(problems)]
+
+
 def check_integrate_status_codes_documented():
     """The status table of `integration.md` must list exactly the `PF_INT_*` codes the module has.
 
@@ -10411,6 +10527,7 @@ CHECKS = (
     ("parquet_interpolate stays Arrow-free", check_parquet_interpolate_stays_arrow_free),
     ("interpolate aborts are documented", check_interpolate_aborts_documented),
     ("optimisation aborts are documented", check_optimize_aborts_documented),
+    ("root-finding aborts are documented", check_root_aborts_documented),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),
     ("parquet_root stays Arrow-free", check_parquet_root_stays_arrow_free),

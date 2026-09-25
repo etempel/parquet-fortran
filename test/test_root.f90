@@ -98,10 +98,54 @@ contains
             new_unittest("extreme but legal calls raise no overflow, invalid or divide-by-zero", &
                          test_root_extreme_calls_raise_no_flag), &
             new_unittest("the guide's overshoot bound holds, and max_neval binds", &
-                         test_guide_budget_overshoot_bound) &
+                         test_guide_budget_overshoot_bound), &
+            new_unittest("a tie on |f| at the two ends hands back the lower one", &
+                         test_root_no_bracket_tie_takes_the_lower_end) &
             ]
 
     end subroutine collect_tests_root
+
+
+    !> A tie on `|f|` at the two ends of an unbracketed interval hands back the LOWER end.
+    !!
+    !! `doc/pages/utilities/root-finding.md` says `x` is "the end of the last bracket with the
+    !! smaller `|f|` -- the lower end where the two are equal". The first half is already covered
+    !! by `test_root_expansion_exhausted_reports_no_bracket`; the tie is not, and `take_the_better_end`
+    !! (`src/parquet_root_solve.f90`) settles it by falling through a strict `<`.
+    !!
+    !! The NEGATIVE CONTROL is the second call: on a bracket whose UPPER end has the strictly
+    !! smaller `|f|`, the answer must be the upper end. Without it an implementation that always
+    !! returned the lower end would pass the first assertion, which is the whole claim here.
+    subroutine test_root_no_bracket_tie_takes_the_lower_end(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_root_info) :: info
+        real(real64)       :: x
+
+        tie: block
+            ! `x*x + 1` is even, so |f(-1)| == |f(1)| == 2 exactly.
+            call pf_find_root(root_even_no_root, -1.0_real64, 1.0_real64, x, info=info)
+            call check(error, info%status == PF_ROOT_NO_BRACKET, &
+                       "an even function on a centred bracket must report PF_ROOT_NO_BRACKET")
+            if (allocated(error)) exit tie
+            call check(error, abs(root_even_no_root(-1.0_real64)) == abs(root_even_no_root(1.0_real64)), &
+                       "the fixture must really tie: |f| equal at the two ends")
+            if (allocated(error)) exit tie
+            call check(error, x == -1.0_real64 .and. info%froot == 2.0_real64, &
+                       "a tie on |f| must hand back the LOWER end, with froot its value")
+            if (allocated(error)) exit tie
+
+            ! Negative control: the upper end is strictly better, so it must come back instead.
+            call pf_find_root(root_even_no_root, -2.0_real64, 1.0_real64, x, info=info)
+            call check(error, abs(root_even_no_root(1.0_real64)) < abs(root_even_no_root(-2.0_real64)), &
+                       "the control's upper end must really be the smaller |f|")
+            if (allocated(error)) exit tie
+            call check(error, info%status == PF_ROOT_NO_BRACKET .and. x == 1.0_real64 &
+                       .and. info%froot == 2.0_real64, &
+                       "where the upper end has the smaller |f| it is the one handed back")
+        end block tie
+
+    end subroutine test_root_no_bracket_tie_takes_the_lower_end
 
     !> `x*x - 2` on `[0, 2]`: `sqrt(2)` within the default bound, and the record of what happened.
     subroutine test_root_finds_a_simple_root(error)

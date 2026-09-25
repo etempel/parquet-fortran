@@ -29,6 +29,7 @@ module test_root_support
     public :: root_neg_inf_tail, root_inf_step, root_inf_both_tails, root_tiny_line, root_huge_line
     public :: root_pole
     public :: root_tiny_root, root_cube, root_steep, root_nan_beyond_two
+    public :: root_even_no_root
     public :: shifted_line, counted_sq2, shaped_root
     public :: TINY_ROOT, CUBIC_ROOT, OMEGA, TANH_ROOT, DOTTIE
 
@@ -113,6 +114,18 @@ contains
         y = 2.0_real64 + x/huge(1.0_real64)
 
     end function root_gentle
+
+    !> `x*x + 1`: EVEN, and positive everywhere, so a bracket centred on zero has no sign
+    !! change and the SAME `|f|` at both ends. That tie is what `take_the_better_end`
+    !! (`src/parquet_root_solve.f90`) settles on the lower end, which
+    !! `doc/pages/utilities/root-finding.md` states under "Growing the bracket".
+    function root_even_no_root(x) result(y)
+        real(real64), intent(in) :: x !! where to evaluate
+        real(real64)             :: y !! the value there
+
+        y = x*x + 1.0_real64
+
+    end function root_even_no_root
 
     !> `cos(x) - x`; root `DOTTIE`.
     function root_cos_minus_x(x) result(y)

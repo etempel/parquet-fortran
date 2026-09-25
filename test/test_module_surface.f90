@@ -2221,8 +2221,9 @@ contains
 
 end module test_module_surface_cosmology
 
-!> `parquet_root` alone: the generic in both forms, the growth policy and its four modes, the info
-!! record and its three status codes, the history, and no settings knob at all.
+!> `parquet_root` alone: the generic in both forms, the callback interfaces, the growth policy
+!! and its four modes, the info record and its three status codes, the history, and no settings
+!! knob at all -- all fourteen public names.
 !!
 !! **One library import, and it must stay that way.** This module's row in the entry-module table
 !! makes two claims nothing else checks: that `use parquet_root` compiles two Fortran files, and
@@ -2252,6 +2253,14 @@ contains
         type(pf_bracket_expansion) :: grow
         type(surface_sq2)          :: obj
         real(real64)               :: x
+        ! `pf_rootfun_eval` is NAMED through this import alone, and nothing else here would
+        ! reach it: an extension declares `procedure :: eval => ...` without naming the
+        ! interface, so making it private compiled and passed before this line existed.
+        ! `pf_rootfun_func` needs no such declaration -- passing a plain function to
+        ! `pf_find_root` below fails to compile without it. Nullified rather than initialised
+        ! in place, because a local with an initialiser is implicitly `save` and this suite
+        ! runs concurrently.
+        procedure(pf_rootfun_eval), pointer :: eval_p
 
         what = ""
 
@@ -2274,6 +2283,11 @@ contains
             call pf_find_root(surface_sq2_func, 2.0_real64, 3.0_real64, x, info=info)
             if (info%status /= PF_ROOT_NO_BRACKET) what = "PF_ROOT_NO_BRACKET"
         end if
+
+        ! The callback interface, named and nothing more: no procedure in this module has a
+        ! matching passed-object dummy, so declaring one is the only way to name it.
+        nullify(eval_p)
+        if (what == "" .and. associated(eval_p)) what = "pf_rootfun_eval"
 
         ! The remaining codes are reachable by name.
         if (what == "" .and. PF_ROOT_LIMIT == PF_ROOT_OK) what = "PF_ROOT_LIMIT"

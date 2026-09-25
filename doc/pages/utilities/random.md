@@ -174,8 +174,8 @@ values — two `real64`s, or four `real32`s, per enciphering. `pf_random_fill_st
 streams, and consecutive streams are *different* streams, so each value needs its own enciphering
 and the remaining words belong to draws this call was not asked for. So the stream-axis fill is a
 worthwhile saving over the scalar loop it replaces — roughly 1.5× — while the draw-axis fill is
-about twice as fast again per value. If you need several values
-per stream, ask for them along the draw axis.
+about twice as fast again per value. If you need several values per stream, ask for them along the
+draw axis.
 
 Each fill has a precondition on the axis it walks: the last position it addresses must be
 representable in `integer(int64)` — `draw + size(v) - 1` for one, `i0 + size(v) - 1` for the other.
@@ -247,20 +247,25 @@ A composite draw often needs a couple of uniforms *and* a choice — a point som
 somewhere. Done the obvious way that is two encipherings. It need not be:
 
 ```fortran
-call pf_random_pair_spare_at(seed, i, 1_int64, n, u1, u2, j, ok, [draw])
+call pf_random_pair_spare_at(seed, i, 1_int64, n, u1, u2, j, ok, draw)
 if (.not. ok) j = pf_random_int_at(other_key, i, 1_int64, n, draw)   ! the caller's own exact draw
 ```
 
+The full call form is `pf_random_pair_spare_at(seed, i, lo, hi, u1, u2, j, ok, [draw])`.
+
 One block carries 128 bits, and converting each half to a `real64` keeps the top 53 and **throws
-away 11** — 22 bits across the block that are free for the taking. `u1` and `u2` are exactly the
-uniforms `pf_random_at` gives at those coordinates, **whatever the integer does**, so the pair a
-caller was going to draw anyway is untouched. `j` is exactly uniform in `[lo, hi]` when `ok`.
+away 11** — 22 bits across the block that are free for the taking. `u1` and `u2` are exactly
+`pf_random_at(seed, i, 2*draw-1)` and `pf_random_at(seed, i, 2*draw)`, **whatever the integer
+does**, so the pair a caller was going to draw anyway is untouched. `j` is exactly uniform in
+`[lo, hi]` when `ok`, and a reversed range is swapped rather than refused, exactly as in
+`pf_random_int_at`.
 
 `ok` is `.false.` when 22 bits cannot decide the range exactly — a width above 2²², or the rejection
 rule firing, which happens with probability `mod(2**22, width)/2**22`. **The caller must then draw
-`j` itself**, by any exact means independent of those bits. Mixing a rejection-rule result with an
-independent uniform is still uniform, so nothing is approximated. This is how a HEALPix mask draw
-costs one enciphering rather than two; see
+`j` itself**, by any exact means independent of those bits; `j` comes back as `min(lo, hi)`, a
+defined value rather than a wild one. Mixing a rejection-rule result with an independent uniform is
+still uniform, so nothing is approximated. This is how a HEALPix mask draw costs one enciphering
+rather than two; see
 [Random points and geometry on the sphere](sphere.html#points-in-healpix-pixels-and-masks).
 
 ## When you don't know how many numbers you need: `pf_random_stream`
@@ -533,11 +538,10 @@ it. It is.
 **What it costs.** A whole permutation is a few tens of nanoseconds per element on one thread and
 falls to a small fraction of that once it is threaded, because element `k` depends on no other
 element. The random-access form is several times more expensive per element, and that gap is the
-price of statelessness: it re-derives the width rule and the whole key schedule on every call, which
-the bulk form does once.
-Where the coordinate addressing pays for itself is a *subset* — the first `n` elements of a
-permutation of `m` cost `O(n)`, not `O(m)`, so drawing 1000 rows out of a billion does not touch
-the other billion.
+price of statelessness: it re-derives the width rule and the whole key schedule on every call,
+which the bulk form does once. Where the coordinate addressing pays for itself is a *subset* — the
+first `n` elements of a permutation of `m` cost `O(n)`, not `O(m)`, so drawing 1000 rows out of a
+billion does not touch the other billion.
 
 ## What is guaranteed, and what is not
 
@@ -692,9 +696,10 @@ in use; there is nothing to configure, and deliberately no way to override it.
 ## Distributions
 
 The distributions are built on the uniforms: the **exponential**, the **normal**, the **normal
-truncated to an interval**, **Gamma** and **Poisson**. Every one of them is addressed exactly as the uniforms are — a coordinate, or a walk
-along a stream — and every one has its own frozen contract identifier, so a program recording
-`pf_random_algorithm` is not told its uniform draws moved because a Ziggurat layer count changed.
+truncated to an interval**, **Gamma** and **Poisson**. Every one of them is addressed exactly as
+the uniforms are — a coordinate, or a walk along a stream — and every one has its own frozen
+contract identifier, so a program recording `pf_random_algorithm` is not told its uniform draws
+moved because a Ziggurat layer count changed.
 
 ### The promise table
 
@@ -758,9 +763,9 @@ the first three of `v(1:6)`, at any chunking, on any number of threads. That is 
 module exists for, and it is unaffected.
 
 **`pf_random_exp_portable_at` costs about 3x**, on a bulk fill and scalar alike. The frozen
-logarithm is
-twelve barriered Horner steps, each a store and a reload, so it neither vectorises nor pipelines
-where a libm `log` does both. Reach for it when a stored result must reproduce across machines.
+logarithm is twelve barriered Horner steps, each a store and a reload, so it neither vectorises
+nor pipelines where a libm `log` does both. Reach for it when a stored result must reproduce across
+machines.
 
 ### The normal
 
@@ -872,8 +877,8 @@ keep the promise its name would imply.
 
 **`%poisson`** takes any `lambda >= 0` (0 always draws 0), up to about 5.8e17 — past that a drawn
 count could overflow `integer(int64)`, so it aborts rather than return one, which is far beyond
-where a Poisson draw means anything. Below `lambda = 10` it uses Knuth's
-product of uniforms, which is exact and terminates unconditionally; at or above it, transformed
+where a Poisson draw means anything. Below `lambda = 10` it uses Knuth's product of uniforms,
+which is exact and terminates unconditionally; at or above it, transformed
 rejection, whose cost does not grow with `lambda`. **The crossover is frozen contract**, published
 through `pf_poisson_algorithm`, because it decides which value comes back — it is not a tuning knob
 and there is no setting for it. The `int32` result refuses a count that does not fit rather than
@@ -974,14 +979,15 @@ The vector forms are `pure` but cannot be elemental, since their result is an ar
 them, or use the draw-axis fills for the shape a mock catalogue wants:
 `pf_random_fill_direction(seed, i, v, [draw])` fills the columns of a `(3, n)` array and
 `pf_random_fill_radec(seed, i, ra, dec, [draw])` two arrays of one size, with element `k` the draw
-`draw + k - 1` of stream `i`. They are a
-convenience rather than a speed-up: a direction already uses a whole enciphering. Like every fill
-here they split at any boundary with identical results, and take no `threads=`.
+`draw + k - 1` of stream `i`. They are a convenience rather than a speed-up: a direction already
+uses a whole enciphering. Like every fill here they split at any boundary with identical results,
+and take no `threads=`.
 
 **Ask for vectors if vectors are what you want.** Every `_radec` form is its vector twin plus an
 arctangent and a square root, and costs a good deal more for it; the fills do not amortise that,
-since the conversion is per value rather than per block. Converting once at the end of a pipeline is
-cheaper than carrying degrees through it. `bench/benchmark_sphere.sh` measures the pair.
+since the conversion is per value rather than per block. Converting once at the end of a pipeline
+is cheaper than carrying degrees through it. `bench/benchmark_random.sh`'s `radec loop` and
+`radec fill` rows measure both against the vector forms.
 
 At a pole the right ascension is **0 by rule**: the declination alone says where a pole is, and
 the arctangent that would otherwise name a right ascension there is undefined.
@@ -1002,13 +1008,13 @@ v = pf_random_disc_at(seed, i, axis, 0.3_real64, r_inner=0.3_real64)   ! on the 
 v = pf_random_disc_at(seed, i, axis, pi/2, r_inner=pi/2)              ! in the plane normal to axis
 ```
 
-`radius = 0` returns the centre, and a radius above `pi` is the whole sphere. **An `r_inner` above
-`pi` is refused rather than clamped**: clamping it leaves a ring of zero width whose every draw is
-the antipode exactly, which is a surprising answer to give silently for what was written as an
-annulus. The cosine of the angle from the centre is exactly uniform between the two bounds, which is
-what uniform per unit solid angle means. A flat disc of offsets in RA and Dec
-rotated onto the centre — the construction it is tempting to write by hand — is not: its density
-at the rim of a 30-degree disc is 15 % above its density at the centre.
+`radius = 0` returns the centre normalised, and a radius above `pi` is the whole sphere. **An
+`r_inner` above `pi` is refused rather than clamped**: clamping it leaves a ring of zero width whose
+every draw is the antipode exactly, which is a surprising answer to give silently for what was
+written as an annulus. The cosine of the angle from the centre is exactly uniform between the two
+bounds, which is what uniform per unit solid angle means. A flat disc of offsets in RA and Dec
+rotated onto the centre — the construction it is tempting to write by hand — is not: its density at
+the rim of a 30-degree disc is 15 % above its density at the centre.
 
 `pf_random_disc_radec_at(seed, i, ra0, dec0, radius_deg, ra, dec, [draw], [r_inner_deg])` is the
 same on the sky, and a disc may cross a pole or straddle `ra = 0` freely.
@@ -1027,10 +1033,12 @@ v = cap%at(seed, i, k)                          ! the same value pf_random_disc_
 ```
 
 `%at` is `pf_random_disc_at` to the bit at the same coordinates, because the scalar form is written
-as `%prepare` followed by `%at`. `%is_set()` says whether `%prepare` has run, and `%at` before it
-stops the program. All three are `pure` and the object is read-only once prepared, so one cap built
-before a parallel region serves the whole team. A rejection walk over a fixed cap is where this
-pays, since it would otherwise repeat the setup per candidate rather than per draw.
+as `%prepare` followed by `%at`, and it takes either integer kind for `i` exactly as the free forms
+do. `%is_set()` says whether `%prepare` has run, and `%at` before it stops the program. `%prepare`
+may be re-run, replacing the disc — unlike `pf_weighted_draw`'s `%init` further down this page, a
+second call is not an error. All three are `pure` and the object is read-only once prepared, so one
+cap built before a parallel region serves the whole team. A rejection walk over a fixed cap is
+where this pays, since it would otherwise repeat the setup per candidate rather than per draw.
 
 **Small discs keep their size.** The offset from the centre is formed directly rather than as the
 difference of two cosines, so a disc of a thousandth of an arcsecond is as uniform as a disc of ten
@@ -1041,26 +1049,29 @@ degrees; subtracting `cos(radius)` from 1 would round a disc that small onto its
 `pf_random_ball_at(seed, i, radius, [draw], [r_inner])` is uniform in volume inside the ball of
 `radius` about the origin, or in the shell between `r_inner` and `radius`. Add a centre at the call
 site. `radius = 0` is the origin. The radius is drawn so that `(r/radius)**3` is uniform, which is
-what uniform in volume requires; a radius drawn uniformly crowds the centre.
+what uniform in volume requires; a radius drawn uniformly crowds the centre. A negative or
+non-finite radius, and an `r_inner` above it, are refused rather than repaired.
 
 ### A Gaussian-like scatter: the von Mises–Fisher distribution
 
 `pf_random_vmf_at(seed, i, mu, kappa, [draw])` scatters directions about `mu` with a concentration
 `kappa >= 0`. `kappa = 0` is the uniform direction; a large `kappa` is a tight scatter whose offsets
 are Gaussian with a width of `1/sqrt(kappa)` radians per axis. Every `kappa` gives the right answer
-to the last few ulp: a concentration of `1e-30` is still uniform, and one of `1e12` a scatter of a
-microradian.
+to full working precision: a concentration of `1e-30` is still uniform, and one of `1e12` a scatter
+of a microradian.
 
 `pf_random_vmf_radec_at(seed, i, ra0, dec0, sigma_deg, ra, dec, [draw])` takes the width an error
 ellipse is quoted in instead. It is `pf_random_vmf_at` with `kappa = 1/sigma**2`, `sigma` in
-radians, so a caller holding `kappa` uses the vector form.
+radians, so a caller holding `kappa` uses the vector form. `sigma_deg` must be strictly above 0:
+the uniform direction is `kappa = 0`, which no width can spell, so ask the vector form for it.
 
 **`sigma_deg` names the concentration, not the dispersion the draws achieve**, and the two part
 company once the scatter stops being small. Up to about 20 degrees the Gaussian reading holds: at
 `sigma_deg = 5` the rms separation from the centre is 7.1 degrees against the `5*sqrt(2) = 7.07` a
 two-dimensional Gaussian predicts. Beyond that the sphere closes on itself and the rms saturates —
-79.5 degrees at `sigma_deg = 60` against a predicted 84.9, and 96.1 at 180, where the distribution
-is uniform and the widest rms possible is 98.1. A width above 20 degrees is still a valid
+79.5 degrees at `sigma_deg = 60` against a predicted 84.9, and 96.1 at 180. The ceiling is 98.1,
+the rms of a uniform direction; `sigma_deg = 180` is a concentration of `1/pi**2` rather than zero,
+so it comes close to that without being uniform. A width above 20 degrees is still a valid
 concentration; it is just no longer the width of anything.
 
 ### Rotations

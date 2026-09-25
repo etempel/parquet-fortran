@@ -42,7 +42,8 @@ program benchmark_random
     use iso_fortran_env, only: int64, real32, real64, output_unit
     use parquet, only: pf_random_at, pf_random_fill_draws, pf_random_algorithm, &
                        parquet_debug_random_uses_int128, pf_random_direction_at, &
-                       pf_random_fill_direction, pf_random_stream
+                       pf_random_fill_direction, pf_random_radec_at, pf_random_fill_radec, &
+                       pf_random_stream
 
     implicit none
 
@@ -273,17 +274,25 @@ contains
     !! building the direction by hand needs. Three shapes: the coordinate-addressed scalar loop, the
     !! stream walk, and the draw-axis fill against `pf_random_fill_draws` over the same count of
     !! uniforms. The stream arm reseeds every round so both arms start at position 1.
+    !!
+    !! **Then two rows whose baseline is the VECTOR form rather than a uniform**, because the
+    !! question they answer is a different one: what the RA/Dec spelling of a family costs over the
+    !! vector spelling of the same point. `pf_random_radec_at` is `pf_random_direction_at` plus an
+    !! arctangent and a square root, and `pf_random_fill_radec` is `pf_random_fill_direction` plus
+    !! the same conversion per VALUE rather than per block, so the fill row is what shows that the
+    !! fills do not amortise it. `doc/pages/utilities/random.md` states both claims and names this
+    !! script for them.
     subroutine sphere_arms(n, rounds)
         integer(int64), intent(in) :: n                     !! Directions per round.
         integer, intent(in) :: rounds                       !! Rounds; the best of each arm is reported.
 
-        real(real64), allocatable :: dirs(:, :), unif(:)
-        real(real64) :: t0, t_base, t_lib, x, acc, v(3)
+        real(real64), allocatable :: dirs(:, :), unif(:), ras(:), decs(:)
+        real(real64) :: t0, t_base, t_lib, x, acc, v(3), ra, dec
         type(pf_random_stream) :: rng
         integer(int64) :: i
         integer :: r
 
-        allocate (dirs(3, n), unif(2_int64 * n))
+        allocate (dirs(3, n), unif(2_int64 * n), ras(n), decs(n))
         call pf_random_fill_direction(SEED, STREAM, dirs)
         call pf_random_fill_draws(SEED, STREAM, unif)
         acc = sum(dirs(:, 1)) + unif(1)
@@ -346,6 +355,42 @@ contains
             acc = acc + dirs(3, n)
         end do
         call report("dir fill", n, t_base, t_lib)
+
+        ! ---- scalar: an RA/Dec position against the vector twin it is read from ----
+        t_base = huge(1.0_real64)
+        t_lib = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            do i = 1_int64, n
+                v = pf_random_direction_at(SEED, i)
+                acc = acc + v(3)
+            end do
+            t_base = min(t_base, now() - t0)
+
+            t0 = now()
+            do i = 1_int64, n
+                call pf_random_radec_at(SEED, i, ra, dec)
+                acc = acc + dec
+            end do
+            t_lib = min(t_lib, now() - t0)
+        end do
+        call report("radec loop", n, t_base, t_lib)
+
+        ! ---- fill: an RA/Dec fill against the direction fill it is read from ----
+        t_base = huge(1.0_real64)
+        t_lib = huge(1.0_real64)
+        do r = 1, rounds
+            t0 = now()
+            call pf_random_fill_direction(SEED, STREAM, dirs)
+            t_base = min(t_base, now() - t0)
+            acc = acc + dirs(3, n)
+
+            t0 = now()
+            call pf_random_fill_radec(SEED, STREAM, ras, decs)
+            t_lib = min(t_lib, now() - t0)
+            acc = acc + decs(n)
+        end do
+        call report("radec fill", n, t_base, t_lib)
 
         if (acc == -1.0_real64) write (output_unit, "(a)") ""   ! keeps `acc` live; never taken
         deallocate (dirs, unif)

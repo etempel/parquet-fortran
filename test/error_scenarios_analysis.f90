@@ -654,6 +654,8 @@ contains
             call scenario_random_fill_direction_draw_beyond_2p62()
         case ("random_stream_disc_inner_exceeds_radius")
             call scenario_random_stream_disc_inner_exceeds_radius()
+        case ("random_disc_cap_unprepared")
+            call scenario_random_disc_cap_unprepared()
         case ("sphere_polygon_too_few_vertices")
             call scenario_sphere_polygon_too_few_vertices()
         case ("sphere_polygon_size_mismatch")
@@ -3524,6 +3526,30 @@ contains
         call rng%disc(NORTH, 0.5_real64, v, r_inner=0.6_real64)   ! -> aborts
         print '(a,3es12.4)', "unexpectedly drew an inverted ring from a stream: ", v
     end subroutine scenario_random_stream_disc_inner_exceeds_radius
+
+    !> `%at` on a cap `%prepare` has never run aborts, rather than drawing from a zero frame.
+    !!
+    !! An unprepared cap holds a zero centre and a zero ring width, so without the guard `%at`
+    !! would hand back a plausible-looking vector built from nothing the caller asked for.
+    !!
+    !! **The control is the same call on a PREPARED cap**, and it earns its place: without it the
+    !! scenario would pass just as well on a build where `%at` aborted unconditionally. It also
+    !! exercises both specifics of the `%at` generic, the `int32` stream index and the `int64` one,
+    !! since a caller reaching for a cap inside a rejection walk passes whichever its loop index is.
+    !! The results are printed because `%at` is `pure` and gfortran deletes an unused pure call at
+    !! `-O1` and above (`check_scenario_uses_a_pure_result`).
+    subroutine scenario_random_disc_cap_unprepared()
+        type(pf_random_disc_cap) :: ready, blank
+        real(real64) :: v(3), w(3)
+        real(real64), parameter :: NORTH(3) = [0.0_real64, 0.0_real64, 1.0_real64]
+        call ready%prepare(NORTH, 0.3_real64)
+        v = ready%at(1_int64, 1_int64, 1_int64)
+        w = ready%at(1_int64, 1, 1_int64)
+        print '(a,3es12.4,a,l1,a,l1)', "drew from a prepared cap: ", v, "  int32 index agrees: ", &
+            all(v == w), "  blank is_set: ", blank%is_set()
+        v = blank%at(1_int64, 1_int64, 1_int64)   ! -> aborts
+        print '(a,3es12.4)', "unexpectedly drew from a cap %prepare has not run: ", v
+    end subroutine scenario_random_disc_cap_unprepared
 
     !> A polygon needs three vertices. The control is a triangle.
     subroutine scenario_sphere_polygon_too_few_vertices()

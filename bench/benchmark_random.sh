@@ -28,6 +28,12 @@
 # replaces, so the price of the transform is measured rather than stated; their length is the
 # smaller of SCALAR and the largest of SIZES.
 #
+# Then two RA/Dec rows, `radec loop` and `radec fill`, whose baseline is the VECTOR form of the
+# same draw rather than a uniform: they measure what the `_radec` spelling costs over the vector
+# one, and the fill row is the one that shows the conversion is per value rather than per block, so
+# the fills do not amortise it. Those are the two claims
+# `doc/pages/utilities/random.md` makes about choosing between the spellings.
+#
 # Its result inverts between compilers, which is the reason to run it per machine rather than quote
 # a figure. On machine B the library costs 2.2x the intrinsic under gfortran 15.2 and 0.48x -- i.e.
 # it is over twice as fast -- under ifx 2026.1, because ifx's own `random_number` is about 11 ns per

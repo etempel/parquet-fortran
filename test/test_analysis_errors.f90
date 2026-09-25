@@ -929,6 +929,8 @@ contains
                 test_random_fill_direction_draw_beyond_2p62_aborts), &
             new_unittest("a stream's disc names itself when it refuses an inverted ring", &
                 test_random_stream_disc_inner_exceeds_radius_aborts), &
+            new_unittest("a disc cap refuses %at before %prepare, and draws after it", &
+                test_random_disc_cap_unprepared_aborts), &
             new_unittest("a sky polygon refuses fewer than three vertices", &
                 test_sphere_polygon_too_few_vertices_aborts), &
             new_unittest("a sky polygon refuses ra and dec of different sizes", &
@@ -5965,6 +5967,24 @@ contains
             required_stderr="pf_random_stream%disc: r_inner must lie in [0, radius] (got " // &
             "6.0000000E-01 against 5.0000000E-01)")
     end subroutine test_random_stream_disc_inner_exceeds_radius_aborts
+    !
+    !> See scenario_random_disc_cap_unprepared.
+    subroutine test_random_disc_cap_unprepared_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "random_disc_cap_unprepared", expect_abort=.true., &
+            failure_message="drawing from a cap %prepare has not run was expected to abort", &
+            required_stderr="pf_random_disc_cap%at: %prepare has not run")
+        if (allocated(error)) return
+        ! THE CONTROL, and it is not decoration: a build whose %at aborted UNCONDITIONALLY would
+        ! pass the assertion above, because the scenario's FIRST call would raise the same message
+        ! with the same exit status. This needle is printed only once a prepared cap has drawn
+        ! through both specifics of the %at generic and they agreed, so it pins the control and the
+        ! int32 stream index together.
+        call check_scenario_streams(error, "random_disc_cap_unprepared", "int32 index agrees: T", &
+            expect_on="stdout", &
+            failure_message="a prepared cap did not draw, or its int32 and int64 stream indices " // &
+            "disagreed, so the abort assertion above proves nothing")
+    end subroutine test_random_disc_cap_unprepared_aborts
     !
     !> See scenario_sphere_polygon_too_few_vertices.
     subroutine test_sphere_polygon_too_few_vertices_aborts(error)

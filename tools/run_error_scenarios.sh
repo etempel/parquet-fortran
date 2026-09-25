@@ -1180,6 +1180,7 @@ scenarios=(
     "random_sphere_draw_beyond_2p62:1"
     "random_fill_direction_draw_beyond_2p62:1"
     "random_stream_disc_inner_exceeds_radius:1"
+    "random_disc_cap_unprepared:1"
     "sphere_polygon_too_few_vertices:1"
     "sphere_polygon_size_mismatch:1"
     "sphere_polygon_nonfinite_vertex:1"

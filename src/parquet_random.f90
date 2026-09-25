@@ -369,9 +369,8 @@ module parquet_random
     !! so a narrow draw costs a quarter of an enciphering instead of a half; the price is that the
     !! rejection rate is `(2**32 mod s)/2**32`, which rises with `s` and reaches 33.3 % just above
     !! `2**32/3`. Capping the WIDTH at `2**24` bounds the worst case over every admitted `s` at
-    !! 0.389 %, at `s = 16 711 936`. See `feature_random_resample.md` sections 5 and 19.4 -- and note
-    !! the cap is on the width `hi - lo + 1`, never on `size(idx)`, which are the same number for a
-    !! resample and different for everything else.
+    !! 0.389 %, at `s = 16 711 936`. Note that the cap is on the width `hi - lo + 1`, never on
+    !! `size(idx)`, which are the same number for a resample and different for everything else.
     integer(int64), parameter :: NARROW32_CAP = 16777216_int64
     !> The bits each half of a block keeps back from `to_real64`, which reads the top 53 of 64.
     integer, parameter :: SPARE_BITS = 11
@@ -384,7 +383,7 @@ module parquet_random
     !
     ! One `(seed, stream)` pair names FOUR independent sequences of 32-bit words, not one, and each
     ! generic family reads its own. Two values taken at different `(generic, draw)` coordinates are
-    ! therefore never functions of the same bits -- see `feature_random_domains.md`, and note the
+    ! therefore never functions of the same bits. Note the
     ! two DOCUMENTED identities that survive: `pf_random_at` is the top 53 bits of
     ! `pf_random_bits_at`, and `pf_random_exp_at` is `-log(1-u)` for that same `u`. Both live inside
     ! `DOM_REAL64` on purpose.
@@ -1180,7 +1179,11 @@ module parquet_random
         logical :: set = .false.                    !! whether `%prepare` has run
     contains
         procedure :: prepare => disc_cap_prepare    !! Validates and prepares the cap; may be re-run.
-        procedure :: at => disc_cap_at              !! The direction at `(seed, i, draw)`; one block.
+        procedure, private :: at_i32 => disc_cap_at_i32 !! `%at`, `int32` stream index
+        procedure, private :: at_i64 => disc_cap_at_i64 !! `%at`, `int64` stream index
+        !> The direction at `(seed, i, draw)`; one block. `i` takes either integer kind, as it does
+        !> in every free `_at` form, and the two give identical values.
+        generic :: at => at_i32, at_i64
         procedure :: is_set => disc_cap_is_set      !! Whether `%prepare` has run.
     end type pf_random_disc_cap
 
@@ -2997,8 +3000,21 @@ contains
         call disc_prepare(self, "pf_random_disc_cap%prepare", centre, radius, r_inner)
     end subroutine disc_cap_prepare
 
+    !> `pf_random_disc_cap%at` for an `integer(int32)` stream index. See the generic.
+    !!
+    !! Sign-extends to `int64` and calls the wide specific, so the two kinds give identical values
+    !! and both name `pf_random_disc_cap%at` in a refusal.
+    pure function disc_cap_at_i32(self, seed, i, draw) result(v)
+        class(pf_random_disc_cap), intent(in) :: self !! a prepared cap
+        integer(int64), intent(in) :: seed           !! the stream family's seed
+        integer(int32), intent(in) :: i              !! stream index; sign-extends, so any value is valid
+        integer(int64), intent(in), optional :: draw !! 1-based value index; absent means 1
+        real(real64) :: v(3)                         !! a unit vector in the disc or ring
+        v = disc_cap_at_i64(self, seed, int(i, int64), draw)
+    end function disc_cap_at_i32
+
     !> `pf_random_disc_cap%at`: `pf_random_disc_at`'s value at the same coordinates, to the bit.
-    pure function disc_cap_at(self, seed, i, draw) result(v)
+    pure function disc_cap_at_i64(self, seed, i, draw) result(v)
         class(pf_random_disc_cap), intent(in) :: self !! a prepared cap
         integer(int64), intent(in) :: seed           !! the stream family's seed
         integer(int64), intent(in) :: i              !! stream index; every value is valid
@@ -3006,7 +3022,7 @@ contains
         real(real64) :: v(3)                         !! a unit vector in the disc or ring
         if (.not. self%set) error stop "pf_random_disc_cap%at: %prepare has not run"
         v = disc_at_prepared(self, seed, i, sph_draw("pf_random_disc_cap%at", draw))
-    end function disc_cap_at
+    end function disc_cap_at_i64
 
     !> `pf_random_disc_cap%is_set`: whether `%prepare` has run.
     pure elemental function disc_cap_is_set(self) result(ok)
@@ -3445,11 +3461,11 @@ contains
     !!
     !! So lane blocking is worth **nothing on gfortran** -- whose release profile carries
     !! `-funroll-loops`, and which is therefore indifferent to the round form -- and a further 29 %
-    !! on ifx, but only when the ten rounds are also written out. That reproduces
-    !! `feature_random_reference.md`'s "must use the unrolled kernel; with loop rounds it is a
-    !! 1.3x-1.6x loss" **as an ifx-specific effect**, which is worth knowing before anyone quotes it
-    !! as a general rule. Writing four lanes x ten rounds out costs roughly 800 lines per worker and
-    !! a second hand-maintained copy of the cipher, which is exactly the duplication this module
+    !! on ifx, but only when the ten rounds are also written out. So the rule "must use the
+    !! unrolled kernel; with loop rounds it is a 1.3x-1.6x loss" is **an ifx-specific effect**,
+    !! which is worth knowing before anyone quotes it as a general rule. Writing four lanes x ten
+    !! rounds out costs roughly 800 lines per worker and a second hand-maintained copy of the
+    !! cipher, which is exactly the duplication this module
     !! exists to avoid; `random_block`'s own header already schedules lane-blocked kernels for the
     !! phase that introduces the rest of the bulk tier. Take that work there, with a generator, not
     !! here.
@@ -3678,7 +3694,7 @@ contains
     !! The probe arms that predicted 1.04x-1.29x were comparing a *hoisted probe* arm against this
     !! *unhoisted library* one across the wrapper boundary, with no unhoisted probe arm to subtract;
     !! one added afterwards to settle it measures 25.12 against the hoisted 25.23, i.e. zero there
-    !! too. See `feature_random_resample.md` stage 3 for both routes. A compiler that does NOT inline
+    !! too, and the same holds on both routes. A compiler that does NOT inline
     !! these workers would change the verdict, so this is a finding about the build and not about the
     !! source -- re-measure rather than assuming either answer.
     pure subroutine fill_streams_i64(seed, i0, v, lo, hi, draw)
@@ -3834,9 +3850,8 @@ contains
             ! `random_block` site and no call at all -- which sounds strictly better -- makes the
             ! body bigger still and costs gfortran the same 13 % while saving ifx 4 %. This shape
             ! costs gfortran 3.6 % and ifx 11.7 % on the wide path, which is the best worst case of
-            ! the three. See `feature_random_resample.md` stage 5 for all six measurements, and
-            ! `feature_risks.md` Risk-115 for why nothing here may be "simplified" without
-            ! re-measuring both compilers.
+            ! the three, over all six measured shapes. See `feature_risks.md` Risk-115 for why
+            ! nothing here may be "simplified" without re-measuring both compilers.
             r = int_at_narrow32(seed, stream, a, s, draw)
             return
         end if

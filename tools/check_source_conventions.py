@@ -3951,6 +3951,133 @@ def check_kde_merge_refusals_documented():
     return problems
 
 
+def check_integrate_aborts_documented():
+    """The abort table of `integration.md` must carry exactly the messages `validate_call` aborts with.
+
+    `pf_integrate` refuses every call it cannot answer from one procedure, `validate_call`
+    (`src/parquet_integrate_driver.f90`), as a run of `integrate_abort` calls in a fixed order.
+    `doc/pages/utilities/integration.md`'s "What aborts" table writes every one of those messages
+    out verbatim, and a reader uses it as the complete list of what is refused.
+
+    **Why this is worth a check.** Both sides are machine-readable and the page's copy is exact
+    text, so a message reworded in the source, or a refusal added, leaves the table wrong with
+    nothing comparing the two. The campaign has already met one abort table that had drifted
+    (`kernel-density.md`, one row missing for as long as the binned method had existed).
+    CLAUDE.md, "A static check that enumerates names goes stale silently".
+
+    **The narrowest part of the page that carries the claim**, per the campaign's SD9: the MESSAGE
+    column only. The condition column is prose about when the refusal fires and legitimately names
+    things the message does not (`50*epsilon`, `huge(1)/42`, "two finite bounds").
+
+    **The `internal:` aborts are not in the table and must not be**: they guard against a code the
+    engine cannot return and a tolerance pair the driver cannot build, neither reachable by a
+    caller, so they are excluded here by prefix rather than listed on a user-facing page.
+
+    **Verify this check by breaking it, not by watching it pass**: reword a message on either side
+    and confirm it fails before trusting a green run. It refuses to pass when the table heading is
+    gone, when either list comes back empty, or when the page or the source is missing.
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "integration.md"
+    src = SRC / "parquet_integrate_driver.f90"
+    for f in (page, src):
+        if not f.is_file():
+            return ["check_integrate_aborts_documented: %s is missing -- this check has gone "
+                    "blind" % f.name]
+
+    want = {m for m in re.findall(r'integrate_abort\("([^"]+)"', src.read_text())
+            if not m.startswith("internal:")}
+    if not want:
+        return ["check_integrate_aborts_documented: found no caller-facing integrate_abort "
+                "messages in %s -- this check has gone blind" % src.name]
+
+    text = page.read_text()
+    heading = "## What aborts"
+    if heading not in text:
+        return ["doc/pages/utilities/integration.md: the %r heading is gone, so this check can no "
+                "longer find the abort table. Restore it or update this check." % heading]
+
+    got = set()
+    for line in text[text.index(heading):].splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 2 or cells[-1].startswith("---"):
+            continue
+        cell = cells[-1]
+        if cell.startswith("`") and cell.endswith("`"):
+            got.add(cell[1:-1])
+
+    if not got:
+        return ["doc/pages/utilities/integration.md: the abort table's message column came back "
+                "empty -- this check has gone blind"]
+
+    extra = sorted(got - want)
+    missing = sorted(want - got)
+    if not extra and not missing:
+        return []
+    return ["doc/pages/utilities/integration.md: the abort table disagrees with validate_call in "
+            "src/parquet_integrate_driver.f90.\n    on the page and not aborted by the source: %s\n"
+            "    aborted by the source and not on the page: %s"
+            % ("; ".join(extra) or "-", "; ".join(missing) or "-")]
+
+
+def check_integrate_status_codes_documented():
+    """The status table of `integration.md` must list exactly the `PF_INT_*` codes the module has.
+
+    `src/parquet_integrate.f90` declares seven status codes and exports all seven;
+    `doc/pages/utilities/integration.md`'s "Budget and outcome" table gives one row per code, and
+    `solvers.md` sends a reader here for the full set.
+
+    **Why this is worth a check.** An eighth code, or a renamed one, leaves the page short with
+    nothing comparing it to the source -- the page reads as exhaustive and nothing makes it so.
+    CLAUDE.md, "A static check that enumerates names goes stale silently".
+
+    **The narrowest part of the page that carries the claim**: the table's FIRST column. The other
+    two are prose about what a code means and what to do, and a future row may well name another
+    code there while explaining a distinction.
+
+    **Verify this check by breaking it, not by watching it pass**: delete a row, or add a code to
+    the module, and confirm it fails before trusting a green run. It refuses to pass when either
+    list comes back empty or when the page or the source is missing.
+    """
+    page = REPO_ROOT / "doc" / "pages" / "utilities" / "integration.md"
+    src = SRC / "parquet_integrate.f90"
+    for f in (page, src):
+        if not f.is_file():
+            return ["check_integrate_status_codes_documented: %s is missing -- this check has "
+                    "gone blind" % f.name]
+
+    want = set(re.findall(r"^\s*integer, parameter :: (PF_INT_[A-Z_]+) =", src.read_text(),
+                          re.MULTILINE))
+    if not want:
+        return ["check_integrate_status_codes_documented: found no PF_INT_* parameters in %s -- "
+                "this check has gone blind" % src.name]
+
+    got = set()
+    for line in page.read_text().splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 3:
+            continue
+        m = re.fullmatch(r"`(PF_INT_[A-Z_]+)`", cells[0])
+        if m:
+            got.add(m.group(1))
+
+    if not got:
+        return ["doc/pages/utilities/integration.md: the status table's code column came back "
+                "empty -- this check has gone blind"]
+
+    extra = sorted(got - want)
+    missing = sorted(want - got)
+    if not extra and not missing:
+        return []
+    return ["doc/pages/utilities/integration.md: the status table disagrees with "
+            "src/parquet_integrate.f90.\n    on the page and not declared by the module: %s\n"
+            "    declared by the module and not on the page: %s"
+            % (", ".join(extra) or "-", ", ".join(missing) or "-")]
+
+
 def _kde_merge_diff(where, got, want):
     """One side's disagreement with the source, reported in both directions."""
     extra = sorted(got - want)
@@ -9718,6 +9845,8 @@ CHECKS = (
      check_parquet_utils_is_total),
     ("parquet_stats stays Arrow-free", check_parquet_stats_stays_arrow_free),
     ("parquet_integrate stays Arrow-free", check_parquet_integrate_stays_arrow_free),
+    ("integrate aborts documented", check_integrate_aborts_documented),
+    ("integrate status codes documented", check_integrate_status_codes_documented),
     ("parquet_interpolate stays Arrow-free", check_parquet_interpolate_stays_arrow_free),
     ("parquet_optimize stays Arrow-free", check_parquet_optimize_stays_arrow_free),
     ("parquet_prima stays Arrow-free", check_parquet_prima_stays_arrow_free),

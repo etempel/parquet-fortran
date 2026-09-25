@@ -121,8 +121,16 @@ contains
                          test_non_finite_value_stops_every_path), &
             new_unittest("the default panel cap clears an algebraic tail at the tightest tolerance", &
                          test_default_panel_cap_clears_an_algebraic_tail), &
-            new_unittest("the guide's overshoot bounds hold, and max_neval binds", &
-                         test_guide_budget_overshoot_bounds) &
+            new_unittest("the guide's budget floors and overshoot bounds both hold", &
+                         test_guide_budget_overshoot_bounds), &
+            new_unittest("the abscissa ceiling is PF_INT_LIMIT with both caps unspent", &
+                         test_abscissa_ceiling_is_limit_with_caps_unspent), &
+            new_unittest("the rule is exact to degree 31 and no further", &
+                         test_rule_is_exact_to_degree_31), &
+            new_unittest("an omitted max_neval is the documented default", &
+                         test_default_budget_is_the_documented_one), &
+            new_unittest("the start search retries a narrower panel below zero too", &
+                         test_start_search_retries_below_zero) &
             ]
 
     end subroutine collect_tests_integrate
@@ -1788,28 +1796,31 @@ contains
 
     end subroutine test_default_panel_cap_clears_an_algebraic_tail
 
-    !> The `pf_integrate` row of the overshoot column in doc/pages/utilities/solvers.md,
-    !! "The budget: max_neval": how far past `max_neval` a call may go, on each of the three shapes
-    !! of range, and that `max_neval` binds at all.
+    !> The `pf_integrate` budget rows of doc/pages/utilities/integration.md and
+    !! doc/pages/utilities/solvers.md: the FLOOR each range cannot cost less than, and the amount
+    !! by which `max_neval` may be exceeded above it.
     !!
-    !! **Where the numbers come from, so that none of them is a recorded output.** A panel's
-    !! subinterval cap is `(max(budget - neval, 0) + ONE_RULE)/BISECTION` floored at 1
-    !! (`run_panel`, `src/parquet_integrate_driver.f90`), so a panel still costs one rule
-    !! application with nothing left of the budget; the walk tests the budget before every panel
-    !! after the first. On an infinite range `find_start_panel` spends one rule application of its
-    !! own before that first panel, and neither it nor the first panel sits behind a budget test --
-    !! so an outward walk costs `2*ONE_RULE` whatever `max_neval` says, and can exceed a budget it
-    !! has already spent by that much. `(-inf, +inf)` is TWO walks, split at zero
-    !! (`integrate_infinite`), and the second is entered whatever the first spent: the first
-    !! overshoots by at most its last panel, `ONE_RULE`, and the second then pays its whole
-    !! `2*ONE_RULE`. A finite range has no walk and no start probe, so once the budget covers the
-    !! one unavoidable rule application it is never exceeded.
+    !! **`max_neval` is a ceiling with a floor under it.** A rule application costs its 21 points
+    !! whether or not the budget is there to pay for them. On a finite range that is the only
+    !! unavoidable one -- `integrate_finite`'s subinterval cap is floored at 1 -- and the whole
+    !! partition is sized from the budget before the first evaluation, so nothing is ever
+    !! overspent once the budget covers 21 per piece. On an infinite range `find_start_panel`'s
+    !! first probe and the first `run_panel` are BOTH unconditional, so a walk costs at least 42;
+    !! where that probe comes back negligible the search retries a narrower panel, also
+    !! unconditionally, and the floor is 63. `(-inf, +inf)` is two such walks, split at zero, the
+    !! second entered whatever the first spent.
     !!
-    !! **Two negative controls, because the bound alone is satisfied by doing nothing.** Every case
-    !! also asserts the MINIMUM cost the same mechanism forces -- one rule application on a finite
-    !! range, two per walk on an infinite one -- so a call that returned at once fails. And each
-    !! shape must somewhere in the sweep actually pass its budget (`neval >= budget`), counted and
-    !! required non-zero, or the bound was asserted over runs that never tried to exceed anything.
+    !! **The overshoot above the floor is a property of the tests, not of the integrand**: the
+    !! last `if (neval >= budget)` can be passed with one evaluation to spare, the probe that
+    !! follows costs 21 and the first panel after it is unconditional -- 20 + 21 = 41 for one
+    !! walk. `(-inf, +inf)` adds the second walk's own unconditional 63, giving 104.
+    !!
+    !! **Three negative controls, because a bound alone is satisfied by doing nothing.** Each case
+    !! asserts its floor as a MINIMUM, so a call that returned at once fails. Each must somewhere
+    !! in the sweep actually pass its budget, counted and required non-zero, or the bound was
+    !! asserted over runs that never tried to exceed anything. And the sweep starts at 1, not at
+    !! the floor: the bound this test replaced was too small by 20 and passed for years of nothing
+    !! because its sweep started at 21 and neither of its integrands ever made the search widen.
     !!
     !! **`PF_INT_LIMIT` is NOT the discriminator for "the budget bound"**, which is why the counts
     !! key on `neval` instead: `walk_outward` reports `LIMIT` whenever it did not show the tail was
@@ -1818,69 +1829,273 @@ contains
     subroutine test_guide_budget_overshoot_bounds(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        type(pf_integrate_info) :: info
-        real(real64) :: r, inf
-        integer :: budget, seen_finite, seen_one, seen_two
-        character(len=190) :: msg
-        !> A one-sided infinite range may exceed `max_neval` by one rule application.
-        integer, parameter :: ONE_SIDED_OVER = ONE_RULE
-        !> `(-inf, +inf)` may exceed it by the first walk's last panel plus the second walk's
-        !! two unavoidable rule applications.
-        integer, parameter :: TWO_SIDED_OVER = ONE_RULE + 2*ONE_RULE
-        !> What a walk cannot avoid spending: the start probe and the first panel.
-        integer, parameter :: PER_WALK_MIN = 2*ONE_RULE
+        real(real64) :: inf
+        integer :: seen(5)
 
         inf = pf_infinity()
-        seen_finite = 0
-        seen_one = 0
-        seen_two = 0
+        seen = 0
 
-        do budget = ONE_RULE, 400, 7
-            ! ---- a finite range: never past the cap -------------------------------------
-            r = pf_integrate(osc_a, 0.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=budget, &
-                             info=info)
-            write(msg, '(a, i0, a, i0)') "finite: max_neval ", budget, " was exceeded, neval ", &
-                info%neval
-            call check(error, info%neval <= budget, trim(msg))
-            if (allocated(error)) return
-            write(msg, '(a, i0, a, i0)') "finite: one rule application is unavoidable, so neval " // &
-                "must be at least ", ONE_RULE, "; it is ", info%neval
-            call check(error, info%neval >= ONE_RULE, trim(msg))
-            if (allocated(error)) return
-            if (info%neval >= budget) seen_finite = seen_finite + 1
+        ! A finite range: one rule application unavoidable, and never a single evaluation past
+        ! the budget once the budget covers it.
+        call one_shape(error, 1, 0.0_real64, 1.0_real64, ONE_RULE, 0, seen(1), "finite")
+        if (allocated(error)) return
+        ! One infinite bound, an integrand that is never negligible: probe plus first panel.
+        call one_shape(error, 2, 1.0_real64, inf, 2*ONE_RULE, 2*ONE_RULE - 1, seen(2), &
+                       "one-sided, no retry")
+        if (allocated(error)) return
+        ! One infinite bound, an integrand EXACTLY zero next to it: the narrow retry runs too.
+        call one_shape(error, 3, 0.0_real64, inf, 3*ONE_RULE, 2*ONE_RULE - 1, seen(3), &
+                       "one-sided, retrying")
+        if (allocated(error)) return
+        ! The whole line, which is two walks sharing one budget.
+        call one_shape(error, 4, -inf, inf, 4*ONE_RULE, 5*ONE_RULE - 1, seen(4), &
+                       "two-sided, no retry")
+        if (allocated(error)) return
+        call one_shape(error, 5, -inf, inf, 6*ONE_RULE, 5*ONE_RULE - 1, seen(5), &
+                       "two-sided, retrying")
+        if (allocated(error)) return
 
-            ! ---- one-sided infinite: one rule application past the cap ------------------
-            r = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-13_real64, max_neval=budget, &
-                             info=info)
-            write(msg, '(a, i0, a, i0, a, i0)') "one-sided: max_neval ", budget, &
-                " may be exceeded by ", ONE_SIDED_OVER, ", neval ", info%neval
-            call check(error, info%neval <= budget + ONE_SIDED_OVER, trim(msg))
-            if (allocated(error)) return
-            write(msg, '(a, i0, a, i0)') "one-sided: a walk cannot spend less than ", &
-                PER_WALK_MIN, "; neval is ", info%neval
-            call check(error, info%neval >= PER_WALK_MIN, trim(msg))
-            if (allocated(error)) return
-            if (info%neval >= budget) seen_one = seen_one + 1
-
-            ! ---- two-sided infinite: three, because the second walk pays in full --------
-            r = pf_integrate(tail_gauss, -inf, inf, 1.0e-13_real64, max_neval=budget, info=info)
-            write(msg, '(a, i0, a, i0, a, i0)') "two-sided: max_neval ", budget, &
-                " may be exceeded by ", TWO_SIDED_OVER, ", neval ", info%neval
-            call check(error, info%neval <= budget + TWO_SIDED_OVER, trim(msg))
-            if (allocated(error)) return
-            write(msg, '(a, i0, a, i0)') "two-sided: two walks cannot spend less than ", &
-                2*PER_WALK_MIN, "; neval is ", info%neval
-            call check(error, info%neval >= 2*PER_WALK_MIN, trim(msg))
-            if (allocated(error)) return
-            if (info%neval >= budget) seen_two = seen_two + 1
-        end do
-
-        ! The vacuity guard: each shape must have reached its budget somewhere in the sweep, or its
-        ! bound above was asserted over runs that never tried to exceed anything.
-        write(msg, '(a, 3(1x, i0))') "the budget must bind somewhere in the sweep; neval reached " // &
-            "it (finite, one-sided, two-sided) times:", seen_finite, seen_one, seen_two
-        call check(error, seen_finite > 0 .and. seen_one > 0 .and. seen_two > 0, trim(msg))
+        call check(error, all(seen > 0), &
+                   "every shape must reach its budget somewhere in the sweep, or its bound was " // &
+                   "asserted over runs that never tried to exceed anything")
 
     end subroutine test_guide_budget_overshoot_bounds
+
+    !> Sweeps `max_neval` from 1 over one range shape and checks its floor and its overshoot.
+    subroutine one_shape(error, which, a, b, floor_n, over, seen, label)
+        type(error_type), allocatable, intent(out) :: error   !! test-drive's error handle.
+        integer, intent(in)                        :: which   !! which integrand and range
+        real(real64), intent(in)                   :: a       !! lower bound
+        real(real64), intent(in)                   :: b       !! upper bound
+        integer, intent(in)                        :: floor_n !! evaluations this shape cannot go below
+        integer, intent(in)                        :: over    !! most it may exceed `max_neval` by
+        integer, intent(out)                       :: seen    !! times the budget was reached
+        character(len=*), intent(in)               :: label   !! the shape's name, for the message
+
+        type(pf_integrate_info) :: info
+        real(real64)            :: r
+        integer                 :: budget
+        character(len=200)      :: msg
+
+        seen = 0
+        do budget = 1, 200
+            select case (which)
+            case (1)
+                POLY_DEGREE = 4
+                r = pf_integrate(poly_even, a, b, 1.0e-13_real64, max_neval=budget, info=info)
+            case (2)
+                r = pf_integrate(inv_pow15, a, b, 1.0e-13_real64, max_neval=budget, info=info)
+            case (4)
+                r = pf_integrate(tail_gauss, a, b, 1.0e-13_real64, max_neval=budget, info=info)
+            case default
+                r = pf_integrate(zero_then_bump, a, b, 1.0e-13_real64, max_neval=budget, info=info)
+            end select
+
+            ! Below the floor the floor IS the bound: a budget of 1 buys the same unavoidable
+            ! rule applications as a budget of 20, and calling that an overshoot of 20 would be
+            ! asserting the floor twice.
+            write(msg, '(a, a, i0, a, i0, a, i0)') label, ": max_neval ", budget, &
+                " may be exceeded by at most ", over, ", neval is ", info%neval
+            call check(error, info%neval <= max(floor_n, budget + over), trim(msg))
+            if (allocated(error)) return
+
+            write(msg, '(a, a, i0, a, i0)') label, ": this shape cannot cost less than ", &
+                floor_n, " evaluations; neval is ", info%neval
+            call check(error, info%neval >= floor_n, trim(msg))
+            if (allocated(error)) return
+
+            if (info%neval >= budget) seen = seen + 1
+        end do
+
+    end subroutine one_shape
+
+    !> The abscissa ceiling: `PF_INT_LIMIT` with NEITHER cap reached.
+    !!
+    !! doc/pages/utilities/integration.md's status table says `PF_INT_LIMIT` means a cap stopped
+    !! the run, and names three: `max_neval`, `max_panels`, and a walk reaching the largest
+    !! abscissa a `real64` carries. The third is the one no cap can move, which is why the page
+    !! has to say "neither moves the abscissa ceiling" and why this test exists.
+    !!
+    !! `walk_outward` exits when `u + TAIL_STEP > LOG_X_CEILING` (709 in natural-log units, below
+    !! `log(huge(1.0_real64))` = 709.78), leaving `finished` false, which is reported as
+    !! `PF_INT_LIMIT`. From a lower bound of `1e300` -- `log` 690.8 -- there are fewer than twenty
+    !! factors of e left before that ceiling.
+    !!
+    !! **The negative control is the second call**: the same integration with both caps raised a
+    !! hundredfold must return the IDENTICAL status, count and panel total. Without it the test
+    !! passes for a run that merely ran out of budget, which is the thing it exists to
+    !! distinguish.
+    subroutine test_abscissa_ceiling_is_limit_with_caps_unspent(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integrate_info) :: tight, loose
+        real(real64)            :: r
+        character(len=200)      :: msg
+
+        r = pf_integrate(inv_square, 1.0e300_real64, pf_infinity(), 1.0e-10_real64, info=tight)
+        call check(error, tight%status == PF_INT_LIMIT .and. .not. tight%converged, &
+                   "a walk that runs out of representable abscissae must report PF_INT_LIMIT")
+        if (allocated(error)) return
+
+        write(msg, '(a, i0, a, i0)') "neither cap may be near its limit: neval ", tight%neval, &
+            " of the default budget, npanels ", tight%npanels
+        call check(error, tight%neval < DEFAULT_BUDGET/10 .and. tight%npanels < DEFAULT_PANELS/10, &
+                   trim(msg))
+        if (allocated(error)) return
+
+        ! The control: raising both caps must change nothing at all, because neither is what
+        ! stopped the walk.
+        r = pf_integrate(inv_square, 1.0e300_real64, pf_infinity(), 1.0e-10_real64, &
+                         max_neval=100*DEFAULT_BUDGET, max_panels=100*DEFAULT_PANELS, info=loose)
+        write(msg, '(a, i0, a, i0, a, i0, a, i0)') "raising both caps must change nothing: " // &
+            "neval ", tight%neval, " -> ", loose%neval, ", npanels ", tight%npanels, " -> ", &
+            loose%npanels
+        call check(error, loose%status == tight%status .and. loose%neval == tight%neval &
+                   .and. loose%npanels == tight%npanels, trim(msg))
+
+    end subroutine test_abscissa_ceiling_is_limit_with_caps_unspent
+
+    !> The rule is exact for polynomials up to degree 31, as "Accuracy against cost" says.
+    !!
+    !! One rule application over `[-1, 1]`, with the extrapolation off so the answer IS the
+    !! partition sum, against the closed form `2/(k + 1)`. The interval matters: over `[0, 1]` the
+    !! change of variable divides the degree-32 content by `2**32`, which buries the rule's error
+    !! under rounding and makes the control useless -- every degree from 28 to 36 then comes back
+    !! within six ulp.
+    !!
+    !! **The negative control is degree 32**, which must be far WORSE than rounding: measured, it
+    !! is `7.3e-11` against degree 30's `8.6e-16`, five orders of magnitude, and the test demands
+    !! three. Odd degrees integrate to zero over `[-1, 1]` by symmetry and say nothing, so the pair
+    !! that brackets the claim is 30 and 32.
+    subroutine test_rule_is_exact_to_degree_31(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integrate_info) :: info
+        real(real64)            :: r, want, err30, err32
+        character(len=200)      :: msg
+
+        POLY_DEGREE = 30
+        want = 2.0_real64/real(POLY_DEGREE + 1, real64)
+        r = pf_integrate(poly_even, -1.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=ONE_RULE, &
+                         extrapolate=.false., info=info)
+        call check(error, info%neval == ONE_RULE, &
+                   "degree 30 must be settled in one rule application")
+        if (allocated(error)) return
+        err30 = abs(info%partition_integral - want)/want
+        write(msg, '(a, es12.5)') "the rule must integrate x**30 over [-1, 1] exactly; " // &
+            "relative error is ", err30
+        call check(error, err30 <= 8.0_real64*epsilon(1.0_real64), trim(msg))
+        if (allocated(error)) return
+
+        POLY_DEGREE = 32
+        want = 2.0_real64/real(POLY_DEGREE + 1, real64)
+        r = pf_integrate(poly_even, -1.0_real64, 1.0_real64, 1.0e-13_real64, max_neval=ONE_RULE, &
+                         extrapolate=.false., info=info)
+        err32 = abs(info%partition_integral - want)/want
+        write(msg, '(a, es12.5, a, es12.5)') "and x**32 must NOT be exact, or the degree is " // &
+            "untested: relative error is ", err32, " against degree 30's ", err30
+        call check(error, err32 > 1.0e3_real64*max(err30, epsilon(1.0_real64)), trim(msg))
+
+    end subroutine test_rule_is_exact_to_degree_31
+
+    !> `max_neval` defaults to 100000, in both directions.
+    !!
+    !! The suite already asserts that a default-budget call can spend at least `DEFAULT_BUDGET`,
+    !! which fails if the default DROPS and passes if it rises. This pins it from the other side:
+    !! a default call and an explicit `max_neval = DEFAULT_BUDGET` call must be the same call.
+    !!
+    !! **The negative control is the third call**, one evaluation short of the default, which must
+    !! differ -- without it the test passes for an integrand whose cost is nowhere near the budget
+    !! and which would answer identically at any cap.
+    subroutine test_default_budget_is_the_documented_one(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integrate_info) :: fallback, explicit, shorter
+        real(real64)            :: r, inf
+        character(len=200)      :: msg
+
+        inf = pf_infinity()
+
+        r = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-10_real64, info=fallback)
+        r = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-10_real64, max_neval=DEFAULT_BUDGET, &
+                         info=explicit)
+        write(msg, '(a, i0, a, i0)') "an omitted max_neval must be the documented default: " // &
+            "neval ", fallback%neval, " against ", explicit%neval
+        call check(error, fallback%neval == explicit%neval &
+                   .and. fallback%status == explicit%status, trim(msg))
+        if (allocated(error)) return
+
+        ! The control: this fixture must actually be governed by the budget, or the equality above
+        ! holds for any two caps at all.
+        ! A tenth off the default, not one evaluation off: the walk's own overshoot means the
+        ! last rule application straddles the cap, so `DEFAULT_BUDGET` and `DEFAULT_BUDGET - 1`
+        ! both end at 100002 and would make this control vacuous.
+        r = pf_integrate(tail_osc, 1.0_real64, inf, 1.0e-10_real64, &
+                         max_neval=9*(DEFAULT_BUDGET/10), info=shorter)
+        write(msg, '(a, i0, a, i0)') "the fixture must be budget-bound, or the default is " // &
+            "untested: neval at the default ", fallback%neval, ", at nine tenths ", shorter%neval
+        call check(error, shorter%neval /= fallback%neval, trim(msg))
+
+    end subroutine test_default_budget_is_the_documented_one
+
+    !> The start search retries a NARROWER panel before widening, for a lower bound at or below
+    !! zero as well as a positive one.
+    !!
+    !! doc/pages/utilities/integration.md, "What the integrator cannot see": "when its first, wide
+    !! probe finds nothing it tries a much NARROWER panel before trying wider ones, because an
+    !! integrand that falls off far faster than the first guess assumed lives in a sliver just
+    !! above the bound." A positive lower bound gets that for free, working in `log y`; a bound at
+    !! or below zero works in linear `y` from a fixed first panel and needs `START_NARROW_A`.
+    !!
+    !! `zero_then_bump`'s bump is 400 times narrower than the spacing of that first panel's 21
+    !! points, so every one of them reads an exact zero. Without the retry the search only ever
+    !! widens, the bump is never sampled, and the call answers zero and reports convergence -- the
+    !! silent wrong answer, on the two commonest infinite spellings.
+    !!
+    !! **Two negative controls.** `breakpoints=` around the bump is the cure the page names and
+    !! must find the same value, which proves the fixture is integrable and the closed form right
+    !! rather than that the search happens to work. And `converged` is asserted beside the value,
+    !! because the defect this pins reported TRUE while answering zero.
+    subroutine test_start_search_retries_below_zero(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integrate_info) :: info
+        real(real64)            :: r, inf, want
+        character(len=200)      :: msg
+        !> Asked for tightly, because the bump's support edges are kinks in the second derivative
+        !! and QUADPACK's estimate over them is optimistic: at `rtol = 1e-8` the fitted finite
+        !! range reports convergence 1.4e-7 out.
+        real(real64), parameter :: RTOL_BUMP = 1.0e-10_real64
+        !> What the assertions allow. Far looser than `RTOL_BUMP` on purpose: the question here is
+        !! whether the bump is FOUND -- the defect answered exactly zero -- so five orders of slack
+        !! over the worst of the three calls (3.4e-11) keeps the test about that and not about
+        !! QUADPACK's error estimate over a kink.
+        real(real64), parameter :: TOL_BUMP = 1.0e-6_real64
+
+        inf = pf_infinity()
+        want = zero_then_bump_exact()
+
+        r = pf_integrate(zero_then_bump, 0.0_real64, inf, RTOL_BUMP, info=info)
+        write(msg, '(a, es22.15, a, es22.15)') "a bump inside the walk's first panel must be " // &
+            "found from a lower bound of zero: got ", r, " want ", want
+        call check(error, abs(r - want) <= TOL_BUMP*want, trim(msg))
+        if (allocated(error)) return
+        call check(error, info%converged, "and that call must converge")
+        if (allocated(error)) return
+
+        r = pf_integrate(zero_then_bump, -inf, inf, RTOL_BUMP, info=info)
+        write(msg, '(a, es22.15, a, es22.15)') "and over the whole line, whose halves are both " // &
+            "walked from zero: got ", r, " want ", want
+        call check(error, abs(r - want) <= TOL_BUMP*want, trim(msg))
+        if (allocated(error)) return
+
+        ! The control: the cure the guide names must reach the same number on the same range.
+        r = pf_integrate(zero_then_bump, 0.0_real64, inf, RTOL_BUMP, &
+                         breakpoints=[ZTB_START, 4.0_real64*ZTB_CENTRE], info=info)
+        write(msg, '(a, es22.15, a, es22.15)') "a cut each side of the bump must reach the same " // &
+            "value, or the fixture is not integrable at all: got ", r, " want ", want
+        call check(error, abs(r - want) <= TOL_BUMP*want, trim(msg))
+
+    end subroutine test_start_search_retries_below_zero
 
 end module test_integrate

@@ -668,7 +668,13 @@ contains
     !!
     !! qfeet's `find_start_panel`, with its narrow retry: an integrand falling off far faster than
     !! the first guess assumed is found by a much narrower panel, and trying that before trying
-    !! wider ones is what finds a spike sitting just above `a`.
+    !! wider ones is what finds a spike sitting just above `a`. **Both branches retry**, and they
+    !! get their narrower panel differently: a positive lower bound has a scale of its own, so the
+    !! retry is a tenth of the log-width (or a tenth of the way to `START_MIN_A`); a bound at or
+    !! below zero has none, so the retry divides the first panel's upper bound by
+    !! `START_NARROW_A`, a constant chosen by measurement rather than derived. Neither retry costs
+    !! an ordinary integrand anything: `negligible` is true only across a panel where `f` is
+    !! exactly zero.
     !!
     !! The probes are one `qk21` application each and their values are discarded -- the panel the
     !! search accepts is integrated again, from scratch, by the adaptive engine. Refining before
@@ -733,6 +739,16 @@ contains
             call qk21(f, aa, bb, in_log, negate, res, abserr, resabs, resasc, neval, px, pw, pv, &
                       bad)
             if (bad%seen) return
+
+            if (negligible(res, resabs)) then
+                ! Nothing there, and this branch has no `log y` to narrow in: without a retry the
+                ! search would only ever coarsen, and a feature below this one panel's 21-point
+                ! spacing could never be reached. `START_NARROW_A` says how far down to look.
+                bb = bb/START_NARROW_A
+                call qk21(f, aa, bb, in_log, negate, res, abserr, resabs, resasc, neval, px, pw, &
+                          pv, bad)
+                if (bad%seen) return
+            end if
 
             do istep = 1, MAX_START_STEPS
                 if (.not. negligible(res, resabs)) exit

@@ -141,7 +141,7 @@ solver.
 
 | Entry point | default | Can the run overshoot it? |
 |---|---|---|
-| [`pf_integrate`](integration.html) | 100000 | never on a finite range, once `max_neval` covers the one rule application (21 evaluations) no range can avoid; by at most one rule application on a one-sided infinite range, and by three on `(-inf, +inf)`, which is split at zero and walked both ways |
+| [`pf_integrate`](integration.html) | 100000 | never on a finite range, once `max_neval` covers the one rule application (21 evaluations) each piece cannot avoid; by up to 41 evaluations on a one-sided infinite range and 104 on `(-inf, +inf)`, which is two walks — [the integration page](integration.html#budget-and-outcome) carries the floors each range cannot go below |
 | [`pf_find_root`](root-finding.html) | 200 | never |
 | [`pf_minimize_scalar`](optimization.html) | 500 | never |
 | [`pf_minimize_simplex`](optimization.html) | 5000 | by one simplex step, `n+2` evaluations |

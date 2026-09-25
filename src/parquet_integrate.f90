@@ -189,6 +189,37 @@ module parquet_integrate
     real(real64), parameter :: START_ADD_A = 0.1_real64
     !> Factor by which the search widens a negligible panel, in `log x`.
     real(real64), parameter :: START_WIDEN = 3.0_real64
+    !> Factor by which the search NARROWS the first panel of a lower bound at or below zero, once
+    !! that panel comes back negligible, before it starts widening.
+    !!
+    !! The `a > 0` branch gets its narrow retry for free: it works in `log y`, so a retry at
+    !! `log(a) + START_ADD_A` (or `log(a*START_MULT_A)`) is a panel a tenth of the width, anchored
+    !! to the caller's own lower bound. A bound at or below zero has no such scale -- `log y` does
+    !! not reach it, the first panel is `[a, START_MIN_A/10]` in LINEAR y, and without this retry
+    !! the search only ever coarsens, so a feature below the 21-point spacing of that one panel is
+    !! unreachable however many times the panel is widened. `[0, +infinity)` and both halves of
+    !! `(-infinity, +infinity)` take this branch, so it is not a corner.
+    !!
+    !! **Chosen by measurement**, over 104 compactly supported spikes on `[0, +infinity)` --
+    !! centres from `1e-8` to `1e4`, half-widths from a third of the centre down to `1e-4` of it,
+    !! `rtol = 1e-8` -- counting the spikes integrated to a relative `1e-4`:
+    !!
+    !! ```
+    !! narrowing factor   1 (none)    3     9    27   100   1e3   1e4   1e5   1e6   1e8
+    !! spikes found          19      19    20    22    26    29    31    34    38    35
+    !! ```
+    !!
+    !! A broad optimum at `1e6`, which finds twice as many as no retry at all, and **no spike that
+    !! was found without the retry is lost with it** (checked case by case, 19 gained and 0 lost).
+    !! Repeated narrowing was tried and rejected: narrowing by `START_WIDEN` until the panel stops
+    !! being negligible spends the widening loop's `MAX_START_STEPS` climbing back and LOSES two
+    !! spikes it used to find, at nearly twice the cost.
+    !!
+    !! **It costs an ordinary integrand nothing**, because `negligible` measures a panel against
+    !! its own integral of `|f|`: only an integrand that is EXACTLY zero across the first panel
+    !! reaches the retry at all. A gaussian, a Lorentzian, a damped cosine and the whole line
+    !! integrate in the same evaluation count with the retry as without it.
+    real(real64), parameter :: START_NARROW_A = 1.0e6_real64
     !> Cap on attempts to find a starting panel that is not negligible. qfeet's
     !! `max_start_steps`: 30 widenings by a factor of three reach `exp(33)` from `x = 1`.
     integer, parameter :: MAX_START_STEPS = 30

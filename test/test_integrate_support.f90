@@ -40,6 +40,19 @@ module test_integrate_support
     public :: inv_sqrt, inv_sqrt_exact, mild_pow, mild_pow_exact
     public :: divergent_pow, divergent_pow_finite_part
     public :: scaled_runge, exp_profile
+    public :: zero_then_bump, zero_then_bump_exact, inv_square, poly_even
+
+    !> Where `zero_then_bump` stops being identically zero. Below it the integrand is an EXACT
+    !! zero, which is what `negligible` needs to be true (it measures a panel against the panel's
+    !! own integral of `|f|`, so a merely tiny integrand is never negligible).
+    real(real64), parameter, public :: ZTB_START = 1.0e-3_real64
+    !> Centre of `zero_then_bump`'s bump, above `ZTB_START` and far below the walk's first panel.
+    real(real64), parameter, public :: ZTB_CENTRE = 2.0e-3_real64
+    !> Half-width of `zero_then_bump`'s bump.
+    real(real64), parameter, public :: ZTB_HALF = 2.0e-4_real64
+    !> Degree `poly_even` raises its argument to. A module variable so that one fixture can serve
+    !! a sweep over degrees; the tests using it are serial.
+    integer, public :: POLY_DEGREE = 4
 
     !> Half-width of `compact_bump`'s support, which is centred on `BUMP_CENTRE`.
     real(real64), parameter, public :: BUMP_HALF = 0.006_real64
@@ -699,5 +712,61 @@ contains
         f = self%amp*exp(-x/self%scale)
 
     end function exp_profile_eval
+
+    !> Identically zero up to `ZTB_START`, then a compact bump: the shape that makes the outward
+    !! walk's start search widen.
+    !!
+    !! It exists for two claims at once. The bump is far narrower than the 21-point spacing of the
+    !! walk's first panel `[a, 0.1]`, so from a lower bound at or below zero it is found only
+    !! because `find_start_panel` retries a NARROWER panel before widening. And the exact zero
+    !! below `ZTB_START` is what makes `negligible` true, which is what makes the start search
+    !! spend more than its first probe -- the case the budget floors below are measured on.
+    function zero_then_bump(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        real(real64) :: u
+
+        f = 0.0_real64
+        if (x <= ZTB_START) return
+        u = (x - ZTB_CENTRE)/ZTB_HALF
+        if (abs(u) < 1.0_real64) f = (1.0_real64 - u*u)**2
+
+    end function zero_then_bump
+
+    !> Exact integral of `zero_then_bump` over any range containing its bump.
+    !!
+    !! The integral of `(1 - u**2)**2` over `u` in `[-1, 1]` is `16/15`, and `x = ZTB_CENTRE +
+    !! ZTB_HALF*u` gives `dx = ZTB_HALF*du`.
+    pure function zero_then_bump_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = ZTB_HALF*16.0_real64/15.0_real64
+
+    end function zero_then_bump_exact
+
+    !> `1/x**2`, whose integral over `[a, +infinity)` is `1/a`.
+    !!
+    !! Used at a lower bound of `1e300`, where the walk runs out of REPRESENTABLE abscissae long
+    !! before either cap is reached.
+    function inv_square(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = 1.0_real64/(x*x)
+
+    end function inv_square
+
+    !> `x**POLY_DEGREE`, for testing the degree the 21-point rule is exact to.
+    !!
+    !! The integral over `[-1, 1]` is `2/(POLY_DEGREE + 1)` for an even degree and zero for an odd
+    !! one, so the tests sweep even degrees.
+    function poly_even(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = x**POLY_DEGREE
+
+    end function poly_even
 
 end module test_integrate_support

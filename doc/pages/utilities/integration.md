@@ -160,9 +160,9 @@ already converging with two independent ones, each paying for its own first rule
 neither able to use what the other learned. `sqrt(abs(x - 1/3))` on `[0, 1]` costs about twice as
 much cut at `1/3` as left alone. What a cut buys is the case above — a feature the first rule
 application does not sample at all, which on a finite range means one narrower than the spacing of
-its 21 points, and on an infinite range means the shapes
-[What the integrator cannot see](#what-the-integrator-cannot-see) describes. `bench/benchmark_integrate.sh`'s
-`walk` mode measures both sides of this.
+its 21 points, and on an infinite range means the shapes [What the integrator cannot
+see](#what-the-integrator-cannot-see) describes. `bench/benchmark_integrate.sh`'s `walk` mode
+measures both sides of this.
 
 **Each piece is integrated to `rtol` of itself and to `atol` divided by the number of pieces**, so
 the sum meets both tolerances whenever every piece meets its own. That division is what makes
@@ -193,17 +193,36 @@ because no double-precision quadrature can report having met it. The same `rtol`
 
 ## Budget and outcome
 
-`max_neval` bounds the integrand evaluations; it defaults to 100000. **It is a ceiling, not a
-suggestion**: the count never exceeds it on a finite range, and an infinite range may overshoot it
-by at most one rule application, because a panel costs its 21 points even when five of them would
-have been enough. Reaching it is a status, not an error. With `breakpoints=` the budget covers the
-whole call and is carried from one piece to the next, each piece reserving one rule application for
-the pieces after it.
+`max_neval` bounds the integrand evaluations; it defaults to 100000. Reaching it is a status, not
+an error. With `breakpoints=` the budget covers the whole call and is carried from one piece to
+the next, each piece reserving one rule application for the pieces after it.
+
+**It is a ceiling with a floor under it.** A rule application costs its 21 points whether or not
+the budget is there to pay for them, and on an infinite range two of them happen before the budget
+is consulted at all:
+
+| range | cannot cost less than | may exceed `max_neval` by |
+|---|---|---|
+| finite, or one piece of a cut range | 21 per piece | nothing, once `max_neval` covers 21 per piece |
+| one infinite bound | 42 — the walk's start probe and its first panel; 63 where the probe finds nothing and the search retries a narrower one | 41 |
+| `(-inf, +inf)` | 84 — two such walks; 126 where both retry | 104 |
+
+A `max_neval` below the floor is spent up to the floor and reported as `PF_INT_LIMIT`. Above it, a
+finite range never overshoots, because its whole partition is sized from the budget before the
+first evaluation; a walk can pass its last budget test with one evaluation left and then start a
+panel that costs 21, which is the whole of the overshoot. The two walks of `(-inf, +inf)` share
+one budget in the order they are walked, so a first half that spends all of it leaves the second
+half its floor and nothing more — which is why the second row's 41 becomes 104 on the third.
 
 `max_panels` bounds the panels ONE walk of an infinite range may use, counting the first panel the
 search accepted; it defaults to 100, and reaching it is `PF_INT_LIMIT` in the same way. It applies
 only to an infinite range — passing it with two finite bounds aborts — and on `(-inf, +inf)`,
 which is two walks, it caps each of them.
+
+A walk stops on a third thing neither cap names: the next panel would begin past the largest
+abscissa a `real64` can carry, about `exp(709)`. That too is `PF_INT_LIMIT`, with both caps
+unspent, and raising either changes nothing — a lower bound within a few factors of e of that
+ceiling has almost no range left to walk.
 
 `converged=` is the short answer. `info=` is the long one, a `pf_integrate_info` carrying:
 
@@ -228,7 +247,7 @@ reports through these values, and speaks only by aborting when a caller contract
 | Code | Means | What to do |
 |---|---|---|
 | `PF_INT_OK` | the requested accuracy was achieved | nothing |
-| `PF_INT_LIMIT` | `max_neval` or `max_panels` ran out first | raise the cap, or loosen the tolerance |
+| `PF_INT_LIMIT` | a cap stopped the run before the tolerance was met: `max_neval`, `max_panels`, or a walk reaching the largest abscissa a `real64` carries | raise the cap, or loosen the tolerance; neither moves the abscissa ceiling |
 | `PF_INT_ROUNDOFF` | round-off prevents the tolerance being met | loosen the tolerance; the result is as good as the arithmetic allows |
 | `PF_INT_BAD_INTEGRAND` | the integrand behaves extremely badly somewhere | split the range at the offending point |
 | `PF_INT_NO_CONVERGENCE` | the extrapolation table stopped making progress | loosen the tolerance, split the range at whatever the table could not accelerate, or pass `extrapolate=.false.` |
@@ -245,6 +264,11 @@ whatever your integrand answered before it stopped answering numbers, so the ret
 than about the integral, which is why it is a status and not an abort — a sweep over a parameter
 grid survives one bad parameter, and `nonfinite_at` says which point to look at.
 
+Nothing further is attempted once your integrand has stopped answering with numbers: the pieces of
+a `breakpoints=` call after the one that met the value are not integrated, and on `(-inf, +inf)`
+the second walk is not walked. `neval`, `nsub`, `npanels` and the record are then an account of
+what was integrated, not of the range you asked for.
+
 ## The evaluation record
 
 Pass `points=` and you get back a `pf_integrate_points`: every abscissa, weight and value of the
@@ -256,7 +280,7 @@ type(pf_integrate_info) :: info
 real(real64) :: r, again
 
 r = pf_integrate(f, a, b, 1.0e-10_real64, info=info, points=pts)
-again = sum(pts%w(1:pts%n)*pts%f(1:pts%n))     ! info%partition_integral, exactly
+again = sum(pts%w(1:pts%n)*pts%f(1:pts%n))     ! info%partition_integral, to rounding
 ```
 
 **The weighted sum reproduces the integral over the partition**, because the weights carry
@@ -267,15 +291,17 @@ points.
 
 Two things to know. It is the final partition, not a log of every evaluation — a subinterval that
 was bisected is represented by its two children, never by both itself and them, because summing
-both would count that region twice. And what it reproduces is `info%partition_integral`, always
-and exactly; it reproduces the RETURNED result only when `info%extrapolated` is false. On a call
-the extrapolation accelerated, the returned result is the better of the two numbers and the
-record is the partition it was accelerated from, so a caller re-weighting the record is working
-with the plain sum — read `info%extrapolated`, or pass `extrapolate=.false.` to be handed the
-number the record reproduces.
+both would count that region twice. And what it reproduces is `info%partition_integral`, to
+rounding: the two sums add the same terms in a different order, which is a few ulp on a small
+partition and tens of ulp on a large one, so compare them with a tolerance and never with `==`. It
+reproduces the RETURNED result only when `info%extrapolated` is false — and then the returned
+result IS `info%partition_integral`, bit for bit. On a call the extrapolation accelerated, the
+returned result is the better of the two numbers and the record is the partition it was
+accelerated from, so a caller re-weighting the record is working with the plain sum — read
+`info%extrapolated`, or pass `extrapolate=.false.` to be handed the number the record reproduces.
 
 With `breakpoints=` the record covers every piece, concatenated in ascending order, and the
-weighted sum reproduces the whole integral exactly as it does for an unbroken range.
+weighted sum reproduces the whole integral just as it does for an unbroken range.
 
 `%append` joins two records, for two adjacent ranges integrated separately:
 
@@ -285,8 +311,9 @@ r_right = pf_integrate(f, 1.0_real64, 2.0_real64, 1.0e-10_real64, points=right)
 call left%append(right)                        ! now a rule for [0, 2]
 ```
 
-Recording costs three `real64` per evaluation and happens only when `points=` is present. A call
-without it allocates no record at all.
+Recording costs three `real64` per point of the final partition — 21 points per subinterval, so
+`3*21*info%nsub` in all, which on a range that bisected is about half the evaluation count. It
+happens only when `points=` is present; a call without it allocates no record at all.
 
 ## The extrapolation
 
@@ -303,11 +330,11 @@ a smooth integrand, an interior peak or a polynomial it changes nothing worth no
 answer, and the same evaluation count but for the occasional extra bisection at the very tightest
 tolerances.
 
-It also earns two of the status codes. A divergent integral is reported as `PF_INT_DIVERGENT` in
-a couple of hundred evaluations, where the bisection alone would keep drilling towards the
-singularity until the integrand overflows and the answer becomes `PF_INT_NONFINITE` instead. A jump inside the
-range — which the table cannot accelerate, because the sequence it is handed was never
-converging — is reported as `PF_INT_NO_CONVERGENCE`.
+It also earns two of the status codes. A divergent integral is reported as `PF_INT_DIVERGENT` in a
+couple of hundred evaluations, where the bisection alone would keep drilling towards the
+singularity until the integrand overflows and the answer becomes `PF_INT_NONFINITE` instead. A
+jump inside the range — which the table cannot accelerate, because the sequence it is handed was
+never converging — is reported as `PF_INT_NO_CONVERGENCE`.
 
 Two things to weigh before leaving it on. `info%extrapolated` says whether the returned result
 came from the table; when it did, the result is no longer the partition sum the record
@@ -360,12 +387,18 @@ and every feature narrower than about a fifth of its distance from the bound —
 samples. The answer comes back as zero, converged, in a few dozen evaluations.
 
 The outward walk does not have that shape. It samples 21 points per factor of e, all the way out,
-so the same bump is found from any lower bound:
+so the same bump is found rather than compressed into the last two abscissae of one rule:
 
 ```fortran
 r = pf_integrate(bump_at_40, 0.0_real64, pf_infinity(), 1.0e-8_real64)
 ! r is sqrt(pi), the right answer
 ```
+
+What the walk fixes is everything beyond the first panel; the first panel is a rule application
+like any other. A lower bound very far BELOW the feature therefore brings the finite blind spot
+back — the same bump on `[-1.0e6, +inf)` sits inside a first panel far too wide to sample it, and
+the answer is zero and converged again. `(-inf, +inf)` is not exposed to that, because it splits
+at zero and walks outward from there.
 
 What remains is the narrower blind spot above: a feature between the samples of one panel. The
 search for the first panel is built around exactly that — when its first, wide probe finds
@@ -458,8 +491,9 @@ library.
 The rule, the bisection driver, the error-ordered subinterval list and the epsilon table are
 QUADPACK's (Piessens, de Doncker-Kapenga, Ueberhuber and Kahaner, 1983; public domain), as
 modernised by Jacob Williams under BSD-3-Clause. They were reworked for this library: the
-integrand became a `class(pf_integrand)` dummy so parameters travel with it, the evaluation counter
-became real rather than a formula, the work arrays grow instead of being sized up front, every
-diagnostic became a status code or an abort, and every evaluation is screened for a non-finite
-value, which ends the integration rather than the process. The numerical logic — the abscissae, the weights, the round-off tests, the extrapolation
-table — is transcribed unchanged, and the engine file's header lists every deviation.
+integrand became a `class(pf_integrand)` dummy so parameters travel with it, the evaluation
+counter became real rather than a formula, the work arrays grow instead of being sized up front,
+every diagnostic became a status code or an abort, and every evaluation is screened for a
+non-finite value, which ends the integration rather than the process. The numerical logic — the
+abscissae, the weights, the round-off tests, the extrapolation table — is transcribed unchanged,
+and the engine file's header lists every deviation.

@@ -332,6 +332,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `pf_integrate` finds a narrow feature sitting just above a lower bound of zero. The outward
+  walk's search for a first panel retries a much NARROWER panel before it starts widening, which
+  is what finds an integrand that falls off far faster than the first guess assumed; that retry
+  existed only for a POSITIVE lower bound, which has a scale of its own to narrow against. From a
+  bound at or below zero the search worked in linear `x` from a fixed first panel and only ever
+  coarsened, so a feature below that panel's 21-point spacing could never be reached however many
+  times the panel was widened -- and the call answered zero with `converged` true, on
+  `[0, +infinity)` and on `(-infinity, +infinity)`, whose two halves are both walked from zero.
+  Measured over 104 compactly supported spikes, the retry doubles the number found and loses none.
+  It costs an ordinary integrand nothing, since only a panel across which the integrand is exactly
+  zero reaches it. The budget floors on the guide page move with it: a walk whose first probe finds
+  nothing now costs three rule applications before the budget is consulted rather than two.
+  [Numerical integration with pf_integrate](doc/pages/utilities/integration.md#budget-and-outcome).
 - `pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`, at every scale. Both identities
   are documented without qualification and were lost on a sample scaled to the end of the
   representable range: the centred sums overflow to `Inf` and their re-centring correction leaves

@@ -12,26 +12,25 @@ Concurrent use (e.g. from an OpenMP parallel region) is supported.
 - Never write to the same output file path from two threads at the same time.
 - A shared `parquet_table` may be **read** from many threads once its columns are resident, and
   **appended to** from many threads (the table serialises that itself). A first touch inside a
-  parallel region, and every other change to a shared table, is a hard error — see
-  [What a `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently) below and
-  [Reading a table from several threads](#reading-a-table-from-several-threads).
+  parallel region, and every other change to a shared table, is a hard error — see [What a
+  `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently) below and [Reading
+  a table from several threads](#reading-a-table-from-several-threads).
 - A `parquet_table_writer` belongs to the thread that opened it: `%append`, `%flush` and the close
   refuse a sink another thread may share. One sink per thread, each writing its own file, is the
   supported shape — as elements of an array declared **before** the region, one per thread, since
   the type is finalizable (so not a `private()` copy) and has allocatable components (so not a
   block-local under ifx). See [Growing one table from several
   threads](#growing-one-table-from-several-threads) for the ownership test it shares.
-- A `parquet_grouping` only ever **reads**: `%agg`, `%apply`, `%gather` and `%count` read the
-  table, and the staleness check reads its generation counter — so a grouping over resident
-  columns may be queried from many threads. The procedure you hand `%apply` must not be the first
-  to touch a column; see [Grouping rows and aggregating per
-  group](../tables/table-group.html).
+- A `parquet_grouping` only ever **reads**: `%agg`, `%apply`, `%gather` and `%count` read the table,
+  and the staleness check reads its generation counter — so a grouping over resident columns may be
+  queried from many threads. The procedure you hand `%apply` must not be the first to touch a
+  column; see [Grouping rows and aggregating per group](../tables/table-group.html).
 - A `pf_logger` may be **emitted through** from many threads at once; **configuring** one may not.
   See [Logging from several threads](#logging-from-several-threads) below.
-- The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix, index maps, density
-  estimation, TOML — have their own short rules, and one of them matters: a **bulk** `pf_spatial_index` query may rebuild
-  the index, so it must not run on a shared index from two threads. See
-  [The Arrow-free tiers](#the-arrow-free-tiers) below.
+- The Arrow-free tiers — sorting, statistics, strings, spatial, HEALPix, minimisation, index maps,
+  density estimation, sky geometry, random draws and TOML — have their own short rules, and one of
+  them matters: a **bulk** `pf_spatial_index` query may rebuild the index, so it must not run on a
+  shared index from two threads. See [The Arrow-free tiers](#the-arrow-free-tiers) below.
 
 ## What a `parquet_table` allows concurrently
 
@@ -87,9 +86,9 @@ memory afterwards (`%sort_by`) if you need a reproducible result.
 **Four groups of operations thread internally, and all of them stand down inside your own parallel
 region.** `%prefetch`/`%materialize_all` read several columns at once, each on its own reader;
 `%sort_by`, `%filter_rows`, `%top_n`, `%delete_rows`, `%truncate` and `%join` rewrite several
-columns at once; `%clone` copies several columns at once; and `%print_stat` scans several columns
-at once for its statistics pass. You do not ask for any of them and cannot get
-them wrong — but four consequences are worth knowing:
+columns at once; `%clone` copies several columns at once; and `%print_stat` scans several columns at
+once for its statistics pass. You do not ask for any of them and cannot get them wrong — but four
+consequences are worth knowing:
 
 - **A small table is rewritten serially, and that is not a failure.** The rewrite group has a work
   floor: it threads only when there are at least **two** columns to rewrite and the largest of them
@@ -134,8 +133,8 @@ end do
 ```
 
 A table a thread **opens for itself inside** the region is a different case: it cannot be shared, so
-its lazy reads are allowed — that is what the
-[slice regime](../tables/table-open.html#reading-part-of-a-file-the-slice-regime) below is for. That
+its lazy reads are allowed — that is what the [slice
+regime](../tables/table-open.html#reading-part-of-a-file-the-slice-regime) below is for. That
 extends to changing it: a thread-private table can be filtered, sorted, renamed and dropped from
 inside the region, because no other thread can see it.
 
@@ -167,9 +166,8 @@ second reader on. **Neither is refused by a `filter=` or a `sort=`**; see the ta
 The row-group split additionally needs **more than one row group**, **enough work to pay for opening
 the extra readers** — the same **131072**-element floor (rows times width) the rewrite group uses,
 which is more than a team spawn here because each thread also opens its own reader and parses the
-file footer — and a **non-string**
-column: a string column's packed variable-length store has no fixed row slots to write row groups
-into, so it keeps the ordinary whole-column read.
+file footer — and a **non-string** column: a string column's packed variable-length store has no
+fixed row slots to write row groups into, so it keeps the ordinary whole-column read.
 
 **A read-time transform keeps all of this.** The extra readers do not re-derive the table's
 `filter=` mask or its `sort=` permutation — they **share** them, which is a refcount increment
@@ -187,8 +185,8 @@ exactly what a serial read would:
 
 Every one of them is faster than a serial read; they are ordered by how much serial work the
 transform leaves in front of the parallel part. The transformed cases fall short of the best case
-because that work is done once, before the parallel read begins — not because any of it is
-repeated. `bench/benchmark_table.sh` measures the ratios on your own machine (see CONTRIBUTING.md).
+because that work is done once, before the parallel read begins — not because any of it is repeated.
+`bench/benchmark_table.sh` measures the ratios on your own machine (see CONTRIBUTING.md).
 
 **Qc warnings are not duplicated by this.** A `qc_soft=.true.` violation prints at most once per
 column per reader, and each column is read by exactly one thread, so the parallel read prints
@@ -196,9 +194,8 @@ exactly what the serial read prints — including for a column the filter itself
 the table's own reader ever evaluates the filter.
 
 If you open readers yourself rather than through a table, `parquet_reader_adopt_transform` is the
-same mechanism, available directly — see
-[Sharing a filter or a sort between your own readers](#sharing-a-filter-or-a-sort-between-your-own-readers)
-below.
+same mechanism, available directly — see [Sharing a filter or a sort between your own
+readers](#sharing-a-filter-or-a-sort-between-your-own-readers) below.
 
 ### Growing one table from several threads
 
@@ -244,8 +241,8 @@ region owns it, anything else may be shared and is refused — but takes a third
 components, which ifx cannot privatize in a block), but an element of an array declared before the
 region, one per thread, each opened, fed and closed by its own thread on its own file.
 
-The full per-operation table is in
-[What a `parquet_table` allows concurrently](#what-a-parquet_table-allows-concurrently).
+The full per-operation table is in [What a `parquet_table` allows
+concurrently](#what-a-parquet_table-allows-concurrently).
 
 ### Nulling elements from several threads
 
@@ -313,18 +310,25 @@ transform at all is a no-op, so there is no need to ask first.
 already share one transform across their internal readers, and you write no OpenMP at all. This
 procedure is for the case where you are managing the readers yourself.
 
-## Random numbers need no rules at all
+## Random numbers need no lock
 
-`parquet_random` is the one part of this library with nothing to say in this page's terms. It has no
-shared state to protect, so there is nothing to lock, nothing to give one instance per thread, and
-no ordering to preserve: every value is a pure function of `(seed, i, [draw])`, computed from those
-arguments and nothing else. Call it from any number of threads at once, on any schedule.
+`parquet_random`'s free functions are the one part of this library with nothing to say in this
+page's terms. They hold no shared state, so there is nothing to lock and no ordering to preserve:
+every value is a pure function of `(seed, i, [draw])`, computed from those arguments and nothing
+else. Call them from any number of threads at once, on any schedule.
 
 That is stronger than thread *safety*, and the difference matters. A conventional generator can be
 made safe with a lock and still be useless in a parallel loop, because which value an iteration
 receives depends on how many draws happened first — and a lock does not decide that, the schedule
-does. Here a draw is **reproducible**, and being reproducible it is automatically safe. See
-[Random numbers](../utilities/random.html).
+does. Here a draw is **reproducible**, and being reproducible it is automatically safe. See [Random
+numbers](../utilities/random.html).
+
+**Its two objects are objects, and they follow the ordinary rules.** A `pf_random_stream` carries a
+position, so it belongs to one thread: declare it in a `block`, never in an OpenMP `private()`
+clause. A `pf_random_disc_cap` is written by `%prepare` and read by `%at`, so prepare it before the
+region and share it from there. Neither weakens the paragraph above — each still answers the value
+the free function gives at the same coordinates — but neither is a thing you may share while it is
+being written.
 
 The single exception is `pf_random_seed()`, which by design is not a pure function — it exists to
 produce a value that has never been produced before. It increments a process-wide counter with a
@@ -334,87 +338,108 @@ interaction with other threads, and it is handled internally.
 ## The Arrow-free tiers
 
 Everything above is about the reader, the writer and `parquet_table`. The tiers that never touch a
-Parquet file and have a rule of their own — sorting, statistics, strings, spatial indexing,
-HEALPix, minimisation, index maps, density estimation and TOML configuration — are below, and they
-are short. **One of them has teeth**; the rest are here so that "what may I do concurrently" has
-one answer rather than one per module.
+Parquet file and have a rule of their own — sorting, statistics, strings, spatial indexing, HEALPix,
+minimisation, index maps, density estimation, sky geometry, random draws and TOML configuration —
+are below, and they are short. **One of them has teeth**; the rest are here so that "what may I do
+concurrently" has one answer rather than one per module.
 
 **A tier not listed here needs no rule**, which is why the list is shorter than the set of
 Arrow-free modules. `parquet_temporal`, `parquet_columns`, `parquet_list`, `parquet_map`,
-`parquet_struct`, `parquet_utils`, `parquet_integrate`, `parquet_interpolate`, `parquet_cosmology`,
-`parquet_root` and `parquet_transform` share no state between calls and hold nothing a second thread
-can see: one object per thread, or one shared object nobody writes, is safe without anything being
-said about it.
+`parquet_struct`, `parquet_utils`, `parquet_version`, `parquet_integrate`, `parquet_interpolate`,
+`parquet_cosmology`, `parquet_root` and `parquet_transform` share no state between calls and hold
+nothing a second thread can see: one object per thread, or one shared object nobody writes, is safe
+without anything being said about it. `parquet_cosmology_config` is safe inside a region for a
+different reason: it reaches a document only through `pf_toml`'s public entries, every one of which
+takes the lock below.
 
-- **`pf_spatial_index`: a BULK query is not read-only.** Single queries (`%within`, `%count_within`,
-  `%nearest`) take the index as read-only, so any number of threads may share one. A bulk form
-  (`%all_within`, `%pairs_within`, `%count_all_within`) may **re-tune the index** before it sweeps
-  when the radius you ask for disagrees badly with the one it was built for — reallocating its cell
-  arrays. Two threads calling a bulk form on the *same* index can therefore both decide to rebuild
-  and race, which corrupts the heap rather than returning a wrong number, and **nothing detects
-  it**: unlike a shared reader, there is no guard here. Call a bulk form from one thread at a time.
-  It threads internally anyway, which is where its parallelism is meant to come from. Building,
-  `%rebuild` and `%rebuild_for` mutate the index for the same reason. See
-  [Threading and settings](../utilities/spatial.html#threading-and-settings).
-- **Sorting and statistics have no shared state at all.** `pf_sort`, `pf_argsort` and the `pf_*`
-  reductions work on the arrays you hand them and keep nothing between calls, so any number of
-  threads may sort or reduce different arrays at once. Both thread internally, and both **stand
-  down to serial inside your own parallel region** rather than nesting a team inside yours. A
-  `pf_stats` accumulator is an ordinary variable: one per thread, or one shared and updated inside
-  your own critical section.
-- **HEALPix is the same story.** Every scalar conversion is `pure` and shares nothing; the `_bulk`
-  forms thread internally and stand down inside your region.
-- **One `parquet_string_column` may not be written from two threads.** Its rows share one packed
-  payload, so a write can move the whole thing — the same rule the table above states for a string
-  column, and it applies to a bare `parquet_string_column` too. Reading a column nobody is writing
-  is unrestricted, and its bulk rebuilds thread internally.
-- **`pf_index_map`/`pf_index_pool`: mutations serialise, and a map's lookups do not.** Any number
-  of threads may `%get`, `%contains` or `%get_many` one map at once, taking no lock; a `%get_many`
-  over a large key array also threads internally, and stands down to serial inside your own
-  parallel region, like the sorts. **A pool is the exception to the second half**: every public
-  entry of `pf_index_pool` takes its lock, the queries included, because `%is_used` and the
-  counters read what a concurrent mutation is writing — so a pool query in a hot loop is not the
+- **`pf_spatial_index` (`parquet_spatial`): a BULK query is not read-only.** Single queries
+  (`%within`, `%count_within`, `%nearest`) take the index as read-only, so any number of threads may
+  share one. A bulk form (`%all_within`, `%pairs_within`, `%count_all_within`) may **re-tune the
+  index** before it sweeps when the radius you ask for disagrees badly with the one it was built for
+  — reallocating its cell arrays. Two threads calling a bulk form on the *same* index can therefore
+  both decide to rebuild and race, which corrupts the heap rather than returning a wrong number, and
+  **nothing detects it**: unlike a shared reader, there is no guard here. Call a bulk form from one
+  thread at a time. It threads internally anyway, which is where its parallelism is meant to come
+  from. Building, `%rebuild` and `%rebuild_for` mutate the index for the same reason. See [Threading
+  and settings](../utilities/spatial.html#threading-and-settings).
+- **Sorting and statistics (`parquet_argsort`, `parquet_sorting`, `parquet_stats`) have no shared
+  state at all.** `pf_sort`, `pf_argsort` and the `pf_*` reductions work on the arrays you hand them
+  and keep nothing between calls, so any number of threads may sort or reduce different arrays at
+  once. Both thread internally, and both **stand down to serial inside your own parallel region**
+  rather than nesting a team inside yours. A `pf_stats` accumulator is an ordinary variable: one per
+  thread, or one shared and updated inside your own critical section.
+- **HEALPix (`parquet_healpix`) is the same story.** Every scalar conversion is `pure` and shares
+  nothing; the `_bulk` forms thread internally and stand down inside your region.
+- **Sky geometry: build the object before the region, then share it.** A `pf_sky_polygon`
+  (`parquet_sphere`) and a `pf_sky_rotation` (`parquet_skycoord`) are written by `%init` and read by
+  everything else, so one built before a parallel region serves the whole team and neither may be
+  rebuilt while another thread reads it. Build a polygon **before** the region rather than in a
+  `block` inside it: it has allocatable components, which ifx cannot privatise in a block. The pixel
+  and mask samplers, and every conversion in `parquet_skycoord`, are `pure` and share nothing; the
+  `pf_healpix_grid` `parquet_sphere` re-exports carries the `_bulk` conversions, which thread
+  internally and stand down as above. See [Thread safety](../utilities/sphere.html#thread-safety)
+  and [Thread safety](../utilities/skycoord.html#thread-safety).
+- **Random draws over a population (`parquet_sampling`): the bulk forms share nothing, a weighted
+  sampler does not.** `pf_random_permutation`, `pf_random_subset` and `pf_random_resample` keep
+  nothing between calls, thread internally, stand down inside your own region and answer the same
+  bits at every thread count, because element `k` is a pure function of its coordinates.
+  `pf_weighted_draw` is the exception: `%next` mutates the sampler's tree, so one cannot serve two
+  threads — give each thread its own. See [Running many sequences at
+  once](../utilities/random.html#running-many-sequences-at-once).
+- **One `parquet_string_column` (`parquet_strings`) may not be written from two threads.** Its rows
+  share one packed payload, so a write can move the whole thing — the same rule the table above
+  states for a string column, and it applies to a bare `parquet_string_column` too. Reading a column
+  nobody is writing is unrestricted, and its bulk rebuilds thread internally.
+- **`pf_index_map`/`pf_index_pool` (`parquet_index`): mutations serialise, and a map's lookups do
+  not.** Any number of threads may `%get`, `%contains` or `%get_many` one map at once, taking no
+  lock; a `%get_many` over a large key array also threads internally, and stands down to serial
+  inside your own parallel region, like the sorts. **A pool is the exception to the second half**:
+  every public entry of `pf_index_pool` takes its lock, the queries included, because `%is_used` and
+  the counters read what a concurrent mutation is writing — so a pool query in a hot loop is not the
   free thing a map lookup is. Every `%insert`/`%remove`/`%get_or_add` is serialised by the library
   on a single lock per type — so several threads streaming keys through one map's `%get_or_add` is a
   supported pattern, and each thread's returned index is unique and stable — and a `%build` takes
   that lock only to swap its finished result in, so builds of different maps on different threads
   run side by side. A `%build` and a `%get_or_add_many` over a large enough key array each open a
   team of their own and stand down inside your region, as `%get_many` does. `pf_index_multimap`
-  follows the same rules: its
-  bulk lookups thread internally and stand down inside your region, and a build or `%clear` is
-  serialised on a lock of its own. A string key changes none of this: it is hashed on the
-  calling thread and verified against the map's own copy of the strings, which nothing writes
-  outside a build or a mutation. A `parquet_table_index` is one of those two engines behind a
-  staleness check, so its queries inherit the lock-free rule and `%build_index` the build's;
-  the check reads the table's generation counter, which a row-structural change on another
-  thread would be moving — and that is the shared-table rule above, not a new one. See
+  follows the same rules: its bulk lookups thread internally and stand down inside your region, and
+  a build or `%clear` is serialised on a lock of its own. A string key changes none of this: it is
+  hashed on the calling thread and verified against the map's own copy of the strings, which nothing
+  writes outside a build or a mutation. A `parquet_table_index` is one of those two engines behind a
+  staleness check, so its queries inherit the lock-free rule and `%build_index` the build's; the
+  check reads the table's generation counter, which a row-structural change on another thread would
+  be moving — and that is the shared-table rule above, not a new one. See
   [Threading](../utilities/index-maps.html#threading).
-- **Minimisation: the objective is yours, and under `threads=` each thread gets a clone.** Every
-  entry point of `parquet_optimize` and `parquet_prima` holds nothing between calls, so separate
-  minimisations may run at once, including from inside your own parallel region — at
-  `threads = 1` each, since a team opened inside yours collapses to one thread with nesting off.
-  At `threads = 1` the objective you passed is the one evaluated, so a counter or cache it keeps
-  is what you read back afterwards. At `threads > 1` the driver allocates one clone of it per
-  thread by sourced allocation and discards them at the end: an `allocatable` component is
-  deep-copied per thread, a `pointer` component is shared (which is fine for data nobody writes),
-  and **whatever the objective accumulates is not visible to you afterwards** — `info%neval` is
-  the count. The answer does not depend on the thread count in either module. See
-  [The objective under threads](../utilities/optimization.html#threads-and-what-each-thread-sees).
-- **`pf_kde` and `pf_kde_grid`: every query is read-only, and the rest are writes.** A fitted
-  `pf_kde`, and a grid nobody is adding to, may be queried and sampled from any number of threads
-  at once; `%fit`, `%init`, `%add`, `%merge` and `%clear` are writes — one object per thread, or
-  one shared and written inside your own critical section, and `%merge` is how per-thread grids
-  become one. The bulk queries, `%sample`, `%fit` and `%add` thread internally and stand down
+- **Minimisation (`parquet_optimize`, `parquet_prima`): the objective is yours, and under `threads=`
+  each thread gets a clone.** Every entry point of both modules holds nothing between calls, so
+  separate minimisations may run at once, including from inside your own parallel region.
+  **`threads=` is `parquet_optimize`'s alone**: `pf_minimize_de` and `pf_minimize_multistart` take
+  it, no entry point of `parquet_prima` does, and Powell's solvers are serial wherever they are
+  called from. A team opened inside your own region collapses to one thread with nesting off, so an
+  unqualified minimisation there runs at `threads = 1`. At `threads = 1` the objective you passed is
+  the one evaluated, so a counter or cache it keeps is what you read back afterwards. At
+  `threads > 1` the driver allocates one clone of it per thread by sourced allocation and discards
+  them at the end: an `allocatable` component is deep-copied per thread, a `pointer` component is
+  shared (which is fine for data nobody writes), and **whatever the objective accumulates is not
+  visible to you afterwards** — `info%neval` is the count. The answer does not depend on the thread
+  count. See [The objective under
+  threads](../utilities/optimization.html#threads-and-what-each-thread-sees).
+- **`pf_kde` and `pf_kde_grid` (`parquet_kde`): every query is read-only, and the rest are writes.**
+  A fitted `pf_kde`, and a grid nobody is adding to, may be queried and sampled from any number of
+  threads at once; `%fit`, `%init`, `%add`, `%merge` and `%clear` are writes — one object per
+  thread, or one shared and written inside your own critical section, and `%merge` is how per-thread
+  grids become one. The bulk queries, `%sample`, `%fit` and `%add` thread internally and stand down
   inside your region. A query's or a sample's answer is the same bits at every thread count;
-  `%add`'s is the same at one count and changes by rounding between counts. See
-  [Thread safety](../utilities/kernel-density.html#thread-safety).
-- **`pf_toml`: every public procedure is safe inside a parallel region**, because each takes one
-  module-wide lock on entry. What that does not cover is a document's lifetime: closing one while
-  another thread still holds a handle taken from it is yours to prevent. See
+  `%add`'s is the same at one count and changes by rounding between counts. See [Thread
+  safety](../utilities/kernel-density.html#thread-safety).
+- **`pf_toml` (`parquet_toml`): every public procedure is safe inside a parallel region**, because
+  each takes one module-wide lock on entry. What that does not cover is a document's lifetime:
+  closing one while another thread still holds a handle taken from it is yours to prevent. See
   [Thread safety](../utilities/configuration-files.html#thread-safety).
-- **`parquet_random` needs no rules at all** — see
-  [Random numbers need no rules at all](#random-numbers-need-no-rules-at-all) above, which is the
-  one part of this library with nothing to say in this page's terms.
+- **`parquet_random`'s free functions need no rules at all** — see [Random numbers need no
+  lock](#random-numbers-need-no-lock) above, which is the one part of this library with nothing to
+  say in this page's terms, and which is also where its two objects, a `pf_random_stream` and a
+  `pf_random_disc_cap`, get theirs.
 
 The pattern across all of them: **internal threading stands down inside your parallel region**, so
 you never nest teams by accident; and the only object that is unsafe to share is one an operation
@@ -423,14 +448,14 @@ under a write.
 
 ## Logging from several threads
 
-`parquet_logging` is safe to **emit** through concurrently and unsafe to **configure**
-concurrently, and the split is deliberate rather than an omission. Emission is what happens
-per record, inside a region; configuration happens once, before one.
+`parquet_logging` is safe to **emit** through concurrently and unsafe to **configure** concurrently,
+and the split is deliberate rather than an omission. Emission is what happens per record, inside a
+region; configuration happens once, before one.
 
-- **Emitting is safe from any number of threads**, on a shared logger or a private one. Every
-  write goes through one named critical section, so two threads cannot interleave halves of a
-  line. `once=` and `every=` are decided inside that same section, so a `once=` record concurrent
-  across a whole team emits exactly one line rather than one per thread.
+- **Emitting is safe from any number of threads**, on a shared logger or a private one. Every write
+  goes through one named critical section, so two threads cannot interleave halves of a line.
+  `once=` and `every=` are decided inside that same section, so a `once=` record concurrent across a
+  whole team emits exactly one line rather than one per thread.
 - **`%fatal`/`pf_log_fatal` is safe to reach from several threads at once, and aborts exactly
   once.** A guard inside a parallel loop fires for every element that offends it, so more than one
   thread arriving at the same fatal is the ordinary case. The whole procedure is serialised, and
@@ -441,23 +466,23 @@ per record, inside a region; configuration happens once, before one.
   behaviour, and on at least one compiler they leave the process exit status nondeterministic —
   including `0`, which would tell a calling script that a run which aborted had succeeded.
 - **Configuring is not** — `%init`, `%add_console`, `%add_file`, `%add_unit`, `%set_level`,
-  `%set_format`, `%set_color`, `%set_name`, `%set_rank`, `%set_thread_mode` and `%close` all
-  mutate the logger without a lock. Call them before entering a parallel region. This is the same
-  rule the rest of the library follows for a reader or a writer, and for the same reason: paying
-  for a lock on the once-per-run path would mean paying for it on the per-record path too.
+  `%set_format`, `%set_color`, `%set_name`, `%set_rank`, `%set_thread_mode` and `%close` all mutate
+  the logger without a lock. Call them before entering a parallel region. This is the same rule the
+  rest of the library follows for a reader or a writer, and for the same reason: paying for a lock
+  on the once-per-run path would mean paying for it on the per-record path too.
 - **A `pf_logger` is safe in a `private()` clause, in a `firstprivate()` clause, and as a
-  block-local variable inside a region.** It has no allocatable components and no finalizer,
-  which is what makes all three legal at once — see
-  [A note on functions returning `character(len=:), allocatable`](#a-note-on-functions-returning-characterlen-allocatable)
-  for the neighbouring hazard, and the type's own documentation for why those two absences are
-  load-bearing rather than incidental.
+  block-local variable inside a region.** It has no allocatable components and no finalizer, which
+  is what makes all three legal at once — see [A note on functions returning
+  `character(len=:), allocatable`](#a-note-on-functions-returning-characterlen-allocatable) for the
+  neighbouring hazard, and the type's own documentation for why those two absences are load-bearing
+  rather than incidental.
 - **The name stack is per thread; the logger's own name is shared.**
   `pf_log_push_name`/`pf_log_pop_name` act on the calling thread's own stack, so a subprogram
   entered on one thread tags only that thread's records. `%set_name` sets the logger-wide base and
   is configuration — set it outside the region, for the same `threadprivate` reason as the context
   base below.
-- **The context stack is per thread; its base is shared.** `pf_log_push_context`/`_pop_context`
-  act on the calling thread's own stack, so each thread tags its records with its own frames.
+- **The context stack is per thread; its base is shared.** `pf_log_push_context`/`_pop_context` act
+  on the calling thread's own stack, so each thread tags its records with its own frames.
   `pf_log_set_context` sets one shared base rendered ahead of them, and is configuration — set it
   outside the region. (An OpenMP `threadprivate` copy is undefined in every thread but the initial
   one at the start of a region, so a per-thread base set *before* a region would reach thread 0 and
@@ -469,10 +494,10 @@ per record, inside a region; configuration happens once, before one.
 writes them out at `%flush`, so one thread's records appear together instead of interleaved with
 every other thread's. The cost is that nothing is visible until the flush.
 
-**A buffered record is not on disk until `%flush` runs**, so a program that aborts mid-region
-loses whatever is still in the slots. `%fatal` flushes before it aborts for exactly this reason;
-an `error stop` elsewhere in your own code does not, so call `%flush` before it if the records
-matter. `%close` flushes too.
+**A buffered record is not on disk until `%flush` runs**, so a program that aborts mid-region loses
+whatever is still in the slots. `%fatal` flushes before it aborts for exactly this reason; an
+`error stop` elsewhere in your own code does not, so call `%flush` before it if the records matter.
+`%close` flushes too.
 
 ## Practical cases
 
@@ -506,9 +531,9 @@ every `!$omp` block is then compiled out and the library runs its serial paths, 
 answers on one thread. Check `fpm build --show-model` if you are unsure which of the two you have —
 it prints the flag set fpm actually computed.
 
-If you call into this library concurrently
-from your own `!$omp parallel` regions and want to be certain OpenMP is active for your own sources
-too, you can add the same dependency to your own `fpm.toml`:
+If you call into this library concurrently from your own `!$omp parallel` regions and want to be
+certain OpenMP is active for your own sources too, you can add the same dependency to your own
+`fpm.toml`:
 ```toml
 [dependencies]
 openmp = "*"
@@ -523,8 +548,8 @@ Calling into a *shared* `parquet_writer`/`parquet_reader` from more than one thr
 "not safe" case above) is actively detected and rejected: the second concurrent caller triggers an
 immediate process exit (status 134) with a diagnostic on stderr. This is a fail-fast race guard, not
 a locking mechanism. Sequential, non-overlapping hand-off between threads remains allowed. (This is
-one of two classes of process-abort failure in this library — see
-[Error handling](error-handling.html#the-two-failure-classes) for the other, Fortran `error stop`.)
+one of two classes of process-abort failure in this library — see [Error
+handling](error-handling.html#the-two-failure-classes) for the other, Fortran `error stop`.)
 
 The guard is claimed at the *first* statement of a call, before any of the writer's or reader's own
 bookkeeping is touched. That ordering is what makes the diagnostic reliable rather than a race in
@@ -554,15 +579,14 @@ If you want to parallelize a streaming write, parallelize the *data preparation*
 `parquet_new_row_group`/`parquet_write_column_chunk`/`parquet_finish_row_group` calls themselves
 serial, on one thread, in order.
 
-**The chunked read API** (`parquet_read_column_chunk` — see
-[Streaming/chunked reads](../io/reading.html#streamingchunked-reads)) is bound by the same "one
-thread at a time per reader" rule as every other reader call, but unlike the streaming write API it
-has no ordering requirement: reads are stateless/random-access, so calls for different row groups
-(or the same one, repeatedly) can happen in any order. This means a row-group loop *can* be
-parallelized directly, as long as each thread uses its own `parquet_reader` instance opened on the
-same file (independent readers on the same file are always safe to use concurrently — see "Practical
-cases" above) rather than sharing one reader across threads, which would still hit the concurrency
-guard.
+**The chunked read API** (`parquet_read_column_chunk` — see [Streaming/chunked
+reads](../io/reading.html#streamingchunked-reads)) is bound by the same "one thread at a time per
+reader" rule as every other reader call, but unlike the streaming write API it has no ordering
+requirement: reads are stateless/random-access, so calls for different row groups (or the same one,
+repeatedly) can happen in any order. This means a row-group loop *can* be parallelized directly, as
+long as each thread uses its own `parquet_reader` instance opened on the same file (independent
+readers on the same file are always safe to use concurrently — see "Practical cases" above) rather
+than sharing one reader across threads, which would still hit the concurrency guard.
 
 ## Thread-pool tuning
 
@@ -603,8 +627,8 @@ affect write/read throughput on your own hardware, see
 
 **No accessor in this library returns a `character(len=:), allocatable` function result.** Every one
 that would naturally be written that way — `parquet_string_column`'s `get` and `summary`, the
-`parquet_string` handle's `to_string`, `schema%add_col_qc`/`schema%set_col_qc` (see
-[Quality control](../schema/quality-control.html#building-a-qc-maml-in-code)) and the rest — is a
+`parquet_string` handle's `to_string`, `schema%add_col_qc`/`schema%set_col_qc` (see [Quality
+control](../schema/quality-control.html#building-a-qc-maml-in-code)) and the rest — is a
 **subroutine** writing into an `intent(out)`/`intent(inout)` allocatable `character` argument
 instead.
 

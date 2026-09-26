@@ -148,12 +148,10 @@ the same row.
 
 ## Thread placement: `OMP_PLACES` and `OMP_PROC_BIND`
 
-**Every** thread count this library resolves — sorting and the statistics that run on the same
-engine, reading a table, rewriting a table, one string column's bulk work, the bulk random draws,
-the bulk spatial queries, the HEALPix bulk forms and an index build — is bounded by
-`omp_get_num_procs()`, which
-reports the **CPU affinity of the process** rather than the machine. One common environment setting
-reduces that to almost nothing.
+**Every** thread count this library resolves — every subsystem in the list further down this
+section, from a sort to a table rewrite to an index build — is bounded by `omp_get_num_procs()`,
+which reports the **CPU affinity of the process** rather than the machine. One common environment
+setting reduces that to almost nothing.
 
 **Set `OMP_PLACES=sockets` if you set `OMP_PROC_BIND` at all:**
 
@@ -184,13 +182,13 @@ OMP_PLACES=sockets avoids it.
 
 `NOTE: ` rather than `WARNING: ` because this is **advice about the process's environment**, not a
 finding about your data: nothing is wrong, every result is identical, and the only thing to fix is
-outside the library. That class goes quiet one level earlier than a warning does — see
-[Terminal output](settings.html#terminal-output).
+outside the library. That class goes quiet one level earlier than a warning does — see [Terminal
+output](settings.html#terminal-output).
 
 The word after that prefix names whichever subsystem noticed — `sorting`, `table prefetching`,
 `table rewriting`, `column gathering`, `string operations`, `random draws`, `spatial`, `healpix`,
-`index`, `grouping` or `optimisation`. There is
-one line per process, not one per subsystem: they all have the same cause and the same fix.
+`index`, `grouping` or `optimisation`. There is one line per process, not one per subsystem: they
+all have the same cause and the same fix.
 
 The message fires only when the clamp actually reduced the thread count, so a job deliberately
 confined to a small cpuset — or one rank pinned per core with `OMP_NUM_THREADS=1` — stays quiet. It
@@ -221,18 +219,21 @@ rather than a second copy, because a figure repeated in two places is a figure t
 with itself:
 
 - **[Sorting](../utilities/sorting.html)** — which of the sort engine's paths runs and when, and the
-  one asymptotic surprise: `pf_nth_element` orders the array rather than selecting, so asking for one
-  order statistic costs about what asking for all of them costs.
+  one asymptotic surprise: `pf_nth_element` orders the array rather than selecting, so asking for
+  one order statistic costs about what asking for all of them costs.
 - **[Array statistics](../utilities/statistics.html)** — what threads, what the work floor is, and
   the exclusion policy's cost. The thread cap is the sort's; there is no separate `stats_threads`.
 - **[Spatial indexing](../utilities/spatial.html)** — cell sizing and the tuner, the cost of a badly
   chosen build `radius=`, and the rebuild that a bulk query can trigger silently.
-- **[HEALPix](../utilities/healpix.html)** — the bulk forms, the team a bulk call opens and why it is
-  derived from the work rather than from the machine.
-- **[Key-to-index lookup](../utilities/index-maps.html)** — what each backend costs, the team a build
-  or a bulk lookup opens, and why a composite lookup costs about what a scalar one does.
+- **[HEALPix](../utilities/healpix.html)** — the bulk forms, the team a bulk call opens and why it
+  is derived from the work rather than from the machine.
+- **[Key-to-index lookup](../utilities/index-maps.html)** — what each backend costs, the team a
+  build or a bulk lookup opens, and why a composite lookup costs about what a scalar one does.
 - **[Random numbers](../utilities/random.html)** — why no scalar figure is quoted against the
   intrinsic, and what reproducibility under a changed schedule is bought with.
+- **[Numerical integration](../utilities/integration.html)** — what an integrand costs to integrate:
+  why an endpoint singularity stops growing with the tolerance once the extrapolation is on, what a
+  decaying tail costs per factor of e, and which tails no method answers cheaply.
 - **[String columns](../types/string-columns.html)** and
   **[Settings](settings.html#threads-inside-one-string-column)** — one column's bulk rebuilds, which
   are the one thread cap that lowers a deliberately conservative default rather than the machine's.

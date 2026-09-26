@@ -55,6 +55,14 @@ module parquet_columns
         parquet_string_column_set_null, parquet_string_column_set_validity, parquet_string_column_shrink_to_fit, &
         parquet_string_column_size
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
+    ! The output pair, on this module's own account. `%gather(..., threads=)` resolves its team
+    ! through `parquet_clamp_to_affinity` (src/parquet_columns_structural.f90), which says so once
+    ! per process when this process's CPU affinity is narrower than the count asked for, and a
+    ! string-kind gather reaches the same clamp again inside `parquet_strings`. A module
+    ! re-exports the output pair wherever it can emit, by any route
+    ! (.claude/rules/module-structure.md), so that `use parquet_columns` alone can silence it.
+    use parquet_settings_base, only : parquet_get_verbosity, parquet_set_verbosity, &
+        parquet_get_message_stream, parquet_set_message_stream
     !
     implicit none
     private
@@ -63,6 +71,10 @@ module parquet_columns
     public :: parquet_container_column
     public :: parquet_kind_name
     public :: parquet_kind_is_container
+    !
+    ! See the `use parquet_settings_base` line above for why a container module carries these.
+    public :: parquet_get_verbosity, parquet_set_verbosity
+    public :: parquet_get_message_stream, parquet_set_message_stream
     public :: PK_NONE
     public :: PK_INT32
     public :: PK_INT64

@@ -252,7 +252,7 @@ fi
 # from the measurement, and an exclusion that is no longer excluded -- because an exclusion list
 # that has gone stale hides the very gap it was written to explain (CLAUDE.md, "A static check that
 # enumerates names goes stale silently").
-FACADE_EXCLUDES="parquet_sorting_oracle.f90 parquet_table_example.f90 parquet_cosmology_config.f90"
+FACADE_EXCLUDES="parquet_sorting_oracle.f90 parquet_table_example.f90"
 #
 #   parquet_sorting_oracle.f90     the C++ sort engine, reachable only behind
 #                                  parquet_sorting_oracle's procedure pointers. TEST-ONLY and
@@ -263,12 +263,15 @@ FACADE_EXCLUDES="parquet_sorting_oracle.f90 parquet_table_example.f90 parquet_co
 #   parquet_table_example.f90      a worked example emitted by tools/generate_user_table_code.py;
 #                                  it ships as a demonstration and nothing in the library uses it,
 #                                  so no `use parquet` program compiles it.
-#   parquet_cosmology_config.f90   the [cosmology] section of a TOML configuration file, over
-#                                  parquet_cosmology and parquet_toml. Deliberately re-exported by
-#                                  no facade: a caller that wants a cosmology from a configuration
-#                                  file names this module, exactly as it already names
-#                                  parquet_toml, and `use parquet` stays clear of a pairing only
-#                                  some programs want.
+#
+# parquet_cosmology_config.f90 was on this list, with the reason that `use parquet` should "stay
+# clear of a pairing only some programs want". It is no longer: the facade already compiles
+# parquet_toml.f90 and the whole cosmology tier, so the pairing cost nothing to avoid and the one
+# file it saved was the joining module itself -- while doc/pages/operating/choosing-a-module.md
+# promised `use parquet` gives you "everything above, through one `use`" and every other entry
+# module in that table. check_facade_reaches_every_entry_module
+# (tools/check_source_conventions.py) now holds the other side of that promise, anchored on the
+# page's sentence rather than on a list here, so silencing it means editing the claim.
 
 if [ "$mode" = "check" ] && [ -z "$only" ]; then
     _got_parquet="$work/got_parquet"

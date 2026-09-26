@@ -589,6 +589,7 @@ parquet_columns_validity.f90
 parquet_core.f90
 parquet_cosmology.f90
 parquet_cosmology_build.f90
+parquet_cosmology_config.f90
 parquet_cosmology_eval.f90
 parquet_expkey.f90
 parquet_healpix.f90

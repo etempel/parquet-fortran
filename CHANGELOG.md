@@ -230,7 +230,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is idempotent, leaves no stale key and touches nothing outside its own table; it records the
   parameters rather than the realization. A new entry module over `parquet_cosmology` and
   `parquet_toml`, so neither of them grows: Arrow-free, settings-free, and taking no lock of its
-  own. See
+  own, and reachable from `use parquet` as well as by name. See
   [A cosmology in a configuration file](doc/pages/utilities/configuration-files.md#a-cosmology-in-a-configuration-file).
 - **Random points on a sphere, in `parquet_random`.** `pf_random_direction_at` draws a uniform unit
   vector and `pf_random_radec_at` the same point as `(ra, dec)` in degrees; `pf_random_disc_at` and
@@ -399,6 +399,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A row-group-scoped read that descends through a `MAP` no longer crashes:
   `parquet_read_column_chunk` of a map column whose value is itself a container, and of a `{key}` or
   `{value}` descent path, return the same values their whole-column forms do.
+- A bulk random draw given an explicit `threads=` is bounded by the process's CPU affinity, as
+  every other thread count in this library already was: `pf_random_permutation`,
+  `pf_random_subset` and `pf_random_resample` no longer open a team larger than the mask allows,
+  and say so once per process when they lower one. The values drawn are unchanged.
+- `use parquet_columns`, `use parquet_list` and `use parquet_sampling` each re-export
+  `parquet_set_verbosity`, `parquet_get_verbosity`, `parquet_set_message_stream` and
+  `parquet_get_message_stream`, so a program importing one of them alone can silence the
+  thread-clamp notice its own calls can raise.
 - Many other minor fixes and improvements.
 
 ## [v2.4.0] - 2026-09-14

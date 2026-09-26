@@ -29,8 +29,9 @@ build that will not link, a program that aborts, threading that does nothing.
   writers, what a shared `parquet_table` allows, transform sharing, logging from several threads,
   the Arrow-free tiers — where a bulk spatial query is the one operation that can corrupt a shared
   object with nothing to detect it — thread-pool tuning, and the guard that does detect a shared
-  reader or writer and stops the process rather than corrupting it. `parquet_random` is the one
-  part of the library with no rules at all.
+  reader or writer and stops the process rather than corrupting it. `parquet_random`'s free
+  functions are the one part of the library with no rules at all; its two objects have the
+  ordinary ones.
 - [Performance and memory](performance.html) — what reads and writes cost in memory, how to reach a
   table's values without paying a name lookup per cell, and the OpenMP thread placement that
   silently collapses threading.

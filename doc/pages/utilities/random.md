@@ -1184,7 +1184,12 @@ the wide kind. `pf_weighted_draw`'s `%init`/`%reseed` and `pf_weighted_subset` t
   `%next` is `O(log n)`, and `%reset`/`%reseed` are `O(k log n)` in the draws already taken. Serial
   by nature, and there is no `threads=`.
 - **`pf_weighted_permutation`** is backed by an exponential race: every item gets a key and the keys
-  are sorted. `O(n)` plus a sort, parallel, and bit-identical at every thread count.
+  are sorted. `O(n)` plus a sort, parallel, and bit-identical at every thread count. **Without
+  `threads=`, the sorting knob decides that phase**: the sort runs through `pf_argsort`, so
+  `parquet_set_sort_threads(n)` caps it, `pf_sort_threads()` reports what it will be, and an
+  affinity notice raised from it names the area `sorting` rather than `random draws`.
+  `parquet_sampling` does not re-export that knob — reach it through `use parquet_sorting` or
+  `use parquet`, or pass `threads=`, which both phases honour.
 
 **The two give different sequences from the same seed**, and that is not a defect to be tidied away.
 Both draw from successive sampling; for one seed they are two different draws from it, in the same

@@ -61,6 +61,13 @@ module parquet_list
         PK_NONE, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING, &
         PK_DATE, PK_TIME, PK_TIMESTAMP, PK_LIST, PK_MAP, PK_STRUCT
     use parquet_temporal, only : parquet_date, parquet_time, parquet_timestamp
+    ! The output pair. This module re-exports `parquet_column`, and a type carries its bindings:
+    ! `%gather(..., threads=)` resolves its team through `parquet_clamp_to_affinity`
+    ! (src/parquet_columns_structural.f90), which says so once per process when this process's CPU
+    ! affinity is narrower than the count asked for. A module re-exports the output pair wherever
+    ! it can emit, by any route (.claude/rules/module-structure.md).
+    use parquet_settings_base, only : parquet_get_verbosity, parquet_set_verbosity, &
+        parquet_get_message_stream, parquet_set_message_stream
     !
     implicit none
     private
@@ -75,6 +82,9 @@ module parquet_list
     public :: PK_NONE, PK_INT32, PK_INT64, PK_FLOAT32, PK_FLOAT64, PK_LOGICAL, PK_STRING
     public :: PK_DATE, PK_TIME, PK_TIMESTAMP, PK_LIST
     public :: parquet_date, parquet_time, parquet_timestamp
+    ! See the `use parquet_settings_base` line above: the re-exported `parquet_column` can print.
+    public :: parquet_get_verbosity, parquet_set_verbosity
+    public :: parquet_get_message_stream, parquet_set_message_stream
     !
     ! INTERNAL API, on the same terms as parquet_columns' own `parquet_column_*` tier: a list
     ! column's offsets and its payload column, as pointers, so that the WRITE path

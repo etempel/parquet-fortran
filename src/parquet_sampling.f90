@@ -86,6 +86,13 @@ module parquet_sampling
     public :: parquet_set_random_threads, parquet_get_random_threads
     public :: parquet_set_random_parallel_min_elements
     public :: parquet_get_random_parallel_min_elements
+    ! The output pair, on this module's own account: `random_threads` resolves an automatic team
+    ! through `parquet_auto_thread_count` and an explicit one through `parquet_clamp_to_affinity`,
+    ! which says so once per process when this process's CPU affinity is narrower than the count
+    ! asked for, and `pf_weighted_permutation`'s sort reaches the same clamp under the area
+    ! `sorting`. Without these, a `use parquet_sampling` program cannot silence either line.
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
     !
     public :: parquet_debug_set_perm_rounds
     public :: parquet_debug_set_perm_parity
@@ -1423,9 +1430,11 @@ contains
 
     !> How many threads a bulk permutation of `n` elements should use.
     !!
-    !! **Both OpenMP rules come from `parquet_settings_base`** -- `parquet_auto_thread_count` for
-    !! the automatic answer and `parquet_nested_team_unsafe` for the Risk-104 deadlock guard on an
-    !! explicit request. This module deliberately holds no copy of either; CLAUDE.md's auto-threading
+    !! **All three OpenMP rules come from `parquet_settings_base`** -- `parquet_auto_thread_count`
+    !! for the automatic answer, `parquet_nested_team_unsafe` for the Risk-104 deadlock guard on an
+    !! explicit request, and `parquet_clamp_to_affinity` for the CPU-affinity bound on an explicit
+    !! request, which the automatic answer already carries from inside `parquet_auto_thread_count`.
+    !! This module deliberately holds no copy of any of them; CLAUDE.md's auto-threading
     !! note names a further copy as the mistake, and `pf_sort_threads` asks the identical questions.
     !!
     !! What is specific to this module is the **work floor**. It applies to an explicit `threads=`
@@ -1439,6 +1448,17 @@ contains
         if (present(threads)) then
             want = max(1_int64, int(threads, int64))
             if (parquet_nested_team_unsafe()) want = 1_int64
+            ! **An explicit request is bounded by the affinity mask too**, as every other resolver
+            ! in this library bounds it -- `resolve_thread_count` (src/parquet_argsort_kernel.f90)
+            ! and `bulk_threads_explicit` (src/parquet_strings.f90) carry the reasoning: a caller
+            ! asking for 64 threads on a two-processor mask has asked for something that cannot
+            ! happen, and the team time-shares and runs slower than the serial path. Without this
+            ! line the automatic answer was clamped and reported while an explicit one was neither,
+            ! which is the opposite way round from useful. NO ANSWER MOVES: element `k` is a pure
+            ! function of its coordinates, so the result is bit-identical at every thread count.
+            ! Skipped at 1, which the clamp could only leave alone and which would otherwise put a
+            ! serial run through the one procedure reachable from here that can print.
+            if (want > 1_int64) want = int(parquet_clamp_to_affinity(int(want), "random draws"), int64)
         else
             want = int(parquet_auto_thread_count(parquet_get_random_threads(), "random draws"), int64)
         end if

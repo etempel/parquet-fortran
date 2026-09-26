@@ -67,6 +67,13 @@
 !>                          or a model of the caller's own, built once and
 !>                          evaluated elementally; with `pf_z2zeta`,
 !>                          `pf_zeta2z` and `pf_z_combine`.
+!>   * `parquet_cosmology_config` -- `pf_cosmology_from_toml` and
+!>                          `pf_cosmology_to_toml`: a `pf_cosmology` read from,
+!>                          and written back into, the `[cosmology]` section of
+!>                          a TOML document. It is a tier of its own so that
+!>                          neither `parquet_cosmology` nor `parquet_toml` has
+!>                          to carry the other; this facade carries both
+!>                          already, so re-exporting it costs one file.
 !>   * `parquet_interpolate` -- `pf_interp_1d`, `pf_interp_2d` and `pf_interp`:
 !>                          linear, cubic-spline and shape-preserving
 !>                          interpolation of a real64 table, with its derivatives
@@ -144,6 +151,7 @@ module parquet
     use parquet_integrate
     use parquet_interpolate
     use parquet_cosmology
+    use parquet_cosmology_config
     use parquet_optimize
     use parquet_prima
     use parquet_root

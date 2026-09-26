@@ -277,13 +277,33 @@ module test_module_surface_sampling
 
 contains
 
-    !> Round-trips the knobs `parquet_sampling` reads.
+    !> Round-trips the knobs `parquet_sampling` reads, and the output pair it needs because it
+    !! can print: `random_threads` resolves an automatic team through `parquet_auto_thread_count`
+    !! and an explicit one through `parquet_clamp_to_affinity`, which says so once per process
+    !! when the affinity mask is narrower than the count asked for. Naming the four setters and
+    !! getters here is what keeps them re-exported.
     subroutine check_sampling_surface(what)
         character(len=:), allocatable, intent(out) :: what !! the first knob that failed, or "".
         integer :: n
-        integer(int64) :: floor_was, n64
+        integer(int64) :: floor_was, n64, perm(64)
+        character(len=:), allocatable :: vb_was, ms_was, vb, ms
 
         what = ""
+        call parquet_get_verbosity(vb_was)
+        call parquet_get_message_stream(ms_was)
+        call parquet_set_verbosity("errors_only")
+        call parquet_get_verbosity(vb)
+        if (vb /= "errors_only") what = "verbosity"
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(ms)
+        if (what == "" .and. ms /= "stderr") what = "message_stream"
+        call parquet_set_verbosity(vb_was)
+        call parquet_set_message_stream(ms_was)
+
+        ! The path the output pair above exists for.
+        call pf_random_permutation(perm, 20260926_int64, threads=2)
+        if (what == "" .and. (minval(perm) /= 1_int64 .or. maxval(perm) /= 64_int64)) &
+            what = "pf_random_permutation(threads=)"
         n = parquet_get_random_threads()
         floor_was = parquet_get_random_parallel_min_elements()
         call parquet_set_random_threads(2)
@@ -840,8 +860,12 @@ end module test_module_surface_io
 !! no such test: test_columns.f90 imports `parquet_strings` and `parquet_temporal` alongside it, so
 !! a re-export dropped from `parquet_columns` would go on compiling there.
 !!
-!! It reads no settings, which is why this module asserts a capability rather than a knob -- and why
-!! its own row in that page's settings table says "none".
+!! **It reads no knob of its own and it CAN print**, which is why the output pair is asserted here
+!! beside the capability. `%gather(..., threads=)` resolves its team through
+!! `parquet_clamp_to_affinity`, which says so once per process when the affinity mask is narrower
+!! than the count asked for, so a program whose only import is this one has to be able to silence
+!! it. Naming the four setters and getters here is also what keeps them re-exported: nothing else
+!! in this file can reach them through this import.
 module test_module_surface_columns
     use parquet_columns                ! THE ONLY library import.
     use iso_fortran_env, only : int64, real64
@@ -856,9 +880,21 @@ contains
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
         type(parquet_column) :: col
         real(real64) :: v
-        character(len=:), allocatable :: kname
+        character(len=:), allocatable :: kname, vb_was, ms_was, vb, ms
+        integer(int64) :: idx(3)
 
         what = ""
+        ! The output pair, round-tripped and put back. A SUBROUTINE-shaped getter, per CLAUDE.md.
+        call parquet_get_verbosity(vb_was)
+        call parquet_get_message_stream(ms_was)
+        call parquet_set_verbosity("errors_only")
+        call parquet_get_verbosity(vb)
+        if (vb /= "errors_only") what = "verbosity"
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(ms)
+        if (what == "" .and. ms /= "stderr") what = "message_stream"
+        call parquet_set_verbosity(vb_was)
+        call parquet_set_message_stream(ms_was)
         call col%init(PK_FLOAT64, 3_int64)
         if (col%kindof() /= PK_FLOAT64) what = "%kindof after init"
         if (what == "" .and. col%length() /= 3_int64) what = "%length after init"
@@ -876,6 +912,15 @@ contains
         if (what == "" .and. v /= 1.5_real64) what = "%set_at/%get_at round trip"
         if (what == "" .and. .not. col%is_null(3_int64)) what = "%set_null/%is_null"
         if (what == "" .and. col%is_null(1_int64)) what = "a written row reads as null"
+
+        ! The path the output pair above exists for: a gather with an explicit team reaches
+        ! `parquet_clamp_to_affinity`, the one emitter in this module's graph. Asserting it here
+        ! is what ties the knobs to the reason they are re-exported.
+        idx = [2_int64, 1_int64, 2_int64]
+        call col%gather(idx, threads=2)
+        if (what == "" .and. col%length() /= 3_int64) what = "%gather(threads=) row count"
+        call col%get_at(1_int64, v)
+        if (what == "" .and. v /= 2.5_real64) what = "%gather(threads=) values"
         call col%clear()
     end subroutine check_columns_surface
 
@@ -891,10 +936,12 @@ end module test_module_surface_columns
 !! a caller cannot so much as declare what it is building. `test_list.f90` imports several modules
 !! alongside it, so a dropped re-export would go on compiling there.
 !!
-!! It reads no settings, which is why this module asserts a capability rather than a knob -- and
-!! why its own row in that page's settings table says "none". Keeping it that way is deliberate:
-!! see the `found=`-not-`warn=` decision in feature_container_phase1.md, which turns on exactly
-!! this dependency.
+!! **It reads no knob of its own and it CAN print**, through the `parquet_column` it re-exports:
+!! a type carries its bindings, and `%gather(..., threads=)` resolves its team through
+!! `parquet_clamp_to_affinity`. So the output pair is asserted here beside the capability, and
+!! naming the four setters and getters is what keeps them re-exported. What stays deliberate is
+!! that no VALIDATION knob appears: see the `found=`-not-`warn=` decision in
+!! feature_container_phase1.md, which turns on exactly this dependency.
 module test_module_surface_list
     use parquet_list                   ! THE ONLY library import.
     use iso_fortran_env, only : int32, int64
@@ -909,12 +956,36 @@ contains
         character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
         type(parquet_list_column), target :: lc            ! `target`: %view stores a pointer to it.
         type(parquet_list_row) :: row
-        type(parquet_column) :: col
+        type(parquet_column) :: col, plain
         class(parquet_container_column), allocatable :: cc
         integer(int32), allocatable :: v(:)
-        character(len=:), allocatable :: txt
+        integer(int32) :: got
+        integer(int64) :: idx(2)
+        character(len=:), allocatable :: txt, vb_was, ms_was, vb, ms
 
         what = ""
+        ! The output pair, round-tripped and put back. A SUBROUTINE-shaped getter, per CLAUDE.md.
+        call parquet_get_verbosity(vb_was)
+        call parquet_get_message_stream(ms_was)
+        call parquet_set_verbosity("errors_only")
+        call parquet_get_verbosity(vb)
+        if (vb /= "errors_only") what = "verbosity"
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(ms)
+        if (what == "" .and. ms /= "stderr") what = "message_stream"
+        call parquet_set_verbosity(vb_was)
+        call parquet_set_message_stream(ms_was)
+
+        ! The path the output pair above exists for, reached through the re-exported
+        ! `parquet_column`: a gather with an explicit team is the one emitter in this graph.
+        call plain%init(PK_INT32, 2_int64)
+        call plain%set_at(1_int64, 10_int32)
+        call plain%set_at(2_int64, 20_int32)
+        idx = [2_int64, 1_int64]
+        call plain%gather(idx, threads=2)
+        call plain%get_at(1_int64, got)
+        if (what == "" .and. got /= 20_int32) what = "parquet_column%gather(threads=)"
+        call plain%clear()
         call lc%init(PK_INT32)
         if (lc%element_kind() /= PK_INT32) what = "%element_kind after init"
         call lc%append_row([1_int32, 2_int32, 3_int32])
@@ -2653,7 +2724,8 @@ contains
                 test_stats_surface), &
             new_unittest("parquet_strings alone exposes every knob it reads", &
                 test_strings_surface), &
-            new_unittest("parquet_sampling alone exposes every knob it reads", &
+            new_unittest("parquet_sampling alone exposes every knob it reads and the output "// &
+                         "pair it can print through", &
                 test_sampling_surface), &
             new_unittest("parquet_spatial alone builds an index and exposes every knob it reads", &
                 test_spatial_surface), &
@@ -2690,13 +2762,15 @@ contains
                 test_version_surface), &
             new_unittest("parquet_io alone reaches every layer of the read/write API", &
                 test_io_surface), &
-            new_unittest("parquet_columns alone builds, nulls and reads a column", &
+            new_unittest("parquet_columns alone builds, nulls and reads a column, and exposes "// &
+                         "the output pair its gather can print through", &
                 test_columns_surface), &
             new_unittest("parquet_random alone draws, and exposes no setting", &
                 test_random_surface), &
             new_unittest("parquet_tables alone round-trips a table through a file", &
                 test_tables_surface), &
-            new_unittest("parquet_list alone builds, reads and adopts a list column", &
+            new_unittest("parquet_list alone builds, reads and adopts a list column, and exposes "// &
+                         "the output pair", &
                 test_list_surface), &
             new_unittest("parquet_struct alone builds, reads and adopts a struct column", &
                 test_struct_surface), &

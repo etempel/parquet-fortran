@@ -10919,6 +10919,241 @@ def check_spatial_cell_caps_are_named_from_their_parameters():
     return problems
 
 
+# ----------------------------------------------------------------------------------------------
+# The three enumerations U16 found on doc/pages/operating/ that nothing read. Each reads the
+# NARROWEST part of the page that carries the claim and FAILS rather than passes when its anchor
+# stops matching (CLAUDE.md, "A static check that enumerates names goes stale silently").
+# ----------------------------------------------------------------------------------------------
+
+
+def _footprint_files():
+    """Fortran file list per entry module, from the committed measured footprints.
+
+    The sibling of `_footprint_counts`, which returns only the sizes. `parquet_wrapper.cpp` is
+    dropped for the same reason it is dropped there: it is in every section and always will be.
+    """
+    text = (TOOLS / "module_footprints.txt").read_text()
+    files, section = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^\[(.+)\]$", line)
+        if m:
+            section = m.group(1)
+            files[section] = set()
+            continue
+        if section is not None and line.endswith(".f90"):
+            files[section].add(line)
+    return files
+
+
+def check_facade_reaches_every_entry_module():
+    """`use parquet` must reach every advertised entry module, which its own table promises.
+
+    `doc/pages/operating/choosing-a-module.md`'s last table row says the facade gives you
+    "everything above, through one `use`", and every row above it is an advertised entry module.
+    Nothing compared the two. `parquet_cosmology_config` was absent from `src/parquet.f90` for the
+    whole of its life: it was the ONE section of `tools/module_footprints.txt` whose own file was
+    missing from `[parquet]`, so a program with `use parquet` met an undeclared-procedure error
+    from the import the page says needs no decisions.
+
+    **`check_facade_inventory_matches_its_use_lines` cannot see this**, and that is worth saying
+    plainly: it compares the facade's header inventory with the facade's `use` lines, and both
+    were missing the same module, so the two agreed with each other and with nothing else. A check
+    that compares a file to itself passes for as long as the file is self-consistently wrong.
+
+    **Read from the measurement, not from a list here.** The entry modules are the sections of
+    `tools/module_footprints.txt`, which `tools/check_module_footprints.sh` measures by building a
+    throwaway consumer per module, and the reachability test is whether `<module>.f90` is in the
+    `[parquet]` section -- also measured. A module added to the table later is covered with no
+    edit to this check.
+
+    **Anchored on the page's promise, and blind means FAIL.** If the `parquet` row stops saying
+    "everything above", this check has lost the claim it enforces and says so rather than going on
+    asserting something the page no longer promises. Parsing no sections, or an empty `[parquet]`,
+    is a failure for the same reason.
+    """
+    problems = []
+    files = _footprint_files()
+    if not files:
+        return ["tools/module_footprints.txt: parsed no sections -- this check is blind"]
+    if not files.get("parquet"):
+        return ["tools/module_footprints.txt: the [parquet] section is missing or empty -- "
+                "this check cannot tell what the facade reaches"]
+    page = REPO_ROOT / "doc" / "pages" / "operating" / "choosing-a-module.md"
+    flat = " ".join(page.read_text(encoding="utf-8").split())
+    if "| `parquet` |" not in flat or "everything above, through one `use`" not in flat:
+        return ["doc/pages/operating/choosing-a-module.md: the `parquet` row no longer says "
+                "\"everything above, through one `use`\" -- that sentence is the claim this check "
+                "enforces, so it has gone blind; re-anchor it deliberately or delete it"]
+    for module in sorted(files):
+        if module == "parquet":
+            continue
+        if (module + ".f90") not in files["parquet"]:
+            problems.append(
+                "src/parquet.f90: `%s` is an advertised entry module (it has a section in "
+                "tools/module_footprints.txt) but src/%s.f90 is not in the [parquet] footprint, so "
+                "`use parquet` does not reach it -- while doc/pages/operating/choosing-a-module.md "
+                "promises \"everything above, through one `use`\". Add `use %s` to src/parquet.f90 "
+                "and its line to that file's header inventory, then regenerate the footprints."
+                % (module, module, module))
+    return problems
+
+
+#: Written-out numbers the guide uses for a list it also spells out. Small on purpose: a page
+#: naming more modules than this in one sentence should be using a table.
+_NUMBER_WORDS = {
+    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+}
+
+
+def check_module_tables_leave_behind_list():
+    """What `parquet_tables` leaves behind must be the measured set difference.
+
+    `doc/pages/operating/choosing-a-module.md` tells a reader choosing between `parquet_tables`
+    and `parquet` exactly which tiers the narrower import drops, and names them. That list is a
+    set difference of two sections of `tools/module_footprints.txt` -- both measured -- and
+    nothing compared it to them. It said EIGHT modules when the answer was sixteen: the edit that
+    added the sky tiers left out all eight of the numerical ones, so 33 of the 60 files were
+    unaccounted for and the paragraph below it took its count from the same list.
+
+    **Both ends are read from the measurement.** The modules are
+    `[parquet]` minus `[parquet_tables]`, mapped from file to owning module by
+    `_file_to_module` (which reads each file's `module`/`submodule` statement), minus the two
+    facades, which the sentence names separately as facades. The written-out count in this
+    sentence and in the `parquet_io` paragraph that cites it are checked against the same set, so
+    the number and the list cannot drift apart from each other either.
+
+    **Blind means FAIL.** A missing section, an empty difference, or an anchor that no longer
+    matches is reported rather than passed: the sentence is the only place in the guide that
+    answers "what does the table layer not bring", and a check that silently stops reading it
+    leaves it exactly as unguarded as it was.
+    """
+    problems = []
+    files = _footprint_files()
+    if not files.get("parquet") or not files.get("parquet_tables"):
+        return ["tools/module_footprints.txt: [parquet] or [parquet_tables] is missing -- "
+                "this check is blind"]
+    # The unit is the TIER a reader chooses, not every module in the graph: PRIMA's vendored
+    # engines are modules of their own rather than submodules, and a reader never imports one.
+    # A tier is left behind when its OWN file is in the difference, which the sections define.
+    diff = files["parquet"] - files["parquet_tables"]
+    facades = {"parquet.f90", "parquet_io.f90"}
+    dropped = {m for m in files
+               if m not in ("parquet", "parquet_io", "parquet_tables")
+               and (m + ".f90") in diff}
+    # Completeness, which is what made the original defect visible: 33 of the 60 dropped files
+    # belonged to tiers the sentence never named. Every dropped file must belong to one of the
+    # tiers above, or the sentence is short of a tier that has no section of its own.
+    covered = set(facades)
+    for m in dropped:
+        covered |= files[m]
+    for name in sorted(diff - covered):
+        problems.append(
+            "tools/module_footprints.txt: src/%s is compiled by `use parquet` and not by "
+            "`use parquet_tables`, and belongs to no entry module the \"leaves behind\" sentence "
+            "could name -- add its tier to ENTRY_MODULES, or this sentence cannot be complete."
+            % name)
+    if not dropped:
+        return ["tools/module_footprints.txt: [parquet] and [parquet_tables] differ by no module "
+                "-- this check is blind, or the table layer now is the library"]
+    page = REPO_ROOT / "doc" / "pages" / "operating" / "choosing-a-module.md"
+    flat = " ".join(page.read_text(encoding="utf-8").split())
+    m = re.search(r"leaves behind is the two facades themselves and the ([a-z]+) utility tiers "
+                  r"nothing in the table layer reaches (.*?)\.", flat)
+    if m is None:
+        return ["doc/pages/operating/choosing-a-module.md: could not find the sentence beginning "
+                "\"leaves behind is the two facades themselves and the\" -- that sentence is what "
+                "this check reads, so it has gone blind; re-anchor it deliberately"]
+    named = set(re.findall(r"`([a-z_]+)`", m.group(2)))
+    for module in sorted(dropped - named):
+        problems.append(
+            "doc/pages/operating/choosing-a-module.md: `use parquet_tables` leaves `%s` behind "
+            "(it is in [parquet] and not in [parquet_tables]) but the \"leaves behind\" sentence "
+            "does not name it." % module)
+    for module in sorted(named - dropped):
+        problems.append(
+            "doc/pages/operating/choosing-a-module.md: the \"leaves behind\" sentence names `%s`, "
+            "which `use parquet_tables` does compile -- the page tells a reader they are dropping "
+            "something they are not." % module)
+    said = _NUMBER_WORDS.get(m.group(1))
+    if said is None:
+        problems.append(
+            "doc/pages/operating/choosing-a-module.md: the \"leaves behind\" sentence counts the "
+            "tiers as \"%s\", which is not a number word this check knows -- add it to "
+            "_NUMBER_WORDS rather than leaving the count unchecked." % m.group(1))
+    elif said != len(dropped):
+        problems.append(
+            "doc/pages/operating/choosing-a-module.md: the \"leaves behind\" sentence says \"%s\" "
+            "utility tiers; the measured difference is %d." % (m.group(1), len(dropped)))
+    m2 = re.search(r"the statistics tier and the ([a-z]+) utility modules listed just above", flat)
+    if m2 is None:
+        problems.append(
+            "doc/pages/operating/choosing-a-module.md: could not find the `parquet_io` paragraph's "
+            "\"the N utility modules listed just above\" -- it takes its count from the sentence "
+            "above and this check has lost sight of it")
+    elif _NUMBER_WORDS.get(m2.group(1)) != len(dropped):
+        problems.append(
+            "doc/pages/operating/choosing-a-module.md: the `parquet_io` paragraph says \"%s\" "
+            "utility modules where the sentence it cites lists %d."
+            % (m2.group(1), len(dropped)))
+    return problems
+
+
+def check_thread_safety_names_every_arrow_free_tier():
+    """Every Arrow-free entry module must be named on the concurrency page.
+
+    `doc/pages/operating/thread-safety.md` says of its Arrow-free section that the tiers are there
+    "so that 'what may I do concurrently' has one answer rather than one per module". It went
+    **five modules short**: `parquet_sphere`, `parquet_skycoord`, `parquet_cosmology_config`,
+    `parquet_sampling` and `parquet_version` appeared on it zero times, and two of the five have
+    real sharing rules stated only on their own pages -- a `pf_sky_polygon` that `%init` mutates,
+    and a `pf_weighted_draw` whose `%next` mutates its tree. A reader who went to the page the
+    guide sends them to for that question was told nothing, which is worse than being sent
+    elsewhere.
+
+    **The set is measured, not listed here**: the entry modules are the sections of
+    `tools/module_footprints.txt`, and a module is Arrow-free when `parquet_bindings.f90` is not
+    in its footprint. The four that do reach Arrow are exempt: the whole page above that section
+    is about them.
+
+    **Named means the module's own name, in a code span.** A bullet that names only a type
+    (`pf_index_map`) leaves a reader who knows they imported `parquet_index` to guess that the
+    bullet is theirs, which is the same gap in a milder form. It is deliberately not a test of
+    WHAT the page says -- that cannot be checked -- only that the tier is accounted for somewhere
+    on it.
+
+    **Blind means FAIL**: no sections parsed, or a page that has lost its Arrow-free section
+    heading, is reported rather than passed.
+    """
+    problems = []
+    files = _footprint_files()
+    if not files:
+        return ["tools/module_footprints.txt: parsed no sections -- this check is blind"]
+    page = REPO_ROOT / "doc" / "pages" / "operating" / "thread-safety.md"
+    text = page.read_text(encoding="utf-8")
+    if "## The Arrow-free tiers" not in text:
+        return ["doc/pages/operating/thread-safety.md: no \"## The Arrow-free tiers\" heading -- "
+                "the section this check exists for is gone or renamed; re-anchor it deliberately"]
+    arrow_free = [m for m in sorted(files)
+                  if "parquet_bindings.f90" not in files[m]]
+    if not arrow_free:
+        return ["tools/module_footprints.txt: no Arrow-free entry module found -- this check is "
+                "blind (every section would have to reach parquet_bindings)"]
+    for module in arrow_free:
+        if ("`%s`" % module) not in text:
+            problems.append(
+                "doc/pages/operating/thread-safety.md: `%s` is an advertised Arrow-free entry "
+                "module and the page never names it, although it promises that \"what may I do "
+                "concurrently\" has one answer rather than one per module. Name it in \"The "
+                "Arrow-free tiers\" -- in the \"needs no rule\" list if it has none, in a bullet "
+                "of its own if it has." % module)
+    return problems
+
+
 CHECKS = (
     ("the spatial cell caps are named from their parameters",
      check_spatial_cell_caps_are_named_from_their_parameters),
@@ -11057,6 +11292,12 @@ CHECKS = (
     ("page titles match their list entries", check_page_titles_match_their_list_entries),
     ("the entry-module tables match the measured footprints",
      check_module_tables_match_the_measured_footprints),
+    ("use parquet reaches every advertised entry module",
+     check_facade_reaches_every_entry_module),
+    ("the leave-behind list matches the measured set difference",
+     check_module_tables_leave_behind_list),
+    ("the concurrency page names every Arrow-free tier",
+     check_thread_safety_names_every_arrow_free_tier),
     ("prose footprint counts match the measured footprints", check_prose_footprint_counts),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
     ("a guide page spells an optional argument one way", check_bracket_convention),

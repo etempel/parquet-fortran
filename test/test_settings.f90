@@ -87,7 +87,8 @@ contains
             new_unittest("sort_threads caps the automatic thread count", test_sort_threads_effect), &
             new_unittest("sort_threads never lifts the in-parallel serial answer", test_sort_threads_respects_region), &
             new_unittest("pf_sort_threads never exceeds the CPU affinity mask", test_sort_threads_affinity_clamp), &
-            new_unittest("the affinity clamp reaches the string and random resolvers too", &
+            new_unittest("the affinity clamp reaches the string and random resolvers too, "// &
+                "both branches of the random one", &
                 test_affinity_clamp_other_resolvers), &
             new_unittest("the affinity clamp reaches a table's per-column rewrite", &
                 test_affinity_clamp_table_rewrite), &
@@ -833,6 +834,13 @@ contains
     !> narrow its own affinity after starting, and on an ordinary machine `omp_get_max_threads()`
     !> and `omp_get_num_procs()` agree -- so every assertion here would hold just as well with the
     !> clamp deleted. That is the vacuity CLAUDE.md's auto-threading note records.
+    !>
+    !> **Both branches of the random resolver, which is the half this test used to miss.** It
+    !> asserted the AUTOMATIC answer only, and the clamp was applied to the automatic answer only:
+    !> `pf_random_permutation(..., threads=8)` opened eight threads on a one-processor mask and
+    !> said nothing, while `doc/pages/operating/settings.md` promised the affinity bound reaches
+    !> an explicit `threads=` as well. A test covering one branch of a two-branch resolver is the
+    !> same vacuity one caller of four was.
     subroutine test_affinity_clamp_other_resolvers(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
@@ -869,6 +877,9 @@ contains
         call check(error, clamped_rnd == 1, &
             "a one-processor mask must make a bulk random draw serial")
         if (allocated(error)) goto 900
+        call check(error, parquet_debug_random_bulk_threads(BIG_N, 8) == 1, &
+            "a one-processor mask must lower an EXPLICIT threads= on a bulk random draw too")
+        if (allocated(error)) goto 900
         !
         ! Negative control, in two halves. First: on a machine with threads to give, the unclamped
         ! answers must have EXCEEDED 1, or the two assertions above hold for a reason that has
@@ -891,6 +902,14 @@ contains
         call parquet_debug_set_affinity_procs(unbound_rnd + 16)
         call check(error, parquet_debug_random_bulk_threads(BIG_N) == unbound_rnd, &
             "a mask wider than the OpenMP thread count must not raise the random resolver")
+        if (allocated(error)) goto 900
+        !
+        ! And the same control for the explicit branch: a mask wider than the request must leave
+        ! it alone, so the new clamp is shown to LOWER only. A clamp applied unconditionally, or
+        ! one that replaced the request with the mask, passes the assertion above and fails here.
+        call parquet_debug_set_affinity_procs(max(avail, 8) + 16)
+        call check(error, parquet_debug_random_bulk_threads(BIG_N, 8) == 8, &
+            "negative control: a mask wider than an explicit threads= must leave the request alone")
         !
 900     continue
         call parquet_debug_set_affinity_procs(0)

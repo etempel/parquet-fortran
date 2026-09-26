@@ -10,11 +10,11 @@ Everything below comes with `use parquet`; naming the module directly (`use parq
 too if you prefer a narrower import.
 
 **If you are importing one of the narrower modules, you do not need `parquet_settings` at all.**
-Each entry module re-exports, getter and setter both, the knobs its own code reads — `use
-parquet_sorting` gives you the four sorting knobs, `use parquet_strings` gives you `string_threads`,
-and both give you `verbosity` and `message_stream` because both can print. That matters for more
-than convenience: `parquet_settings` owns this library's C++ boundary, so importing it would put the
-Arrow stack back into a build that was deliberately staying clear of it. See
+Each entry module re-exports, getter and setter both, the knobs its own code reads —
+`use parquet_sorting` gives you the four sorting knobs, `use parquet_strings` gives you
+`string_threads`, and both give you `verbosity` and `message_stream` because both can print. That
+matters for more than convenience: `parquet_settings` owns this library's C++ boundary, so importing
+it would put the Arrow stack back into a build that was deliberately staying clear of it. See
 [Choosing a module](choosing-a-module.html) for which module carries which knob.
 
 ## A startup block, end to end
@@ -59,8 +59,8 @@ the library answers.**
 
 That line is deliberate and it is why some things you might expect here are absent. A global default
 for "where do nulls sort", or for whether quality-control checks are enforced, would make the same
-call return different results in two different programs, with nothing at the call site to hint at
-it — and possibly set by a library the caller did not know was linked in. Those stay as arguments to
+call return different results in two different programs, with nothing at the call site to hint at it
+— and possibly set by a library the caller did not know was linked in. Those stay as arguments to
 the specific call that needs them.
 
 Two consequences worth knowing:
@@ -72,14 +72,14 @@ Two consequences worth knowing:
 
 **One procedure in this module is not a setting.** `parquet_get_arrow_version` reports which Arrow
 and Parquet C++ libraries your program is actually linked against — `parquet_get_arrow_version(v)`
-for the **runtime** version of the Arrow library now loaded, `parquet_get_arrow_version(v,
-mode="parquet")` for the version of Parquet C++ the wrapper was **compiled against**. Those two can
-differ, and telling them apart is usually the point of asking.
+for the **runtime** version of the Arrow library now loaded,
+`parquet_get_arrow_version(v, mode="parquet")` for the version of Parquet C++ the wrapper was
+**compiled against**. Those two can differ, and telling them apart is usually the point of asking.
 It lives here because reading it means calling into the C++ half, which is the boundary this module
 already owns, and because `parquet_get_arrow_threads` is its neighbour in every practical sense. The
 library's *own* version is a separate question with a separate answer: `parquet_get_version`, in the
-leaf module `parquet_version`, which needs no C++ at all. See
-[Choosing a module](choosing-a-module.html#the-entry-modules).
+leaf module `parquet_version`, which needs no C++ at all. See [Choosing a
+module](choosing-a-module.html#the-entry-modules).
 
 ## Thread safety: set once, at startup
 
@@ -87,10 +87,10 @@ Set your settings during program initialisation — before other threads exist, 
 reader, writer or table. Reads are unsynchronised, and a concurrent write is a data race that the
 library does not defend against.
 
-This is not a limitation the settings module introduces. `parquet_set_arrow_threads` resizes the single
-CPU thread pool that every reader and writer in the process is already sharing, so calling it from
-two threads with different values is a race whatever bookkeeping sits in front of it. In exchange,
-reading a setting costs nothing on any hot path.
+This is not a limitation the settings module introduces. `parquet_set_arrow_threads` resizes the
+single CPU thread pool that every reader and writer in the process is already sharing, so calling it
+from two threads with different values is a race whatever bookkeeping sits in front of it. In
+exchange, reading a setting costs nothing on any hot path.
 
 ## When a setting takes effect
 
@@ -113,10 +113,9 @@ before printing, so setting `verbosity="silent"` after the reader was opened sti
 all three act only inside C++.
 
 `sort_counting_path` and `sort_counting_bucket_limit` have a C++ mirror too and are deliberately
-**not** in that list: the sort engine
-is Fortran and reads them on every sort, so they take effect immediately (see [Tuning the
-sort](#tuning-the-sort)). Their mirror serves only the second, C++ implementation that the test
-suite checks the Fortran one against.
+**not** in that list: the sort engine is Fortran and reads them on every sort, so they take effect
+immediately (see [Tuning the sort](#tuning-the-sort)). Their mirror serves only the second, C++
+implementation that the test suite checks the Fortran one against.
 
 The reason is worth one sentence, because it is what makes the rest of this library's module
 structure possible: a setter that pushed its value across to C++ immediately would have to live in
@@ -126,9 +125,9 @@ and `use parquet_strings` the string ones, without either import pulling in the 
 
 ## Thread pool
 
-`parquet_set_arrow_threads(n)` sets, and `parquet_get_arrow_threads()` reports, the capacity of Arrow's
-global CPU thread pool — the pool used by every reader and writer opened with `use_threads` enabled,
-which is the default.
+`parquet_set_arrow_threads(n)` sets, and `parquet_get_arrow_threads()` reports, the capacity of
+Arrow's global CPU thread pool — the pool used by every reader and writer opened with `use_threads`
+enabled, which is the default.
 
 ```fortran
 use parquet
@@ -148,17 +147,17 @@ capacity is hardware-derived, and `parquet_reset_settings` is how you get it bac
 ## Every thread count at once
 
 `parquet_set_threads(n)` sets Arrow's pool and every per-area cap together — sorting, the table
-prefetch, the table rewrite, one string column's bulk work, the bulk random draws, the bulk
-spatial queries, the bulk HEALPix conversions and an index build — for the common case of "give
-this library `n` threads and no more".
+prefetch, the table rewrite, one string column's bulk work, the bulk random draws, the bulk spatial
+queries, the bulk HEALPix conversions and an index build — for the common case of "give this library
+`n` threads and no more".
 
 ```fortran
 call parquet_set_threads(4)          ! every one of them
 call parquet_set_sort_threads(1)     ! ...then keep sorting serial
 ```
 
-It holds no state of its own: read them back individually or with `parquet_print_settings`, and
-set any one afterwards to override just that one, as above.
+It holds no state of its own: read them back individually or with `parquet_print_settings`, and set
+any one afterwards to override just that one, as above.
 
 **`n` must be at least 1.** `0` means "automatic" to a per-area cap, but Arrow's pool has no
 automatic value — its starting capacity is hardware-derived — so rather than let one argument mean
@@ -166,8 +165,8 @@ two things, this takes a real thread count only. Use the individual setters for 
 or `parquet_reset_settings()` to put everything back.
 
 **They do not all take effect at the same moment.** Arrow's pool is resized immediately and is
-shared, so readers and writers you have already opened are affected too; the per-area caps are
-read per call and so apply to work started afterwards. Setting them together does not make them
+shared, so readers and writers you have already opened are affected too; the per-area caps are read
+per call and so apply to work started afterwards. Setting them together does not make them
 simultaneous.
 
 ## Threads for sorting
@@ -175,16 +174,18 @@ simultaneous.
 `parquet_set_sort_threads(n)` caps how many threads a sort uses when it is not given an explicit
 `threads=`. It covers every sort in the library at once — `pf_sort`/`pf_argsort` and friends, a
 read-time `parquet_open_reader(..., sort_by=)`, and `parquet_table%sort_by` — because all three run
-on one engine and ask one question. A `%join` that builds its match on that engine —
-`order="key"`, a logical key, a string key beside another — sorts under it too, and runs its passes
-over the sorted runs on the same team; every other join answers to `index_threads` below (see
-[How the match is built](../tables/table-join.html#how-the-match-is-built)).
+on one engine and ask one question. A `%join` that builds its match on that engine — `order="key"`,
+a logical key, a string key beside another — sorts under it too, and runs its passes over the sorted
+runs on the same team; every other join answers to `index_threads` below (see [How the match is
+built](../tables/table-join.html#how-the-match-is-built)).
 
-**It also governs the threaded statistics**, which is why there is no `stats_threads` beside it.
-`parquet_stats` resolves its thread count through the same engine rather than carrying a knob of
-its own, deliberately: a second setter would be a second answer to a question this one already
-answers. Its work floor is its own, because a statistic's inner loop is compute-bound where a
-sort's is a copy.
+**It also governs every automatic team that resolves through the same engine**, which is why there
+is no `stats_threads` beside it: the threaded statistics (`parquet_stats`), the density estimates
+(`pf_kde` and `pf_kde_grid`, whose every automatic team this caps), and the sort inside
+`pf_weighted_permutation`. None of the three carries a knob of its own, deliberately: a second
+setter would be a second answer to a question this one already answers, and an affinity notice
+raised from any of them names the area `sorting`. Each keeps its own work floor, because a
+statistic's inner loop is compute-bound where a sort's is a copy.
 
 ```fortran
 call parquet_set_sort_threads(4)     ! sorting uses at most 4 threads
@@ -204,14 +205,14 @@ properties are worth knowing, because each surprises someone:
   eight threads would each spawn eight more, which is slower than not threading at all. Pass
   `threads=` explicitly if you really want a threaded sort in there.
 
-`pf_sort_threads()` reports the resolved answer for the current context; `parquet_get_sort_threads()`
-reports the raw setting (`0` when automatic).
+`pf_sort_threads()` reports the resolved answer for the current context;
+`parquet_get_sort_threads()` reports the raw setting (`0` when automatic).
 
 **Every thread count in this library is additionally bounded by the CPU affinity of the process**,
 which under one common `OMP_PLACES` setting is far smaller than the machine. It applies to this cap,
-to the four below, and to an explicit `threads=`; it warns once per process when it bites; and it is
-the first thing to check when threading does nothing on a large machine. See [Thread
-placement](performance.html#thread-placement-omp_places-and-omp_proc_bind).
+to every per-area cap below it, and to an explicit `threads=`; it warns once per process when it
+bites; and it is the first thing to check when threading does nothing on a large machine. See
+[Thread placement](performance.html#thread-placement-omp_places-and-omp_proc_bind).
 
 ## Threads for reading a table
 
@@ -232,14 +233,14 @@ its columns — `%sort_by`, `%filter_rows`, `%top_n`, `%join`'s rewrite of both 
 statistics pass scans at once, which divides its work the same way. Every column is rewritten
 independently of every other, so the work divides cleanly across the columns, one per thread. A
 **gather** — `%top_n`, and a `%join`'s rewrite of its own rows and of every column it carries in —
-can also divide one column's rows across the team, and does so whenever there are fewer columns
-than threads: the columns are then rewritten one after another, each on the whole team. So a wide
-table gains on either level, and a join carrying a single column is not left to one thread. A
-sort's replay and a filter's compaction divide across columns only, so for them a two-column table
-gains almost nothing.
+can also divide one column's rows across the team, and does so whenever there are fewer columns than
+threads: the columns are then rewritten one after another, each on the whole team. So a wide table
+gains on either level, and a join carrying a single column is not left to one thread. A sort's
+replay and a filter's compaction divide across columns only, so for them a two-column table gains
+almost nothing.
 
-Like the other two it is a cap rather than a request, read per call, with `0` meaning automatic.
-`1` makes the rewrite serial, which is also what happens on its own inside your own OpenMP parallel
+Like the other two it is a cap rather than a request, read per call, with `0` meaning automatic. `1`
+makes the rewrite serial, which is also what happens on its own inside your own OpenMP parallel
 region, on a table too small to be worth a thread team, and — for the operations that divide across
 columns only — on a table with fewer than two rewritable columns.
 
@@ -249,16 +250,16 @@ inside your own parallel region; `%apply` stays serial unless you name a count, 
 procedure it calls is yours. An explicit `threads=` on either is honoured, as elsewhere. See
 [Grouping rows and aggregating per group](../tables/table-group.html).
 
-**This is also the memory control, and it is the one thing to know before leaving it automatic.**
-A thread rewriting a column holds a transient second copy of that column, so `n` threads rewriting
-`n` columns at once hold `n` copies where a serial rewrite holds one. Since that count never exceeds
-the column count, those copies come to at most one extra copy of the table — so a whole-column
-rewrite (`%sort_by`) can **double the table's peak memory for the duration of the call**.
-`%filter_rows` and `%top_n` are proportionally cheaper, since their new storage is sized by the rows
-they keep, and a gather that divides one column's rows across the team holds one extra column at a
-time whatever the thread count. A column `%join` carries in is built directly from the other
-table's rows — one copy, rather than a copy and a rebuild of it. A program working near its memory
-ceiling caps the threads here, which caps the copies with them.
+**This is also the memory control, and it is the one thing to know before leaving it automatic.** A
+thread rewriting a column holds a transient second copy of that column, so `n` threads rewriting `n`
+columns at once hold `n` copies where a serial rewrite holds one. Since that count never exceeds the
+column count, those copies come to at most one extra copy of the table — so a whole-column rewrite
+(`%sort_by`) can **double the table's peak memory for the duration of the call**. `%filter_rows` and
+`%top_n` are proportionally cheaper, since their new storage is sized by the rows they keep, and a
+gather that divides one column's rows across the team holds one extra column at a time whatever the
+thread count. A column `%join` carries in is built directly from the other table's rows — one copy,
+rather than a copy and a rebuild of it. A program working near its memory ceiling caps the threads
+here, which caps the copies with them.
 
 
 ## Threads inside one string column
@@ -274,17 +275,17 @@ parallel region stands down, exactly as a sort does, so at most one of the two i
 
 Read per operation, with `0` meaning automatic and `1` forcing serial. A string operation also stays
 serial on its own inside your own OpenMP parallel region, and on a payload too small to be worth a
-thread team — the floor is measured in **bytes of payload rather than rows**, because a column of ten
-million one-character elements and one of ten thousand ten-kilobyte elements have very different row
-counts and much the same amount of copying to do.
+thread team — the floor is measured in **bytes of payload rather than rows**, because a column of
+ten million one-character elements and one of ten thousand ten-kilobyte elements have very different
+row counts and much the same amount of copying to do.
 
 **This one behaves differently from the other thread settings in one respect, and on a large machine
 the difference matters.** The others only ever *lower* the automatic answer. This one *replaces* it:
-the automatic answer is deliberately **capped well below** what OpenMP offers, because past a certain
-thread count a string rebuild stops scaling and begins losing ground — measured on a machine with
-several hundred logical threads, where taking the full count was 18–40 % **worse** than the best
-available. If you know your machine wants more than the default, say so and it is honoured, bounded
-only by what OpenMP offers:
+the automatic answer is deliberately **capped well below** what OpenMP offers, because past a
+certain thread count a string rebuild stops scaling and begins losing ground — measured on a machine
+with several hundred logical threads, where taking the full count was 18–40 % **worse** than the
+best available. If you know your machine wants more than the default, say so and it is honoured,
+bounded only by what OpenMP offers:
 
 ```fortran
 call parquet_set_string_threads(128)   ! honoured, even though the automatic default is lower
@@ -358,10 +359,10 @@ settings.
 
 ## Threads for a bulk spatial query, and the rebuild it may trigger
 
-`parquet_set_spatial_threads(n)` caps the threads one bulk `pf_spatial_index` query —
-`%all_within`, `%pairs_within`, `%count_all_within` — may use. Like every other per-area cap it is a
-cap rather than a request, read per call, with `0` meaning automatic and `1` forcing serial, and an
-explicit `threads=` on the call itself still wins.
+`parquet_set_spatial_threads(n)` caps the threads one bulk `pf_spatial_index` query — `%all_within`,
+`%pairs_within`, `%count_all_within` — may use. Like every other per-area cap it is a cap rather
+than a request, read per call, with `0` meaning automatic and `1` forcing serial, and an explicit
+`threads=` on the call itself still wins.
 
 **The answer does not depend on the thread count.** Any re-tuning happens before the team opens, so
 the index is read-only for the whole of the sweep and each thread writes its own disjoint slice of
@@ -371,22 +372,22 @@ argument. (That ordering is also why two threads must not call a bulk query on t
 once — see [Threading and settings](../utilities/spatial.html#threading-and-settings).)
 
 **An index says so when it rebuilds itself.** A bulk query whose radius disagrees badly with the
-`radius=` the index was built for re-tunes the cell size before sweeping, and says so once per index.
-It is said because a silent rebuild is a silent performance cliff: the message exists to tell you
-your `radius=` hint was wrong, and without it the symptom is simply a library that seems slow.
+`radius=` the index was built for re-tunes the cell size before sweeping, and says so once per
+index. It is said because a silent rebuild is a silent performance cliff: the message exists to tell
+you your `radius=` hint was wrong, and without it the symptom is simply a library that seems slow.
 
 That message is [advice](#terminal-output), so `verbosity` governs it with every other piece of
 advice: `parquet_set_verbosity("silent")` silences it, and nothing silences the rebuild itself.
-There is no per-message knob — there used to be a `spatial_rebuild_warning`, and it was the last
-setting in this library that governed exactly one line of output.
+There is no per-message knob, here or anywhere: no setting in this library governs exactly one line
+of output.
 
 `parquet_get_spatial_threads()` reports the raw setting.
 
 ## Threads for a bulk HEALPix conversion
 
-`parquet_set_healpix_threads(n)` caps the threads one bulk HEALPix call — `pf_ang2pix_ring_bulk`
-and its siblings — may use. It is read per call, with `1` forcing serial and an explicit `threads=`
-on the call itself still winning.
+`parquet_set_healpix_threads(n)` caps the threads one bulk HEALPix call — `pf_ang2pix_ring_bulk` and
+its siblings — may use. It is read per call, with `1` forcing serial and an explicit `threads=` on
+the call itself still winning.
 
 **It replaces a ceiling that is already there, as `index_threads` does.** Left at `0`, the automatic
 answer for this tier is not simply "as many as OpenMP offers": it is held to **64**, above which the
@@ -399,47 +400,46 @@ bounded by the work and by the CPU affinity mask.
 inputs and each thread writes its own disjoint slice of the output, so the serial and threaded
 results are bit-identical.
 
-`parquet_get_healpix_threads()` reports the raw setting (`0` when automatic). See
-[Converting a whole array at once](../utilities/healpix.html#converting-a-whole-array-at-once)
-for what the bulk forms are and what omitting `threads=` costs you.
+`parquet_get_healpix_threads()` reports the raw setting (`0` when automatic). See [Converting a
+whole array at once](../utilities/healpix.html#converting-a-whole-array-at-once) for what the bulk
+forms are and what omitting `threads=` costs you.
 
 ## Threads for an index build or a bulk lookup
 
-`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build`, one `%get_or_add_many`
-or one bulk lookup — `pf_index_map%get_many`, or `pf_index_multimap`'s `%get_first_many`,
-`%get_many` and `%probe_many` — may use, and with them a table's `%build_index` and a
-`parquet_table_index`'s `%find_many`, which are those calls behind a wrapper, and
-`parquet_table%join`'s hash engine, which is a multimap built over the other table's keys and
-probed with this one's (see
-[How the match is built](../tables/table-join.html#how-the-match-is-built)). It is read per call,
-with `1` forcing serial and an explicit `threads=` on the call itself still winning.
+`parquet_set_index_threads(n)` caps the threads one `pf_index_map%build`, one `%get_or_add_many` or
+one bulk lookup — `pf_index_map%get_many`, or `pf_index_multimap`'s `%get_first_many`, `%get_many`
+and `%probe_many` — may use, and with them a table's `%build_index` and a `parquet_table_index`'s
+`%find_many`, which are those calls behind a wrapper, and `parquet_table%join`'s hash engine, which
+is a multimap built over the other table's keys and probed with this one's (see [How the match is
+built](../tables/table-join.html#how-the-match-is-built)). It is read per call, with `1` forcing
+serial and an explicit `threads=` on the call itself still winning.
 
 **Like `healpix_threads`, and unlike the other per-area caps, it replaces a ceiling.** Left at `0`,
 the automatic answer is held to **64** threads, however many the machine offers: past a team of
 about that size these paths get slower rather than faster, and one thread per four thousand keys
-would otherwise ask for hundreds on a large build. A positive `n` holds it to `n` instead —
-above 64 as well as below — so a machine whose best team is larger says so once here rather than
-passing `threads=` to every call. It is still a cap, never a request: the automatic answer stays
-serial inside a parallel region and bounded by the work and by the CPU affinity mask.
+would otherwise ask for hundreds on a large build. A positive `n` holds it to `n` instead — above 64
+as well as below — so a machine whose best team is larger says so once here rather than passing
+`threads=` to every call. It is still a cap, never a request: the automatic answer stays serial
+inside a parallel region and bounded by the work and by the CPU affinity mask.
 
 **It bounds the build's key scan, scatter and hash insert, the bulk lookup's probe, and
-`%get_or_add_many`'s lookup and insert, and nothing else.** A scalar `%get` is a few nanoseconds
-of straight-line code with no team to open, so there is nothing there for this knob to govern. A
+`%get_or_add_many`'s lookup and insert, and nothing else.** A scalar `%get` is a few nanoseconds of
+straight-line code with no team to open, so there is nothing there for this knob to govern. A
 `method="sorted"` build sorts through `pf_argsort`, so *that* phase answers to `sort_threads`
 instead — a sorted build reads both knobs, each for the phase it owns.
 
 **The answer does not depend on the thread count.** The scan is a min/max reduction, the scatter
 writes one distinct slot per unique key, the partitioned hash insert places a key where a lookup
-finds it whatever order filled the table, and a bulk lookup's chunks read a map nobody is
-writing, so a threaded build produces the same answers as a serial one and a threaded lookup the
-same answers; a threaded `%get_or_add_many` numbers its new keys in another order, and that order
-is documented as unspecified.
+finds it whatever order filled the table, and a bulk lookup's chunks read a map nobody is writing,
+so a threaded build produces the same answers as a serial one and a threaded lookup the same
+answers; a threaded `%get_or_add_many` numbers its new keys in another order, and that order is
+documented as unspecified.
 
 `parquet_get_index_threads()` reports the raw setting (`0` when automatic), and
-`pf_index_threads(n)` reports what an automatic build over `n` keys, or lookup over `n` rows,
-would actually open — which is the one to read, since the team is bounded by the work as well as
-by this cap. See
-[Threads a build or a bulk lookup uses](../utilities/index-maps.html#threads-a-build-or-a-bulk-lookup-uses).
+`pf_index_threads(n)` reports what an automatic build over `n` keys, or lookup over `n` rows, would
+actually open — which is the one to read, since the team is bounded by the work as well as by this
+cap. See [Threads a build or a bulk lookup
+uses](../utilities/index-maps.html#threads-a-build-or-a-bulk-lookup-uses).
 
 ## Writer defaults
 
@@ -456,23 +456,23 @@ call parquet_set_default_compression_level(6)
 ```
 
 The codec must be one of `uncompressed`, `snappy`, `gzip`, `zstd`, `brotli`, `lz4`
-(case-insensitive); anything else aborts, against the same list the `compression=` argument itself is
-checked against. The *level* is not validated here, because the valid range belongs to the codec —
-zstd, gzip and brotli each accept a different one, and snappy and lz4 have no levels at all — so an
-out-of-range level is reported by the codec when a writer is actually opened with it.
+(case-insensitive); anything else aborts, against the same list the `compression=` argument itself
+is checked against. The *level* is not validated here, because the valid range belongs to the codec
+— zstd, gzip and brotli each accept a different one, and snappy and lz4 have no levels at all — so
+an out-of-range level is reported by the codec when a writer is actually opened with it.
 
-**One rule that is easy to trip over.** The library's default level of 3 is tuned for its own default
-codec, so it applies only when the codec was left alone **both** as an argument and as a setting.
-Choose a codec by either route and the level falls back to that codec's own default unless you set a
-level too. That is deliberate: it stops a zstd-tuned level being attached to, say, snappy just
-because you changed the codec.
+**One rule that is easy to trip over.** The library's default level of 3 is tuned for its own
+default codec, so it applies only when the codec was left alone **both** as an argument and as a
+setting. Choose a codec by either route and the level falls back to that codec's own default unless
+you set a level too. That is deliberate: it stops a zstd-tuned level being attached to, say, snappy
+just because you changed the codec.
 
 ## Tuning the sort
 
-Three knobs govern the sort engine — two for the counting path and one for the radix path. All
-three are read at each sort, so they take effect immediately, and all three are process-global: a
-sort anywhere in your program sees the same values. Each governs *which implementation* runs, never
-what it answers; every path produces the same permutation.
+Three knobs govern the sort engine — two for the counting path and one for the radix path. All three
+are read at each sort, so they take effect immediately, and all three are process-global: a sort
+anywhere in your program sees the same values. Each governs *which implementation* runs, never what
+it answers; every path produces the same permutation.
 
 ```fortran
 call parquet_set_sort_counting_bucket_limit(0)   ! 0 restores the built-in value
@@ -485,12 +485,12 @@ integer counting fast path — a second sort implementation that a single intege
 value range can use instead of the comparator. It is what stops a low-cardinality integer sort
 costing many times what it should.
 
-These two knobs are a veto, not the whole rule: **the counting path is used only when the flag is
-on *and* the key's value range fits the bucket limit** — but clearing both is not sufficient, since
-the engine also weighs the range against the row count and against the size of the team it was
-asked for. Turning the flag off overrides the limit; raising the limit does nothing while the flag
-is off. **Nulls are not a disqualifier** — a null row's slot is skipped when the range is measured,
-so a null-bearing key reaches this path like any other.
+These two knobs are a veto, not the whole rule: **the counting path is used only when the flag is on
+*and* the key's value range fits the bucket limit** — but clearing both is not sufficient, since the
+engine also weighs the range against the row count and against the size of the team it was asked
+for. Turning the flag off overrides the limit; raising the limit does nothing while the flag is off.
+**Nulls are not a disqualifier** — a null row's slot is skipped when the range is measured, so a
+null-bearing key reaches this path like any other.
 
 Two things about the limit specifically:
 
@@ -507,12 +507,12 @@ The limit accepts `0`, meaning "restore the built-in value", and takes either in
 
 ### The radix path
 
-`parquet_set_sort_radix_path(flag)` controls the radix fast path — a stable
-least-significant-digit radix sort that orders a column by bucketing its bytes rather than by
-comparing rows at all. It applies to **every** key family, integer, real and string alike, so unlike
-the counting path the key's type is never a reason it declines. The rule is: the radix path is used
-when the flag is on *and* the row count clears an internal floor set at the measured point below
-which the comparison sort is cheaper.
+`parquet_set_sort_radix_path(flag)` controls the radix fast path — a stable least-significant-digit
+radix sort that orders a column by bucketing its bytes rather than by comparing rows at all. It
+applies to **every** key family, integer, real and string alike, so unlike the counting path the
+key's type is never a reason it declines. The rule is: the radix path is used when the flag is on
+*and* the row count clears an internal floor set at the measured point below which the comparison
+sort is cheaper.
 
 It handles a **multi-key** sort as well as a single-key one, by running one stable pass per key from
 the last key to the first. There is one exception, and it is about cost rather than correctness: a
@@ -554,12 +554,12 @@ know you are memory-bound, turn the setting off rather than relying on it.
 
 ### There is no knob for the threading floor
 
-**There is no knob for the row count below which a sort refuses to thread.** That floor is
-internal and scales with the team size, because the right value depends on how many threads are
-being opened rather than on the data — a floor correct for four threads is far too low for
-sixty-four. Threading a small array costs more than the sort saves, so the engine declines rather
-than obeying a `threads=` it cannot use profitably; a sort that reports one thread on a small array
-is behaving correctly.
+**There is no knob for the row count below which a sort refuses to thread.** That floor is internal
+and scales with the team size, because the right value depends on how many threads are being opened
+rather than on the data — a floor correct for four threads is far too low for sixty-four. Threading
+a small array costs more than the sort saves, so the engine declines rather than obeying a
+`threads=` it cannot use profitably; a sort that reports one thread on a small array is behaving
+correctly.
 
 ## Row-group size when writing
 
@@ -600,10 +600,9 @@ merely *uncertain*; it cannot detect statistics that are confidently wrong.
 
 ## Reproducible output: pinning the file date
 
-Every file this library writes carries a creation timestamp, and it is **the only thing that
-differs between two writes of the same data**. Write one file twice and the two differ only in the
-digits of that timestamp; write it twice inside the same wall-clock second and the two are
-bit-identical.
+Every file this library writes carries a creation timestamp, and it is **the only thing that differs
+between two writes of the same data**. Write one file twice and the two differ only in the digits of
+that timestamp; write it twice inside the same wall-clock second and the two are bit-identical.
 
 `parquet_set_file_date(text)` pins that timestamp to a value you choose, which makes the whole file
 reproducible byte for byte:
@@ -618,15 +617,16 @@ is being read. Anything else aborts, naming the part of the date that is wrong; 
 character width is required rather than preferred, because the same value goes into a VOTable
 `PARAM` that declares `arraysize="19"`.
 
-The date is read when a **writer is opened**, like every other setting the C++ half consults, so
-set it before `parquet_open_writer` or `parquet_write_table`.
+The date is read when a **writer is opened**, like every other setting the C++ half consults, so set
+it before `parquet_open_writer` or `parquet_write_table`.
 
-**It pins the date; it does not remove it.** The `DATE` key is still written, in all four places
-the timestamp appears — the key itself, the VOTable sidecar's own `DATE` `PARAM`, and both of those
+**It pins the date; it does not remove it.** The `DATE` key is still written, in all four places the
+timestamp appears — the key itself, the VOTable sidecar's own `DATE` `PARAM`, and both of those
 again inside the base64 `ARROW:schema` block Arrow builds from the same metadata. Suppressing the
 key instead would change more than a timestamp: `DATE` is written unconditionally and
-[shadows](../schema/building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata) a `schema%add_metadata("DATE", ...)`
-of your own on read, so removing it would silently promote your entry.
+[shadows](../schema/building-schema-in-code.html#runtime-table-metadata-schemaadd_metadata-and-schemaclear_metadata)
+a `schema%add_metadata("DATE", ...)` of your own on read, so removing it would silently promote your
+entry.
 
 This is a **development and testing** control — a regression suite that compares files byte for
 byte, a build system that wants reproducible artifacts, a `diff` between two runs. A file written
@@ -691,8 +691,8 @@ call parquet_set_message_stream("stderr")   ! keep stdout clean for piped data
 ```
 
 **It governs everything this library writes.** The warnings, the advice, the remarks, the context
-lines a failing close prints before aborting, and every explicitly-called `%print*` procedure you did
-not give a `unit=`:
+lines a failing close prints before aborting, and every explicitly-called `%print*` procedure you
+did not give a `unit=`:
 
 | what | where it goes |
 |---|---|
@@ -705,8 +705,8 @@ not give a `unit=`:
 An explicit `unit=` always wins over the setting, as an explicit argument always does.
 
 **Only those two values are accepted, and that is a constraint rather than a preference.** A Fortran
-unit number means nothing to this library's C++ half, which prints three of the warnings and one
-of the reports itself — so a setting holding an arbitrary unit could be honoured by the Fortran half
+unit number means nothing to this library's C++ half, which prints three of the warnings and one of
+the reports itself — so a setting holding an arbitrary unit could be honoured by the Fortran half
 and silently ignored by the other. Sending messages to a log file is therefore not supported; a
 shell redirect covers it.
 
@@ -727,9 +727,9 @@ call parquet_settings_from_env()     ! near the top of your program
 ```
 
 **You call it; the library never does.** Reading the environment lazily on first access would be a
-data race the first time two threads touched a setting, so there is no hidden call. Put it where
-you would put your own `parquet_set_*` calls: before other threads exist and before any reader,
-writer or table is opened.
+data race the first time two threads touched a setting, so there is no hidden call. Put it where you
+would put your own `parquet_set_*` calls: before other threads exist and before any reader, writer
+or table is opened.
 
 **It applies over what is already set — it does not reset.** A variable that is absent leaves its
 knob alone, so calling it *after* your own setters lets the environment override them, and calling
@@ -788,15 +788,16 @@ and look like it worked.
 
 **One exception to "a bad value aborts": an empty variable is treated as unset.**
 `PARQUET_FORTRAN_VERBOSITY=` does nothing at all, and neither does a variable set to only spaces.
-This is worth knowing when a variable seems to be ignored — `export PARQUET_FORTRAN_VERBOSITY=$LEVEL`
-with `LEVEL` itself unset produces exactly that, and is skipped silently. `parquet_print_settings()`
-is the quickest way to see what the environment actually did.
+This is worth knowing when a variable seems to be ignored —
+`export PARQUET_FORTRAN_VERBOSITY=$LEVEL` with `LEVEL` itself unset produces exactly that, and is
+skipped silently. `parquet_print_settings()` is the quickest way to see what the environment
+actually did.
 
 ## Restoring and inspecting
 
 `parquet_reset_settings()` restores every setting to what it was before your program changed it. For
-the thread pool that means the capacity captured on the **first** `parquet_set_arrow_threads` call, so
-several sets followed by one reset land back where you started. If you never changed a setting,
+the thread pool that means the capacity captured on the **first** `parquet_set_arrow_threads` call,
+so several sets followed by one reset land back where you started. If you never changed a setting,
 resetting it does nothing — the library will not resize a pool to a default it does not get to
 choose.
 
@@ -868,5 +869,5 @@ a way to crash the process.
 Some limits the library enforces are **not** published here — notably Arrow's own 2<sup>31</sup>-1
 ceilings on a vector column's `col_size` and on a file's column count. Those are enforced in the C++
 layer, which reports them clearly when they are hit, and mirroring them into Fortran would create a
-second copy of a number that has exactly one correct value. See
-[Limitations](../../index.html) in the README for what those ceilings are.
+second copy of a number that has exactly one correct value. See [Limitations](../../index.html) in
+the README for what those ceilings are.

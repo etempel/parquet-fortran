@@ -281,6 +281,7 @@ contains
     !> parquet_kde (pf_kde/pf_kde_grid),
     !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
     !> parquet_cosmology (pf_cosmology/pf_z2zeta/pf_zeta2z/pf_z_combine),
+    !> parquet_cosmology_config (pf_cosmology_from_toml/pf_cosmology_to_toml),
     !> parquet_optimize (pf_minimize_scalar/pf_minimize_de/pf_minimize_multistart/
     !> pf_optimize_info/PF_OPT_OK/PF_OPT_TARGET),
     !> parquet_prima (pf_minimize_bobyqa/pf_minimize_lincoa/pf_minimize_cobyla/
@@ -580,6 +581,26 @@ contains
                 abs(pf_z_combine(1.0_real64, 1.0_real64) - 3.0_real64) < 1.0e-12_real64 .and. &
                 abs(pf_zeta2z(pf_z2zeta(2.0_real64)) - 2.0_real64) < 1.0e-12_real64, &
                 "pf_cosmology and the redshift conversions must be reachable from use parquet alone")
+            if (allocated(error)) return
+        end block
+
+        ! parquet_cosmology_config: the cosmology tier joined to parquet_toml. It was the ONE
+        ! advertised entry module `use parquet` did not reach -- the facade named every other
+        ! section of tools/module_footprints.txt and not this one -- so a caller of the import
+        ! that is meant to need no decisions met an undeclared-procedure error. A round trip
+        ! through an in-memory document is what stops that recurring here;
+        ! check_facade_reaches_every_entry_module is the mechanical half.
+        block
+            type(pf_cosmology) :: written, back
+            type(pf_toml) :: doc
+            logical :: there
+            call written%init(h0 = 70.0_real64, om0 = 0.3_real64, name = "facade")
+            call pf_toml_new(doc, "test_run/facade_covers_every_layer_cosmology.toml")
+            call pf_cosmology_to_toml(written, doc)
+            call pf_cosmology_from_toml(doc, back, found=there)
+            call pf_toml_close(doc)
+            call check(error, there .and. abs(back%h0() - 70.0_real64) < 1.0e-12_real64, &
+                "pf_cosmology_from_toml/pf_cosmology_to_toml must be reachable from use parquet alone")
             if (allocated(error)) return
         end block
 

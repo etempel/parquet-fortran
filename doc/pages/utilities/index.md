@@ -68,14 +68,14 @@ project.
   `max_neval` and whether a run can overshoot it, `converged=` and `info=` and the status codes the
   modules spell alike, the evaluation record, what your function may return, and what aborts. Each
   engine's own page keeps its engines, its examples and its tables.
-- [Numerical integration with pf_integrate](integration.html) — adaptive quadrature of a function of
-  one variable over a finite or infinite range, with the integrand supplied as an object carrying
+- [Numerical integration with `pf_integrate`](integration.html) — adaptive quadrature of a function
+  of one variable over a finite or infinite range, with the integrand supplied as an object carrying
   its own parameters or as a plain function. Tolerances as a required `rtol` and an optional `atol`,
   a budget on integrand evaluations, a status code rather than a printed warning, integration in
   `log x` for a range spanning many decades, an outward walk that finds a feature far along an
   infinite range rather than stepping over it, and a record of every evaluation on request whose
   weighted sum reproduces the integral. Nothing is printed.
-- [Interpolation of tabulated data with parquet_interpolate](interpolation.html) — an interpolant
+- [Interpolation of tabulated data with `parquet_interpolate`](interpolation.html) — an interpolant
   built once over a table of abscissae and ordinates, ascending or descending, and evaluated,
   differentiated and integrated anywhere: straight lines between the points, a cubic spline with a
   natural, not-a-knot or clamped end, or a shape-preserving cubic that keeps monotone data monotone;
@@ -83,7 +83,7 @@ project.
   table (the end value, the end segment continued, or NaN), a mask that drops points before
   building, and a one-shot form for a table queried only a few times. Every binding that reads an
   object is `pure`, so one object serves a whole team of threads. Nothing is printed.
-- [Distances and times in an expanding universe with parquet_cosmology](cosmology.html) — a
+- [Distances and times in an expanding universe with `parquet_cosmology`](cosmology.html) — a
   cosmology built once and evaluated over whole columns: the comoving, transverse, luminosity and
   angular diameter distances, the lookback time and the age, the comoving volume and its element,
   the distance modulus and the transverse angular scales, what the universe is made of at a redshift
@@ -146,7 +146,7 @@ project.
   directions, grid arithmetic, and a `_bulk` form of every conversion that threads internally.
   Equal-area pixels on rings of constant latitude, both integer kinds, and no floating-point
   exception raised — so a program running under `-ffpe-trap` needs no guard around a disc query.
-- [Random points and geometry on the sphere with parquet_sphere](sphere.html) — points uniform per
+- [Random points and geometry on the sphere with `parquet_sphere`](sphere.html) — points uniform per
   solid angle inside a sky polygon, with straight RA/Dec edges or great-circle edges, inside one
   HEALPix pixel or over a list of them; the polygon's containment, area and acceptance; RA/Dec
   conversions that name their declination frame, and the Fibonacci grid. Every draw is addressed

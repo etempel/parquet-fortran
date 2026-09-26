@@ -16,24 +16,25 @@ type/function/subroutine under `use parquet`), see the [modules](../lists/module
 **One `use parquet` brings in the whole library** — readers and writers, schemas and MAML, the
 `parquet_table` container, the `parquet_column` foundation and its `PK_*` kind constants, compact
 string columns, the list/struct/map container columns, the date/time/timestamp types, sorting,
-array statistics, kernel density estimation, random numbers and sampling, spatial neighbour search, key-to-index lookup,
-sphere pixelisation, random points in sky regions, celestial coordinate systems, logging for your
-own program, TOML configuration files, numeric, text and path helpers, and the process-global
-settings. Every page below assumes that single import.
+array statistics, kernel density estimation, numerical integration, interpolation of tabulated
+data, distances and times in an expanding universe, function minimisation and Powell's
+derivative-free solvers, root finding in one variable, the discrete cosine and sine transforms,
+random numbers and sampling, spatial neighbour search, key-to-index lookup, sphere pixelisation,
+random points in sky regions, celestial coordinate systems, logging for your own program, TOML
+configuration files, numeric, text and path helpers, and the process-global settings. Every page
+below assumes that single import.
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
 `parquet_argsort`, `parquet_stats`, `parquet_kde`, `parquet_integrate`, `parquet_interpolate`,
-`parquet_cosmology`, `parquet_cosmology_config`, `parquet_optimize`,
-`parquet_prima`, `parquet_root`, `parquet_transform`,
-`parquet_sampling`, `parquet_spatial`,
-`parquet_healpix`, `parquet_sphere`, `parquet_skycoord`,
-`parquet_random`, `parquet_index`, `parquet_logging`, `parquet_toml`, `parquet_utils`,
-`parquet_settings`, `parquet_version`, `parquet_maml_base`) can be named directly when you want a
-narrower import — see [Choosing a module](operating/choosing-a-module.html) for what each one
-costs to compile against and which of them are covered by the library's API stability promise.
-`parquet_core` is the exception in the other direction: it is internal and is covered by no
-promise.
+`parquet_cosmology`, `parquet_cosmology_config`, `parquet_optimize`, `parquet_prima`,
+`parquet_root`, `parquet_transform`, `parquet_sampling`, `parquet_spatial`, `parquet_healpix`,
+`parquet_sphere`, `parquet_skycoord`, `parquet_random`, `parquet_index`, `parquet_logging`,
+`parquet_toml`, `parquet_utils`, `parquet_settings`, `parquet_version`, `parquet_maml_base`) can be
+named directly when you want a narrower import — see [Choosing a
+module](operating/choosing-a-module.html) for what each one costs to compile against and which of
+them are covered by the library's API stability promise. `parquet_core` is the exception in the
+other direction: it is internal and is covered by no promise.
 
 Because `parquet` re-exports rather than defines, the generated
 [procedures](../lists/procedures.html) and [types](../lists/types.html) listings are the reliable
@@ -61,14 +62,13 @@ point in the library.
   touched — or built in memory and written out; then changed in place, joined against another table
   on one or more key columns, and grouped by key columns for one answer per group.
 - [Utilities and code generation](utilities/index.html) — sorting for arrays and columns, array
-  statistics, kernel density estimation, numerical integration, interpolation of tabulated data, function minimisation,
-  Powell's derivative-free solvers, root finding in one variable,
-  the discrete cosine and sine transforms,
-  reproducible random numbers and the sampling built on them,
-  spatial neighbour search,
-  sphere pixelisation, random points and geometry on the sphere, celestial coordinate systems,
-  key-to-index lookup, logging for your own program, TOML configuration files, numeric, text and
-  path helpers, generated table types, and embedding your own MAML schemas.
+  statistics, kernel density estimation, numerical integration, interpolation of tabulated data,
+  distances and times in an expanding universe, function minimisation, Powell's derivative-free
+  solvers, root finding in one variable, the discrete cosine and sine transforms, reproducible
+  random numbers and the sampling built on them, spatial neighbour search, sphere pixelisation,
+  random points and geometry on the sphere, celestial coordinate systems, key-to-index lookup,
+  logging for your own program, TOML configuration files, numeric, text and path helpers,
+  generated table types, and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
   something is wrong or has to be tuned: which module to import, what an error means, why a build,
   a link or a run fails, what may run concurrently, what memory and speed to expect, and the
@@ -76,9 +76,9 @@ point in the library.
 
 ### Every page at a glance
 
-All 48 pages, in reading order. (This list, each group's own page list and the
-`ordered_subpage:` frontmatter are kept consistent by
-`tools/check_source_conventions.py`, which fails the CI lint stage when they drift.)
+All 48 pages, in reading order. (This list, each group's own page list and the `ordered_subpage:`
+frontmatter are kept consistent by `tools/check_source_conventions.py`, which fails the CI lint
+stage when they drift.)
 
 **Reading and writing files**
 
@@ -118,9 +118,9 @@ All 48 pages, in reading order. (This list, each group's own page list and the
 - [Array statistics with the `pf_` reduction family](utilities/statistics.html)
 - [Kernel density estimation with `parquet_kde`](utilities/kernel-density.html)
 - [Solver conventions: callbacks, tolerances, budgets and outcomes](utilities/solvers.html)
-- [Numerical integration with pf_integrate](utilities/integration.html)
-- [Interpolation of tabulated data with parquet_interpolate](utilities/interpolation.html)
-- [Distances and times in an expanding universe with parquet_cosmology](utilities/cosmology.html)
+- [Numerical integration with `pf_integrate`](utilities/integration.html)
+- [Interpolation of tabulated data with `parquet_interpolate`](utilities/interpolation.html)
+- [Distances and times in an expanding universe with `parquet_cosmology`](utilities/cosmology.html)
 - [Optimisation: minimising a function of one or many variables](utilities/optimization.html)
 - [Powell's derivative-free solvers with `parquet_prima`](utilities/prima.html)
 - [Root finding: solving f(x) = 0 in one variable](utilities/root-finding.html)
@@ -128,7 +128,7 @@ All 48 pages, in reading order. (This list, each group's own page list and the
 - [Random numbers and sampling with `pf_random_at`](utilities/random.html)
 - [Spatial neighbour search with `pf_spatial_index`](utilities/spatial.html)
 - [Sphere pixelisation with `parquet_healpix`](utilities/healpix.html)
-- [Random points and geometry on the sphere with parquet_sphere](utilities/sphere.html)
+- [Random points and geometry on the sphere with `parquet_sphere`](utilities/sphere.html)
 - [Celestial coordinate systems with `parquet_skycoord`](utilities/skycoord.html)
 - [Key-to-index lookup with `parquet_index`](utilities/index-maps.html)
 - [Logging with `parquet_logging`](utilities/logging.html)

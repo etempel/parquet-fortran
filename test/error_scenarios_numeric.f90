@@ -154,6 +154,10 @@ contains
             call scenario_index_bad_method()
         case ("index_direct_set_out_of_range")
             call scenario_index_direct_set_out_of_range()
+        case ("index_direct_get_or_add_out_of_range")
+            call scenario_index_direct_get_or_add_out_of_range(many=.false.)
+        case ("index_direct_get_or_add_many_out_of_range")
+            call scenario_index_direct_get_or_add_out_of_range(many=.true.)
         case ("index_ncomp_too_large")
             call scenario_index_ncomp_too_large()
         case ("index_direct_range_too_wide")
@@ -1405,6 +1409,37 @@ contains
         call m%set(9999_int64, 4_int64)
         print '(a)', "a direct map accepted a key outside its range"
     end subroutine scenario_index_direct_set_out_of_range
+
+    !> `%get_or_add`/`%get_or_add_many` on a direct map, with a key outside the built range.
+    !!
+    !! **The pair is what pins the refusal to the entry the CALLER used.** `many=.false.` goes
+    !! through `ix_goa_scalar` and must name `%get_or_add`; `many=.true.` passes TUPLES, so it goes
+    !! through `ix_goa_tuple` -- the other worker -- and must name `%get_or_add_many`. One scenario
+    !! cannot show that, because a single message is consistent with the name being hard-coded.
+    !!
+    !! Until both workers refused the direct backend themselves, neither did: the refusal fell
+    !! through to `ix_set_scalar`/`ix_set_tuple`, which name `%set` on every path, so all four
+    !! combinations blamed a procedure the caller had not called.
+    !! `index_direct_set_out_of_range` is the control that keeps `%set` naming `%set`.
+    subroutine scenario_index_direct_get_or_add_out_of_range(many)
+        logical, intent(in) :: many !! whether to ask through `%get_or_add_many` over tuples.
+        type(pf_index_map) :: m
+        integer(int64) :: idx, pairs(3, 2), probe(2, 2), codes(2)
+
+        if (many) then
+            pairs(:, 1) = [1_int64, 2_int64, 3_int64]
+            pairs(:, 2) = [1_int64, 1_int64, 1_int64]
+            call m%build(pairs, method="direct")
+            probe(:, 1) = [1_int64, 9999_int64]
+            probe(:, 2) = [1_int64, 1_int64]
+            call m%get_or_add_many(probe, codes, threads=1)
+            print '(a,i0)', "a direct map added an out-of-range key through get_or_add_many, code=", codes(2)
+        else
+            call m%build([10_int64, 11_int64, 12_int64], method="direct")
+            call m%get_or_add(9999_int64, idx)
+            print '(a,i0)', "a direct map added an out-of-range key through get_or_add, idx=", idx
+        end if
+    end subroutine scenario_index_direct_get_or_add_out_of_range
     !
     !> More components than the module's published maximum is refused at build, because the tuple
     !> paths widen into a fixed-size stack buffer of exactly that width.

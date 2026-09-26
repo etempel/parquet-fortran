@@ -127,6 +127,8 @@ contains
                 test_index_bad_method_aborts), &
             new_unittest("setting outside a direct map's range aborts", &
                 test_index_direct_set_out_of_range_aborts), &
+            new_unittest("get_or_add outside a direct map's range aborts naming the caller's entry", &
+                test_index_direct_get_or_add_out_of_range_aborts), &
             new_unittest("a key wider than the component limit aborts", &
                 test_index_ncomp_too_large_aborts), &
             new_unittest("an explicit direct map over the whole int64 range aborts", &
@@ -1279,12 +1281,35 @@ contains
     end subroutine test_index_bad_method_aborts
     !
     !> See `scenario_index_direct_set_out_of_range` (test/error_scenarios.f90) for why this is refused.
+    !!
+    !! The required text names `%set` as well as the reason, because this is the CONTROL for
+    !! `test_index_direct_get_or_add_out_of_range_aborts`: the pair is only evidence that a refusal
+    !! names the entry the caller used if this one is pinned to `%set` at the same time.
     subroutine test_index_direct_set_out_of_range_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "index_direct_set_out_of_range", expect_abort=.true., &
             failure_message="setting outside a direct map's range was expected to abort", &
-            required_stderr="outside the range")
+            required_stderr="pf_index_map%set: this key is outside the range")
     end subroutine test_index_direct_set_out_of_range_aborts
+    !
+    !> See `scenario_index_direct_get_or_add_out_of_range` (test/error_scenarios.f90).
+    !!
+    !! Both arms assert the PROCEDURE NAME, which is the whole point: the two go through different
+    !! workers (`ix_goa_scalar` and `ix_goa_tuple`) and must each name the entry the caller used
+    !! rather than `%set`, which is what the refusal said before both workers guarded the direct
+    !! backend themselves.
+    subroutine test_index_direct_get_or_add_out_of_range_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "index_direct_get_or_add_out_of_range", &
+            expect_abort=.true., &
+            failure_message="get_or_add of an out-of-range key on a direct map was expected to abort", &
+            required_stderr="pf_index_map%get_or_add: this key is outside the range")
+        if (allocated(error)) return
+        call check_scenario_exit_status_and_stderr(error, "index_direct_get_or_add_many_out_of_range", &
+            expect_abort=.true., &
+            failure_message="get_or_add_many of an out-of-range key on a direct map was expected to abort", &
+            required_stderr="pf_index_map%get_or_add_many: this key is outside the range")
+    end subroutine test_index_direct_get_or_add_out_of_range_aborts
     !
     !> See `scenario_index_ncomp_too_large` (test/error_scenarios.f90) for why this is refused.
     subroutine test_index_ncomp_too_large_aborts(error)

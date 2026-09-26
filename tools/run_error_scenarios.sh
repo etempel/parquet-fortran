@@ -2110,6 +2110,8 @@ scenarios=(
     "index_init_sorted:1"
     "index_bad_method:1"
     "index_direct_set_out_of_range:1"
+    "index_direct_get_or_add_out_of_range:1"
+    "index_direct_get_or_add_many_out_of_range:1"
     "index_ncomp_too_large:1"
     "index_direct_range_too_wide:1"
     "index_remove_absent:1"

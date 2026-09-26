@@ -86,7 +86,7 @@ reports the choice.
 | `%build` | yes | yes | single-component keys only |
 | `%init` (fill as you go) | no | yes | no |
 | composite keys | yes | yes | no |
-| `%set` / `%get_or_add` | inside the built key range | yes | aborts on a new key |
+| `%set` / `%get_or_add` | inside the built key range | yes | `%set` aborts; `%get_or_add` for a new key |
 | `%remove` | yes | yes | aborts |
 
 The hash row is for a single-component key. A composite one keeps each tuple and its value as one
@@ -394,10 +394,9 @@ and `threads=` reaches only the map built over the distinct keys. The layout tha
 counts the rows per group and places each one, is serial on every backend.
 
 **Group ids are dense in `1 .. ngroups` and rows are ascending within a group; nothing else about
-the ids is a contract.** On the serial pass (`threads=1`, a small build, or any direct build)
-they follow first appearance among the unmasked rows; on a team they are numbered partition by
-partition. Rely on
-an id being stable for the life of one build, never on its order.
+the ids is a contract.** On the serial pass (`threads=1`, a small build, or any direct build) they
+follow first appearance among the unmasked rows; on a team they are numbered partition by
+partition. Rely on an id being stable for the life of one build, never on its order.
 
 ### Looking up a key that repeats
 
@@ -421,10 +420,9 @@ call mm%probe_many(keys, offsets, matches)       ! EVERY match, as a CSR pair
 
 All three take `valid=` (a masked key answers 0, or an empty range, unprobed), `threads=`, and a
 count: `n_found=` on the first two, `n_matched=` on the third. `n_matched=` counts the **probes
-that matched**, not the pairs: the pair total is `offsets(size(keys) + 1) - 1`.
-`rows`, `groups` and `matches` may
-be `int32` or `int64`; an `int32` answer aborts up front, rather than truncating, if any stored
-value would not fit.
+that matched**, not the pairs: the pair total is `offsets(size(keys) + 1) - 1`. `rows`, `groups`
+and `matches` may be `int32` or `int64`; an `int32` answer aborts up front, rather than truncating,
+if any stored value would not fit.
 
 ### Every match at once: `%probe_many`
 
@@ -486,9 +484,9 @@ call p%free_index(slot)              ! give it back
 Reuse always precedes growth, so the indexes stay as dense as your live set allows: the pool only
 grows its internal storage when every index up to its watermark is out. It costs one bit per index
 up to its watermark, plus 8 bytes per index freed since its last `%compact` and not yet handed out
-again. Freeing an index the pool
-never issued, or freeing one twice, aborts — a double free would put the same index on the free
-list twice and hand it to two owners who each believed they held the slot.
+again. Freeing an index the pool never issued, or freeing one twice, aborts — a double free would
+put the same index on the free list twice and hand it to two owners who each believed they held the
+slot.
 
 ```fortran
 n  = p%get_max_index()               ! the highest index handed out
@@ -645,8 +643,7 @@ the team and inserts the ones not found by that same partitioned pass. All resol
 the same rule, over the rows they are handed, and so do the multimap's `%get_first_many`,
 `%get_many` and `%probe_many`, and its build's hash grouping pass (a dense key column groups
 serially: see [Building a multimap](#building-a-multimap)). A string build threads the same way:
-the hash of every key and the
-copy into the store on the team, then the partitioned insert.
+the hash of every key and the copy into the store on the team, then the partitioned insert.
 
 ```fortran
 call m%build(keys)                   ! automatic
@@ -660,10 +657,9 @@ nt = pf_index_threads(size(keys, kind=int64))   ! what an automatic build or loo
 **The automatic answer and an explicit `threads=` are resolved differently, and only one of them is
 bounded.** The automatic one is `omp_get_max_threads()` outside a parallel region and **1** inside
 one — nested teams are the caller's business — capped at **64**, or at `parquet_set_index_threads`
-when that is set, then bounded by the work available.
-An explicit `threads=` bypasses all three: it is honoured whatever
-the size of the build and wherever it is called from, including inside somebody else's parallel
-region.
+when that is set, then bounded by the work available. An explicit `threads=` bypasses all three: it
+is honoured whatever the size of the build and wherever it is called from, including inside
+somebody else's parallel region.
 
 | situation | threads used |
 |---|---|
@@ -680,12 +676,11 @@ the answer. `threads=0` is refused rather than read as "automatic".
 
 Left alone, the automatic answer stops at 64 threads however many the machine offers: past a team
 of about that size these paths get slower rather than faster. `parquet_set_index_threads(n)`
-replaces that ceiling process-wide, above 64 as well as below, and
-`PARQUET_FORTRAN_INDEX_THREADS` does the same from the environment — see
-[Settings](../operating/settings.html). It stays a cap on the automatic answer, never a request;
-pass `threads=` on the call to ask for a team outright.
-A `method="sorted"` build sorts through `pf_argsort`, so that phase
-answers to the sorting thread knobs instead, while the key scan around it follows the rule above.
+replaces that ceiling process-wide, above 64 as well as below, and `PARQUET_FORTRAN_INDEX_THREADS`
+does the same from the environment — see [Settings](../operating/settings.html). It stays a cap on
+the automatic answer, never a request; pass `threads=` on the call to ask for a team outright. A
+`method="sorted"` build sorts through `pf_argsort`, so that phase answers to the sorting thread
+knobs instead, while the key scan around it follows the rule above.
 
 **Two passes of a build have a work floor of their own**, because a team costs them more than it
 saves on a small map: an automatic `hash` build inserts serially until the key count justifies the
@@ -710,7 +705,7 @@ your own hardware.
   hash runs one 32-bit mixing step per component on two independent chains; and pairs — a
   timestamp key, a string key underneath — have a kernel of their own. `--mode=tuple` of
   `bench/benchmark_index.sh` prints the two side by side, with each table's probe statistics.
-- **`%get_many` beats a loop of `%get`** by enough to be worth restructuring a hot loop for --
+- **`%get_many` beats a loop of `%get`** by enough to be worth restructuring a hot loop for —
   on a map larger than the cache it is about twice as fast even on one thread, because it hashes
   a block of keys first and walks the table afterwards, so a block's cache misses are in flight
   together where a loop of `%get` waits for each one — and on a team it is the fastest probe

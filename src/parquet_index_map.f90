@@ -583,14 +583,14 @@ contains
         integer(int64) :: v
 
         !$omp critical (pf_index_map_guard)
-        call ix_goa_tuple_i32(self, key, v, .true.)
+        call ix_goa_tuple_i32(self, key, v, .true., "get_or_add")
         !$omp end critical (pf_index_map_guard)
         idx = int(v, int32)
     end procedure goa_t32_i32
 
     module procedure goa_t32_i64
         !$omp critical (pf_index_map_guard)
-        call ix_goa_tuple_i32(self, key, idx, .false.)
+        call ix_goa_tuple_i32(self, key, idx, .false., "get_or_add")
         !$omp end critical (pf_index_map_guard)
     end procedure goa_t32_i64
 
@@ -598,14 +598,14 @@ contains
         integer(int64) :: v
 
         !$omp critical (pf_index_map_guard)
-        call ix_goa_tuple(self, key, v, .true.)
+        call ix_goa_tuple(self, key, v, .true., "get_or_add")
         !$omp end critical (pf_index_map_guard)
         idx = int(v, int32)
     end procedure goa_t64_i32
 
     module procedure goa_t64_i64
         !$omp critical (pf_index_map_guard)
-        call ix_goa_tuple(self, key, idx, .false.)
+        call ix_goa_tuple(self, key, idx, .false., "get_or_add")
         !$omp end critical (pf_index_map_guard)
     end procedure goa_t64_i64
 
@@ -3142,6 +3142,12 @@ contains
     !! **A sorted map answers a key it holds and refuses only a new one**: the lookup mutates
     !! nothing, and only the insert would unfreeze the map. The refusal is made here, before the
     !! insert, so that it names the entry the caller used rather than `%set`.
+    !!
+    !! **The direct backend is refused here for the same reason**, and not left to `ix_set_scalar`:
+    !! that worker names `%set` unconditionally, so a caller who reached this through
+    !! `%get_or_add` or `%get_or_add_many` with a key outside the built range was told to look at a
+    !! procedure they never called. Both refusing backends now resolve through one call, and the
+    !! hash backend -- the one that inserts -- still pays no test, since neither arm is taken.
     subroutine ix_goa_scalar(self, key, idx, want32, what)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: key         !! the key, already widened.
@@ -3153,26 +3159,40 @@ contains
         call ix_autoinit(self, 1)
         idx = ix_get_scalar(self, key)
         if (idx <= 0_int64) then
-            if (self%backend == IX_SORTED) call ix_check_mutable(self, 1_int64, what)
+            if (self%backend == IX_SORTED) then
+                call ix_check_mutable(self, 1_int64, what)
+            else if (self%backend == IX_DIRECT) then
+                call ix_check_mutable(self, ix_direct_off_1(self, key), what)
+            end if
             idx = self%next_auto + 1_int64
             call ix_set_scalar(self, key, idx)
         end if
         if (want32) idx = ix_narrow_check(idx)
     end subroutine ix_goa_scalar
 
-    !> `%get_or_add` for a key tuple.
-    subroutine ix_goa_tuple(self, key, idx, want32)
+    !> `%get_or_add` for a key tuple. See `ix_goa_scalar` for why both refusals are made here.
+    !!
+    !! **`what` is carried in rather than written as `"get_or_add"`** because a 1-tuple reaches
+    !! this worker from `%get_or_add_many` as well (a single-component map and a 1-tuple are the
+    !! same map), and a refusal that named the wrong one of the two sent the caller to an entry
+    !! they had not used.
+    subroutine ix_goa_tuple(self, key, idx, want32, what)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int64), intent(in) :: key(:)      !! the tuple, already widened.
         integer(int64), intent(out) :: idx        !! the key's index.
         logical, intent(in) :: want32             !! whether the answer must fit `int32`.
+        character(len=*), intent(in) :: what      !! the public procedure, for a refusal.
         integer :: nc
 
         call ix_autoinit(self, size(key))
-        nc = ix_tuple_width(self, size(key), "get_or_add")
+        nc = ix_tuple_width(self, size(key), what)
         idx = ix_get_tuple(self, key(1:nc))
         if (idx <= 0_int64) then
-            if (self%backend == IX_SORTED) call ix_check_mutable(self, 1_int64, "get_or_add")
+            if (self%backend == IX_SORTED) then
+                call ix_check_mutable(self, 1_int64, what)
+            else if (self%backend == IX_DIRECT) then
+                call ix_check_mutable(self, ix_direct_off_n(self, key(1:nc)), what)
+            end if
             idx = self%next_auto + 1_int64
             call ix_set_tuple(self, key(1:nc), idx)
         end if
@@ -3180,17 +3200,18 @@ contains
     end subroutine ix_goa_tuple
 
     !> `%get_or_add` for an `int32` key tuple.
-    subroutine ix_goa_tuple_i32(self, key, idx, want32)
+    subroutine ix_goa_tuple_i32(self, key, idx, want32, what)
         type(pf_index_map), intent(inout) :: self !! the map.
         integer(int32), intent(in) :: key(:)      !! the caller's tuple.
         integer(int64), intent(out) :: idx        !! the key's index.
         logical, intent(in) :: want32             !! whether the answer must fit `int32`.
+        character(len=*), intent(in) :: what      !! the public procedure, for a refusal.
         integer(int64) :: kb(pf_index_max_components)
         integer :: nc
 
         call ix_autoinit(self, size(key))
-        call ix_widen_tuple(self, key, kb, nc, "get_or_add")
-        call ix_goa_tuple(self, kb(1:nc), idx, want32)
+        call ix_widen_tuple(self, key, kb, nc, what)
+        call ix_goa_tuple(self, kb(1:nc), idx, want32, what)
     end subroutine ix_goa_tuple_i32
 
     !> `%get_or_add_many` for rank-1 keys: `%get_or_add` per row, with the guard already held.
@@ -3282,7 +3303,7 @@ contains
             do j = 1, nc
                 kb(j) = keys(i, j)
             end do
-            call ix_goa_tuple(self, kb(1:nc), idx, want32)
+            call ix_goa_tuple(self, kb(1:nc), idx, want32, "get_or_add_many")
             codes(i) = idx
         end do
     end subroutine ix_goam_n

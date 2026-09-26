@@ -462,6 +462,9 @@ without `unit=` follows `message_stream`.
   value-unsafe floating-point model, such as ifx's default `-fp-model=fast`.
 - `pf_index_map%keys`/`pf_index_multimap%keys` into an `int32` list silently truncated a key below
   the `int32` range instead of aborting, in an ifx `-O0 -check all` build.
+- `pf_index_map%get_or_add` and `%get_or_add_many` named `%set` when refusing a key outside a
+  direct map's range, and `%get_or_add_many` over a one-component tuple named `%get_or_add` when
+  refusing a new key on a sorted map.
 - Many other minor fixes and improvements.
 
 ## [v2.3.0] - 2026-09-06

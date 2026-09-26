@@ -24,9 +24,15 @@
 module test_index_omp
     use testdrive, only: new_unittest, unittest_type, error_type, check, skip_test
     use parquet_index
+    ! `parquet_index` re-exports `index_threads` but not the affinity override, which lives
+    ! with the clamp itself; `test_index_threads_ceiling` needs it to fake a wide machine.
+    ! Taken from `parquet_settings_base`, the Arrow-free LEAF, and not from `parquet_settings`,
+    ! which adds `parquet_bindings`: this suite runs in `run_tester_pf`, which must stay clear
+    ! of bind(C) (`check_test_runner_partition`).
+    use parquet_settings_base, only: parquet_debug_set_affinity_procs
     use iso_fortran_env, only: int32, int64
 #ifdef _OPENMP
-    use omp_lib, only: omp_get_max_threads, omp_get_thread_num, omp_get_num_procs
+    use omp_lib, only: omp_get_max_threads, omp_get_thread_num, omp_get_num_procs, omp_set_num_threads
 #endif
     implicit none
     private
@@ -55,6 +61,10 @@ contains
             new_unittest("a threaded composite build equals a serial one", test_threaded_composite_build), &
             new_unittest("threads= is honoured and bounded", test_threads_argument), &
             new_unittest("pf_index_threads reports the rule the build follows", test_index_threads_rule), &
+            new_unittest("the automatic answer stops at 64, and index_threads replaces that ceiling", &
+                test_index_threads_ceiling), &
+            new_unittest("a direct multimap above the work floor still numbers groups by first appearance", &
+                test_mm_direct_ids_above_the_floor), &
             new_unittest("a per-thread map and pool work inside a region", test_per_thread_containers), &
             new_unittest("two builds on two threads run at the same time", test_concurrent_builds_overlap), &
             new_unittest("a partitioned hash build answers every key and every miss, and spills", &
@@ -1771,5 +1781,130 @@ contains
         call check(error, bad == 0_int64, &
             "every row's code is what %get answers for its key afterwards")
     end subroutine test_threaded_rank2_single_column_goam
+
+    !> The automatic answer stops at 64, and `index_threads` REPLACES that ceiling -- above 64 as
+    !! well as below (`doc/pages/utilities/index-maps.md`, "Threads a build or a bulk lookup uses";
+    !! `IX_MAX_AUTO_THREADS` and `ix_auto_cap`).
+    !!
+    !! **The machine has to be faked in BOTH halves or the assertion cannot be made anywhere.** On
+    !! a 64-processor runner a 64-cap is indistinguishable from 64 processors, and on a smaller one
+    !! the affinity clamp answers below 64 first, so the ceiling never shows. `omp_set_num_threads`
+    !! raises what the environment asks for and `parquet_debug_set_affinity_procs` raises what the
+    !! mask is reported to allow; the cap is then the only bound left and the test reads the same
+    !! on every machine.
+    !!
+    !! **This is the only caller of `parquet_debug_set_affinity_procs` in `run_tester_pf`**, and
+    !! `test_optimize_omp`'s `expected_team` says in as many words that its suites assume the real
+    !! `omp_get_num_procs()`. The override is process-global, so both it and the thread count are
+    !! restored before this returns, and this suite is serial
+    !! (`suite_is_safe_to_parallelize`) so nothing runs beside it meanwhile. It never provokes the
+    !! affinity warning -- the faked mask is never below the faked request -- so the single-shot
+    !! warning is not consumed for a later test.
+    !!
+    !! The third arm is the negative control: without it a library that ignored the cap entirely
+    !! and always answered `min(omp_get_max_threads(), 64)` would pass the first two.
+    subroutine test_index_threads_ceiling(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+#ifdef _OPENMP
+        integer, parameter :: BIG = 200                  ! a machine wider than the 64 ceiling
+        integer(int64), parameter :: N = 100000000_int64 ! far above the work floor
+        integer :: saved_threads, saved_cap, got
+
+        saved_threads = omp_get_max_threads()
+        saved_cap = parquet_get_index_threads()
+        call omp_set_num_threads(BIG)
+        call parquet_debug_set_affinity_procs(BIG)
+
+        call parquet_set_index_threads(0)
+        got = pf_index_threads(N)
+        call check(error, got == 64, &
+            "left alone on a machine offering 200 threads the automatic answer must stop at 64")
+        if (.not. allocated(error)) then
+            call parquet_set_index_threads(128)
+            got = pf_index_threads(N)
+            call check(error, got == 128, &
+                "index_threads REPLACES the ceiling rather than lowering it: 128 must raise the " // &
+                "automatic answer above 64, not be ignored as a value over the default cap")
+        end if
+        if (.not. allocated(error)) then
+            call parquet_set_index_threads(8)
+            got = pf_index_threads(N)
+            call check(error, got == 8, &
+                "and it still lowers: 8 must hold the automatic answer to 8, so the two arms " // &
+                "above cannot both pass against a cap that is never read")
+        end if
+
+        ! Restored on every path, including a failing one: these are process-global.
+        call parquet_set_index_threads(saved_cap)
+        call parquet_debug_set_affinity_procs(0)
+        call omp_set_num_threads(saved_threads)
+#else
+        call skip_test(error, "needs OpenMP: without it the automatic answer is 1 whatever the " // &
+            "cap says, so no ceiling can bite and all three arms would pass for the wrong reason")
+#endif
+    end subroutine test_index_threads_ceiling
+
+    !> A DIRECT multimap build above the work floor still numbers its groups by first appearance.
+    !!
+    !! `doc/pages/utilities/index-maps.md` lists "any direct build" among the serial-pass cases, on
+    !! the strength of the direct backend's grouping being one pass over a slot array that is
+    !! serial at every team size (`parquet_index_multi.f90`'s header). The existing
+    !! `test_mm_group_ids_first_appearance` asserts first-appearance numbering on all three
+    !! backends but over 800 keys -- below the 8192-row floor, where EVERY backend is serial
+    !! anyway -- so it would pass unchanged if the direct grouping ever started threading and
+    !! numbering partition by partition. This one puts the build in the regime where that
+    !! difference is reachable.
+    !!
+    !! The guard against a vacuous pass is explicit: the row count must really resolve to a team,
+    !! and the backend must really be direct. Either failing means the fixture stopped testing
+    !! what its name says rather than the library being right.
+    subroutine test_mm_direct_ids_above_the_floor(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
+        integer(int64), parameter :: N = 40000_int64, NKEY = 500_int64
+        type(pf_index_multimap) :: mm
+        integer(int64) :: keys(N), first_at(NKEY), i, k, seen
+        character(len=:), allocatable :: tok
+
+        ! A stride of 37 through 500 distinct keys, so first appearance is a permutation of the
+        ! key order rather than the identity -- an identity fixture cannot tell "first appearance"
+        ! from "sorted by key".
+        do i = 1_int64, N
+            keys(i) = mod(i * 37_int64, NKEY) + 1_int64
+        end do
+        first_at = 0_int64
+        seen = 0_int64
+        do i = 1_int64, N
+            if (first_at(keys(i)) == 0_int64) then
+                seen = seen + 1_int64
+                first_at(keys(i)) = seen
+            end if
+        end do
+        call check(error, seen == NKEY, "fixture: every one of the 500 keys must appear")
+        if (allocated(error)) return
+#ifdef _OPENMP
+        if (omp_get_num_procs() >= 2) then
+            call check(error, pf_index_threads(N) > 1, &
+                "fixture: 40000 rows must sit ABOVE the work floor on this machine, or a serial " // &
+                "direct grouping is all that could happen and the test asserts nothing")
+            if (allocated(error)) return
+        end if
+#endif
+        call mm%build(keys, method="direct", threads=4)
+        call mm%get_method(tok)
+        call check(error, tok == "direct", &
+            "fixture: the build must really have taken the direct backend")
+        if (allocated(error)) return
+        call check(error, mm%ngroups() == NKEY .and. mm%nkeys() == N, &
+            "the build must hold every row and find every distinct key")
+        if (allocated(error)) return
+        do k = 1_int64, NKEY
+            if (mm%get(k) /= first_at(k)) then
+                call check(error, .false., &
+                    "a direct build with threads=4 over 40000 rows must still number groups by " // &
+                    "first appearance, as the page says every direct build does")
+                return
+            end if
+        end do
+    end subroutine test_mm_direct_ids_above_the_floor
 
 end module test_index_omp ! GCOVR_EXCL_LINE

@@ -3321,7 +3321,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "logging_fatal", expect_abort=.true., &
             failure_message="pf_log_fatal was expected to abort", &
-            required_stderr="the run cannot continue")
+            required_stderr="pf_logger%fatal: the run cannot continue")
     end subroutine test_logging_fatal_aborts
 
     !> Eight threads call pf_log_fatal at once and the process still aborts ONCE.
@@ -3360,8 +3360,8 @@ contains
             "a concurrent pf_log_fatal was expected to abort, but the process exited 0")
         if (allocated(error)) return
 
-        call file_contains(err_file, "the parallel run cannot continue", on_err)
-        call check(error, on_err, "the abort did not carry the message it was given")
+        call file_contains(err_file, "pf_logger%fatal: the parallel run cannot continue", on_err)
+        call check(error, on_err, "the abort did not carry the message it was given, prefixed")
         if (allocated(error)) return
 
         call file_count_containing(out_file, "the parallel run cannot continue", nrec)

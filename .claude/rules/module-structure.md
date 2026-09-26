@@ -102,10 +102,11 @@ parquet_wrapper.cpp             (the single C++ translation unit)
 
 ## `parquet_toml`
 
-- The one module that emits through `parquet_logging` instead of the settings channels:
+- It emits through `parquet_logging` instead of the settings channels:
   `parquet_verbosity`/`parquet_message_stream` govern nothing it prints, and output appears without
-  `pf_log_init`. Do not reroute it, and do not give another module this exception without the same
-  audience argument (its diagnostics belong to the calling program's log).
+  `pf_log_init`. `parquet_cosmology_config` has the same exception on the same ground: both read a
+  configuration file, so their diagnostics belong to the calling program's log. Do not reroute
+  either, and do not give a third module the exception without that audience argument.
 - It brings `toml-f`, the only Fortran package dependency: every consumer fetches it; `fpm publish`
   is permanently off (CONTRIBUTING.md, "Why not the fpm registry?"); `tools/module_footprints.txt`
   counts this library's own files only.

@@ -20,9 +20,10 @@ build that will not link, a program that aborts, threading that does nothing.
   a narrow import can be configured without naming `parquet_settings`; that each is covered by the
   versioning promise in its own right; and the one caveat: no import makes the *package* Arrow-free.
 - [Error handling](error-handling.html) — the two failure classes (Fortran `error stop` and a
-  C++-level process exit), how to tell them apart by exit status, warnings, and asking with
-  `found=` instead of aborting; plus the context a message carries, why some of it arrives on the
-  other stream, what calling before open or after close does, and what re-opening a handle does.
+  C++-level process exit), how to tell them apart by exit status, warnings, and the four shapes a
+  call uses to report instead of aborting; plus the context a message carries, the `context=` you
+  can add to it, why some of it arrives on the other stream, what calling before open or after
+  close does, and what re-opening a handle does.
 - [Troubleshooting](troubleshooting.html) — build, link and runtime symptoms with their fixes,
   and what to put in a bug report.
 - [Thread safety](thread-safety.html) — the complete concurrency rules: per-thread readers and

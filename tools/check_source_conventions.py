@@ -11154,9 +11154,107 @@ def check_thread_safety_names_every_arrow_free_tier():
     return problems
 
 
+def check_error_page_names_every_supported_compiler():
+    """The error-handling page must name every compiler README says the suite is run against.
+
+    `doc/pages/operating/error-handling.md`'s "Fortran `error stop`" section tells a reader what
+    the abort line looks like, per compiler, because the prefix is the compiler's and not this
+    library's. It named three of the four: **ifx was missing**, and ifx is the one that prints no
+    prefix at all and exits 128 rather than 1 or 2 -- so a reader on the compiler least like the
+    others was the one told nothing. A count written beside the list it counts, or a list the
+    repository owns elsewhere, needs a check rather than careful reading
+    (`.claude/rules/documentation.md`).
+
+    **The set is read from README.md, not listed here**: the nested bullets under the
+    "Fortran compiler" item. Their bold labels give the names, and the written-out count in that
+    item ("run against four") is checked against how many bullets follow it -- a drift in either
+    direction is a finding.
+
+    **An alias is enough.** From `**NAG Fortran (nagfor)**` the check accepts `nagfor` or `NAG`,
+    from `**Intel Fortran (ifx)**` either `ifx` or `Intel`: the page is free to use the spelling
+    that reads best, and the generic word "Fortran" is never an alias.
+
+    **Blind means FAIL**: a README whose compiler list cannot be found or yields fewer than two
+    entries, and a page that has lost the section heading, are reported rather than passed.
+    """
+    problems = []
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    lines = readme.split("\n")
+    anchor = None
+    for i, line in enumerate(lines):
+        if re.match(r"^- Fortran compiler\b", line):
+            anchor = i
+            break
+    if anchor is None:
+        return ["README.md: no \"- Fortran compiler\" bullet -- this check cannot find the "
+                "supported-compiler list and is blind; re-anchor it deliberately"]
+
+    labels = []
+    for line in lines[anchor + 1:]:
+        if re.match(r"^[-#]", line) or (line.strip() and not line.startswith("  ")):
+            break
+        m = re.match(r"^\s+- \*\*(.+?)\*\*", line)
+        if m:
+            labels.append(m.group(1))
+    if len(labels) < 2:
+        return ["README.md: parsed %d compiler bullet(s) under \"- Fortran compiler\" -- this "
+                "check is blind" % len(labels)]
+
+    said = re.search(r"run against ([a-z]+)", lines[anchor])
+    if not said:
+        problems.append("README.md:%d: the \"Fortran compiler\" bullet no longer says how many "
+                        "compilers the suite is run against, so the count beside the list went "
+                        "unchecked. Restore it, or re-anchor this check." % (anchor + 1))
+    else:
+        stated = _NUMBER_WORDS.get(said.group(1))
+        if stated is None:
+            problems.append("README.md:%d: \"run against %s\" is not a number word this check "
+                            "knows; add it to _NUMBER_WORDS rather than leaving the count "
+                            "unchecked." % (anchor + 1, said.group(1)))
+        elif stated != len(labels):
+            problems.append("README.md:%d: says the suite is run against %s (%d) and %d compiler "
+                            "bullets follow it." % (anchor + 1, said.group(1), stated, len(labels)))
+
+    page_path = REPO_ROOT / "doc" / "pages" / "operating" / "error-handling.md"
+    page = page_path.read_text(encoding="utf-8")
+    head = "### Fortran `error stop`"
+    if head not in page:
+        return problems + ["doc/pages/operating/error-handling.md: no \"%s\" heading -- the "
+                           "section this check exists for is gone or renamed; re-anchor it "
+                           "deliberately" % head]
+    body = page.split(head, 1)[1]
+    cut = re.search(r"^#{2,3} ", body, re.M)
+    if cut:
+        body = body[:cut.start()]
+
+    for label in labels:
+        aliases = set()
+        paren = re.search(r"\(([^)]+)\)", label)
+        if paren:
+            aliases.add(paren.group(1).strip().lower())
+        words = [w for w in re.sub(r"\([^)]*\)", " ", label).split() if w.lower() != "fortran"]
+        for w in (words[:1] + words[-1:]):
+            aliases.add(w.strip().lower())
+        aliases = {a for a in aliases if len(a) >= 3}
+        if not aliases:
+            problems.append("README.md: compiler bullet \"%s\" yields no usable alias -- this "
+                            "check cannot look it up on the page" % label)
+            continue
+        if not any(re.search(r"\b%s\b" % re.escape(a), body, re.I) for a in aliases):
+            problems.append(
+                "doc/pages/operating/error-handling.md: \"%s\" is one of the %d compilers "
+                "README says the test suite is run against, and the \"Fortran `error stop`\" "
+                "section never names it (tried %s). A reader on that compiler cannot tell what "
+                "its abort line looks like or what it exits with; say so, or say that it was not "
+                "measured." % (label, len(labels), ", ".join(sorted(aliases))))
+    return problems
+
+
 CHECKS = (
     ("the spatial cell caps are named from their parameters",
      check_spatial_cell_caps_are_named_from_their_parameters),
+    ("the error-handling page names every compiler the suite is run against",
+     check_error_page_names_every_supported_compiler),
     ("the comment stripper's fast paths agree with its loop",
      check_comment_stripper_fast_paths_agree),
     ("every instruction citation names the file that carries the topic",

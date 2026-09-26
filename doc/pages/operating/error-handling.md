@@ -2,17 +2,24 @@
 title: Error handling
 ---
 
-This library reports failures through two distinct mechanisms, neither of which can be caught or
+This library ends a run through two distinct mechanisms, neither of which can be caught or
 recovered from once it fires (the first has one variant, described below, for a failure that
-reports through the logger). The reader, writer and schema surface has no status or `ierr` return
-code anywhere, so check inputs (file existence, column names, array bounds) before calling into it
-if you need to avoid aborting. **The `parquet_table` layer is the exception**: every one of its
-type-bound procedures that looks an existing column up by name takes an optional `found=`, and
-passing it turns what would abort into a reported miss. That covers the readers (`%get`, `%col`,
-`%get_slice`, `%get_element`), the mutators (`%set`, `%set_null`, `%drop_column`, `%cast` and the
-rest) and the metadata queries (`%kind`, `%width`, `%unit`, `%has_nulls`) alike. See
-[Asking about a column by position instead of by name](../tables/table.html#asking-about-a-column-by-position-instead-of-by-name)
-for the full list and for the three name-taking calls deliberately outside the rule.
+reports through the logger). **They are not the whole story.** A mistake in your code aborts; a
+condition in your data is reported back to you instead — through a `found=`, an `ok=`, a solver
+status or a NaN — and the program carries on.
+[Asking instead of aborting](#asking-instead-of-aborting) below is that half, and it covers most
+of the utility tiers.
+
+**The reader, writer and schema surface is the part with no middle ground**: it has no status or
+`ierr` return code anywhere, so check inputs (file existence, column names, array bounds) before
+calling into it if you need to avoid aborting. **The `parquet_table` layer is the exception**: every
+one of its type-bound procedures that looks an existing column up by name takes an optional
+`found=`, and passing it turns what would abort into a reported miss. That covers the readers
+(`%get`, `%col`, `%get_slice`, `%get_element`), the mutators (`%set`, `%set_null`, `%drop_column`,
+`%cast` and the rest) and the metadata queries (`%kind`, `%width`, `%unit`, `%has_nulls`) alike. See
+[Asking about a column by position instead of by
+name](../tables/table.html#asking-about-a-column-by-position-instead-of-by-name) for the full list
+and for the three name-taking calls deliberately outside the rule.
 
 ## The two failure classes
 
@@ -22,11 +29,11 @@ log** — it tells you which half of the library detected the problem, and the t
 
 ### Fortran `error stop`
 
-Prints your compiler's `ERROR STOP` line carrying the library's message, usually followed by a
-backtrace. Both the exact prefix and whether you get a backtrace are properties of your compiler and
-build flags rather than guarantees this library makes — gfortran writes `ERROR STOP <message>`, NAG
-`ERROR STOP: <message>`, flang `Fortran ERROR STOP: <message>`. What is the same everywhere is the
-message after it, which is the library's.
+Prints the library's message on standard error, usually behind a prefix your compiler chose and
+usually followed by a backtrace. Both the prefix and the backtrace are properties of your compiler
+and build flags rather than guarantees this library makes — gfortran writes `ERROR STOP <message>`,
+NAG `ERROR STOP: <message>`, flang `Fortran ERROR STOP: <message>`, and ifx writes the message with
+no prefix at all. What is the same everywhere is the message itself, which is the library's.
 
 This is the class used for precondition and validation failures this library's own Fortran code
 detects directly: a missing file, invalid MAML, an unknown column name, calling a reader/writer
@@ -63,10 +70,11 @@ This is the class used where the failing check happens on the C++/Arrow side of 
 
 ### One variant of the first class: a failure routed through the logger
 
-`pf_toml` — and anything else that reports through `parquet_logging` — reaches its fatal path by
-calling `pf_log_fatal` rather than `error stop` directly. That is still the first class above (it
-ends in a Fortran `ERROR STOP`), but three things about it differ from the description there, and
-all three matter when you are reading a log:
+`pf_toml` — and `pf_cosmology_from_toml` with it, and anything else that reports through
+`parquet_logging` — reaches its fatal path by calling `pf_log_fatal` rather than `error stop`
+directly. That is still the first class above (it ends in a Fortran `ERROR STOP`), but three
+things about it differ from the description there, and all three matter when you are reading a
+log:
 
 - **The message carries an extra prefix.** The abort line reads
   `pf_logger%fatal: ERR: <message>` after whatever your compiler puts in front, rather than the
@@ -91,13 +99,14 @@ Three things distinguish them, and the first is the one to reach for in a script
 | | Fortran `error stop` | C++-level exit |
 |---|---|---|
 | exit status | nonzero, and **never 134** | always exactly **134** |
-| first line | your compiler's `ERROR STOP` prefix, then `<message>` | `parquet-fortran: <procedure>: <message>` |
+| first line | your compiler's prefix if it writes one, then `<message>` | `parquet-fortran: <procedure>: <message>` |
 | backtrace | usually | never |
 
 **Test for 134, not for the other one.** The C++ status is exact because that path ends in an
 explicit `_Exit(134)`; the Fortran one is whatever your compiler chose for `ERROR STOP` — 1 with
-gfortran and flang, 2 with NAG — and the Fortran standard leaves it processor-dependent, so a script
-that keys on a particular value is testing its compiler rather than this library.
+gfortran and flang, 2 with NAG, 128 with ifx — and the Fortran standard leaves it
+processor-dependent, so a script that keys on a particular value is testing its compiler rather than
+this library.
 
 **134 is also what a shell reports for a process killed by `SIGABRT`**, so a wrapper that inspects
 only the exit code cannot tell a deliberate C++-side failure from a genuine crash. Read the stderr
@@ -135,6 +144,14 @@ Once a reader/writer/schema is far enough along to know it (i.e.
 — so a failure is identifiable even when a program has several readers/writers/schemas in play at
 once. This wording isn't a fixed contract (exact phrasing may change between releases); only the
 presence of file/schema context, where available, is intended to be relied on.
+
+**The utility tiers let you add context of your own.** Every entry point of the numerical and sky
+tiers — the solvers, integration, interpolation, the transforms, cosmology and its configuration
+reader — takes an optional `context=`, whose text is appended to any abort message that call
+produces, capped at 100 characters. It is for telling two call sites apart when the same routine
+is reached from several places. See [What aborts](../utilities/solvers.html#what-aborts) for the
+convention and [Configuration files](../utilities/configuration-files.html) for it on
+`pf_cosmology_from_toml`.
 
 **A configuration-file failure carries its context differently**, because it has something better
 to point at: `pf_toml` reports the offending **source line**, quoted, as part of the log record it
@@ -188,7 +205,37 @@ along. A `parquet_grouping` (`%group_by`), a `parquet_table_index` (`%build_inde
 - **Closed.** A `parquet_table_writer` used after its close stops with *"this output file has
   already been closed"*.
 
-## Asking instead of aborting: `found=`
+## Asking instead of aborting
+
+The rule from the top of this page decides which of the two a call gives you: an argument that
+cannot have been meant — a size mismatch, a tolerance that is not a number, a selector outside its
+set — stops the process, while a column that is not there, a sample with no spread, a search that
+runs out of budget or a coordinate outside a model's domain is an answer, handed back for you to
+test.
+
+Four shapes carry that answer, and the page named beside each owns the detail for its tier:
+
+| shape | says | where the detail is |
+|---|---|---|
+| `found=` | it was not there | the `parquet_table` calls below, `pf_toml_section`, and `pf_cosmology_from_toml` ([Configuration files](../utilities/configuration-files.html)) |
+| `ok=` | the answer is not defined for these values | the statistics tier ([What aborts, and what does not](../utilities/statistics.html#what-aborts-and-what-does-not)) and `pf_kde` ([What aborts](../utilities/kernel-density.html#what-aborts)) |
+| `converged=`, `info=` | the run ended, and here is how | the four solver modules ([The outcome](../utilities/solvers.html#the-outcome-converged-info-and-the-status-codes)) |
+| a quiet NaN | you asked outside the domain | the sky tier ([What is validated and what is not](../utilities/skycoord.html#what-is-validated-and-what-is-not)) and cosmology ([The domain](../utilities/cosmology.html#the-domain-and-what-is-not-a-number)) |
+
+Three things about that table are easy to get wrong:
+
+- **`ok=` is optional almost everywhere and mandatory on the three sky text parsers.**
+  `pf_str2ra`, `pf_str2dec` and `pf_str2radec` require it, because a parse that cannot fail is not
+  a parse.
+- **Running out of budget is not an error.** A solver that spends its `max_neval` reports `LIMIT`
+  rather than aborting, and `converged` is not a test for `status == OK`, since reaching a target
+  is a stopping rule like any other.
+- **A total procedure raises no floating-point flag.** A NaN argument gives a NaN answer quietly,
+  so a program running with the IEEE exceptions unmasked is not stopped by a column holding one.
+
+None of these four prints anything about the outcome it reports — a miss, a non-convergence or a
+NaN is handed back and nothing is said about it — and none is a third failure class: the two
+classes above are what a fatal failure uses, and these are what the library does instead of one.
 
 The reader, writer and schema surface has no way to say "tell me rather than stopping". The
 `parquet_table` layer does: pass `found=` to any call that looks an existing column up by name, as

@@ -44,7 +44,10 @@ module parquet_sphere
     use, intrinsic :: iso_fortran_env, only: int32, int64, real64
     use parquet_random, only: pf_random_stream, pf_random_key, pf_random_fill_draws, pf_random_int_at, &
         pf_random_pair_spare_at, pf_random_disc_cap
-    use parquet_healpix, only: pf_healpix_grid, PF_HP_RING, PF_HP_NEST, PF_HP_DEC_NORTH, PF_HP_DEC_SOUTH
+    use parquet_healpix, only: pf_healpix_grid, PF_HP_RING, PF_HP_NEST, PF_HP_DEC_NORTH, &
+        PF_HP_DEC_SOUTH, parquet_set_verbosity, parquet_get_verbosity, &
+        parquet_set_message_stream, parquet_get_message_stream, &
+        parquet_set_healpix_threads, parquet_get_healpix_threads
     use parquet_utils, only: pf_wrap_deg
     implicit none
     private
@@ -69,6 +72,20 @@ module parquet_sphere
     public :: PF_HP_RING, PF_HP_NEST, PF_HP_DEC_NORTH, PF_HP_DEC_SOUTH
     !> The two types the samplers take, so a program importing this module alone can declare them.
     public :: pf_healpix_grid, pf_random_stream
+    !
+    !> The output pair, on the same argument. Re-exporting `pf_healpix_grid` re-exports its `_bulk`
+    !! bindings, and those resolve a thread count through `parquet_clamp_to_affinity`, which says
+    !! so once per process when this process's CPU affinity is narrower than the count asked for.
+    !! So a program whose only import is `use parquet_sphere` can be made to print, and without
+    !! these it could not silence it without naming `parquet_settings` -- which would put the C++
+    !! boundary, and with it Arrow, back into an otherwise Arrow-free build.
+    public :: parquet_set_verbosity, parquet_get_verbosity
+    public :: parquet_set_message_stream, parquet_get_message_stream
+    !
+    !> The thread cap those same `_bulk` bindings read when `threads=` is absent
+    !! (`cfg_healpix_threads`, through `pf_healpix_threads`). It is the HEALPix tier's knob because
+    !! it is the HEALPix tier's work; this module opens no team of its own.
+    public :: parquet_set_healpix_threads, parquet_get_healpix_threads
     ! ---- Test-only observation and override hooks ----
     public :: parquet_debug_sphere_polygon_draw, parquet_debug_sphere_pixel_draw
     public :: parquet_debug_set_sphere_acceptance_floor

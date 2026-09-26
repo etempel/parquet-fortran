@@ -150,7 +150,7 @@ anything else.
 | `parquet_sampling` | `random_threads`, `random_parallel_min_elements` |
 | `parquet_spatial` | `spatial_threads`, the four sorting knobs, plus `verbosity` and `message_stream` |
 | `parquet_healpix` | `healpix_threads`, plus `verbosity` and `message_stream` — it can warn from a thread clamp |
-| `parquet_sphere` | none — it reads none, and prints nothing at all |
+| `parquet_sphere` | `healpix_threads`, plus `verbosity` and `message_stream` — its own code reads none and opens no team, but re-exporting `pf_healpix_grid` re-exports that type's `_bulk` bindings, which resolve a thread count and can warn from a thread clamp |
 | `parquet_skycoord` | none — it reads none, and prints nothing at all |
 | `parquet_index` | `index_threads`, the four sorting knobs (a `method="sorted"` build sorts through `pf_argsort`), plus `verbosity` and `message_stream` — it can warn from a thread clamp |
 | `parquet_argsort` | `sort_threads`, `sort_radix_path`, `sort_counting_path`, `sort_counting_bucket_limit`, plus `verbosity` and `message_stream` |

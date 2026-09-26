@@ -261,7 +261,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   same one block by taking its choice of a listed pixel from the bits the point leaves spare.
   `pf_radec2vec` and `pf_vec2radec` convert between degrees and unit vectors in a named declination
   frame, and `pf_fibonacci_grid` places `n` quasi-uniform directions. `pf_sky_region_algorithm`
-  freezes the samplers' values. An Arrow-free entry module. See
+  freezes the samplers' values. An Arrow-free entry module, re-exporting `healpix_threads` and the
+  `verbosity`/`message_stream` pair, since the `pf_healpix_grid` it re-exports carries `_bulk`
+  bindings that resolve a thread count and can warn from a thread clamp. See
   [Random points and geometry on the sphere](doc/pages/utilities/sphere.md).
 - **Celestial coordinate systems: `parquet_skycoord`.** `pf_icrs2gal`, `pf_gal2icrs`,
   `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal`, `pf_sgal2icrs`,

@@ -40,7 +40,11 @@ a block containing them is a description rather than a runnable example.
 `parquet_healpix`, `parquet_utils` and its own four — and never reaches this library's reader, its
 writer or its C++ bindings. The module re-exports `pf_healpix_grid`, `pf_random_stream` and the four
 HEALPix selectors (`PF_HP_RING`, `PF_HP_NEST`, `PF_HP_DEC_NORTH`, `PF_HP_DEC_SOUTH`), so one import
-is enough to call everything on this page. See [Choosing a module](../operating/choosing-a-module.html)
+is enough to call everything on this page. It also re-exports `healpix_threads` and the
+`verbosity`/`message_stream` pair, because the grid it hands you carries the `_bulk` conversions,
+and those resolve a thread count and can say so — see
+[Converting a whole array at once](healpix.html#converting-a-whole-array-at-once). See
+[Choosing a module](../operating/choosing-a-module.html)
 for the whole table. Everything here is also available through `use parquet`.
 
 ## Positions, vectors, and where the frame enters
@@ -279,7 +283,8 @@ before a parallel region serves the whole team, and nothing here holds state a t
 `%init` and `%clear` change the polygon and must not run while another thread reads it. **Build a
 polygon before the region, not in a `block` inside it**: `pf_sky_polygon` has allocatable components,
 and ifx cannot privatise such a type in a `block` within a parallel region. Nothing on this page
-prints, and nothing reads a setting.
+prints, and nothing here reads a setting — but the grid this module re-exports carries the `_bulk`
+conversions, which do both, which is why `healpix_threads` and the output pair are re-exported too.
 
 ## Limitations
 

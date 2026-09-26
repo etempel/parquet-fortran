@@ -395,12 +395,22 @@ contains
 end module test_module_surface_healpix
 
 !> `parquet_sphere` alone: a polygon and its draw, a pixel draw on a grid, a conversion, and the
-!> deliberate ABSENCE of any settings re-export.
+!> three knob pairs it re-exports because re-exporting `pf_healpix_grid` re-exports its `_bulk`
+!> bindings.
 !!
-!! **One library import, and it must stay that way.** The module reads no knob and prints nothing, so
-!! what it must carry is the vocabulary its procedures take: the HEALPix scheme and frame selectors and
-!! the grid and stream types, without which a program importing only this module could not call half
-!! of it. Declaring a `pf_healpix_grid` and a `pf_random_stream` here is what asserts those re-exports.
+!! **One library import, and it must stay that way.** What the module must carry is the vocabulary
+!! its procedures take: the HEALPix scheme and frame selectors and the grid and stream types,
+!! without which a program importing only this module could not call half of it. Declaring a
+!! `pf_healpix_grid` and a `pf_random_stream` here is what asserts those re-exports.
+!!
+!! **This module's own code reads no knob, and it still re-exports three pairs.** That is not a
+!! contradiction: `pf_healpix_grid` is re-exported, so its `_bulk` bindings are callable here, and
+!! those resolve a thread count -- from `threads=`, or from `healpix_threads` when it is absent --
+!! and clamp it through `parquet_clamp_to_affinity`, which says so once per process when the
+!! process's CPU affinity is narrower than the count asked for. A program whose only import is
+!! `use parquet_sphere` can therefore be made to print, so it must be able to quiet that and to
+!! bound the team, without naming `parquet_settings` -- which would put the C++ boundary, and with
+!! it Arrow, back into an otherwise Arrow-free build.
 module test_module_surface_sphere
     use parquet_sphere                 ! THE ONLY library import.
     use iso_fortran_env, only : int64, real64
@@ -417,10 +427,27 @@ contains
         type(pf_healpix_grid) :: grid
         type(pf_random_stream) :: rng
         real(real64) :: ra, dec, v(3)
-        integer(int64) :: ipix
+        real(real64) :: th(4), ph(4)
+        integer(int64) :: ipix, bulkpix(4)
+        integer :: cap
         character(len=:), allocatable :: algo
+        character(len=:), allocatable :: tok
 
         what = ""
+        ! The three knob pairs, each separately droppable from the `public ::` list above, and each
+        ! round-tripped so that a re-export naming a knob nothing can set would still be caught.
+        call parquet_set_verbosity("silent")
+        call parquet_get_verbosity(tok)
+        if (tok /= "silent") what = "verbosity"
+        call parquet_set_verbosity("normal")
+        call parquet_set_message_stream("stderr")
+        call parquet_get_message_stream(tok)
+        if (what == "" .and. tok /= "stderr") what = "message_stream"
+        call parquet_set_message_stream("stdout")
+        call parquet_set_healpix_threads(3)
+        cap = parquet_get_healpix_threads()
+        if (what == "" .and. cap /= 3) what = "healpix_threads"
+        call parquet_set_healpix_threads(0)
         call poly%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
         call poly%random_at(20260917_int64, 1_int64, ra, dec)
         if (.not. poly%contains(ra, dec)) what = "pf_sky_polygon%random_at drew a point outside the polygon"
@@ -435,6 +462,15 @@ contains
         if (what == "" .and. ipix /= 100_int64) what = "pf_random_pixel_at drew a point outside its pixel"
         call grid%init(8_int64, PF_HP_NEST, frame=PF_HP_DEC_SOUTH)
         if (what == "" .and. grid%frame() /= PF_HP_DEC_SOUTH) what = "PF_HP_NEST and PF_HP_DEC_SOUTH"
+
+        ! The reason the three knob pairs above are here at all: the re-exported grid's `_bulk`
+        ! bindings are callable from this one import, and they are what resolves and clamps a
+        ! thread count. Without this call the knob round-trips above would pass over a module that
+        ! could not reach an emitter, and the re-exports would be unjustified rather than wrong.
+        th = [0.5_real64, 1.0_real64, 1.5_real64, 2.0_real64]
+        ph = [0.0_real64, 1.0_real64, 2.0_real64, 3.0_real64]
+        call grid%ang2pix_bulk(th, ph, bulkpix, threads=2)
+        if (what == "" .and. any(bulkpix < 0_int64)) what = "pf_healpix_grid%ang2pix_bulk"
 
         ! The conversions against values the geometry fixes, so a procedure answering nonsense is caught.
         call pf_radec2vec(90.0_real64, 0.0_real64, v, frame=PF_HP_DEC_NORTH)
@@ -2623,7 +2659,8 @@ contains
                 test_spatial_surface), &
             new_unittest("parquet_healpix alone pixelises the sphere and exposes the output pair", &
                          test_healpix_surface), &
-            new_unittest("parquet_sphere alone draws in a polygon and a pixel, and exposes no setting", &
+            new_unittest("parquet_sphere alone draws in a polygon and a pixel, and exposes the "// &
+                         "output pair and the healpix thread cap", &
                          test_sphere_surface), &
             new_unittest("parquet_skycoord alone converts between every system and measures the sky", &
                          test_skycoord_surface), &

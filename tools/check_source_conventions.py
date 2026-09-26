@@ -982,12 +982,19 @@ def shared_emitter_region(path):
 def check_generated_table_windows_documented():
     """`generated-tables.md`'s window table and its two written-out counts match USER_WINDOWS.
 
-    The page carries the generator's window list three times -- a table of one row per window, and
-    the count spelled out under "Editing the generated module" and again under "A schema with no
-    fields" -- while `tools/generate_user_table_code.py` owns it once, as USER_WINDOWS. Nothing
-    compared them, and the count had drifted in one of the two places within a single change:
-    splitting `uses` into `uses` + `parameters` updated the first sentence and left the second
-    saying six.
+    The count lives in FOUR places and the generator owns it once, as USER_WINDOWS:
+    `generated-tables.md`'s table of one row per window, that page's count spelled out under
+    "Editing the generated module" and again under "A schema with no fields", and the
+    `generated-tables.html` bullet on `doc/pages/utilities/index.md`. Nothing compared them, and
+    the count has now drifted twice in consecutive changes: splitting `uses` into
+    `uses` + `parameters` updated the first sentence and left the second saying six, and the same
+    split left the index bullet saying six as well -- found by the index review a unit later,
+    because this check read only the one page.
+
+    **The fourth site is on another page, which is the whole reason it drifts.** A page review
+    opens the page it reviews; the index entry is a copy somewhere else, and B8's instruction to
+    update index entries in the same edit is exactly the kind of thing that gets missed. Checking
+    it here costs nothing and does not depend on anyone remembering.
 
     Order is compared too, not just membership. The list is the order the windows appear in the
     emitted file, and that order is load-bearing -- `uses` is above `implicit none` and
@@ -1036,6 +1043,36 @@ def check_generated_table_windows_documented():
         elif said != len(windows):
             problems.append("doc/pages/utilities/generated-tables.md: says '%s' windows; "
                             "generate_user_table_code.py emits %d" % (word, len(windows)))
+
+    # Fourth site: the utilities index bullet, which is a copy of the same count on a page the
+    # generated-tables review does not open. U14 split `uses` into `uses` + `parameters`, updated
+    # all three sites above, and left this one saying six -- so the count drifted again in the
+    # very change that added this check. Anchored on the bullet whose link target is the page,
+    # rather than on a line number or on the word "windows", which appears in the prose of
+    # several bullets.
+    index_path = REPO_ROOT / "doc" / "pages" / "utilities" / "index.md"
+    if not index_path.is_file():
+        problems.append("doc/pages/utilities/index.md: missing -- this check needs updating")
+        return problems
+    bullet = re.search(r"^- \[[^\]]*\]\(generated-tables\.html\)(.*?)(?=^- \[|\Z)",
+                       index_path.read_text(encoding="utf-8"), re.M | re.S)
+    if bullet is None:
+        problems.append(
+            "doc/pages/utilities/index.md: no bullet linking `generated-tables.html` -- the index "
+            "moved and this check has gone blind on its copy of the window count")
+        return problems
+    said_here = re.search(r"the ([a-z]+) windows in the generated file", bullet.group(1))
+    if said_here is None:
+        problems.append(
+            "doc/pages/utilities/index.md: its `generated-tables.html` bullet no longer says "
+            "'the N windows in the generated file' -- re-anchor this check deliberately rather "
+            "than letting the count go unread")
+    elif COUNTED_LIST_WORDS.get(said_here.group(1)) != len(windows):
+        problems.append(
+            "doc/pages/utilities/index.md: its `generated-tables.html` bullet says '%s' windows; "
+            "generate_user_table_code.py emits %d. The index is a fourth copy of this count and "
+            "drifts on its own -- fix the bullet, not this check."
+            % (said_here.group(1), len(windows)))
     return problems
 
 
@@ -2004,6 +2041,208 @@ def check_set_threads_fanout_documented():
             problems.append(
                 "doc/pages/operating/settings.md: parquet_set_threads calls `%s`, so `%s` should be "
                 "one of the rows below `PARQUET_FORTRAN_THREADS`, and it is not." % (setter, var))
+    return problems
+
+
+#: Guide pages whose narrative subject is one entry module, for the silence check below. Only the
+#: pages that carry a silence claim need an entry; an unmapped claim is a FAILURE, not a pass, so
+#: a new one cannot arrive unchecked. Asserted live: every page must exist and every module must
+#: be a section of tools/module_footprints.txt.
+SILENCE_PAGE_MODULE = {
+    "integration.html": "parquet_integrate",
+    "interpolation.html": "parquet_interpolate",
+    "cosmology.html": "parquet_cosmology",
+    "root-finding.html": "parquet_root",
+    "transforms.html": "parquet_transform",
+    "optimization.html": "parquet_optimize",
+    "prima.html": "parquet_prima",
+    "sphere.html": "parquet_sphere",
+    "skycoord.html": "parquet_skycoord",
+    "kernel-density.html": "parquet_kde",
+    "healpix.html": "parquet_healpix",
+    "spatial.html": "parquet_spatial",
+    "index-maps.html": "parquet_index",
+    "random.html": "parquet_random",
+    "logging.html": "parquet_logging",
+    "configuration-files.html": "parquet_toml",
+    "utils.html": "parquet_utils",
+    "sorting.html": "parquet_sorting",
+    "statistics.html": "parquet_stats",
+    "solvers.html": None,             # a conventions page, not a module's page
+    "generated-tables.html": None,    # a generator's page
+    "embedding-maml-schemas.html": None,
+}
+
+#: Every way this library can put a line in front of a user. `check_no_direct_printing` is what
+#: makes this list closed: it forbids a `print`/`write` anywhere else in `src/`, so a module that
+#: calls none of these cannot emit. `parquet_clamp_to_affinity` is here because it emits on its
+#: own account (its once-per-process affinity notice), and the `pf_log_*` family because
+#: `parquet_toml` and `parquet_cosmology_config` report through `parquet_logging` rather than
+#: through the settings channels.
+EMIT_CHANNELS = (
+    "parquet_emit_info", "parquet_emit_advice", "parquet_emit_warning", "parquet_emit_error_context",
+    "parquet_message_unit", "parquet_clamp_to_affinity", "parquet_auto_thread_count",
+    "pf_log_error", "pf_log_fatal", "pf_log_warn", "pf_log_info", "pf_log_debug", "pf_log_trace",
+)
+
+#: The files that DEFINE the channels above; calling one from inside its own home is not evidence
+#: that an importer can reach it.
+EMIT_DEFINERS = ("parquet_settings_base.f90", "parquet_logging.f90")
+
+
+def _modules_that_can_print():
+    """Entry module -> the files in its footprint that call an emit channel (empty means silent).
+
+    The footprint is what fpm compiles for a single-module import, which is a COMPILE closure and
+    not a namespace -- U14's lesson, recorded in feature_doc_group_generators.md: a name can be
+    compiled into a build without being in scope. So this OVER-approximates, and a module it calls
+    loud might in principle reach no emitter through its public surface. That is the safe
+    direction for a check on a claim of total silence, and the one case anyone doubted was
+    measured rather than argued: a `use parquet_sphere` program calling the re-exported grid's
+    `%ang2pix_bulk` under a narrowed CPU affinity really does print. A future false positive is
+    answered by naming the module and the reason, not by loosening the scan.
+    """
+    callers = set()
+    for path in sorted(SRC.glob("*.f90")):
+        if path.name in EMIT_DEFINERS:
+            continue
+        for line in path.read_text().split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("!") or re.match(r"(?i)^use\s", stripped):
+                continue
+            if any(re.search(r"\b%s\s*\(" % c, stripped) for c in EMIT_CHANNELS):
+                callers.add(path.name)
+                break
+    sections, current = {}, None
+    for line in (TOOLS / "module_footprints.txt").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        found = re.match(r"^\[(.+)\]$", line)
+        if found:
+            current = found.group(1)
+            sections[current] = []
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {m: sorted(f for f in files if f in callers) for m, files in sections.items()}, callers
+
+
+def check_silence_claims_match_the_footprints():
+    """A page saying a module prints nothing must be saying something true.
+
+    This is a CLAIMED ABSENCE, which is the shape a test cannot express and a reader cannot check:
+    the page promises that no line will ever appear, and the way to find out otherwise is to be
+    surprised by one in production. Nothing compared the claims with the code, and one of them was
+    wrong in each of the two places that make it -- `doc/pages/utilities/index.md` said "Nothing is
+    printed" of `parquet_optimize`, whose own page says in bold that its thread clamp can warn, and
+    `choosing-a-module.md` said `parquet_sphere` "prints nothing at all", which was measured false.
+
+    **Computed, not listed.** A module can print iff some file fpm compiles for a single-module
+    import of it calls one of EMIT_CHANNELS. Both halves are owned elsewhere and kept honest
+    elsewhere: `tools/module_footprints.txt` by
+    `check_module_tables_match_the_measured_footprints`, and the closedness of the channel list by
+    `check_no_direct_printing`, which forbids printing any other way. So this check adds no third
+    list to keep in step.
+
+    **A claim of silence may be qualified rather than simply true.** `parquet_prima`'s row says it
+    prints nothing and then names the one emitter it can reach and where to silence it, which is
+    honest and more useful than either half alone. So a claim is accepted when the module really
+    is silent OR when the same cell goes on to name the emitter.
+
+    **What it does NOT read**, stated so the limit is not mistaken for coverage: free prose. Two
+    sentences in the guide are scoped to something narrower than a module's closure --
+    `prima.md`'s "This tier prints nothing by design", about the vendored engines' own refusal to
+    warn where upstream would, and `solvers.md`'s "Nothing is printed on any of these paths", about
+    the status-reporting paths rather than the module. Binding a prose subject with a regex would
+    condemn both. The two sites read here are the ones where the module is unambiguous: a table row
+    whose first cell names it, and an index bullet whose link target names its page.
+
+    **It fails when blind.** No footprint sections, no emitter call anywhere in `src/`, no settings
+    table, no bullets, a page in SILENCE_PAGE_MODULE that does not exist, a module there that is
+    not a footprint section, and a silence claim on a page with no mapping -- each is reported
+    rather than passing quietly.
+    """
+    problems = []
+    can_print, callers = _modules_that_can_print()
+    if not can_print:
+        return ["tools/module_footprints.txt: no [module] sections parsed -- this check is blind"]
+    if not callers:
+        return ["src/: no file calls any of EMIT_CHANNELS -- the call shape has moved and this "
+                "check would pass every silence claim in the guide"]
+
+    pages = REPO_ROOT / "doc" / "pages"
+    for html, module in sorted(SILENCE_PAGE_MODULE.items()):
+        if not (pages / "utilities" / html.replace(".html", ".md")).is_file():
+            problems.append("tools/check_source_conventions.py: SILENCE_PAGE_MODULE names %s, "
+                            "which is not a page in doc/pages/utilities -- delete the entry" % html)
+        if module is not None and module not in can_print:
+            problems.append("tools/check_source_conventions.py: SILENCE_PAGE_MODULE maps %s to "
+                            "`%s`, which is not a section of tools/module_footprints.txt"
+                            % (html, module))
+    if problems:
+        return problems
+
+    # Site 1: choosing-a-module.md's settings table. The module is the row's first cell.
+    chooser = pages / "operating" / "choosing-a-module.md"
+    text = chooser.read_text()
+    table = re.search(r"^\| Import \| Settings it re-exports \|\n\|[-| ]+\|\n((?:\|.*\n)+)",
+                      text, re.M)
+    if table is None:
+        return ["doc/pages/operating/choosing-a-module.md: no `| Import | Settings it re-exports |`"
+                " table -- this check has gone blind on every row"]
+    seen = 0
+    for row in table.group(1).splitlines():
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if len(cells) != 2:
+            continue
+        name = re.fullmatch(r"`([a-z_]+)`", cells[0])
+        if name is None or name.group(1) not in can_print:
+            continue
+        seen += 1
+        if "prints nothing" not in cells[1] and "cannot print" not in cells[1]:
+            continue
+        loud = can_print[name.group(1)]
+        if loud and "emitter" not in cells[1]:
+            problems.append(
+                "doc/pages/operating/choosing-a-module.md: the row for `%s` claims it prints "
+                "nothing, but %s in its footprint call%s an emit channel. Either name the emitter "
+                "it can reach and where a caller silences it, which is what makes such a row "
+                "honest, or re-export the output pair and list it here."
+                % (name.group(1), " and ".join(loud), "" if len(loud) > 1 else "s"))
+    if seen == 0:
+        problems.append("doc/pages/operating/choosing-a-module.md: matched no `| `module` |` row "
+                        "against the footprints -- the table's shape moved")
+
+    # Site 2: the utilities index bullets. The module comes from the bullet's link target.
+    index_md = pages / "utilities" / "index.md"
+    bullets = re.findall(r"^- \[[^\]]*\]\(([a-z0-9-]+\.html)\)(.*?)(?=^- \[|\Z)",
+                         index_md.read_text(), re.M | re.S)
+    if not bullets:
+        problems.append("doc/pages/utilities/index.md: no bullets parsed -- this check has gone "
+                        "blind on the index's silence claims")
+    for html, body in bullets:
+        flat = re.sub(r"\s+", " ", body)
+        if "Nothing is printed" not in flat and "prints nothing" not in flat:
+            continue
+        if html not in SILENCE_PAGE_MODULE:
+            problems.append(
+                "doc/pages/utilities/index.md: the bullet for %s claims it prints nothing, and no "
+                "entry module is mapped to that page -- add one to SILENCE_PAGE_MODULE so the "
+                "claim is checked rather than trusted" % html)
+            continue
+        module = SILENCE_PAGE_MODULE[html]
+        if module is None:
+            problems.append(
+                "doc/pages/utilities/index.md: the bullet for %s claims it prints nothing, but "
+                "that page is mapped to no module, so the claim cannot be about one" % html)
+            continue
+        loud = can_print[module]
+        if loud:
+            problems.append(
+                "doc/pages/utilities/index.md: the bullet for %s says nothing is printed, but "
+                "`%s` reaches an emit channel through %s. Say what it can print and how to "
+                "silence it." % (html, module, " and ".join(loud)))
     return problems
 
 
@@ -10833,6 +11072,8 @@ CHECKS = (
     ("no statement exceeds 255 continuation lines", check_statement_continuation_lines),
     ("the affinity clamp's area names are documented", check_affinity_areas_documented),
     ("parquet_set_threads' fan-out count is documented", check_set_threads_fanout_documented),
+    ("a page saying a module prints nothing is telling the truth",
+     check_silence_claims_match_the_footprints),
     ("the entry-module settings table matches the re-exports",
      check_module_settings_reexports_documented),
     ("every %view call site declares its column target",

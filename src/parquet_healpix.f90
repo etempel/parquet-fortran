@@ -15,7 +15,7 @@
 !!
 !! **This module is Arrow-free by construction and that is the point of its tier.** It reaches
 !! `iso_fortran_env`, `ieee_arithmetic` and `parquet_settings_base`, and nothing else, so
-!! `use parquet_healpix` in a downstream project compiles six Fortran files rather than the
+!! `use parquet_healpix` in a downstream project compiles seven Fortran files rather than the
 !! sixty-odd the reader/writer stack costs. `check_parquet_healpix_stays_arrow_free`
 !! (tools/check_source_conventions.py) and `tools/module_footprints.txt` are what keep that true --
 !! a `use` line added here can silently multiply what every consumer compiles, and no test can see
@@ -293,7 +293,8 @@ module parquet_healpix
     !!   `nside` disappears from every call having been validated once.
     !!
     !! **The free procedures remain the primary API and this is sugar over them.** Every binding
-    !! delegates to one, so results are identical by construction rather than by test.
+    !! but `%pix2vec_offset` delegates to one, so results are identical by construction rather than
+    !! by test; `%pix2vec_offset`'s worker is private, so the object is the only way to reach it.
     !!
     !! **The delegation costs nothing measurable, and the one measurement that appeared to say
     !! otherwise was comparing two different computations.** `bench/benchmark_healpix.sh

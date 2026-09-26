@@ -38,7 +38,9 @@ library's reader, its writer or its C++ bindings. That is a statement about the 
 not about linking: `link` is a package-level key in `fpm.toml`, so every import of this package
 still compiles the C++ wrapper and still links `-larrow`. See
 [Which module do I import?](../operating/choosing-a-module.html) for the whole table. Everything
-documented on this page is also available through `use parquet`.
+documented on this page but [`pf_query_disc_runs`](#a-disc-as-runs-rather-than-as-pixels) is also
+available through `use parquet`; that one name the facade hides deliberately, and its own section
+says why.
 
 ## Two conventions to get right
 
@@ -105,8 +107,9 @@ cannot take. Everything else about them is the free bulk forms' behaviour.
 
 `call sky%pix2vec_offset(ipix, dx, dy, vec)` is `%pix2vec` generalised from the centre to any
 position within the pixel. `(dx, dy)` runs over the unit square: `(0.5, 0.5)` is the centre and
-reproduces `%pix2vec`, and `(0, 0)` and `(1, 1)` are opposite corners of the pixel's own square in
-the HEALPix projection plane.
+reproduces `%pix2vec` to rounding, and `(0, 0)` and `(1, 1)` are opposite corners of the pixel's
+own square in the HEALPix projection plane. It is the one binding with no free-procedure form, so
+the object is the only way to reach it.
 
 **That projection is equal-area, which is what makes this useful**: `(dx, dy)` uniform over the
 square is a direction uniform over the pixel per unit solid angle, in one step and with nothing
@@ -188,8 +191,8 @@ vector component of `-1` is perfectly ordinary, so `-1` would go unnoticed there
 floating-point exception is raised on that path either** — the sentinel is answered directly rather
 than by dividing by a zero `nside`.
 
-**The free procedures remain the primary API.** The object is sugar over them: every binding
-delegates to one, so the answers are identical by construction.
+**The free procedures remain the primary API.** The object is sugar over them: every binding but
+`%pix2vec_offset` delegates to one, so the answers are identical by construction.
 
 **Pick by what reads better.** The delegation costs a call and nothing more:
 `bench/benchmark_healpix.sh --mode=grid` measures each binding against the free procedure it calls,
@@ -326,7 +329,8 @@ and no per-candidate transcendental at all.
 For positions held as RA/Dec in degrees rather than vectors,
 [`pf_angdist_deg`](skycoord.html#angular-separations-offsets-and-position-angles) in
 `parquet_skycoord` computes the same angle directly, element by element and appreciably more
-cheaply than converting both positions to vectors first.
+cheaply than converting both positions to vectors first
+(`bench/benchmark_healpix.sh --mode=dist` measures both).
 
 ## What is validated and what is not
 
@@ -369,11 +373,13 @@ procedure's *answer* is a function of its arguments alone and can be called from
 threads with nothing to arrange. The scalar conversions are `pure`, so a loop over them threads
 with a plain `!$omp parallel do`.
 
-The one thing a `_bulk` call can do besides return a value is **warn, once per process**, when the
-thread count it resolved had to be lowered to the processors your CPU affinity mask actually
-allows. That warning is shared with every other part of the library that resolves a thread count,
-and it exists because nothing else reveals the situation: no call fails and no answer changes, only
-wall-clock. `parquet_healpix` re-exports `parquet_set_verbosity`/`parquet_get_verbosity` and
+The one thing a `_bulk` call can do besides return a value is **say so, once per process**, when
+the thread count it resolved had to be lowered to the processors your CPU affinity mask actually
+allows. That line is [advice](../operating/settings.html#terminal-output) rather than a warning, so
+`parquet_set_verbosity("silent")` stops it. It is shared with every other part of the library that
+resolves a thread count, and it exists because nothing else reveals the situation: no call fails
+and no answer changes, only wall-clock. `parquet_healpix` re-exports
+`parquet_set_verbosity`/`parquet_get_verbosity` and
 `parquet_set_message_stream`/`parquet_get_message_stream` for exactly this, so a program on the
 narrow import can silence or redirect it without importing `parquet_settings`.
 
@@ -483,7 +489,7 @@ This replaces round-tripping through angles to move between two resolutions, whi
 program running a coarse and a fine grid side by side would otherwise do. That detour is lossy;
 this is exact.
 
-## The three disc forms
+## The disc forms
 
 ```fortran
 call pf_query_disc(nside, vec, radius, listpix, nlist, [scheme], [inclusive])        ! your buffer
@@ -557,6 +563,40 @@ enumerate the same pixels in a different order. A `radius` at or above pi gives
 on a bad `nside`. A sizing routine that answered -1 would have you allocate a zero-length buffer and
 meet the real complaint one call later, naming the query rather than the mistake.
 
+### A disc as runs rather than as pixels
+
+```fortran
+call pf_query_disc_runs(nside, vec, radius, runs, nruns, [inclusive])
+```
+
+**RING numbering is contiguous along each ring, and a disc covers one arc of every ring it
+touches** — so a disc arrives naturally as a handful of slices of the pixel numbering rather than
+as a list of pixels. Column `k` of `runs` is one of those slices: `runs(1, k)` is its first RING
+pixel and `runs(2, k)` its length, so the run is `runs(1, k) .. runs(1, k) + runs(2, k) - 1`. They
+come back in the same ascending order `pf_query_disc` returns pixels in, because they are the
+walk's own runs rather than a decomposition computed afterwards. `runs` must have exactly two rows
+and the call **aborts** if it has not, which catches the one wrong shape that would otherwise look
+like a working call.
+
+**This is the form for anything that keeps a per-pixel index** — a bucketed point set, a mask, a
+coverage map — because such a structure wants a range rather than a pixel, and rebuilding the
+ranges from a pixel list afterwards is a second implementation of a decomposition this module
+already computed. It also never materialises the pixel list at all, which for a large disc is a
+real buffer. There is no `scheme` argument, and RING is the only scheme the question makes sense
+in: a NEST run is not contiguous.
+
+**A buffer too small is not an error here, which is the opposite of `pf_query_disc`'s rule.**
+`nruns` is the true number of runs whether or not there was room to store them, `runs` holds the
+first `size(runs, 2)` of them, and the remaining columns are left undefined — so read `nruns`
+before `runs`, and grow and re-query if it exceeded your buffer. The two forms differ because a
+run count is bounded by the rings a disc spans and is cheap to bound in advance, where a pixel
+count is not.
+
+**It is the one name on this page that `use parquet` does not give you.** The facade hides it
+deliberately: its own consumer is `parquet_spatial`'s HEALPix backend, turning one disc into
+contiguous slices of a bucketed point array, and a program that holds a pixel list has
+`pf_query_disc` for that. A caller who genuinely wants runs writes `use parquet_healpix`.
+
 ## Comparing angles without computing them
 
 ```fortran
@@ -629,8 +669,10 @@ the same on both, so that is what the rule is written in terms of. And the ceili
 than defensive: on a machine with several hundred processors, a team of nearly two hundred threads
 was measured costing **orders of magnitude more per element** than a plain serial loop on a
 ten-thousand-element array, entirely in libgomp's fork and join, while 64 threads was at or within
-noise of the best figure at every size measured. An explicit `threads=` overrides all of it,
-including the ceiling, on the rule that an explicit argument always wins.
+noise of the best figure at every size measured. An explicit `threads=` overrides the work rule and
+the ceiling, on the rule that an explicit argument always wins — but not the affinity mask, which
+clamps an explicit request exactly as it clamps an automatic one, because opening more threads than
+the mask allows is slower than not threading at all.
 
 **The process-wide cap is `parquet_set_healpix_threads(n)`, and it replaces that ceiling rather
 than the rule.** The team is still derived from the work in front of it — one thread per thousand

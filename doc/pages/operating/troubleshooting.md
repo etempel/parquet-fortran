@@ -3,13 +3,14 @@ title: Troubleshooting
 ---
 
 Symptoms and fixes for the things most likely to go wrong when you build a program against this
-library: a build that cannot find Arrow, a link that cannot resolve it, a program that builds but
-will not start, and one compiler bug that looks like a data problem. The last section says what to
-include in a bug report. See [Environment variables](../../index.html#environment-variables) in the
-README for the full list of the **build-time** variables named below, and
-[Prerequisites](../../index.html#prerequisites) for the versions this library needs. The library's
-own **run-time** variables are a separate family, `PARQUET_FORTRAN_*`, listed under
-[Setting from the environment](settings.html#setting-from-the-environment).
+library: a build that cannot find Arrow, a link that cannot resolve it, a program that builds
+cleanly and then will not start or dies in your own callback, and one compiler bug that looks like
+a data problem. The last section says what to include in a bug report. See [Environment
+variables](../../index.html#environment-variables) in the README for the full list of the
+**build-time** variables named below, and [Prerequisites](../../index.html#prerequisites) for the
+versions this library needs. The library's own **run-time** variables are a separate family,
+`PARQUET_FORTRAN_*`, listed under [Setting from the
+environment](settings.html#setting-from-the-environment).
 
 ## Build and compile errors
 
@@ -46,7 +47,10 @@ own **run-time** variables are a separate family, `PARQUET_FORTRAN_*`, listed un
   **`fatal error: 'arrow/api.h' file not found`** (Clang's), and likewise for
   `parquet/arrow/reader.h` — `FPM_CXXFLAGS` is not pointing `-I` at Arrow's `include` directory.
   It is `FPM_CXXFLAGS` specifically: these are C++ headers, included only by
-  `src/parquet_wrapper.cpp`, so an `-I` that reaches only `FPM_FFLAGS` does not fix this.
+  `src/parquet_wrapper.cpp`, so an `-I` that reaches only `FPM_FFLAGS` does not fix this. Arrow is
+  needed whatever you import: `link` is a package-level key and fpm cannot prune a C++ translation
+  unit, so a program whose only `use` is an Arrow-free tier compiles that file too — see
+  [Choosing a module](choosing-a-module.html#the-one-caveat-first).
 - **A compile error naming `arrow/compute/api.h`** (or another `arrow/compute/*.h` header) **when
   `arrow/api.h` itself was found** — Arrow ships its compute kernels as a *separate package*, and
   that is the one missing. On Debian/Ubuntu install `libarrow-compute-dev` alongside `libarrow-dev`
@@ -92,11 +96,24 @@ own **run-time** variables are a separate family, `PARQUET_FORTRAN_*`, listed un
   precondition. See [Error handling](error-handling.html#the-two-failure-classes) for how to tell
   them apart, and for the `found=` argument that reports a miss instead of aborting.
 - **A spurious "column not found" abort at runtime, with a plausible-looking column name that
-  doesn't match anything in the schema** — this is not a real missing-column bug: gfortran 11 and
-  earlier (e.g. Ubuntu 22.04's default compiler) miscompile the optional deferred-length allocatable
-  `character` argument returned by `schema%add_col_qc` / `schema%set_col_qc`, corrupting the
-  returned column name at runtime rather than failing to build. Use gfortran 13 or newer (see
+  doesn't match anything in the schema** — this is not a real missing-column bug: gfortran before
+  13 (e.g. Ubuntu 22.04's default compiler, which is 11) miscompiles the optional deferred-length
+  allocatable `character` argument returned by `schema%add_col_qc` / `schema%set_col_qc`, corrupting
+  the returned column name at runtime rather than failing to build. Use gfortran 13 or newer (see
   [Prerequisites](../../index.html#prerequisites) in the README).
+- **A segmentation fault whose backtrace is bare addresses with no frame named**, at or inside the
+  first call into a solver or a grouping reducer, from a program that built without a single
+  message — the callback you supplied is an **internal procedure**, one written after a `contains`
+  inside a program or another procedure. gfortran gives such a procedure a trampoline on the stack,
+  so the binary demands an executable stack and a system that refuses one kills it before your
+  callback body runs; flang cannot pass one as a callback at all on some platforms. Two things
+  confirm it without a debugger: `readelf -l <your program>` reports `RWE` rather than `RW` on the
+  `GNU_STACK` line, and fpm's own `build/<tree>/app/<program>.log` holds a
+  `requires executable stack` warning that fpm itself never prints. Move the procedure into a
+  module and carry its context in module variables, or use the object form. Both spellings are on
+  [Solver conventions](../utilities/solvers.html#a-module-procedure-never-an-internal-one) for the
+  four solver modules and on [Grouping rows](../tables/table-group.html#the-procedure-form) for
+  `parquet_table%apply` and `%agg`.
 
 ## Filing a bug report
 

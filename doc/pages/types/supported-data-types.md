@@ -186,14 +186,15 @@ letting Arrow itself throw an uncaught `IOError: List index overflow` mid-write.
 
 ## Column-count limit
 
-A file is capped at 2,147,483,647 columns — the third and last of Arrow's hard `int32` ceilings,
-alongside the two above. `arrow::Schema::num_fields()` and `GetFieldIndex()` return a plain
-`int32_t`, and unlike a column's row count there is no 64-bit or "large" variant to fall back to.
-Writing a column that would push the file's column count past this aborts the process (a C++-level
-abort with a diagnostic on stderr, the same class of failure as the two cases above) rather than
-letting Arrow's own field bookkeeping wrap silently. Reaching it takes an enormous amount of memory
-and time first — every column carries its own name, type and metadata — so unlike the `col_size`
-ceiling it is not a limit you meet by accident.
+A file is capped at 2,147,483,647 columns — the third of Arrow's hard `int32` ceilings, alongside
+the two above; the fourth is a map column's total entry count, on [Map
+columns](map-columns.html#the-entry-count-ceiling). `arrow::Schema::num_fields()` and
+`GetFieldIndex()` return a plain `int32_t`, and unlike a column's row count there is no 64-bit or
+"large" variant to fall back to. Writing a column that would push the file's column count past this
+aborts the process (a C++-level abort with a diagnostic on stderr, the same class of failure as the
+two cases above) rather than letting Arrow's own field bookkeeping wrap silently. Reaching it takes
+an enormous amount of memory and time first — every column carries its own name, type and metadata —
+so unlike the `col_size` ceiling it is not a limit you meet by accident.
 
 ## Reading a column into a different numeric kind
 

@@ -202,10 +202,18 @@ RESERVED = {
 # The names THIS generator adds to the type on top of the inherited ones.
 GENERATED_BINDINGS = {"init", "init_slice", "init_empty", "init_extra"}
 
-# The six user-editable windows, in the order they appear in the emitted file. Their content is
+# The seven user-editable windows, in the order they appear in the emitted file. Their content is
 # lifted out of an existing file and put back verbatim; the marker lines themselves are generated,
 # so their guidance text can be improved without a user having to do anything.
-USER_WINDOWS = ["uses", "components", "bindings", "init_extra", "clone_extra", "procedures"]
+#
+# `uses` and `parameters` are two windows rather than one because Fortran's specification part is
+# ordered USE -> IMPORT -> IMPLICIT -> declarations, so no single position can take both: a `use`
+# below `implicit none` is rejected with "USE statement cannot follow attribute declaration
+# statement", and a parameter above it is rejected with "IMPLICIT NONE cannot follow data
+# declaration statement". `uses` therefore sits above `implicit none` and `parameters` below it.
+# See migrate_uses_window below for what that means for a file written before the split.
+USER_WINDOWS = ["uses", "parameters", "components", "bindings", "init_extra", "clone_extra",
+                "procedures"]
 
 WINDOW_START = re.compile(r"^\s*!\s*>>>>>\s*USER SECTION \((\w+)\)")
 WINDOW_END = re.compile(r"^\s*!\s*>>>>>\s*END USER SECTION \((\w+)\)")
@@ -495,9 +503,13 @@ def extract_windows(text, path):
     state in which rewriting the file would silently destroy user code.
     """
     found, open_id, buf = {}, None, []
+    starts_at, implicit_at = {}, None
     for lineno, line in enumerate(text.splitlines(), start=1):
+        if implicit_at is None and line.strip().lower().startswith("implicit none"):
+            implicit_at = lineno
         ms, me = WINDOW_START.match(line), WINDOW_END.match(line)
         if ms:
+            starts_at[ms.group(1)] = lineno
             if open_id is not None:
                 raise MamlError(f"{path}:{lineno}: USER SECTION ({ms.group(1)}) starts while "
                                 f"({open_id}) is still open")
@@ -521,6 +533,20 @@ def extract_windows(text, path):
             buf.append(line)
     if open_id is not None:
         raise MamlError(f"{path}: USER SECTION ({open_id}) is never closed")
+    # MIGRATION, from before `uses` and `parameters` were two windows. Such a file has one window
+    # named `uses`, BELOW `implicit none`, and no `parameters`. Whatever its marker said, that
+    # position could never hold a `use` statement, so its content is declarations and belongs in
+    # `parameters` -- which is emitted at exactly the position the old window already occupies, so
+    # the content does not move at all. The new `uses` window comes out empty.
+    #
+    # Gated on the POSITION of the marker, not merely on `parameters` being absent: in a file
+    # written after the split, `uses` is above `implicit none`, and a missing `parameters` there
+    # means a deleted window, which must stay the hard error below rather than silently relocating
+    # `use` statements to where they will not compile.
+    if (found and "parameters" not in found and "uses" in found and
+            implicit_at is not None and starts_at.get("uses", 0) > implicit_at):
+        found["parameters"] = found.pop("uses")
+        found["uses"] = []
     missing = [w for w in USER_WINDOWS if w not in found]
     if missing and found:
         raise MamlError(f"{path}: these USER SECTIONs are missing: {', '.join(missing)}; restore "
@@ -730,25 +756,36 @@ def render(schema, windows):
                                 "columns."))
     w(f"module {schema.dataset}")
     # THE THREE ENTRY MODULES THIS EMITTED CODE NEEDS, rather than the `parquet` facade, so that
-    # embedding a table type costs a project reading/writing plus the table and column tiers and
-    # not the whole library (sorting, random, sampling, stats, the sky and numerics tiers). Each
-    # is load-bearing for every schema this script can emit: parquet_tables for parquet_table
+    # embedding a table type costs a project 100 of this library's Fortran files rather than all
+    # 159. What it drops is the outer facade, parquet_sampling, parquet_logging, parquet_toml,
+    # parquet_version, the four sky tiers and the eight numerics tiers. What it does NOT drop --
+    # because parquet_tables reaches them, and naming them here as savings would be wrong -- is
+    # the sorting engine (9 files), the statistics tier (6) and parquet_random (1, which the
+    # reader needs for sample_fraction=). doc/pages/operating/choosing-a-module.md carries the
+    # per-module counts and the check that keeps them honest. Each of the three is load-bearing
+    # for every schema this script can emit: parquet_tables for parquet_table
     # itself, parquet_columns for the PK_* discriminators and parquet_column, parquet_io for
     # parquet_schema/parquet_filter/parquet_read_qc/parquet_sortkey and the string and temporal
     # element types the accessors return. Code a user writes in the USER SECTIONs below may need
-    # more than these three; the `uses` window directly beneath is where it says so.
+    # more than these three; the `uses` window directly beneath is where it says so, and it is
+    # above `implicit none` because that is the only place a `use` statement is legal.
     w("    use parquet_io")
     w("    use parquet_tables")
     w("    use parquet_columns")
     # The four kinds every constructor signature needs (row bounds, sample_fraction,
     # sample_seed), plus whatever the accessors declare. The imports above do not re-export them.
     w("    use iso_fortran_env, only : int32, int64, real32, real64")
+    o.extend(fill_window("    ", "uses",
+                         "your own use statements; preserved on regeneration",
+                         windows.get("uses", [])))
     w("    implicit none")
     w("    private")
     w(f"    public :: {t}")
-    o.extend(fill_window("    ", "uses",
-                         "your own use/parameter declarations; preserved on regeneration",
-                         windows.get("uses", [])))
+    # Module parameters cannot share the `uses` window: they have to come AFTER `implicit none`,
+    # and a `use` has to come before it.
+    o.extend(fill_window("    ", "parameters",
+                         "your own module parameters; preserved on regeneration",
+                         windows.get("parameters", [])))
     w("")
     o.extend(wrap_doc("    ", "!>", f"Predefined-column table generated from the "
                                     f"`{schema.table}` schema."))
@@ -1529,6 +1566,57 @@ def self_test():
         gone = "\n".join(ln for ln in text.splitlines() if "USER SECTION (uses)" not in ln)
         expect_error(lambda: build(maml, out, gone), "are missing",
                      "a deleted window should be a hard error")
+
+        # --- the uses/parameters split, and the one-way migration into it -------------
+        # Both halves are asserted by POSITION, not merely by presence: the whole reason there
+        # are two windows is that Fortran puts `use` above `implicit none` and a parameter
+        # declaration below it, so a version of this that only counted markers would pass while
+        # emitting a module no compiler accepts.
+        u_at = text.index("USER SECTION (uses)")
+        p_at = text.index("USER SECTION (parameters)")
+        i_at = text.index("\n    implicit none")
+        check(u_at < i_at < p_at,
+              "the uses window belongs above `implicit none` and parameters below it")
+
+        # A file from before the split: one window named `uses`, sitting where `parameters` sits
+        # now, holding what is necessarily a declaration. Its content must arrive in
+        # `parameters` -- the same position it already occupied -- and the new `uses` must come
+        # out empty, with no missing-window error on the way.
+        pre_split = text.replace(
+            "    ! >>>>> USER SECTION (uses) -- your own use statements; preserved on "
+            "regeneration\n    ! >>>>> END USER SECTION (uses)\n", "")
+        pre_split = pre_split.replace(
+            "    ! >>>>> USER SECTION (parameters) -- your own module parameters; preserved on "
+            "regeneration",
+            "    ! >>>>> USER SECTION (uses) -- your own use/parameter declarations; preserved "
+            "on regeneration\n    integer, parameter :: legacy_batch = 64")
+        pre_split = pre_split.replace("    ! >>>>> END USER SECTION (parameters)",
+                                      "    ! >>>>> END USER SECTION (uses)")
+        check("USER SECTION (parameters)" not in pre_split and
+              pre_split.count("USER SECTION (uses)") == 2,
+              "the pre-split fixture should carry one `uses` window and no `parameters` one")
+        _pm, migrated, _sm = build(maml, out, pre_split)
+        check("legacy_batch = 64" in migrated, "a pre-split window's content must survive")
+        m_u = migrated.index("USER SECTION (uses)")
+        m_p = migrated.index("USER SECTION (parameters)")
+        m_i = migrated.index("\n    implicit none")
+        check(m_p < migrated.index("legacy_batch") < migrated.index("END USER SECTION "
+                                                                    "(parameters)"),
+              "a pre-split window's content belongs in `parameters` after migration")
+        check(m_u < m_i, "the migrated-in `uses` window still sits above `implicit none`")
+        check(migrated[m_u:m_i].count("legacy_batch") == 0,
+              "migration must not lift a declaration above `implicit none`")
+
+        # The gate is the marker's POSITION, so a post-split file whose `parameters` window was
+        # deleted is still the hard error -- migrating there would move real `use` statements
+        # below `implicit none`, where they do not compile.
+        with_use = text.replace(
+            "    ! >>>>> END USER SECTION (uses)",
+            "    use iso_c_binding\n    ! >>>>> END USER SECTION (uses)")
+        dropped = "\n".join(ln for ln in with_use.splitlines()
+                            if "USER SECTION (parameters)" not in ln)
+        expect_error(lambda: build(maml, out, dropped), "are missing",
+                     "a deleted `parameters` window must not migrate a real `use` downwards")
 
         # --- a user binding colliding with a generated accessor is refused ------------
         clash = text.replace(

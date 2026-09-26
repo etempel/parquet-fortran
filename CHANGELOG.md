@@ -330,8 +330,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `tools/generate_parquet_maml_base.sh`, which is internal to this library. Regenerate and commit
   your own generated modules to pick this up; code you have written in a generated table type's
   `USER SECTION` windows may need a `use` line of its own in the `uses` window.
+- **A generated table type has a seventh user window, `parameters`, and its `uses` window has
+  moved above `implicit none`.** Fortran orders the specification part USE, then IMPLICIT, then
+  declarations, so one window could never hold both a `use` statement and a module parameter: the
+  `uses` window sat below `implicit none`, where a `use` does not compile. Now `uses` takes `use`
+  statements above `implicit none` and `parameters` takes module parameters below it. Your next
+  regeneration migrates an older file for you — whatever its `uses` window held comes back in
+  `parameters`, at the same place in the file, and the new `uses` window arrives empty.
 
 ### Fixed
+
+- Both MAML generators refuse a schema holding a non-ASCII character, naming the file, the line
+  and the code point. `tools/generate_parquet_maml.sh` and `tools/generate_parquet_maml_base.sh`
+  embed every MAML line as a Fortran character literal and write the module as ASCII, so a byte
+  above 127 ended the run in a `UnicodeEncodeError` traceback — after the output file had already
+  been truncated to zero bytes, leaving an empty `src/parquet_maml.f90` behind and naming no
+  schema.
 
 - `pf_integrate` finds a narrow feature sitting just above a lower bound of zero. The outward
   walk's search for a first panel retries a much NARROWER panel before it starts widening, which

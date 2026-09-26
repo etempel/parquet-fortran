@@ -17,11 +17,13 @@ module parquet_table_example
     use parquet_tables
     use parquet_columns
     use iso_fortran_env, only : int32, int64, real32, real64
+    ! >>>>> USER SECTION (uses) -- your own use statements; preserved on regeneration
+    ! >>>>> END USER SECTION (uses)
     implicit none
     private
     public :: parquet_table_test
-    ! >>>>> USER SECTION (uses) -- your own use/parameter declarations; preserved on regeneration
-    ! >>>>> END USER SECTION (uses)
+    ! >>>>> USER SECTION (parameters) -- your own module parameters; preserved on regeneration
+    ! >>>>> END USER SECTION (parameters)
 
     !> Predefined-column table generated from the `test` schema.
     type, extends(parquet_table) :: parquet_table_test

@@ -154,8 +154,14 @@ Each of these is a message and a nonzero exit, before anything is written:
 - **Two schemas sharing a filename**, anywhere in the tree, or two whose names differ only in case
   or punctuation. The script names both files and writes nothing. Allowed to run, it would emit a
   module with a duplicated accessor in it, and your build would fail on a line naming neither file.
+- **A non-ASCII character in a schema**, named with its file, line and code point. Every MAML line
+  is embedded as a Fortran character literal, and those are ASCII — write `deg` rather than `°`.
 - **An invalid `--module` name.** A Fortran module name is letters, digits and underscores,
   starting with a letter, and at most 63 characters.
+- **An argument it does not recognise**, including the `base` positional an older version of this
+  script accepted — `generate_parquet_maml.sh: unknown argument '<arg>'`, followed by the usage
+  line. `base` mode lives in `tools/generate_parquet_maml_base.sh`, which is internal to this
+  library and generates its bundled schemas, not yours.
 
 At run time, `get_parquet_maml` `error stop`s on a name it does not have, with
 `get_parquet_maml: unknown internal MAML file: <name>`.

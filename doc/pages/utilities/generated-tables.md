@@ -246,7 +246,7 @@ did not declare, and `%init` then fails on the first *missing* one instead.
 
 ## Editing the generated module
 
-The generated file has **six user windows**, marked like this:
+The generated file has **seven user windows**, marked like this:
 
 ```fortran
     ! >>>>> USER SECTION (components) -- your own table parameters; preserved on regeneration
@@ -255,12 +255,20 @@ The generated file has **six user windows**, marked like this:
 
 | window | for |
 |---|---|
-| `uses` | extra `use` statements and module parameters |
+| `uses` | extra `use` statements — the one window above `implicit none` |
+| `parameters` | your own module parameters |
 | `components` | your own table parameters |
 | `bindings` | your own type-bound procedures |
 | `init_extra` | your own initialization, run by every constructor |
 | `clone_extra` | anything the generator could not copy for you |
 | `procedures` | your own procedure bodies |
+
+**`uses` and `parameters` are two windows because Fortran will not let them be one.** A `use`
+statement has to come before `implicit none` and a parameter declaration after it, so the first
+window sits above the module's `implicit none` and the second below it. Put a `use` in
+`parameters` and the compiler answers *"USE statement cannot follow attribute declaration
+statement"*; put a parameter in `uses` and it answers *"IMPLICIT NONE statement cannot follow data
+declaration statement"*.
 
 Everything outside them is regenerated. **Never delete or reorder a marker**: the generator reads
 the windows out of the existing file before rewriting it, so a missing marker is a hard error (it
@@ -270,6 +278,12 @@ There is one exception, and it is the case that costs you work rather than repor
 **no markers at all** is treated as a fresh start and regenerated whole. That is the documented way
 to start over — delete the file, or delete every marker — but it means the hard error above protects
 you only while at least one marker survives.
+
+A file generated before `uses` and `parameters` were separate has one window named `uses`, in the
+place `parameters` occupies now. Regenerating moves its content into `parameters` and leaves the
+new `uses` window empty — the content does not move in the file, only the marker around it
+changes, and nothing you wrote can have been a `use` statement, because that position never
+accepted one. You need do nothing; commit the result as usual.
 
 ### Adding your own state, and keeping `%clone` correct
 
@@ -341,9 +355,24 @@ table-facing name in your schema.
 ## A schema with no fields
 
 An empty (or absent) `fields:` is valid, and generates a **bare `parquet_table` extension**: the
-type, all three constructors, both hooks and all six windows, with no accessors and nothing
+type, all three constructors, both hooks and all seven windows, with no accessors and nothing
 predefined. That is a useful starting point if you want your own named table type with your own
 parameters and procedures, over columns you will reach by name.
+
+## What the generated module depends on
+
+The generated module imports three of this library's entry modules — `parquet_io`,
+`parquet_tables` and `parquet_columns` — plus `iso_fortran_env` for the kinds its constructors and
+accessors declare. It does not `use parquet`, so a project that embeds a table type does not also
+compile the sampling, logging, configuration, sky and numerics tiers.
+[Choosing a module](../operating/choosing-a-module.html) says what each of the three costs; the
+figures are not repeated here, because a copy of them is a copy that will disagree.
+
+**Code you write in a `USER SECTION` window may need a `use` line of its own.** Those three
+modules export a good deal less than `use parquet` does, and a name being *compiled* into your
+project is not the same as its being in scope: `pf_sort`, `pf_mean` and everything in the sky and
+numerics tiers are out of scope inside the generated module. Write the `use` in the
+[`uses` window](#editing-the-generated-module), which is the one above `implicit none`.
 
 ## What the library side does
 
@@ -411,9 +440,9 @@ directly.
 `parquet_table_example`, holding `type :: parquet_table_test` — which ships with the library as a
 worked example. Nothing else in the library uses it; it is there to be read, and to be exercised by
 the `table_codegen` test suite, which drives every emitted accessor shape across its fourteen
-declared columns: all five specifics of each of the twelve numeric and temporal ones, both forms of
-the scalar `string` one, and the copy-out form that is all a `string` vector column has. It is
-generated, committed and `--check`ed like any other generated file, so it is
+declared columns: all five specifics of each of the twelve numeric, logical and temporal ones, both
+forms of the scalar `string` one, and the copy-out form that is all a `string` vector column has.
+It is generated, committed and `--check`ed like any other generated file, so it is
 also a live demonstration that the round trip works: its `components` window carries a `zeropoint`
 parameter, and the `clone_extra`/`init_extra` statements next to it were written by the generator
 from that declaration.

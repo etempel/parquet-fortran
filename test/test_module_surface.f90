@@ -2435,7 +2435,60 @@ contains
 
 end module test_module_surface_kde
 
+!> `parquet_table_example` alone: the `generated_table_quickstart` example on
+!! doc/pages/utilities/generated-tables.md, compiled with exactly the two `use` lines the page
+!! shows.
+!!
+!! **This module is here for what it does NOT import, like every other one in this file, and it is
+!! the only one whose subject is not an entry module.** The page's example is already mirrored, by
+!! `test_generated_table_quickstart_example` in test/test_examples.f90, which asserts the three
+!! values its trailing comment prints. But that module opens `use parquet`, so every name in the
+!! library is in scope there and the mirror cannot notice the page's own import list becoming
+!! insufficient -- the property this file exists to assert, stated in its own header above. The
+!! narrowing that made it matter is the generated module's: it imports `parquet_io`,
+!! `parquet_tables` and `parquet_columns` rather than the facade, so `pf_sort`, `pf_mean` and the
+!! sky and numerics tiers are no longer in scope inside it, and the next line added to that
+!! example may well need a third `use`.
+!!
+!! So this is a COMPILE test first: an example needing a name these two imports do not provide
+!! stops building, the way `test_facade_covers_every_layer` does. The value assertions are here so
+!! the calls cannot be optimised away, and they are the same three the page prints.
+module test_module_surface_generated_table
+    use parquet_table_example, only : parquet_table_test   ! THE ONLY library import.
+    use iso_fortran_env, only : int64, real64
+    implicit none
+    private
+    public :: check_generated_table_surface
+
+contains
+
+    !> Runs the page's quickstart with the page's own `use` list and nothing else.
+    subroutine check_generated_table_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+
+        type(parquet_table_test) :: t
+        real(real64), pointer :: ra(:), one
+
+        what = ""
+
+        ! The example, statement for statement.
+        call t%init_empty(3)
+        call t%set("uberid", [101_int64, 102_int64, 103_int64])
+        call t%set("ra", [10.5_real64, 20.25_real64, 30.125_real64])
+        ra  => t%ra()
+        one => t%ra(2)
+
+        ! The three values its trailing comment shows: `3 20.250000 20.291667`.
+        if (t%nrows() /= 3_int64) what = "%nrows() is not 3"
+        if (what == "" .and. abs(one - 20.25_real64) > 1.0e-12_real64) what = "%ra(2) is not 20.25"
+        if (what == "" .and. abs(sum(ra) / t%nrows() - 20.291666666666668_real64) &
+            > 1.0e-9_real64) what = "sum(ra) / %nrows() is not 20.291667"
+    end subroutine check_generated_table_surface
+
+end module test_module_surface_generated_table
+
 module test_module_surface
+    use test_module_surface_generated_table, only : check_generated_table_surface
     use test_module_surface_io, only : check_io_surface
     use test_module_surface_argsort, only : check_argsort_surface
     use test_module_surface_sorting, only : check_sorting_surface
@@ -2611,8 +2664,20 @@ contains
             new_unittest("parquet_struct alone builds, reads and adopts a struct column", &
                 test_struct_surface), &
             new_unittest("parquet_map alone builds, reads and adopts a map column", &
-                test_map_surface) ]
+                test_map_surface), &
+            new_unittest("generated-tables.md's quickstart compiles with the two `use` lines it shows", &
+                test_generated_table_surface) ]
     end subroutine collect_tests_module_surface
+
+    !> The test-drive wrapper over check_generated_table_surface.
+    subroutine test_generated_table_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_generated_table_surface(what)
+        call check(error, what == "", "generated-tables.md's quickstart did not run through its " // &
+            "own two `use` lines: " // what)
+    end subroutine test_generated_table_surface
 
     !> The test-drive wrapper over check_columns_surface.
     subroutine test_columns_surface(error)

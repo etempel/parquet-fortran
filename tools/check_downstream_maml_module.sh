@@ -63,12 +63,16 @@
 # throwaway project in a temporary directory (nothing is written inside this repository), generates
 # from it and compiles the result against the library's own `.mod` files. It compiles rather than
 # runs, which is what makes it cheap enough for every pipeline: no linking, no Arrow link line, no
-# dependency resolve. Its five checks also cover the generator's own refusals -- a duplicate
-# `.maml` filename, `--check` drift in both directions,
-# `--module=<name>` -- and one of them is a deliberate negative control that renames an imported
-# name and requires the compile to fail, so a run that had silently stopped compiling anything
-# cannot report success. It runs in CI's `test` job rather than `lint`, because it needs a Fortran
-# compiler and a built library and the lint image has neither.
+# dependency resolve. Its eight checks also cover the generator's own refusals -- a duplicate
+# `.maml` filename, a non-ASCII schema, `--check` drift in both directions, `--module=<name>` --
+# the exact SET of modules the emitted code imports (compiling can only show that an
+# import resolves, never that one was added), and the page agreeing with itself about what its
+# example prints. Two of the eight are deliberate negative controls:
+# one renames an imported name and requires the compile to fail, the other adds `use parquet` and
+# requires the import-set assertion to notice. So a run that had silently stopped compiling
+# anything, or stopped matching any `use` line, cannot report success. It runs in CI's `test` job
+# rather than `lint`, because it needs a Fortran compiler and a built library and the lint image
+# has neither.
 #
 #     tools/check_downstream_maml_module.sh          # builds the library first if needed
 #     FC=ifx tools/check_downstream_maml_module.sh   # follows FPM_FC when FC is unset
@@ -214,7 +218,40 @@ else
     fi
 fi
 
-# 2. --module=<name>: same content, different module and filename.
+# 2. THE IMPORT SET, EXACTLY -- not merely that the four names resolve.
+#    Check 1 proves those four names EXIST in parquet_io. Nothing in it would notice one being
+#    ADDED: if the shared emitter ever grew a `use parquet` line, the emitted module would compile
+#    BETTER rather than worse, every check in this repository would stay green, and every
+#    downstream project would silently go back to compiling the whole library surface -- the very
+#    failure this script exists for, in the one direction that compiling cannot see. It is also
+#    the only thing holding up the guide page's "It does not import parquet_maml_base at all",
+#    which is a claimed absence and so has no compile that can demonstrate it.
+modules_used() {  # modules_used <file>; the modules it imports, one per line, sorted, unique
+    sed -n 's/^[[:space:]]*use[[:space:]]*,*[[:space:]]*\([A-Za-z_][A-Za-z_0-9]*\).*/\1/p' "$1" \
+        | sort -u
+}
+USED="$(modules_used "$PROJ/src/parquet_maml.f90")"
+if [ "$USED" = "parquet_io" ]; then
+    report ok "the emitted module imports parquet_io and nothing else"
+else
+    report FAIL "the emitted module imports parquet_io and nothing else (found: $(echo "$USED" | tr '\n' ' '))"
+fi
+#    THE NEGATIVE CONTROL for that assertion, for the same reason check 5 below has one: a
+#    `modules_used` whose pattern had stopped matching would report the empty set, which is not
+#    "parquet_io", so THAT direction fails safe -- but a pattern matching too little on ONE added
+#    line would not. Add the import this check exists to catch and require it to be seen.
+awk '{ print }
+     /^[ ]*use parquet_io, only: parquet_schema/ && !seen { print "    use parquet"; seen = 1 }' \
+    "$PROJ/src/parquet_maml.f90" > "$WORK/widened.f90"
+if cmp -s "$PROJ/src/parquet_maml.f90" "$WORK/widened.f90"; then
+    report FAIL "negative control: the emitted module should carry the parquet_io import line"
+elif [ "$(modules_used "$WORK/widened.f90")" = "parquet_io" ]; then
+    report FAIL "negative control: an added \`use parquet\` must NOT go unseen"
+else
+    report ok "negative control: an added \`use parquet\` is seen"
+fi
+
+# 3. --module=<name>: same content, different module and filename.
 ( cd "$PROJ" && "$GEN" --module=probe_pkg_maml >"$WORK/gen2.log" 2>&1 )
 if [ -f "$PROJ/src/probe_pkg_maml.f90" ] && compile_module "$PROJ/src/probe_pkg_maml.f90" "$WORK/o2"; then
     report ok "--module=<name> emits and compiles src/<name>.f90"
@@ -223,7 +260,7 @@ else
     [ -f "$WORK/o2/err.txt" ] && sed -n '1,25p' "$WORK/o2/err.txt" >&2
 fi
 
-# 3. --check round-trips, and notices an edited schema. Both directions: a --check that always
+# 4. --check round-trips, and notices an edited schema. Both directions: a --check that always
 #    passed would be indistinguishable from one that had stopped finding the file.
 if ( cd "$PROJ" && "$GEN" --check >/dev/null 2>&1 ); then
     report ok "--check passes against a freshly generated module"
@@ -238,9 +275,9 @@ else
 fi
 ( cd "$PROJ" && "$GEN" >/dev/null 2>&1 )
 
-# 4. THE NEGATIVE CONTROL, and the reason the whole script is evidence rather than decoration.
+# 5. THE NEGATIVE CONTROL, and the reason the whole script is evidence rather than decoration.
 #    Break exactly what this check exists to catch -- one of the four names the emitted module
-#    imports from `parquet` -- and require the compile to FAIL. Without this, a check that had
+#    imports from `parquet_io` -- and require the compile to FAIL. Without this, a check that had
 #    silently stopped compiling anything (a moved .mod directory, an -I that resolves to nothing)
 #    would report success forever.
 sed 's/parquet_validate_user_maml/parquet_validate_user_maml_x/g' \
@@ -253,7 +290,7 @@ else
     report ok "negative control: a renamed import does not compile"
 fi
 
-# 5. The generator refuses a filename collision instead of emitting duplicate Fortran, and writes
+# 6. The generator refuses a filename collision instead of emitting duplicate Fortran, and writes
 #    nothing when it refuses. Two .maml files sharing a filename would otherwise produce a
 #    duplicate `public ::`, a duplicate function and a duplicate `case` label, with the generator
 #    reporting success and the consumer's build failing on a line naming neither.
@@ -272,6 +309,60 @@ else
     cat "$WORK/gen5.log" >&2
 fi
 rm -rf "$PROJ/schemas/dr3"
+
+# 7. A non-ASCII schema is refused, and the refusal writes nothing. This one is here because it
+#    once did the opposite: the emitted module is written with encoding='ascii', so a byte above
+#    127 came out as a UnicodeEncodeError traceback from write_text -- AFTER pathlib had truncated
+#    src/parquet_maml.f90 to zero bytes. A downstream project was left an empty module, a Python
+#    stack trace and no indication of which schema was at fault. The zero-length test below is the
+#    half that regressed, so it is asserted separately from the exit status.
+printf 'dataset: probe_bad\ntable: bad\nfields:\n- name: ra\n  data_type: float64\n  unit: (deg\xc2\xb0)\n' \
+    > "$PROJ/schemas/nonascii.maml"
+rm -f "$PROJ/src/parquet_maml.f90"
+if ( cd "$PROJ" && "$GEN" >"$WORK/gen7.log" 2>&1 ); then
+    report FAIL "a non-ASCII schema is refused"
+elif [ -e "$PROJ/src/parquet_maml.f90" ]; then
+    report FAIL "a refused non-ASCII run leaves no file behind (found one of \
+$(wc -c < "$PROJ/src/parquet_maml.f90") bytes)"
+elif grep -q 'nonascii.maml:6' "$WORK/gen7.log" && grep -q 'non-ASCII' "$WORK/gen7.log"; then
+    report ok "a non-ASCII schema is refused, naming file and line, writing nothing"
+else
+    report FAIL "the non-ASCII refusal names the file and line"
+    cat "$WORK/gen7.log" >&2
+fi
+rm -f "$PROJ/schemas/nonascii.maml"
+
+# 8. THE PAGE AGREES WITH ITSELF about how many fields its example has. Its prose says the program
+#    prints `parsed=T fields=3`, and the ```yaml block above declares those fields. The LIBRARY
+#    half of that line is covered in process -- test/test_maml.f90 asserts that %is_parsed is
+#    .true. after a MAML parse and that %get_num_fields counts what a schema holds, and
+#    test/test_reading.f90's test_get_parquet_maml_examples drives the shared select-case template
+#    through the base module. What nothing covered is the page agreeing with itself, which is the
+#    half that drifts: add a field to the example schema and the printed line goes stale silently.
+#    This script already extracts both, so the check is one comparison and no compile. It is why
+#    "IT COMPILES, IT DOES NOT RUN" above costs nothing here.
+if python3 - "$ROOT_DIR/$PAGE" >"$WORK/fields.log" 2>&1 <<'PY'
+import pathlib, re, sys
+
+page = pathlib.Path(sys.argv[1]).read_text()
+block = re.search(r'```yaml\n(.*?)```', page, re.S)
+if block is None:
+    raise SystemExit('no ```yaml block on the page')
+declared = len(re.findall(r'^- name:', block.group(1), re.M))
+said = re.search(r'parsed=T fields=(\d+)', page)
+if said is None:
+    raise SystemExit('the page states no `parsed=T fields=N` result for its example')
+if int(said.group(1)) != declared:
+    raise SystemExit('the page says the example prints fields=%s; its own schema declares %d'
+                     % (said.group(1), declared))
+print('fields=%d, as the page says' % declared)
+PY
+then
+    report ok "the example's printed field count matches its own schema ($(cat "$WORK/fields.log"))"
+else
+    report FAIL "the example's printed field count matches its own schema"
+    cat "$WORK/fields.log" >&2
+fi
 
 # ---- Verdict -----------------------------------------------------------------------------------
 finished=1

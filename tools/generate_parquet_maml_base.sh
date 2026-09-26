@@ -230,6 +230,26 @@ def emit_lookup(case_blocks: list, spec: dict) -> list:
     out.append('        end select')
     out.append('    end function get_parquet_maml')
     return out
+
+
+# REFUSE A NON-ASCII SCHEMA, before anything is written, and name the file, the line and the
+# character. The emitted module is written as ASCII -- Fortran's own character set, and what the
+# length arithmetic above assumes, since `max_len` counts CHARACTERS while a Fortran literal's
+# length is BYTES. Without this, a byte above 127 surfaces as a UnicodeEncodeError traceback out
+# of write_text, and pathlib has by then already truncated src/<module>.f90 to zero bytes: the
+# project is left an empty module and a Python stack trace in place of one of the clean refusals
+# this script otherwise gives, and nothing says which schema was at fault.
+def check_for_non_ascii(paths: list, source_dir) -> None:
+    for path in paths:
+        rel_name = path.relative_to(source_dir).as_posix()
+        for lineno, line in enumerate(path.read_text(encoding='utf-8').splitlines(), start=1):
+            for ch in line:
+                if ord(ch) > 127:
+                    raise SystemExit(
+                        f"{rel_name}:{lineno}: non-ASCII character '{ch}' (U+{ord(ch):04X}). The "
+                        'generated module embeds every MAML line as a Fortran character literal, '
+                        'which is ASCII, so a schema compiled in this way may use ASCII only. '
+                        "Replace the character -- 'deg' for a degree sign, 'um' for a micron.")
 # ---- shared emitter (end) ---------------------------------------------------------------------
 
 lines = []
@@ -328,6 +348,7 @@ lines.append('        end subroutine parquet_maml_set_col_qc')
 lines.append('    end interface')
 lines.append('')
 
+check_for_non_ascii(maml_files, maml_source_dir)
 check_for_collisions(maml_files, maml_source_dir, MAML_DIR)
 
 # Base mode hands back the RAW parquet_maml_file: this module is the library's own internal

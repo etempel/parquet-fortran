@@ -62,6 +62,8 @@ contains
                 test_get_num_fields_uninitialized), &
             new_unittest("set_unavailable/set_available toggle is_set", test_set_available_unavailable), &
             new_unittest("is_column_set reports a column's current is_set state", test_is_column_set), &
+            new_unittest("a validated user MAML reports the fields it omitted, and only those", &
+                test_validate_user_maml_reports_missing), &
             new_unittest("schema_new = schema_old deep-copies independently, even overwriting an " // &
                 "already-initialized schema_new", test_schema_deep_copy_independence), &
             new_unittest("add_col_qc builds a qc-maml from compact strings", test_add_col_qc_builds_maml), &
@@ -467,6 +469,108 @@ contains
         call check(error, (.not. schema%cinfo%col(idx)%is_set) .and. schema%cinfo%col(idx)%is_deactivated, &
             "expected 'idarr' to be merged in as a deactivated placeholder")
     end subroutine test_validate_user_maml_ok
+
+    !> The three things doc/pages/utilities/embedding-maml-schemas.md promises a caller of
+    !> `set_maml(maml_default, maml_file)` gets back: a schema carrying the DEFAULT's full field
+    !> list, `%is_column_set(name)` answering `.false.` for a field the user's MAML omitted, and
+    !> that field recorded in `%maml%missing_columns`.
+    !!
+    !! **None of the three had a test.** `test_validate_user_maml_ok` above reads the merged list
+    !! through the `%cinfo%col(i)%is_set` COMPONENT rather than the `%is_column_set` binding the
+    !! page names, `test_is_column_set` drives that binding only through
+    !! `set_column_available`/`set_column_unavailable`, and `schema%maml%missing_columns` is
+    !! asserted nowhere -- `test_table.f90`'s `test_require_and_missing_columns` is
+    !! `parquet_table%missing_columns`, a different thing with a similar name. `set_maml` itself is
+    !! named by nothing in `test/`, because it exists only in the module a DOWNSTREAM project
+    !! generates; this is its body's two library calls, in order, over the same fixture.
+    !!
+    !! **The second arm is the negative control, and it is what makes the first mean anything.**
+    !! Asserting only that `idarr` is missing passes just as well against an implementation that
+    !! reports every base field as missing, declared or not. So the same schema is validated again
+    !! with `idarr` declared: it must then be set, must leave the list, and `myflag` -- omitted by
+    !! both arms -- must still be in it.
+    subroutine test_validate_user_maml_reports_missing(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(parquet_maml_file) :: base_maml
+        type(parquet_schema) :: schema, declared
+        integer :: i, n_idarr, n_myflag
+
+        base_maml = get_parquet_maml("maml_example.maml")
+
+        ! Arm one: two of the base schema's thirteen fields are declared.
+        schema%maml%name = "user_subset_missing.maml"
+        schema%maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32", &
+            "- name: name", &
+            "  data_type: string", &
+            "  array_size: 18" ]
+        call parquet_validate_user_maml(base_maml, schema%maml)
+        call parquet_parse_maml(schema)
+
+        call check(error, schema%maml%name == "user_subset_missing.maml", &
+            "%maml%name must stay the user's own file name, so a diagnostic can say which schema ran")
+        if (allocated(error)) return
+        call check(error, schema%is_column_set("id0"), &
+            "%is_column_set must be .true. for a field the user's MAML declares")
+        if (allocated(error)) return
+        call check(error, .not. schema%is_column_set("idarr"), &
+            "%is_column_set must be .false. for a field only the default declares")
+        if (allocated(error)) return
+        call check(error, allocated(schema%maml%missing_columns), &
+            "%maml%missing_columns must be allocated once a user MAML has been validated")
+        if (allocated(error)) return
+        call check(error, size(schema%maml%missing_columns) == 11, &
+            "the 11 fields of the 13 the user's MAML omits must all be recorded")
+        if (allocated(error)) return
+
+        n_idarr = 0
+        n_myflag = 0
+        do i = 1, size(schema%maml%missing_columns)
+            if (schema%maml%missing_columns(i)%name == "idarr") n_idarr = n_idarr + 1
+            if (schema%maml%missing_columns(i)%name == "myflag") n_myflag = n_myflag + 1
+        end do
+        call check(error, n_idarr == 1 .and. n_myflag == 1, &
+            "both omitted fields must be recorded by name, exactly once each")
+        if (allocated(error)) return
+
+        ! Arm two, the control: the same schema with `idarr` declared as well.
+        declared%maml%name = "user_subset_with_idarr.maml"
+        declared%maml%lines = [character(len=40) :: &
+            "table: user_table", &
+            "fields:", &
+            "- name: id0", &
+            "  data_type: int32", &
+            "- name: idarr", &
+            "  data_type: int64", &
+            "  col_size: 2", &
+            "- name: name", &
+            "  data_type: string", &
+            "  array_size: 18" ]
+        call parquet_validate_user_maml(base_maml, declared%maml)
+        call parquet_parse_maml(declared)
+
+        call check(error, declared%is_column_set("idarr"), &
+            "declaring `idarr` must make %is_column_set answer .true. for it")
+        if (allocated(error)) return
+        call check(error, size(declared%maml%missing_columns) == 10, &
+            "declaring one more field must shorten the missing list by exactly one")
+        if (allocated(error)) return
+
+        n_idarr = 0
+        n_myflag = 0
+        do i = 1, size(declared%maml%missing_columns)
+            if (declared%maml%missing_columns(i)%name == "idarr") n_idarr = n_idarr + 1
+            if (declared%maml%missing_columns(i)%name == "myflag") n_myflag = n_myflag + 1
+        end do
+        call check(error, n_idarr == 0, &
+            "a field the user's MAML declares must NOT be reported missing")
+        if (allocated(error)) return
+        call check(error, n_myflag == 1, &
+            "a field still omitted must stay reported -- otherwise the list is not being read")
+    end subroutine test_validate_user_maml_reports_missing
 
     !> col_map: renames a field's internal (base) name to whatever name the
     !> user MAML's own fields: section declares. parquet_write_column etc.

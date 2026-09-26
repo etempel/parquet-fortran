@@ -979,6 +979,66 @@ def shared_emitter_region(path):
     return lines[starts[0]:ends[0] + 1], starts[0] + 1
 
 
+def check_generated_table_windows_documented():
+    """`generated-tables.md`'s window table and its two written-out counts match USER_WINDOWS.
+
+    The page carries the generator's window list three times -- a table of one row per window, and
+    the count spelled out under "Editing the generated module" and again under "A schema with no
+    fields" -- while `tools/generate_user_table_code.py` owns it once, as USER_WINDOWS. Nothing
+    compared them, and the count had drifted in one of the two places within a single change:
+    splitting `uses` into `uses` + `parameters` updated the first sentence and left the second
+    saying six.
+
+    Order is compared too, not just membership. The list is the order the windows appear in the
+    emitted file, and that order is load-bearing -- `uses` is above `implicit none` and
+    `parameters` below it, because Fortran puts USE before IMPLICIT and declarations after -- so a
+    table listing them in some other order would misdescribe the file a reader is looking at.
+
+    **It fails when blind**, per `.claude/rules/testing.md`: an unreadable USER_WINDOWS, a missing
+    table and a missing count are each reported rather than passing quietly, which is what a check
+    built out of three regexes over prose needs to do to stay evidence.
+    """
+    problems = []
+    gen = REPO_ROOT / "tools" / "generate_user_table_code.py"
+    page_path = REPO_ROOT / "doc" / "pages" / "utilities" / "generated-tables.md"
+    decl = re.search(r"^USER_WINDOWS = \[(.*?)\]", gen.read_text(encoding="utf-8"),
+                     re.S | re.M)
+    if decl is None:
+        return ["tools/generate_user_table_code.py: no `USER_WINDOWS = [...]` to read the window "
+                "list from -- this check needs updating"]
+    windows = re.findall(r'"([a-z_]+)"', decl.group(1))
+    if not windows:
+        return ["tools/generate_user_table_code.py: USER_WINDOWS parsed as empty"]
+
+    page = page_path.read_text(encoding="utf-8")
+    table = re.search(r"^\| window \| for \|\n\|[-| ]+\|\n((?:\|.*\n)+)", page, re.M)
+    if table is None:
+        problems.append("doc/pages/utilities/generated-tables.md: no `| window | for |` table "
+                        "found; the window list is unchecked")
+    else:
+        listed = [m.group(1) for m in re.finditer(r"^\| `([a-z_]+)`", table.group(1), re.M)]
+        if listed != windows:
+            problems.append(
+                "doc/pages/utilities/generated-tables.md: its window table lists %s; "
+                "generate_user_table_code.py's USER_WINDOWS is %s (order matters -- it is the "
+                "order they appear in the emitted file)" % (listed, windows))
+
+    counts = re.findall(r"\*\*([a-z]+) user windows\*\*|all ([a-z]+) windows", page)
+    flat = [a or b for a, b in counts]
+    if not flat:
+        problems.append("doc/pages/utilities/generated-tables.md: neither `**N user windows**` "
+                        "nor `all N windows` found; the count is unchecked")
+    for word in flat:
+        said = COUNTED_LIST_WORDS.get(word)
+        if said is None:
+            problems.append("doc/pages/utilities/generated-tables.md: cannot read the window "
+                            "count '%s'; add it to COUNTED_LIST_WORDS" % word)
+        elif said != len(windows):
+            problems.append("doc/pages/utilities/generated-tables.md: says '%s' windows; "
+                            "generate_user_table_code.py emits %d" % (word, len(windows)))
+    return problems
+
+
 def check_maml_generators_share_their_emitter():
     """The two MAML generators carry one emitter, byte for byte.
 
@@ -10658,6 +10718,8 @@ CHECKS = (
      check_no_type_bound_string_column_access),
     ("generated files carry their conventions", check_generated_file_conventions),
     ("the two MAML generators share one emitter", check_maml_generators_share_their_emitter),
+    ("generated-tables.md's window table matches the generator",
+     check_generated_table_windows_documented),
     ("the schema-less write declares auto sizes", check_schemaless_write_declares_auto),
     ("row-group reads guard against a sort", check_row_group_reads_guard_against_sort),
     ("print_stat's columns match its documentation", check_print_stat_columns_documented),

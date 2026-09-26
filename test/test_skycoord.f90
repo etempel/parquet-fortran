@@ -1502,11 +1502,15 @@ contains
             do j = 1, size(SEPS)
                 t = tan(SEPS(j) * DEG) / DEG
                 ! **The tolerance is the POSITION's own resolution, not the projection's.** The
-                ! offset is handed over as two doubles near 33 and 21 degrees, whose ulp is 3.6e-15
-                ! degrees, so a separation of `sep` is carried with a relative error of about
-                ! `8e-15 / sep` however exactly the projection then works: at a millionth of a
-                ! degree that is 8e-9, and at half a degree 1e-12.
-                tol = max(1.0e-12_real64, 8.0e-15_real64 / SEPS(j))
+                ! offset is handed over as two doubles near 33 and 21 degrees, whose ulps are
+                ! 7.1e-15 and 3.6e-15 degrees, and `pf_offset_radec` reaches them through a unit
+                ! vector, a few ulps from the exact point: over a quarter-degree sweep of position
+                ! angles the offset and its image together miss by up to 2.0e-14 degrees, with or
+                ! without fused multiply-adds. So a separation of `sep` is carried with a relative
+                ! error of about `2e-14 / sep` however exactly the projection then works, and the
+                ! tolerance is twice that: 4e-8 at a millionth of a degree, and the floor of 1e-12
+                ! from half a degree out.
+                tol = max(1.0e-12_real64, 4.0e-14_real64 / SEPS(j))
                 call pf_offset_radec(33.0_real64, 21.0_real64, PAS(i), SEPS(j), ra, dec)
                 ! Turned to the point's own position angle: it lands on +y, at tan(sep).
                 call pf_radec2tan(ra, dec, 33.0_real64, 21.0_real64, x, y, PAS(i))

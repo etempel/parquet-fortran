@@ -234,6 +234,8 @@ contains
                          test_einstein_de_sitter_growth_is_exact), &
             new_unittest("D(0) is exactly one and f(0) is the generated row", &
                          test_growth_is_anchored_at_the_origin), &
+            new_unittest("D(0) is exactly one at every table depth zmin= can ask for", &
+                         test_growth_anchor_holds_at_every_depth), &
             new_unittest("the growth rate is the logarithmic derivative of the growth factor", &
                          test_growth_rate_is_the_log_derivative), &
             new_unittest("the growth pair satisfies its own equation", &
@@ -3638,6 +3640,44 @@ contains
         end do
 
     end subroutine test_growth_is_anchored_at_the_origin
+
+    !> `D(0)` is exactly one however deep `zmin=` puts the table's bottom node.
+    !!
+    !! The depth is the one input that moves where the origin sits in the table, and so the one
+    !! that can move the quintic off `t = 0` there. Depth `k` -- the bottom node at `-k h`, with
+    !! `h = 0.008` the lattice spacing -- is asked for as `zmin = e^(-(k - 1/2) h) - 1`, which
+    !! `%init` rounds up to `k`. *Catches*: an interval found as `floor((zeta - zeta_0) / h)`,
+    !! which at the origin is `(k h) / h` and rounds BELOW `k` at depths 2001 and 2041, so that
+    !! the origin is reached from the interval on its left at `t = 1`, under every compiler; and
+    !! a node formed as `zeta_0 + (mid - 1) h`, a multiply-add that a fused multiply-add rounds
+    !! once, leaving the product's rounding residue where the origin's zero belongs (depth 1000,
+    !! on an arm64 build). Depth 0 puts the origin at the table's FIRST node, which the one-sided
+    !! stencil reaches at `t = -1`.
+    subroutine test_growth_anchor_holds_at_every_depth(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        integer, parameter :: DEPTHS(4) = [0, 1000, 2001, 2041]
+        type(pf_cosmology) :: c
+        real(real64)       :: zmin
+        integer            :: k
+        character(len=8)   :: tag
+
+        do k = 1, size(DEPTHS)
+            write (tag, '(i0)') DEPTHS(k)
+            zmin = 0.0_real64
+            if (DEPTHS(k) > 0) zmin = exp(-(real(DEPTHS(k), real64) - 0.5_real64) * 0.008_real64) - 1.0_real64
+            call c%init("Planck18", zmin = zmin)
+            ! The model's own floor must not clamp the table above the depth asked for: `%init`
+            ! keeps the bottom node a whole unit of `zeta` clear of it.
+            call check(error, -c%zeta_floor() - 1.0_real64 > real(DEPTHS(k) + 1, real64) * 0.008_real64, &
+                       "Planck18's floor clamps the table above depth " // trim(tag))
+            if (allocated(error)) return
+            call check(error, c%growth_factor(0.0_real64) == 1.0_real64, &
+                       "D(0) must be exactly one at table depth " // trim(tag))
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_growth_anchor_holds_at_every_depth
 
     !> `f = dlnD/dlna` against a central difference of `%growth_factor` itself.
     !!

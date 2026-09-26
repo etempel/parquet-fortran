@@ -735,7 +735,8 @@ contains
     !! second derivative, and the one thing an end condition would have to invent is gone.
     !!
     !! **No abscissae and no search.** The nodes are the integer lattice times `PFC_H`, so the
-    !! interval is one division and one `floor`; `zeta_0` is the table's bottom node. The stencil
+    !! interval is one `floor` of `zeta / PFC_H` and a node is its lattice index times `PFC_H`;
+    !! `zeta_0` is the table's bottom node, a lattice node whose index `nint` recovers. The stencil
     !! is the interval's LEFT neighbour, except in the first interval, where it is the right one
     !! -- the same polynomial degree, one-sided, and still matching value and slope at both ends
     !! of the interval it is used on.
@@ -743,25 +744,35 @@ contains
         real(real64), intent(in)  :: v(:)   !! the node values
         real(real64), intent(in)  :: s(:)   !! the node slopes, `d/dzeta`
         integer, intent(in)       :: n      !! how many nodes
-        real(real64), intent(in)  :: zeta_0 !! the first node
+        real(real64), intent(in)  :: zeta_0 !! the first node, an integer times `PFC_H`
         real(real64), intent(in)  :: zeta   !! where to evaluate, inside the table
         real(real64), intent(out) :: y      !! the value there
         real(real64), intent(out) :: yp     !! `dy/dzeta` there
 
         real(real64) :: t, ym, y0, y1, gm, g0, g1, aa, bb, cc, dd
         real(real64) :: c2, c3, c4, c5
-        integer      :: i, mid
+        integer      :: i, mid, k_0
 
+        ! **The interval and the node both come from the lattice INDEX, never from `zeta_0`.** That
+        ! is what puts the origin at `t = 0` exactly, and so `%growth_factor(0)` at exactly one
+        ! (`test_growth_anchor_holds_at_every_depth`): there the node is `0 * PFC_H`, an exact zero
+        ! however the product is rounded or fused. Neither form written from `zeta_0` reaches it.
+        ! `zeta_0 + (mid - 1) * PFC_H` is a multiply-add, which a fused multiply-add rounds once --
+        ! nagfor's C does so on arm64 even unoptimised -- leaving the product's rounding residue as
+        ! the node. And `(zeta - zeta_0) / PFC_H` at the origin is `(k h) / h`, which rounds BELOW
+        ! `k` at some of the depths `zmin=` can ask for, the first at `k = 2001`, so the origin is
+        ! reached from the interval on its left, at `t = 1`.
+        k_0 = nint(zeta_0 / PFC_H)
         ! The interval `[i, i+1]`, clamped so that an argument sitting exactly on either end of
         ! the table lands in a real interval rather than one past it.
-        i = floor((zeta - zeta_0) / PFC_H) + 1
+        i = floor(zeta / PFC_H) - k_0 + 1
         if (i < 1) i = 1
         if (i > n - 1) i = n - 1
         ! The stencil's MIDDLE node. Taking the left neighbour puts the interval in `[0, 1]` of
         ! the local coordinate; the first interval has no left neighbour and sits in `[-1, 0]`.
         mid = i
         if (mid < 2) mid = 2
-        t = (zeta - (zeta_0 + real(mid - 1, real64) * PFC_H)) / PFC_H
+        t = (zeta - real(k_0 + mid - 1, real64) * PFC_H) / PFC_H
 
         ym = v(mid - 1)
         y0 = v(mid)

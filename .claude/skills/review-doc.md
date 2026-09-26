@@ -267,11 +267,15 @@ Run all six, in this order, for every page.
 Where a lint check already validates a claim, lean on it and say so in the report; the maintainer
 must be able to tell which claims were verified against source, which against a check, and which
 not at all. When a re-derivation finds a drifted enumeration, propose a check that reads its
-source (writing it is a code change, B8). A claim whose subject is the compiler, runtime, OS or
-linker (an exit status, a runtime message, a flag's effect) cannot be verified on one compiler:
-state the property the library guarantees, or check the fleet before writing the value down. When
-reading cannot settle a claim, run it in a throwaway project outside the repository depending on
-this one by **relative** path, in a scratch directory, and verify the fix the same way.
+source (writing it is a code change, B8), and say in the proposal that it **reads the narrowest
+part of the page that carries the claim** — a table's first column, not the whole row, since a
+`why` column legitimately names what its row excludes. `.claude/rules/testing.md` carries the rest
+of what such a check owes and how it is proven. A claim whose subject is the compiler, runtime,
+OS or linker (an exit status, a runtime message, a flag's effect) cannot be verified on one
+compiler: state the property the library guarantees, or check the fleet before writing the value
+down. When reading cannot settle a claim, run it in a throwaway project outside the repository
+depending on this one by **relative** path, in a scratch directory, and verify the fix the same
+way.
 
 **Pass 2 — coverage.** What is missing and what is stale:
 
@@ -300,6 +304,9 @@ validates, aborts or prints"), whose test is usually a lint check.
   out-of-process scenario harness (`.claude/rules/testing.md`). Never conclude "uncovered" from a
   search truncated with `head`; count first. A test that merely touches the code is not a test of
   the claim: ask **which named test would fail if exactly the documented behaviour broke**.
+  **A test's registered name is not its contract** — read the body before crediting or proposing:
+  a scenario named for one failure mode routinely asserts another, so a name-only search both
+  proposes a test that exists and credits a claim nothing covers.
 - An uncovered claim gets a **proposed** test, never a written one: the claim quoted with its source
   location; the file and whether in-process or scenario; what it asserts in one sentence **and its
   negative control**; the fixture, with its own filename.
@@ -443,6 +450,10 @@ project rule applies to an edit made here.
   failure: write after each replacement, or verify afterwards (`.claude/rules/workflow.md`).
 - A rewrap is provably whitespace-only: collapse all whitespace on both sides and refuse to write
   unless byte-identical (token-list comparison misreports a code span that spanned a line break).
+  **That proof cannot see two paragraphs merged into one**, since collapsing the blank line
+  between them leaves the same string: pair it with a count of the blocks on each side —
+  blank-line-separated paragraphs, list items, table rows and fences — and refuse on a difference
+  there too.
   Test the *stripped* line for a table delimiter (an indented table under a list item is still a
   table), and never reattach punctuation inside an inline code span; diff the word stream and read
   every hunk.

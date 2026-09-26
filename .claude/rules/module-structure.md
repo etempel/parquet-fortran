@@ -69,6 +69,27 @@ parquet_wrapper.cpp             (the single C++ translation unit)
 - **A module re-exports, getter and setter, every settings knob its own code reads** (including
   `verbosity`/`message_stream` when it can emit). `test/test_module_surface.f90` holds one
   single-import module per tier; never add a second library `use` to any module in that file.
+  Three qualifications:
+  - **The subject is the reachable SURFACE, not the text of the module's own procedures.**
+    Re-exporting a TYPE re-exports everything callable on it, so the module owes the knobs those
+    bindings read (`parquet_sphere` owes `healpix_threads` through `pf_healpix_grid`'s `_bulk`
+    conversions). Derive the set from the module's `tools/module_footprints.txt` closure — its
+    `cfg_*` reads and its calls to the emit channels — never from its own source.
+  - **A knob governing machinery the caller never named stays unexported.** Where the module's
+    automatic teams come from another tier's shared resolver and the caller cannot name that
+    tier, its page states which knob caps it and which affinity area it reports under, and the
+    surface stays narrow (`parquet_kde`, `parquet_stats`). This holds even where the module has a
+    thread knob of its own (`parquet_sampling` re-exports `random_threads`, not `sort_threads`).
+    The discriminator is **who holds the other tier's API**: a phase the caller chose by an
+    argument they wrote (`parquet_spatial`'s and `parquet_index`'s `method="sorted"` builds) is
+    theirs to cap; a phase that happens beneath them is not.
+  - **The output pair is separate**: re-export `verbosity`/`message_stream` wherever the module
+    can emit, by any route, a re-exported type's bindings included. A module can owe the pair and
+    not the knob.
+
+  Partly enforced: `check_silence_claims_match_the_footprints` fails a claim of total silence the
+  footprints contradict, `check_module_settings_reexports_documented` forces the
+  `choosing-a-module.md` row once a re-export lands. Neither enforces the re-export itself.
 - **Placement of a read/write helper**: type-generic code goes in the parent (`parquet_read`/
   `parquet_write`) as an ordinary contained procedure; type-specific code in the matching child. A
   public generic's specifics and any type-bound binding target keep their interface in

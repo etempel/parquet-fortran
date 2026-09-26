@@ -200,6 +200,15 @@ as caught). Rules for reading a result:
 - **Match by shape, never by an enumerated list**; where a list is unavoidable, fail when it comes
   up empty. Two checks needing the same list derive it from one place
   (`parquet_print_settings`' rows).
+- **A check fails rather than passes when it goes blind** — its anchor stops matching, a list comes
+  back empty, or the page or source file it reads is missing. A vacuity guard naming the floor it
+  expects is the usual shape (`RISK_SCANNED_MIN_FILES`).
+- **Prove a new check in BOTH directions before trusting it**: plant a violation and confirm it
+  fails naming the site, and blind it — delete the file it globs, empty the list it derives,
+  rename its anchor — and confirm it fails there too. **The blind direction is where the holes
+  are**: a check that passes when it can see nothing reports a clean tree forever, and a surviving
+  blind case is more often a hole in the check than a weak mutation. Record both sets of trials
+  where the check's work is written up.
 - A documentation table mirroring a source-owned list is compared against the source in both
   directions (`check_env_table_matches_the_source`); read the table's rows, not the page.
 - A count in prose is checkable only where the words can be expanded from the source they mirror

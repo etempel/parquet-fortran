@@ -70,6 +70,12 @@ Working rules:
   quotes the whole title, a group `index.md` bullet quotes the title or an initial prefix
   (`check_page_titles_match_their_list_entries`). A flat-list entry saying more than the `<h1>`
   means the title is too short — lengthen the title.
+- **A `pf_*`/`parquet_*` name inside a list entry is a code span**: the landing page's
+  every-page-at-a-glance rows and a group index's bullets write it in backticks, as running prose
+  does. Enforced by nothing, and do not widen
+  `check_page_titles_match_their_list_entries` to cover it — it strips backticks from both sides
+  deliberately, because a `title:` may not carry one (FORD renders it literally in the browser
+  tab's plain-text `<title>`).
 - **A count written beside the list it counts, or a list the code also owns, needs a check**, not
   careful review; point at the source instead of copying it.
 - **Optional arguments in square brackets, comma OUTSIDE the bracket**: `%f(a, [b])`, never

@@ -118,7 +118,7 @@ module parquet_skycoord
     !! `(47.37, 6.32)`, with `SGL = 90` at the north Galactic pole.
     integer, parameter :: PF_COORD_SUPERGALACTIC = 4
     !> FK5 J2000 `(ra, dec)`, astropy's `FK5` at its default equinox: ICRS rotated by the frame bias
-    !! of USNO Circular 179, 20 to 30 milliarcseconds. **FK5 J2000 only**: no other equinox is provided.
+    !! of USNO Circular 179, at most 32 milliarcseconds. **FK5 J2000 only**: no other equinox is provided.
     integer, parameter :: PF_COORD_FK5 = 5
 
     ! ---- Mathematical constants ----
@@ -409,7 +409,7 @@ module parquet_skycoord
         end subroutine pf_sgal2icrs
 
         !> ICRS `(ra, dec)` to FK5 J2000 `(ra_fk5, dec_fk5)`, in degrees, as astropy's `FK5` at its
-        !! default equinox: the frame bias of USNO Circular 179 and nothing else, 20 to 30
+        !! default equinox: the frame bias of USNO Circular 179 and nothing else, at most 32
         !! milliarcseconds on the sky. **FK5 here is FK5 J2000**: no other equinox is provided.
         !!
         !! `pure elemental` and total, with `pf_icrs2gal`'s rules: NaN in gives NaN out without a

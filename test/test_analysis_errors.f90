@@ -961,6 +961,8 @@ contains
                 test_sphere_polygon_init_twice_aborts), &
             new_unittest("a sky polygon's %contains refuses before %init", &
                 test_sphere_polygon_contains_before_init_aborts), &
+            new_unittest("a sky polygon's %is_simple refuses before %init", &
+                test_sphere_polygon_is_simple_before_init_aborts), &
             new_unittest("a sky polygon's %area refuses before %init", &
                 test_sphere_polygon_area_before_init_aborts), &
             new_unittest("a sky polygon's %area_deg2 refuses before %init", &
@@ -1019,6 +1021,8 @@ contains
                 test_skycoord_radec2str_width_overflow_aborts), &
             new_unittest("pf_dec2str refuses a separator that is not a colon, a blank or the letters", &
                 test_skycoord_text_bad_separator_aborts), &
+            new_unittest("pf_dec2str refuses a negative precision", &
+                test_skycoord_text_precision_negative_aborts), &
             new_unittest("pf_zhel2zcmb refuses the unknown system", &
                 test_skycoord_zcmb_unknown_system_aborts), &
             new_unittest("pf_sky_rotation%apply refuses to run before %init", &
@@ -6113,6 +6117,14 @@ contains
             required_stderr="pf_sky_polygon%contains: %init has not run")
     end subroutine test_sphere_polygon_contains_before_init_aborts
     !
+    !> See scenario_sphere_polygon_is_simple_before_init.
+    subroutine test_sphere_polygon_is_simple_before_init_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "sphere_polygon_is_simple_before_init", expect_abort=.true., &
+            failure_message="%is_simple on an unbuilt polygon was expected to abort", &
+            required_stderr="pf_sky_polygon%is_simple: %init has not run")
+    end subroutine test_sphere_polygon_is_simple_before_init_aborts
+    !
     !> See scenario_sphere_polygon_area_before_init.
     subroutine test_sphere_polygon_area_before_init_aborts(error)
         type(error_type), allocatable, intent(out) :: error
@@ -6355,6 +6367,14 @@ contains
             failure_message="writing with a slash between the fields was expected to abort", &
             required_stderr='pf_dec2str: sep must be ":", " " or "hms" (got "/")')
     end subroutine test_skycoord_text_bad_separator_aborts
+    !
+    !> See scenario_skycoord_text_precision_negative.
+    subroutine test_skycoord_text_precision_negative_aborts(error)
+        type(error_type), allocatable, intent(out) :: error
+        call check_scenario_exit_status_and_stderr(error, "skycoord_text_precision_negative", expect_abort=.true., &
+            failure_message="writing at a negative precision was expected to abort", &
+            required_stderr="pf_dec2str: precision must be in [0, 9] (got -1)")
+    end subroutine test_skycoord_text_precision_negative_aborts
     !
     !> See scenario_skycoord_zcmb_unknown_system.
     subroutine test_skycoord_zcmb_unknown_system_aborts(error)

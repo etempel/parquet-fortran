@@ -8895,6 +8895,51 @@ def check_no_leadz():
     return problems
 
 
+def check_source_lines_are_within_132_columns():
+    """No Fortran line exceeds the standard 132-column free-form limit, comments included.
+
+    `.claude/rules/code-style.md` states the limit as a firm rule and `.gitlab-ci.yml`'s coverage
+    job states in a comment that it RELIES on it -- "Source is kept within the standard 132-column
+    free-form limit, so no -ffree-line-length-none override is needed". Nothing enforced it, and
+    the documentation review found **three** live violations: `src/parquet_core.f90` at 147
+    columns, and `src/parquet_sphere.f90` and the generated `src/parquet_sorting_argsort.f90` at
+    134. All three were comments.
+
+    **Why no build caught them, measured rather than assumed.** A 143-column assignment whose
+    trailing `+ 41` starts at column 140 compiles under a bare `gfortran` and answers 42, so
+    gfortran's own default does not apply the limit; the developer machines then pass
+    `-ffree-line-length-none` as well, out of the toolchain activation script's `FPM_FFLAGS`. The
+    same file is REJECTED by `gfortran -ffree-line-length-132` and by `gfortran -std=f2018
+    -pedantic`, and nagfor applies the standard. So the limit is real, three toolchain
+    configurations in use here enforce it, and the two that run daily do not.
+
+    **That makes a violation in CODE, rather than in a comment, a silent wrong answer.** Past the
+    limit a conforming processor does not truncate to a syntax error -- it stops reading the line,
+    so `i = 1<130 spaces>+ 41` is the perfectly valid statement `i = 1`. The three found were
+    comments and harmless; the next one need not be.
+
+    Comments are counted because the rule covers them (a long comment is what a `&` continuation
+    cannot rescue, and it is how all three arose) and because counting only code would need this
+    check to parse continuations and strings correctly to say anything at all.
+
+    Length is counted in CHARACTERS: these sources are ASCII, but a stray non-ASCII byte in a
+    comment would otherwise make a compliant line look over-long.
+    """
+    problems = []
+    for directory in ("src", "test", "app", "bench", "tools"):
+        base = REPO_ROOT / directory
+        if not base.is_dir():
+            continue
+        for path in sorted(base.glob("*.f90")):
+            for n, line in enumerate(path.read_text().split("\n"), 1):
+                if len(line) > 132:
+                    problems.append(
+                        "%s:%d: %d columns, over the 132-column free-form limit "
+                        "(.claude/rules/code-style.md); wrap it with & or split the comment."
+                        % (path.relative_to(REPO_ROOT), n, len(line)))
+    return problems
+
+
 def check_no_shape_nagfor_undefined_cannot_compile():
     """No source shape that nagfor 7.2 cannot compile under `-C=undefined`.
 
@@ -10585,6 +10630,8 @@ CHECKS = (
     ("feature_risks.md is a short register of open risks, and only open ones are cited",
      check_risk_register_shape),
     ("LEADZ is not used anywhere (nagfor miscompiles it on int64)", check_no_leadz),
+    ("every Fortran line is within the 132-column free-form limit",
+     check_source_lines_are_within_132_columns),
     ("no call hands an array temporary to an explicit-shape dummy",
      check_no_array_temporary_at_an_explicit_shape_dummy),
     ("no source shape nagfor -C=undefined cannot compile",

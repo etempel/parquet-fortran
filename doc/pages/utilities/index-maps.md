@@ -713,7 +713,7 @@ your own hardware.
 - **`%get_many` beats a loop of `%get`** by enough to be worth restructuring a hot loop for --
   on a map larger than the cache it is about twice as fast even on one thread, because it hashes
   a block of keys first and walks the table afterwards, so a block's cache misses are in flight
-  together where a loop of `%get` waits for each one -- and on a team it is the fastest probe
+  together where a loop of `%get` waits for each one — and on a team it is the fastest probe
   there is: the chunks share nothing and a hash probe is one cache miss, so the speed-up tracks
   the thread count until memory bandwidth saturates.
 - **A hash build threads, and so does the insert side of `%get_or_add_many`.** On a team the

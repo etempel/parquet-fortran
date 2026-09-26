@@ -150,6 +150,8 @@ contains
                          test_tangent_far_hemisphere_and_nan), &
             new_unittest("angdist_deg reproduces a 60-digit evaluation on every edge case", &
                          test_angdist_deg_reference), &
+            new_unittest("angdist_deg holds 1e-13 degrees over the whole separation range", &
+                         test_angdist_deg_sweep), &
             new_unittest("angdist_deg agrees with angdist, and keeps its four symmetries", &
                          test_angdist_deg_agrees), &
             new_unittest("angdist_deg is total: NaN in, NaN out", test_angdist_deg_total), &
@@ -1721,6 +1723,60 @@ contains
         ! Set the bound negative to have the run report the largest disagreement it found.
         call check(error, worst <= 1.0e-12_real64, "angdist_deg worst absolute error exceeded 1e-12 deg")
     end subroutine test_angdist_deg_reference
+
+    !> `pf_angdist_deg` against the 60-digit model over the WHOLE separation range, 1e-9 degrees
+    !! to 180 -- the half `test_angdist_deg_reference` does not cover.
+    !!
+    !! That test pins 15 EDGE CASES at 1e-12, loose on purpose so that the rejected formulas fail
+    !! it. The guide page states two figures, 7.8e-15 on those edge cases and 2.8e-14 over a
+    !! separation sweep, and until this test the second was guarded by nothing whatever: the only
+    !! sweep in the suite compares `pf_angdist_deg` with `pf_angdist` at 1e-11, which is two
+    !! implementations agreeing rather than either being accurate. A regression to 5e-13 would
+    !! have falsified the page with every test still green.
+    !!
+    !! **1e-13, rather than the 2.8e-14 actually measured, and deliberately so**: the last digits
+    !! come from the platform's `atan2` and its two sine/cosine pairs, so a bound tight enough to
+    !! pin one machine's rounding would fail on another. 1e-13 is about four times the worst seen
+    !! and still an order below the edge-case test's 1e-12, so the page's figure cannot silently
+    !! become 1e-12.
+    !!
+    !! Both ends of every row are exact in double, so what this measures is the formula's error
+    !! and not the input's; `sep_rows` in `tools/generate_skycoord_reference.py` says why.
+    subroutine test_angdist_deg_sweep(error)
+        type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
+        real(real64), parameter :: TOL = 1.0e-13_real64
+        real(real64) :: got, want, worst
+        integer :: k, kworst
+        logical :: differs
+        character(len=160) :: msg
+
+        worst = 0.0_real64
+        kworst = 0
+        differs = .false.
+        do k = 1, n_sdist
+            got = pf_angdist_deg(transfer(sdist_in_bits(4 * k - 3), 0.0_real64), &
+                                 transfer(sdist_in_bits(4 * k - 2), 0.0_real64), &
+                                 transfer(sdist_in_bits(4 * k - 1), 0.0_real64), &
+                                 transfer(sdist_in_bits(4 * k), 0.0_real64))
+            want = transfer(sdist_out_bits(k), 0.0_real64)
+            if (abs(got - want) > worst) then
+                worst = abs(got - want)
+                kworst = k
+            end if
+            differs = differs .or. got /= want
+        end do
+        write (msg, '(a,es10.3,a,i0,a,es10.3)') "pf_angdist_deg misses the 60-digit model by ", worst, &
+            " degrees at row ", kworst, ", over a budget of ", TOL
+        call check(error, worst <= TOL, trim(msg))
+        if (allocated(error)) return
+        call check(error, n_sdist > 0, "the separation sweep lost its rows")
+        if (allocated(error)) return
+        ! The same vacuity guard the offset rows carry: a table read back out of a Fortran run
+        ! would agree to the bit everywhere, and would pass this test while measuring nothing.
+        call check(error, differs, &
+            "not one separation differs from its 60-digit reference by even an ulp, which is what a table " // &
+            "generated FROM the implementation would look like rather than one generated for it")
+    end subroutine test_angdist_deg_sweep
 
     !> `pf_angdist_deg` equals `pf_angdist` of the same two directions, and holds four symmetries.
     !>

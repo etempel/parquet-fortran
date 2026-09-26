@@ -664,7 +664,7 @@ work available rather than from the machine: one thread per thousand elements, u
 CPU affinity mask allows and never more than 64. So an array of 500 runs serial, 10 000 gets ten
 threads, and anything from 64 000 upward gets the full team. Two things drove that shape. Threading
 a short array is a loss, and a single element count cannot mark where that stops on both a laptop
-and a node with hundreds of processors -- but the work *one* thread needs to be worth waking is much
+and a node with hundreds of processors — but the work *one* thread needs to be worth waking is much
 the same on both, so that is what the rule is written in terms of. And the ceiling is real rather
 than defensive: on a machine with several hundred processors, a team of nearly two hundred threads
 was measured costing **orders of magnitude more per element** than a plain serial loop on a

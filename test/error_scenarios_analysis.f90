@@ -686,6 +686,8 @@ contains
             call scenario_sphere_polygon_init_twice()
         case ("sphere_polygon_contains_before_init")
             call scenario_sphere_polygon_contains_before_init()
+        case ("sphere_polygon_is_simple_before_init")
+            call scenario_sphere_polygon_is_simple_before_init()
         case ("sphere_polygon_area_before_init")
             call scenario_sphere_polygon_area_before_init()
         case ("sphere_polygon_area_deg2_before_init")
@@ -744,6 +746,8 @@ contains
             call scenario_skycoord_radec2str_width_overflow()
         case ("skycoord_text_bad_separator")
             call scenario_skycoord_text_bad_separator()
+        case ("skycoord_text_precision_negative")
+            call scenario_skycoord_text_precision_negative()
         case ("skycoord_zcmb_unknown_system")
             call scenario_skycoord_zcmb_unknown_system()
         case ("skycoord_rotation_apply_before_init")
@@ -3712,6 +3716,13 @@ contains
     end subroutine scenario_sphere_polygon_contains_before_init
 
     !> `%area` needs a built polygon. The control asks a built one.
+    subroutine scenario_sphere_polygon_is_simple_before_init()
+        type(pf_sky_polygon) :: built, poly
+        call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
+        print '(a,l1)', "a built polygon answers ", built%is_simple()
+        print '(a,l1)', "unexpectedly, an unbuilt polygon answers ", poly%is_simple()   ! -> aborts
+    end subroutine scenario_sphere_polygon_is_simple_before_init
+
     subroutine scenario_sphere_polygon_area_before_init()
         type(pf_sky_polygon) :: built, poly
         call built%init([10.0_real64, 30.0_real64, 30.0_real64, 10.0_real64], [-5.0_real64, -5.0_real64, 5.0_real64, 5.0_real64])
@@ -4044,6 +4055,14 @@ contains
 
     !> The position's system is one of the four, as for a conversion. The control names Galactic.
     !! The result is printed each time: the procedure is `pure`, and an unused call may be deleted.
+    subroutine scenario_skycoord_text_precision_negative()
+        character(len=:), allocatable :: text
+        call pf_dec2str(-12.5_real64, text, precision=0)
+        print '(a,a)', "wrote at precision 0: ", text
+        call pf_dec2str(-12.5_real64, text, precision=-1)   ! -> aborts
+        print '(a,a)', "unexpectedly wrote at precision -1: ", text
+    end subroutine scenario_skycoord_text_precision_negative
+
     subroutine scenario_skycoord_zcmb_unknown_system()
         real(real64) :: z
         z = pf_zhel2zcmb(10.0_real64, 20.0_real64, 0.1_real64, PF_COORD_GALACTIC)

@@ -61,16 +61,20 @@ Both are **total**, like [`pf_angdist_deg`](skycoord.html#what-is-validated-and-
 argument gives NaN results without raising a floating-point flag; a declination outside `[-90, 90]`
 is read as the direction it names; a vector need not have unit length, and one as small as
 `[1e-300, 0, 1e-300]` is still a direction; an infinite component is read as the direction of the
-infinite components alone; the zero vector gives `(0, 0)`. Two rules make the poles exact: **a
+infinite components alone; the zero vector gives `(0, 0)`. **An infinite right ascension or
+declination is the one argument that is not screened**: `pf_radec2vec` gives NaN components and
+raises `IEEE_INVALID`, as the sine of an infinite angle must, so a program running with the
+exceptions unmasked screens infinities as well as NaNs. Two rules make the poles exact: **a
 declination of exactly ±90 is the pole `(0, 0, ±1)`**, whatever the right ascension, and **the right
 ascension of a pole is 0**. `pf_vec2radec` takes the declination as `atan2(z, hypot(x, y))`, never
 `asin(z)`, which loses half its digits near a pole.
 
-**Nothing else on this page takes a frame, or needs one.** A procedure whose input and output are
-both `(ra, dec)` — a polygon, the Fibonacci grid's RA/Dec form — gives the same answer under either
-convention: the two differ by a reflection, which maps great circles, containment and solid angle
-onto themselves. These compute in the standard frame. A frame enters again only where a pixel
-crosses the interface, and there it is the one your `pf_healpix_grid` was built with.
+**A procedure whose input and output are both `(ra, dec)` needs no frame and takes none** — a
+polygon, the Fibonacci grid's RA/Dec form — because the two conventions differ by a reflection,
+which maps great circles, containment and solid angle onto themselves; these compute in the
+standard frame. A frame is named wherever a vector or a pixel crosses the interface: the two
+conversions above, `pf_fibonacci_grid`, whose points come out as vectors, and the pixel and mask
+samplers, which read the frame your `pf_healpix_grid` was built with.
 
 ## Polygons: `pf_sky_polygon`
 
@@ -144,7 +148,8 @@ box for `PF_EDGE_RADEC` — right ascension uniform, and the sine of the declina
 candidates are uniform per unit solid angle — or the cap about the mean direction through the
 farthest vertex for `PF_EDGE_GREAT_CIRCLE`. `%acceptance()` is the fraction kept, the area over the
 bounding region's area, and a draw averages `1/%acceptance()` candidates — on a self-intersecting
-polygon too, since `%area()` there is the area actually sampled.
+polygon too, since `%area()` there is the area actually sampled
+(`bench/benchmark_sphere.sh --mode=polygon` measures the draw rate against it).
 
 **`%init` refuses a polygon with an acceptance below 1e-3**, and the message says to split it. A
 thin strip running diagonally across its own box is the shape that does this; a handful of boxes
@@ -181,7 +186,10 @@ v = pf_random_mask_at(grid, seed, i, pixels, [draw])              ! uniform over
 call pf_random_mask_radec_at(grid, seed, i, pixels, ra, dec, [draw])
 call pf_random_fill_mask(grid, seed, i, pixels, v, [draw])        ! v(3, n)
 call pf_random_fill_mask_radec(grid, seed, i, pixels, ra, dec, [draw])
-call pf_random_pixel_next(grid, rng, ipix, v)                     ! and the three other stream forms
+call pf_random_pixel_next(grid, rng, ipix, v)                    ! the next point of a stream
+call pf_random_pixel_radec_next(grid, rng, ipix, ra, dec)        ! the same point as (ra, dec)
+call pf_random_mask_next(grid, rng, pixels, v)                   ! the same two over a pixel list
+call pf_random_mask_radec_next(grid, rng, pixels, ra, dec)
 ```
 
 Every form takes a built [`pf_healpix_grid`](healpix.html#carrying-the-grid-in-an-object), which
@@ -210,9 +218,9 @@ enciphering as a pixel draw**: converting the block's two halves to the point's 
 22 bits spare, and the choice comes out of those
 ([`pf_random_pair_spare_at`](random.html#two-uniforms-and-an-integer-for-the-price-of-one-pf_random_pair_spare_at)).
 A list longer than 2²², and the rare draw the spare bits cannot decide exactly, fall back to a
-second block — the choice stays exactly uniform over the list either way. A scalar mask draw checks only the
-entry it chooses, so a long list costs nothing per draw; the fills check every entry before drawing
-anything. For real-valued weights, choose the pixel yourself and draw in it:
+second block — the choice stays exactly uniform over the list either way. A scalar mask draw
+checks only the entry it chooses, so a long list costs nothing per draw; the fills check every
+entry before drawing anything. For real-valued weights, choose the pixel yourself and draw in it:
 
 ```fortran
 real(real64) :: cum(npix_listed), u

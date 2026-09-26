@@ -3478,8 +3478,9 @@ ARGSORT_HEAD = BANNER + '''
 !! -- for `pf_sort` -- gather the result. No ordering decision is made here.
 !!
 !! **The int32 permutation forms exist because a caller with a default-kind `INTEGER` should not be
-!! forced to widen one** (`.claude/rules/api-conventions.md`'s "Numeric arguments: int32 and int64"). They compute in int64 and narrow
-!! at the end, aborting rather than truncating when the array is longer than `huge(1_int32)`.
+!! forced to widen one** (`.claude/rules/api-conventions.md`'s "Numeric arguments: int32 and
+!! int64"). They compute in int64 and narrow at the end, aborting rather than truncating when the
+!! array is longer than `huge(1_int32)`.
 submodule (parquet_sorting) parquet_sorting_argsort
     implicit none
     !
@@ -4871,8 +4872,9 @@ def gen_argsort():
 !! decision is made here.
 !!
 !! **The int32 permutation forms exist because a caller with a default-kind `INTEGER` should not be
-!! forced to widen one** (`.claude/rules/api-conventions.md`'s "Numeric arguments: int32 and int64"). They compute in int64 and narrow
-!! at the end, aborting rather than truncating when the array is longer than `huge(1_int32)`.
+!! forced to widen one** (`.claude/rules/api-conventions.md`'s "Numeric arguments: int32 and
+!! int64"). They compute in int64 and narrow at the end, aborting rather than truncating when the
+!! array is longer than `huge(1_int32)`.
 submodule (parquet_sorting) parquet_sorting_argsort
     implicit none
     !

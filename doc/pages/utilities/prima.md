@@ -408,7 +408,7 @@ The status codes, and what PRIMA reported to produce each:
 
 **`max_neval` is a hard ceiling on all three engines: a run never overruns it.** It defaults to
 `500*n`. Where the local engines of `parquet_optimize` may take one more step after the budget is
-tested -- a whole simplex step, a Brent iteration, a DE generation -- PRIMA tests its count before
+tested — a whole simplex step, a Brent iteration, a DE generation — PRIMA tests its count before
 each evaluation, so `info%neval` is at most the `max_neval` you passed. Reaching it is
 `PF_OPT_LIMIT`, not an error.
 

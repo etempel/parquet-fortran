@@ -90,12 +90,12 @@ system = pf_coord_system_from_name(token)
 `pf_sky_convert` is the same conversion with the two systems given as `PF_COORD_*` selectors — for a
 system read out of a configuration file or a column's metadata. For a pair that has a named
 procedure it calls that procedure, so the two answer alike to within a few ulp — they are two call
-sites of one kernel, and a compiler is free to inline it at one and not the other; for a pair that has none —
-Galactic and ecliptic, ecliptic and supergalactic, and FK5 J2000 and any system but ICRS, either way
-round — it applies that pair's own compile-time matrix, never two rotations in turn. **From a system
-to itself, the input comes back unchanged**, by copy and before any arithmetic: a longitude of `-10`
-stays `-10`, so the `[0, 360)` range applies to a real conversion only. `pf_sky_convert` is
-`pure elemental` like the named procedures.
+sites of one kernel, and a compiler is free to inline it at one and not the other; for a pair that
+has none — Galactic and ecliptic, ecliptic and supergalactic, and FK5 J2000 and any system but
+ICRS, either way round — it applies that pair's own compile-time matrix, never two rotations in
+turn. **From a system to itself, the input comes back unchanged**, by copy and before any
+arithmetic: a longitude of `-10` stays `-10`, so the `[0, 360)` range applies to a real
+conversion only. `pf_sky_convert` is `pure elemental` like the named procedures.
 
 A coordinate system written as text has a token: `pf_coord_system_name` gives `"icrs"`,
 `"galactic"`, `"ecliptic"`, `"supergalactic"` or `"fk5"` for a selector, and `"unknown"` for
@@ -169,15 +169,15 @@ in, provided both positions are in the same one.
 **`pf_angdist_deg`** is the angle between two positions, computed in the frame where only the
 difference of the right ascensions survives, as `atan2` of the cross and dot products rather than
 `acos` of the dot product — so it keeps its accuracy near 0 and near 180 degrees. It is within
-7.8e-15 degrees of a 60-digit evaluation on the edge cases it is pinned to -- the seam at right
-ascension 0, both poles, and coincident and antipodal pairs -- and within 2.8e-14 degrees over a
+7.8e-15 degrees of a 60-digit evaluation on the edge cases it is pinned to — the seam at right
+ascension 0, both poles, and coincident and antipodal pairs — and within 2.8e-14 degrees over a
 sweep of separations from a billionth of a degree to 180, and a right ascension may be any value:
-it is folded into one turn first. **A position is exactly zero degrees from itself**, including when the two right ascensions
-differ by whole turns and when both positions are one pole named by different right ascensions, so
-`dist > 0` excludes self-matches safely. It is appreciably cheaper than converting both positions to
-vectors and calling `parquet_healpix`'s `pf_angdist`, because the frame it works in removes one of
-the four sine and cosine pairs (`bench/benchmark_healpix.sh --mode=dist` measures both on your
-machine).
+it is folded into one turn first. **A position is exactly zero degrees from itself**, including
+when the two right ascensions differ by whole turns and when both positions are one pole named by
+different right ascensions, so `dist > 0` excludes self-matches safely. It is appreciably cheaper
+than converting both positions to vectors and calling `parquet_healpix`'s `pf_angdist`, because the
+frame it works in removes one of the four sine and cosine pairs
+(`bench/benchmark_healpix.sh --mode=dist` measures both on your machine).
 
 **`pf_offset_radec`** moves `sep_deg` along the great circle leaving `(ra0, dec0)` at position angle
 `pa_deg`, measured from north through east, and **`pf_position_angle_deg`** recovers that angle, in
@@ -296,6 +296,11 @@ call pf_str2radec(text, ra, dec, ok)
 
 A catalogue often keeps its positions as text, and more often as two text columns than as one, so
 each angle has its own writer and reader and the pair is the two together.
+
+**`text` is `character(len=:), allocatable`** in all three writers, which allocate it to the length
+they need; a fixed-length declaration does not compile. The writers are `pure` but not `elemental`
+— an allocatable output cannot be — so a column is written in a loop, where the readers below
+take one in a single call.
 
 **Writing.** A right ascension is wrapped into `[0, 360)` and written `hh:mm:ss.sss`, a declination
 `+dd:mm:ss.ss` with its sign always, every field below ten zero-padded. **`precision` is the number

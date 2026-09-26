@@ -2144,8 +2144,9 @@ module parquet_core
         !> returning); with neither, the listing goes wherever the message_stream setting names, as
         !> everything this library writes does. An unopened/read-only unit, or a unit+filename pair
         !> where filename does not match (exact, trimmed string equality against
-        !> inquire(unit=unit, name=)) the file unit is already connected to, both error stop. Calling this on a schema that has not been parsed yet
-        !> (schema%cinfo not populated -- neither parquet_parse_maml nor, for an in-code schema,
+        !> inquire(unit=unit, name=)) the file unit is already connected to, both error stop.
+        !> Calling this on a schema that has not been parsed yet (schema%cinfo not populated --
+        !> neither parquet_parse_maml nor, for an in-code schema,
         !> %init/%add_field followed by parquet_parse_maml, has run) also error stops by default,
         !> with the message "schema is not initialized (not parsed)" -- pass
         !> allow_uninitialized=.true. to silently print nothing instead (a complete no-op: no file

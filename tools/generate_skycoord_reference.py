@@ -380,6 +380,37 @@ def pa_rows(offsets):
     return rows
 
 
+#: The separation sweep behind `utilities/skycoord.md`'s "within 2.8e-14 degrees over a sweep of
+#: separations from a billionth of a degree to 180". That figure was stated on the page with
+#: nothing in the repository behind it: `test_angdist_deg_reference` pins 15 EDGE CASES at 1e-12,
+#: and the only sweep in the suite compares `pf_angdist_deg` with `pf_angdist` at 1e-11, which is
+#: two implementations agreeing rather than either being accurate. These rows are the missing
+#: half -- the whole separation range against the model.
+#:
+#: **Both ends of every pair are rounded to double BEFORE the reference angle is taken.** That is
+#: the distinction `test_angdist_deg_reference`'s header draws: a separation of 1e-9 degrees
+#: written as the difference of two numbers near 360 carries about 1e-5 relative INPUT error
+#: before any formula runs, so a table built the other way round measures binary64 rather than
+#: the library, and would pass against a much worse implementation.
+SEP_SWEEP_BASES = [(0.0, 0.0), (123.25, 41.5), (359.9, -0.25), (0.0, 89.5), (45.0, 60.0)]
+SEP_SWEEP_SEPS = [1e-9, 1e-8, 1e-6, 1e-4, 1e-2, 1.0, 30.0, 90.0, 150.0, 179.99, 180.0]
+SEP_SWEEP_PAS = [0.0, 37.0, 143.0]
+
+
+def sep_rows():
+    """(ra1, dec1, ra2, dec2, sep): the exact angle between two directions both exact in double."""
+    rows = []
+    for ra0, dec0 in SEP_SWEEP_BASES:
+        for sep in SEP_SWEEP_SEPS:
+            for pa in SEP_SWEEP_PAS:
+                far = offset_radec(D(ra0), dec0, D(pa), D(sep))
+                ra1, dec1 = float(far[0]), float(far[1])
+                with dctx():
+                    exact = rad2deg(dangle(radec_unit(ra0, dec0), radec_unit(ra1, dec1)))
+                rows.append((ra0, dec0, ra1, dec1, exact))
+    return rows
+
+
 # ---------------------------------------------------------------------------------------------
 # Unit vectors and the tangent plane at 60 digits
 # ---------------------------------------------------------------------------------------------
@@ -929,6 +960,7 @@ def gen_module():
     rots = rotation_rows()
     offs = offset_rows()
     pas = pa_rows(offs)
+    seps = sep_rows()
     pms = pm_rows()
     hms = [(x,) + hms_fields(x) for x in HMS_INPUTS]
     dms = [(x,) + dms_fields(x) for x in DMS_INPUTS]
@@ -975,6 +1007,13 @@ def gen_module():
     L += array("integer(int64)", "spa_in_bits", "4 * n_spa", [bits64(x) for r in pas for x in r[:4]])
     L += array("integer(int64)", "spa_out_bits", "n_spa", [bits64(r[4]) for r in pas])
     L += array("integer(int64)", "spa_tol_bits", "n_spa", [bits64(r[5]) for r in pas])
+    L.append("")
+
+    L.append("    ! ---- pf_angdist_deg: (ra1, dec1, ra2, dec2) -> the exact separation, over a")
+    L.append("    ! ---- sweep from 1e-9 to 180 degrees; both ends are exact in double ----")
+    L.append("    integer, parameter :: n_sdist = %d" % len(seps))
+    L += array("integer(int64)", "sdist_in_bits", "4 * n_sdist", [bits64(x) for r in seps for x in r[:4]])
+    L += array("integer(int64)", "sdist_out_bits", "n_sdist", [bits64(r[4]) for r in seps])
     L.append("")
 
     L.append("    ! ---- pf_apply_pm: (ra, dec, pm_ra, pm_dec, dt_years) -> (ra, dec) ----")

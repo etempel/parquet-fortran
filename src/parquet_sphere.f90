@@ -97,8 +97,9 @@ module parquet_sphere
     !! per-draw key and the candidate order, the containment rules (even-odd in the chart, and
     !! even-odd on the gnomonic projection about the cap centre with the far hemisphere excluded),
     !! the pixel's own square in the equal-area projection (`pf_healpix_grid%pix2vec_offset`), the
-    !! mask's choice draw, the 1e-3 acceptance floor and the 100000-candidate cap. The deterministic geometry has no identifier: it is
-    !! arithmetic, and its accuracy is asserted rather than frozen.
+    !! mask's choice draw, the 1e-3 acceptance floor and the 100000-candidate cap. The
+    !! deterministic geometry has no identifier: it is arithmetic, and its accuracy is asserted
+    !! rather than frozen.
     character(len=*), parameter :: pf_sky_region_algorithm = "region:box+cap/gnomonic-evenodd/1e-3/v1"
 
     ! ---- Family labels ----
@@ -612,9 +613,10 @@ module parquet_sphere
         !! **For a self-intersecting polygon (`%is_simple()` is `.false.`) it is the area the
         !! even-odd rule samples, measured**: neither integral answers that question -- both are
         !! signed sums, which cancel to nothing on a polygon whose lobes balance -- so `%init` counts
-        !! how many of `2**18` candidates uniform over the bounding region fall inside. The value is
-        !! a pure function of the polygon (the measurement takes a fixed key of its own, no caller's
-        !! seed), and its relative standard error is about 0.3 % at an acceptance of 0.3.
+        !! how many of `2**18` points of the `R2` low-discrepancy lattice over the bounding region
+        !! fall inside (`sky_polygon_measure`). The value is a pure function of the polygon -- the
+        !! lattice needs no key, and no caller's seed enters it -- and is accurate to about one part
+        !! in ten thousand, better on a polygon whose boundary is shorter.
         pure elemental module function sky_polygon_area(this) result(a)
             class(pf_sky_polygon), intent(in) :: this !! the polygon.
             real(real64) :: a !! the area, steradians.

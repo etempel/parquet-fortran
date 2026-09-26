@@ -744,10 +744,10 @@ contains
     !! **Half, but not exactly half, and the tolerance says which parts are which.** The two lobes
     !! put their width at the middle declination, where `cos(dec)` is largest, so the true ratio is
     !! 0.5013 rather than 0.5 for this fixture -- and the great-circle rule adds the gnomonic
-    !! projection's own distortion over 20 degrees. The measure itself is a 512 by 512 sweep of the
-    !! bounding region, which carries about one part in a hundred on a boundary this long. 10 per
-    !! cent covers all three together and still separates "half" from the answers a broken measure
-    !! gives: the whole box, nothing, or twice the interior.
+    !! projection's own distortion over 20 degrees. The measure itself is `2**18` points of an `R2`
+    !! low-discrepancy lattice over the bounding region, which carries about 8e-5 on this fixture --
+    !! far the smallest of the three. 10 per cent covers all three together and still separates
+    !! "half" from the answers a broken measure gives: the whole box, nothing, or twice the interior.
     subroutine test_polygon_self_intersecting(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         !> The square's four corners in CROSSING order: the edges 1-2 and 3-4 are its diagonals.

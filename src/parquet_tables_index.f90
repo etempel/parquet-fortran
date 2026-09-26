@@ -20,12 +20,12 @@
 !! importing `parquet_tables`, which is the wrong direction for the tier, so the stamp and the
 !! comparison live here.
 !!
-!! **The generation is compared on EVERY query, never cached** (feature_risks.md Risk-210). A
-!! stale index answers in-range row numbers that name the wrong rows, which is exactly the
-!! silent failure `table-mutate.md` refuses a "still sorted" flag for; one `integer(int64)`
-!! comparison per query is the whole cost of not having it.
+!! **The generation is compared on EVERY query, never cached**. A stale index answers in-range row
+!! numbers that name the wrong rows, which is exactly the silent failure `table-mutate.md` refuses
+!! a "still sorted" flag for; one `integer(int64)` comparison per query is the whole cost of not
+!! having it.
 !!
-!! **The key is converted by parquet_core's helpers and by nothing here** (Risk-211): the same
+!! **The key is converted by parquet_core's helpers and by nothing here**: the same
 !! `parquet_date_key`, `parquet_time_key` and `parquet_timestamp_key` the filter's `in` leaf
 !! uses, and `parquet_index_real_key` -- the CANONICALISING real key, every NaN one value -- where
 !! the filter takes `parquet_filter_real_key`. An index answers the sort comparator's question,
@@ -234,7 +234,7 @@ contains
     !!
     !! The comparison is made HERE, on every query, and the answer is never cached: a "still
     !! valid" flag would be the stale-flag hazard `table-mutate.md` refuses for sortedness, and
-    !! the check is one integer comparison (feature_risks.md Risk-210).
+    !! the check is one integer comparison.
     subroutine tix_resolve(self, proc)
         class(parquet_table_index), intent(in) :: self !! the index.
         character(len=*), intent(in) :: proc          !! calling binding, for the message.

@@ -266,9 +266,9 @@ contains
     ! ==================================================================================
     !
     !> `%sort_by`: the operation with the most to lose, because it is the one whose per-column loop
-    !> has a validating first column hoisted out of the parallel path (`feature_risks.md` Risk-46).
-    !> A hoist that lost the validation, or a loop that skipped the hoisted column, both show up
-    !> here as a column out of step with its neighbours.
+    !> has a validating first column hoisted out of the parallel path. A hoist that lost the
+    !> validation, or a loop that skipped the hoisted column, both show up here as a column out of
+    !> step with its neighbours.
     subroutine test_sort_by_parallel_equals_serial(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: par, ser
@@ -551,7 +551,7 @@ contains
             "a filtered table's last column differed between the parallel and serial prefetch")
         if (allocated(error)) return
         ! And the columns must be in step with EACH OTHER, which the A/B comparison above cannot
-        ! see: two readers agreeing on a wrong mask would satisfy it (feature_risks.md Risk-52).
+        ! see: two readers agreeing on a wrong mask would satisfy it.
         call check(error, all(abs(pe - 5.0_real64 * pa) < 1.0e-9_real64), &
             "two columns of a filtered table came from different row sets")
     end subroutine test_prefetch_filter_parallel_equals_serial
@@ -559,11 +559,10 @@ contains
     !> **The load-bearing test of P4.**
     !>
     !> A table opened with `sample_fraction=` and NO `sample_seed=` now prefetches in parallel. That
-    !> is only safe because `parquet_open_table` settles a seed before any reader exists
-    !> (`feature_risks.md` Risk-55), so every per-thread reader draws the identical rows. A
-    !> per-thread reader opened without that seed -- a bare `parquet_open_reader`, as this path used
-    !> to do -- gives each column its own random subset, and every column still looks perfectly
-    !> ordinary on its own.
+    !> is only safe because `parquet_open_table` settles a seed before any reader exists, so every
+    !> per-thread reader draws the identical rows. A per-thread reader opened without that seed -- a
+    !> bare `parquet_open_reader`, as this path used to do -- gives each column its own random
+    !> subset, and every column still looks perfectly ordinary on its own.
     !>
     !> **The assertion is that the columns are in step with EACH OTHER**, not a row count and not an
     !> A/B equality. The fixture writes column *c* as `c*i`, so `e == 5*a` holds for any set of rows
@@ -960,9 +959,9 @@ contains
     !> different arm, and both must produce exactly the same answer — which is the point, since a
     !> lock that was skipped and a lock that was taken must be indistinguishable in the result.
     !>
-    !> The work floor is moved rather than the fixture grown for the usual reason (Risk-49): a
-    !> fixture large enough to clear the real floor with 40-row row groups would be tens of
-    !> thousands of row groups.
+    !> The work floor is moved rather than the fixture grown for the usual reason: a fixture
+    !> large enough to clear the real floor with 40-row row groups would be tens of thousands
+    !> of row groups.
     subroutine test_colread_short_row_groups(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: f = "test_run/tblpar_colread_shortrg.parquet"
@@ -1104,7 +1103,7 @@ contains
     !> The floor exists at all because each thread opens its own reader, which parses the footer;
     !> below roughly a megabyte of column that dominates and the split loses. No fixture a test can
     !> afford sits near the real break-even, which is why the override exists rather than a sweep
-    !> over fixture sizes (`feature_risks.md` Risk-49).
+    !> over fixture sizes.
     subroutine test_colread_floor_override(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: f = "test_run/tblpar_colread_floor.parquet"
@@ -1673,7 +1672,7 @@ contains
     !! caught it — cannot be relied on to catch a regression, because a lost update simply may not
     !! happen on any given run. So the rule itself is what is asserted here, deterministically, the
     !! way `thread row ranges cover every row and never share a validity byte` does for
-    !! `parquet_string_column` (`feature_risks.md` Risk-61).
+    !! `parquet_string_column`.
     !!
     !! What it checks, for a sweep of widths and row-group layouts including ones whose boundaries
     !! deliberately do not divide the alignment: the reported middle is inside the range; no two
@@ -1754,7 +1753,7 @@ contains
     !> "different memory": without the `!$omp atomic` in `bit_set`
     !> (`src/parquet_columns_util.f90`) two threads writing rows in one block both read, modify and
     !> write it, and one update is lost silently -- the column still validates and the row count is
-    !> still right. See feature_risks.md Risk-135.
+    !> still right.
     !>
     !>   * The **sharing** arm uses `schedule(dynamic)`, which hands out single iterations, so
     !>     threads interleave across every block. Measured against the unfixed code on machine A:
@@ -2112,7 +2111,7 @@ contains
     !! then call the SERIAL builder, so `threads=` changed nothing at all -- measured here at 1 for
     !! `threads=4` with the engine floor lowered, while the ungrouped path's own test (`a
     !! selection's ordering route really opens a team`, `test/test_sorting.f90`) opened 4 on the
-    !! same machine. The builder now receives that count (`feature_risks.md` Risk-189).
+    !! same machine. The builder now receives that count.
     !!
     !! **Neither engine's record can be reset, so every request is preceded by an explicit
     !! `threads=1` join that pins the record to 1.** An `== nt` read against a record an earlier
@@ -2121,7 +2120,7 @@ contains
     !! (`suite_is_safe_to_parallelize`), so nothing else writes the records in between.
     !!
     !! The join is made to DETACH so the column work is a real gather over all five columns rather
-    !! than a no-op, which is what clears `colwork_avail`'s floor (the Risk-49 trap).
+    !! than a no-op, which is what clears `colwork_avail`'s floor (the threshold trap).
     subroutine test_join_thread_split(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b, c, d, e
@@ -2278,7 +2277,7 @@ contains
     !! pair list is identical at every team size -- so the two records
     !! `parquet_debug_get_join_group_threads_used` and `parquet_debug_get_join_side_threads_used`
     !! are the only observables, and the A/B against `threads=1` is what proves the threaded
-    !! passes right (feature_risks.md Risk-189, Risk-220).
+    !! passes right.
     !!
     !! **Five arms.** `threads=1` on the sort engine pins both records to 1; `threads=nt` records
     !! nt in both; `parquet_set_table_threads(1)` moves neither -- the mirror of the thread-split
@@ -3075,9 +3074,9 @@ contains
     !> The `int32` `%broadcast`'s team: the forwarder must hand `threads=` on to the one loop
     !! that does the work, so the record reads `nt` for `threads=nt` and 1 for `threads=1`, and
     !! the answer at `nt` equals the answer at 1 entry for entry -- and equals the `int64` form's,
-    !! which is the walk it forwards onto (feature_risks.md Risk-264). A forwarder that dropped
-    !! `threads=` would answer correctly and run serially, which only the record can see. Serial
-    !! in this suite, so the team is real.
+    !! which is the walk it forwards onto. A forwarder that dropped `threads=` would answer
+    !! correctly and run serially, which only the record can see. Serial in this suite, so the
+    !! team is real.
     subroutine test_broadcast_i32_group_team(error)
         type(error_type), allocatable, intent(out) :: error
         integer, parameter :: N = 20000 !! rows; about five hundred groups of unequal size.

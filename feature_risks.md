@@ -7,14 +7,17 @@ documented caller contract or a contributor-only trap. Read the entries for an a
 it. `.claude/rules/workflow.md`, "The `feature_risks.md` open-risks register", holds the admission
 test and the editing rules; `check_risk_register_shape` enforces the shape.
 
-A `Risk-N` cited in a source, test or tool comment but absent below was closed: the comment beside
-the citation and the test it names are the record. Numbers are never reused.
+Every `Risk-N` cited anywhere in the repository names an entry below. Closing an entry removes its
+citations in the same change, after what it required moves into a comment at the site or a rule
+file, so a number never points at something that is gone; `check_risk_register_shape` enforces that
+over the instruction files and the four source trees. The numbering was compacted once, so a
+`Risk-N` in the git history or in an archived document does not name the entry of that number here.
 
-Next number: Risk-271
+Next number: Risk-5
 
 ## Open risks
 
-### Risk-57 — A parallel table read loses nulls if the validity bitmap is not allocated before the region
+### Risk-1 — A parallel table read loses nulls if the validity bitmap is not allocated before the region
 
 `materialize_column_parallel` (`src/parquet_tables_read.f90`) pastes one row group per thread into
 one column. The pastes are disjoint, but `%paste` allocates the validity bitmap on first null
@@ -26,7 +29,7 @@ window is a few instructions. **Forbids:** any parallel path writing into one `p
 several threads ensures validity before the region, never inside it. A ThreadSanitizer report of
 `paste` storing `has_nulls = .true.` from several threads is a benign same-value store, not this.
 
-### Risk-123 — A weighted sampler at the caller's own coordinates couples with the caller's draws
+### Risk-2 — A weighted sampler at the caller's own coordinates couples with the caller's draws
 
 `pf_weighted_permutation` and `pf_weighted_draw` derive their seeds through `pf_random_key` with
 fixed family labels (`wperm_family_label`, `wd_family_label`), so neither reads the raw
@@ -39,7 +42,7 @@ reverted; one family reverting to the raw axis couples with the caller and no te
 lowest-weight cell, with a deliberately coupled control arm. A new construction over the same
 generator takes its own label.
 
-### Risk-173 — A size-then-fill pair whose sizing pass discards work writes past its buffer
+### Risk-3 — A size-then-fill pair whose sizing pass discards work writes past its buffer
 
 `pf_join_path_many` (`src/parquet_utils.f90`) sizes a joined path in one walk and fills it in a
 second; an absolute component discards everything before it. If the filling walk writes a prefix
@@ -51,7 +54,7 @@ plain `fpm test` and CI compile no `-fcheck`. **Closes with:** a CI job running 
 `--profile debug`. **Forbids:** in any size-then-fill pair, pass 1 may shrink its accumulator and
 pass 2 may not.
 
-### Risk-251 — A far-tail truncated-normal draw hangs when its case threshold cancels under FMA
+### Risk-4 — A far-tail truncated-normal draw hangs when its case threshold cancels under FMA
 
 `tn_threshold` (`src/parquet_random.f90`) must not form `a*a - a*s` with `s = sqrt(a*a + 4)`: for a
 standardised bound near `1e10` an FMA contraction turns the exact 0 into hundreds, the threshold

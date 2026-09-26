@@ -151,8 +151,7 @@ contains
     !! validates, the row count is still right, and some row's null flag is simply wrong. This is
     !! reachable straight from the public API (`%set_null` in a parallel loop, which
     !! `doc/pages/operating/thread-safety.md` documents as safe) and from any concurrent value
-    !! write to a null-carrying column, since a setter clears the element's bit. See
-    !! feature_risks.md Risk-135.
+    !! write to a null-carrying column, since a setter clears the element's bit.
     !!
     !! The two halves: the mask is built *before* the directive, because `!$omp atomic update`
     !! accepts only `x = x op expr` or `x = intrinsic(x, expr)` with `intrinsic` one of

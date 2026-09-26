@@ -1565,8 +1565,8 @@ contains
     !! endpoint singularity per tooth, cut at the teeth. There the engine stops at the first
     !! partition inside the bound, so the estimate it returns sits just under the budget it was
     !! given -- and four budgets of `atol` instead of `atol/4` come back, measured, at about 3.6
-    !! times the `atol` the caller asked for, with `converged` still true. That is Risk-274's
-    !! silent failure exactly, and the summed `abserr` is what shows it: the ACTUAL error stays
+    !! times the `atol` the caller asked for, with `converged` still true. That is the silent
+    !! failure exactly, and the summed `abserr` is what shows it: the ACTUAL error stays
     !! inside `atol` in both arms, so a test asserting only the answer would pass over it. It is
     !! also the only half a caller who cannot check the answer has.
     !!

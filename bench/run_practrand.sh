@@ -40,11 +40,11 @@
 # Maintainer-only, and deliberately never in CI: a deep run takes hours, and a battery that emits
 # marginal p-values by design is a flaky test waiting to happen.
 #
-# The forced half currently fails on gfortran under LTO, and that is expected -- see
-# `feature_risks.md` (feature_risks.md) Risk-101. It is a gfortran bug affecting a kernel gfortran
-# never ships (gfortran takes the protected arm and is clean; ifx ships the wrapping arm and is
-# clean at every setting measured, including `-ipo`), so CI runs `--shipped-only` rather than going
-# permanently red on it. Maintainer-only (stripped from the fpm-published package).
+# The forced half currently fails on gfortran under LTO, and that is expected.
+# It is a gfortran bug affecting a kernel gfortran never ships (gfortran takes the protected arm and
+# is clean; ifx ships the wrapping arm and is clean at every setting measured, including `-ipo`), so
+# CI runs `--shipped-only` rather than going permanently red on it. Maintainer-only (stripped from
+# the fpm-published package).
 # ---------------------------------------------------------------------------------------------
 
 set -euo pipefail

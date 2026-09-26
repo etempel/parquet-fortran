@@ -1524,9 +1524,8 @@ contains
     !! `hi - lo + 1` overflows whenever the span exceeds `huge`, and an `int64` key set is entitled
     !! to do exactly that -- `{-huge, huge}` is two keys. So the span-exceeds-the-domain case is
     !! ruled out first, using a bound formed from `huge` and never from the most-negative constant
-    !! (`feature_risks.md` Risk-125 is nagfor mis-evaluating that constant); then the subtraction
-    !! is known safe; then the comparison is made BEFORE the `+ 1` that would itself overflow at
-    !! the very top of the domain.
+    !! (nagfor mis-evaluates that constant); then the subtraction is known safe; then the comparison
+    !! is made BEFORE the `+ 1` that would itself overflow at the very top of the domain.
     pure subroutine ix_span_ok(lo, hi, budget, span, ok)
         integer(int64), intent(in) :: lo      !! smallest key.
         integer(int64), intent(in) :: hi      !! largest key.
@@ -1732,13 +1731,13 @@ contains
     ! accident of the constants. A conventional 64-bit multiplicative mixer wraps a signed
     ! multiply, which this project treats as the hazard it is: a compiler may wrap the arithmetic
     ! and STILL use the overflow's undefinedness to delete a branch somewhere else -- the confirmed
-    ! ifx incident behind feature_risks.md Risk-94, which cost parquet_random a three-arm
-    ! preprocessor fork and two standalone check scripts to own exactly one such site. This module
-    ! avoids the entire class instead: a key is split into 32-bit halves and mixed with 32-bit x
-    ! 31-bit multiplies, so every product is provably below 2**63 and no wrapping site exists at
-    ! all. There is therefore nothing here to fork, nothing to check with a separate script, and
-    ! the module is clean under -ftrapv, nagfor's -C=intovf and UBSan on every compiler in the
-    ! fleet. A lookup is memory-bound; the few extra ALU operations disappear next to one miss.
+    ! ifx incident that cost parquet_random a three-arm preprocessor fork and two standalone check
+    ! scripts to own exactly one such site. This module avoids the entire class instead: a key is
+    ! split into 32-bit halves and mixed with 32-bit x 31-bit multiplies, so every product is
+    ! provably below 2**63 and no wrapping site exists at all. There is therefore nothing here to
+    ! fork, nothing to check with a separate script, and the module is clean under -ftrapv, nagfor's
+    ! -C=intovf and UBSan on every compiler in the fleet. A lookup is memory-bound; the few extra
+    ! ALU operations disappear next to one miss.
     ! ============================================================================================
 
     !> Avalanches the low 32 bits of `v` into a value in `0 .. 2**32 - 1`.

@@ -10,8 +10,8 @@
 !!
 !! **The extremes are two `nth_element` calls, not a hand-written scan.** Rank 1 ascending is the
 !! minimum and rank 1 DESCENDING is the maximum, so reaching them through the engine means the
-!! answers cannot disagree with `pf_sort`'s own ends (`feature_risks.md` Risk-34). Both calls are
-!! O(n), the same as the scan would be, and neither needs a per-type comparison written here.
+!! answers cannot disagree with `pf_sort`'s own ends. Both calls are O(n), the same as the scan
+!! would be, and neither needs a per-type comparison written here.
 !!
 !! Rank `n_value` of the ascending order would name the same maximum VALUE, but the last of a tied
 !! run rather than the first -- see `minmax_impl_*`'s own comment for why that asymmetry is not

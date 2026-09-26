@@ -511,9 +511,9 @@ contains
     !
     !> `set_validity` is `set_null` over a whole mask in one rebuild, so the oracle is the loop it
     !! replaces, run on a clone. The fixture puts its SHORTEST element first and already holds a
-    !! null before the call, so the add-only rule (feature_risks.md Risk-182) is exercised rather
-    !! than assumed; the mask nulls the FIRST and the LAST element, where a byte cursor is easiest
-    !! to get wrong, and a zero-length element sits in the middle.
+    !! null before the call, so the add-only rule is exercised rather than assumed; the mask nulls
+    !! the FIRST and the LAST element, where a byte cursor is easiest to get wrong, and a
+    !! zero-length element sits in the middle.
     subroutine test_set_validity_bulk(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col, oracle, empty
@@ -2728,8 +2728,8 @@ contains
     !
     !> %argminmax must point at exactly the elements a scan keeping running winners through
     !! %compare points at: nulls skipped, the shorter operand blank-padded, and a tie kept by the
-    !! EARLIER index -- since %print_stat's string extremes moved from that scan onto it
-    !! (feature_risks.md Risk-223). The reference is that scan, run here over the same column.
+    !! EARLIER index -- since %print_stat's string extremes moved from that scan onto it. The
+    !! reference is that scan, run here over the same column.
     subroutine test_argminmax_matches_compare(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col

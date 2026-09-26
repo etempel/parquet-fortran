@@ -124,14 +124,13 @@ contains
 
     !> A null struct row's fields must be null in their OWN bitmaps, not merely masked by the row.
     !!
-    !! **This is the field-level half of `feature_risks.md` Risk-155, and it needs a trick to
-    !! observe at all.** `unwrap_struct_path` returns each leaf's COMBINED mask
-    !! (`struct_valid AND field_valid`) and `read_struct_field` stores it unchanged. That is
-    !! correct -- Parquet's definition levels cannot encode "the struct is absent but its field is
-    !! present", so for a file the combined mask IS the field's own stored validity -- and it looks
-    !! wrong, so the tempting "fix" is to divide the struct's contribution back out. Doing that
-    !! makes every field of every null struct row report `is_valid = .true.` over a value the file
-    !! does not contain.
+    !! **This is the field-level half of the problem, and it needs a trick to observe at all.**
+    !! `unwrap_struct_path` returns each leaf's COMBINED mask (`struct_valid AND field_valid`) and
+    !! `read_struct_field` stores it unchanged. That is correct -- Parquet's definition levels
+    !! cannot encode "the struct is absent but its field is present", so for a file the combined
+    !! mask IS the field's own stored validity -- and it looks wrong, so the tempting "fix" is to
+    !! divide the struct's contribution back out. Doing that makes every field of every null struct
+    !! row report `is_valid = .true.` over a value the file does not contain.
     !!
     !! **`%get_field` alone cannot see the difference**, which is why `test_two_null_levels` above
     !! does not catch it: `begin_get` tests the ROW level first and short-circuits, so a null row's

@@ -268,10 +268,10 @@ contains
         ! a change here should actually do.**
         !
         ! Nothing finalizable is declared inside this construct -- the body only references slots
-        ! that already exist. That is what keeps feature_risks.md Risk-45 (gfortran and ifx forbid
-        ! opposite shapes for a finalizable type in a parallel region) out of this region entirely;
-        ! a finalizable local inside a procedure CALLED from here is fine and is what
-        ! parquet_column's own procedures already do.
+        ! that already exist. That is what keeps the trap (gfortran and ifx forbid opposite shapes
+        ! for a finalizable type in a parallel region) out of this region entirely; a finalizable
+        ! local inside a procedure CALLED from here is fine and is what parquet_column's own
+        ! procedures already do.
         !$omp parallel do default(shared) private(j) schedule(dynamic) num_threads(nt)
         do j = 1, size(slots)
             call colwork_one(cache, op, slots(j), rows, keep, valid, 1)
@@ -305,9 +305,9 @@ contains
         select case (op)
         case (PCW_REINDEX_TRUSTED)
             ! Trusted, never `%reindex`: the permutation is validated ONCE per sort, by the caller,
-            ! on a column it rewrites serially before handing the rest here (feature_risks.md
-            ! Risk-46). Collapsing this to all-trusted with no validating column anywhere, or
-            ! making this one validate too, both undo that.
+            ! on a column it rewrites serially before handing the rest here. Collapsing this to
+            ! all-trusted with no validating column anywhere, or making this one validate too, both
+            ! undo that.
             call cache%cols(idx)%values%reindex_trusted(rows)
         case (PCW_DELETE_MASK)
             call cache%cols(idx)%values%delete_by_mask(keep)
@@ -400,10 +400,10 @@ contains
     !! a single pass -- kind, width, unit and values, the source's own nulls carried with their
     !! rows, and every row `valid` marks `.false.` null on top of them. That mask only ever ADDS
     !! nulls, which is what lets it describe the unmatched rows alone and leaves the nulls the
-    !! source column already had exactly where the gather put them (`feature_risks.md` Risk-182).
-    !! Until stage 4 this was three calls -- `deep_copy`, `%gather`, `%set_validity` -- which
-    !! copied the whole source before rebuilding the copy, held two transient copies where this
-    !! holds one, and walked the rows three times.
+    !! source column already had exactly where the gather put them. Until stage 4 this was three
+    !! calls -- `deep_copy`, `%gather`, `%set_validity` -- which copied the whole source before
+    !! rebuilding the copy, held two transient copies where this holds one, and walked the rows
+    !! three times.
     subroutine join_one_column(src, dst, sslot, dslot, idx, valid, threads)
         type(parquet_table_cache), intent(in) :: src      !! the source column store.
         type(parquet_table_cache), intent(inout) :: dst   !! the destination column store.

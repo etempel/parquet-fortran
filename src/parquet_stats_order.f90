@@ -1226,7 +1226,7 @@ contains
         ! **Written as the negation of the legal range so that a NaN is refused.** `prob <= 0.0
         ! .or. prob >= 0.5` is FALSE for a NaN, so a guard spelled that way would pass one through
         ! to `pf_quantile`, which would then abort with a message about a probability outside
-        ! [0, 1] -- naming an argument the caller never passed. Risk-172's shape.
+        ! [0, 1] -- naming an argument the caller never passed.
         if (.not. (prob > 0.0_real64 .and. prob < 0.5_real64)) &
             error stop what // ": prob must satisfy 0 < prob < 0.5; prob=0.5 asks for a zero " // &
                 "range over a zero denominator, prob=0 asks for the whole range over an " // &
@@ -1250,10 +1250,10 @@ contains
     !! to a bit or two rather than exactly. Compare them with a tolerance -- `pf_mean`'s own
     !! doc-comment says the same thing about comparing it with anything.
     !!
-    !! **A `method=` token whose positions are NOT symmetric would silently break both**
-    !! (`feature_risks.md` Risk-255), as would replacing the ORDINAL ranks used here with
-    !! `pf_normal_scores`' midranks -- a tie takes two positions to one value and the symmetry
-    !! goes with it. The ordinal ranks are also what make this `scipy.stats.probplot`.
+    !! **A `method=` token whose positions are NOT symmetric would silently break both**, as
+    !! would replacing the ORDINAL ranks used here with `pf_normal_scores`' midranks -- a tie
+    !! takes two positions to one value and the symmetry goes with it. The ordinal ranks are
+    !! also what make this `scipy.stats.probplot`.
     pure subroutine probit_line(xs, m, a, filliben, loc, sigma, corr)
         real(real64), intent(in) :: xs(:)   !! the survivors, ASCENDING; the first `m` are live.
         integer(int64), intent(in) :: m     !! how many survived; at least 2.
@@ -1330,8 +1330,7 @@ contains
         sigma = stats_nan()
         c = stats_nan()
         ! `poisoned` has to be TESTED, not inherited: under `skipnan = .false.` a NaN sorts to one
-        ! end of the ordering and the line through the rest is a perfectly ordinary one
-        ! (`feature_risks.md` Risk-253).
+        ! end of the ordering and the line through the rest is a perfectly ordinary one.
         !
         ! **`m == 1` is NOT screened here**, deliberately: a line needs two points, and
         ! `probit_line` is the one place that decides so -- for this procedure and for
@@ -1370,9 +1369,8 @@ contains
         ! the divisor is 1.3489795003921634, which makes this exactly `pf_iqr` over that number.
         !
         ! `pf_probit` rather than a frozen literal, because this factor depends on `prob` and only
-        ! the default could be frozen. `feature_risks.md` Risk-252 is what keeps the default in
-        ! step with `pf_mad`'s `MAD_NORMAL_SCALE`, which is frozen precisely because it does not
-        ! depend on anything.
+        ! the default could be frozen. The default is kept in step with `pf_mad`'s
+        ! `MAD_NORMAL_SCALE`, which is frozen precisely because it does not depend on anything.
         sigma = (two(2) - two(1)) / (2.0_real64 * pf_probit(1.0_real64 - pr))
     end procedure probit_scale_f64
 

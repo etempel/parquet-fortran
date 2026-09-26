@@ -751,16 +751,16 @@ contains
         ! must bump.
         !
         ! The test is deliberately one predicate in one place rather than a decision each branch
-        ! makes for itself: the counter's rule is otherwise a total, exception-free one
-        ! (feature_risks.md Risk-71), and a single computed exception is checkable where a
-        ! scattered one is not. The replace-in-place branch above bumps on its way out for a
-        ! different reason -- it CLEARS a column's values, which no held pointer can survive.
+        ! makes for itself: the counter's rule is otherwise a total, exception-free one, and a
+        ! single computed exception is checkable where a scattered one is not. The replace-in-place
+        ! branch above bumps on its way out for a different reason -- it CLEARS a column's values,
+        ! which no held pointer can survive.
         if (grew) cache%generation = cache%generation + 1_int64
         ! Blanked before it is handed out, because slot `n` may be one a drop vacated: every
         ! vacating path resets what it removes, and this is what makes that a property of the
         ! slot rather than a rule three of them have to remember. `unit` is the field that
         ! actually escaped -- it is read in preference to the parquet_column's own, so a stale
-        ! one shadowed the unit %add_column was given. See feature_risks.md Risk-204.
+        ! one shadowed the unit %add_column was given.
         call reset_column_slot(cache%cols(n))
         cache%cols(n)%name = trim(name)
         cache%cols(n)%file_name = trim(name)

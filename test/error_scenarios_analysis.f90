@@ -2747,8 +2747,8 @@ contains
     !! the key column, which the join itself read, is the control.
     !!
     !! **The right key is DUPLICATED on purpose, and the scenario is vacuous without it.** A join
-    !! that leaves every left row exactly once and in place does not detach at all (`Risk-184`), so
-    !! against a unique key this reads the skipped column perfectly happily -- which is what it did
+    !! that leaves every left row exactly once and in place does not detach at all, so against a
+    !! unique key this reads the skipped column perfectly happily -- which is what it did
     !! until P4 landed and this scenario stopped aborting. The duplicate is what makes it a join
     !! that rewrites the row set.
     subroutine scenario_join_detached_column()
@@ -3036,9 +3036,9 @@ contains
     !> A stream addresses `2**63` words and no more, so a draw whose words would pass that bound
     !! has nowhere to come from. The guard exists as much for the arithmetic as for the caller:
     !! an unguarded `pos + 2` here would be a deliberate signed-overflow site on a hot path, and
-    !! Risk-94 records this module being caught with a compiler using exactly that kind of
-    !! undefinedness to delete a branch far away. The first draw is the control -- it must succeed
-    !! from a position one word below the ceiling.
+    !! this module has been caught with a compiler using exactly that kind of undefinedness to
+    !! delete a branch far away. The first draw is the control -- it must succeed from a position
+    !! one word below the ceiling.
     subroutine scenario_random_stream_exhausted()
         type(pf_random_stream) :: rng
         real(real64) :: x

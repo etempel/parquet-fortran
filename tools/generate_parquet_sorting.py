@@ -810,9 +810,9 @@ module parquet_sorting
     !!
     !! A hook that FORCES a state needs a way to prove the state took effect, or the test it enables
     !! passes just as happily against a hook that does nothing -- both paths answer identically here,
-    !! so no assertion on the permutation can tell them apart. This is the `had_index` shape from
-    !! `feature_risks.md` Risk-75. It costs one increment per heapsort call, i.e. at most O(log n)
-    !! per sort and never anything per comparison.
+    !! so no assertion on the permutation can tell them apart. This is the `had_index` shape.
+    !! It costs one increment per heapsort call, i.e. at most O(log n) per sort and never anything
+    !! per comparison.
     integer(int64), save :: dbg_sort_heapsort_calls = 0_int64
     !> .true. makes the introsort's final insertion pass record how far it moved anything.
     !!
@@ -833,13 +833,13 @@ module parquet_sorting
     !! Needed in BOTH directions, which is unusual for a threshold hook. Raising it (to `huge`)
     !! declines the radix path, which is how the introsort's own negative controls stay non-vacuous
     !! once the floor drops below their fixture sizes; lowering it (to 2) drives every engine fixture
-    !! in the suite through the radix path. Both are the `feature_risks.md` Risk-49 shape -- a
-    !! size threshold hiding a code path from the tests written for everything else.
+    !! in the suite through the radix path. Both are the same trap -- a size threshold hiding a
+    !! code path from the tests written for everything else.
     integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
     !> Overrides the row floor above which a SELECTION orders instead; NEGATIVE restores
     !! `SORT_NTH_ORDER_MIN`.
     !!
-    !! Risk-49 again, and here the threshold hides not a tuning choice but a whole second answer
+    !! The same threshold trap, and here it hides not a tuning choice but a whole second answer
     !! path: below the floor `sort_nth_index` quickselects, above it the same question is answered
     !! by the ordering engine. Every fixture in the suite is small, so without this override only
     !! the quickselect arm would ever run and the routing would be untested in the direction that
@@ -847,7 +847,7 @@ module parquet_sorting
     integer(int64), save :: dbg_sort_nth_order_min = -1_int64
     !> Overrides the balanced split's smallest task size; NEGATIVE restores `SORT_TASK_FLOOR`.
     !!
-    !! Risk-49 again, and the sharpest instance of it in this module: the floor binds only when
+    !! The same threshold trap, the sharpest instance in this module: the floor binds only when
     !! `nv / team` falls below it, i.e. small `n` with a large team, which is precisely the regime
     !! no fixture in the suite reaches -- so the constant ships unexercised rather than merely
     !! untuned. It is also the reason a value for it cannot be measured by rebuilding: a crossover
@@ -916,12 +916,12 @@ module parquet_sorting
     integer, save :: dbg_sort_radix_fail_alloc = 0
     !> Radix scatter passes actually EXECUTED since the counter was last reset.
     !!
-    !! The `had_index` shape from `feature_risks.md` Risk-75, and the only observable an optimisation
-    !! that changes the PASS COUNT has. Several of them exist -- the constant-digit skip, and the
-    !! narrow-integer bias that exists to make that skip fire -- and every one of them leaves the
-    !! permutation bit-identical by construction. So no assertion on an answer can distinguish a
-    !! build where the optimisation fires from one where it never does, and without this counter a
-    !! test for any of them is vacuous rather than merely weak.
+    !! The `had_index` shape again, and the only observable an optimisation that changes the PASS
+    !! COUNT has. Several of them exist -- the constant-digit skip, and the narrow-integer bias that
+    !! exists to make that skip fire -- and every one of them leaves the permutation bit-identical
+    !! by construction. So no assertion on an answer can distinguish a build where the optimisation
+    !! fires from one where it never does, and without this counter a test for any of them is
+    !! vacuous rather than merely weak.
     !!
     !! Counts a pass that scatters, never one the skip declined, and never the string refine's own
     !! recursion -- it is a measure of the LSD loop's work, which is what those optimisations move.
@@ -929,12 +929,12 @@ module parquet_sorting
     integer(int64), save :: dbg_sort_radix_passes = 0_int64
     !> Threads the engine's permutation build actually opened on its last call; 1 means serial.
     !!
-    !! Stage 4, and the same `had_index` shape as `dbg_sort_radix_passes` above (`feature_risks.md`
-    !! Risk-75). It is the ONLY thing that can tell a threaded build from a serial one, because the
-    !! permutation is bit-identical either way: `sort_row_less` is a total order, so exactly one
-    !! correct answer exists and no assertion on `perm` can see the team size. Without this counter
-    !! every threading test is vacuous, and a policy bug that silently never threads -- the easiest
-    !! one to write -- passes the whole suite.
+    !! Stage 4, and the same `had_index` shape as `dbg_sort_radix_passes` above. It is the ONLY
+    !! thing that can tell a threaded build from a serial one, because the permutation is
+    !! bit-identical either way: `sort_row_less` is a total order, so exactly one correct answer
+    !! exists and no assertion on `perm` can see the team size. Without this counter every
+    !! threading test is vacuous, and a policy bug that silently never threads -- the easiest one
+    !! to write -- passes the whole suite.
     !!
     !! Records what the policy RESOLVED, not `omp_get_num_threads()` from inside the region. The two
     !! differ when the runtime gives a smaller team than asked for, and it is the decision under test
@@ -954,11 +954,11 @@ module parquet_sorting
     !> Threads the last tie pass (`sort_build_runs_permutation`) ran on; 1 = serial. Written on
     !! every run detection, so a test reads the pass it just asked for. The same reasoning as
     !! `dbg_sort_threads_used`: the flags are identical at every team size, so this is the only
-    !! thing that can see whether the pass threaded -- feature_risks.md Risk-189.
+    !! thing that can see whether the pass threaded.
     integer(int64), save :: dbg_sort_tie_threads_used = 1_int64
     !> Threads the last `runs_to_offsets` ran on; 1 = serial. Its own record rather than a
     !! share of the tie pass's, because the two are handed the count separately -- a driver
-    !! that drops it on the way to one and not the other has to be visible (Risk-189's shape).
+    !! that drops it on the way to one and not the other has to be visible.
     integer(int64), save :: dbg_sort_offsets_threads_used = 1_int64
     !> Buckets Design B's split produced on the last permutation build; 0 means B did not run.
     !!
@@ -1683,7 +1683,7 @@ module parquet_sorting
     w("            !> Receives the count `resolve_thread_count` produced, for a caller's own pass over")
     w("            !! the result (`drive_engine_grouped` hands it to `runs_to_offsets`); 1 for fewer")
     w("            !! than two rows, where nothing is resolved. Resolved once and handed to every")
-    w("            !! branch, which is the rule feature_risks.md Risk-189 states.")
+    w("            !! branch, which is the rule here.")
     w("            integer(int64), intent(out), optional :: resolved_threads")
     w("        end subroutine engine_build_runs")
     W.to_a = False
@@ -2764,7 +2764,7 @@ def emit_engine_interfaces(w):
     w("        !! The index tiebreaker makes this a TOTAL ORDER in which no two distinct rows compare")
     w("        !! equal, which is what makes an unstable sort produce the stable answer, makes")
     w("        !! nth_element deterministic, and makes a parallel result bit-identical to a serial one")
-    w("        !! by construction. Keep it beside `sort_keys_compare` -- feature_risks.md Risk-34.")
+    w("        !! by construction. Keep it beside `sort_keys_compare`.")
     w("        module function sort_row_less(keys, a, b) result(less)")
     w("            type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.")
     w("            integer(int64), intent(in) :: a           !! first row, 1-based.")
@@ -2914,7 +2914,7 @@ def emit_engine_interfaces(w):
     w("        !> Binary search for a target row the caller APPENDED past the rows being searched.")
     w("        !!")
     w("        !! **Preserve the appending.** It is what removes any compare-a-row-against-a-value arm")
-    w("        !! and so makes drift from the sort comparator structurally impossible — Risk-34.")
+    w("        !! and so makes drift from the sort comparator structurally impossible.")
     w("        !!")
     w("        !! `target_row` names which appended row to search for, so that ONE extracted key can")
     w("        !! serve many searches: a caller appending m targets at rows `n_search+1 .. n_search+m`")
@@ -3732,8 +3732,7 @@ contains
     !! column calling `%get` per element, which allocates a deferred-length string, fills it, copies
     !! it out and frees it, **once per row**; that measured at roughly 0.11 s per allocation per 4 M
     !! elements, i.e. 19 % of a `parquet_string_column` sort and 33 % of a `parquet_column` one,
-    !! because the latter paid it twice. Do not reintroduce a per-element `%get` here; see
-    !! `feature_risks.md` Risk-60.
+    !! because the latter paid it twice. Do not reintroduce a per-element `%get` here.
     !!
     !! **A null is zero-width in both layouts** (`set_null` compacts the payload), so the copy needs
     !! no null special-casing -- a null row simply occupies an empty range, which is what the old
@@ -4294,17 +4293,16 @@ contains
         !
         ! **The rule itself lives in parquet_auto_thread_count (src/parquet_settings_base.f90)** --
         ! the serial-inside-a-parallel-region default, why the predicate is omp_get_level rather
-        ! than omp_in_parallel, the libgomp deadlock behind that choice (feature_risks.md Risk-104),
-        ! why a cap may only lower the answer, and the omp_get_num_procs clamp. It was moved there
-        ! when parquet_random gained a threaded bulk permutation and needed the same answer:
-        ! CLAUDE.md's auto-threading note names a further copy of this rule as the mistake, and
-        ! parquet_random is pure Fortran, so it cannot reach this module without acquiring the C++
-        ! dependency parquet_sorting carries. Behaviour here is unchanged.
+        ! than omp_in_parallel, the libgomp deadlock behind that choice, why a cap may only lower
+        ! the answer, and the omp_get_num_procs clamp. It was moved there when parquet_random gained
+        ! a threaded bulk permutation and needed the same answer: CLAUDE.md's auto-threading note
+        ! names a further copy of this rule as the mistake, and parquet_random is pure Fortran, so
+        ! it cannot reach this module without acquiring the C++ dependency parquet_sorting carries.
+        ! Behaviour here is unchanged.
         !
         ! What stays here is which SETTING caps the sort, and this is the ONE place it is read:
-        ! Risk-40 records that pf_sort_threads is public precisely so a read-time sort_by= and a
-        ! raw-array sort ask the same question, and a second reader is how the two would come to
-        ! disagree.
+        ! pf_sort_threads is public precisely so a read-time sort_by= and a raw-array sort ask the
+        ! same question, and a second reader is how the two would come to disagree.
         n = parquet_auto_thread_count(parquet_get_sort_threads(), "sorting")
     end procedure pf_sort_threads
     !
@@ -4322,9 +4320,9 @@ contains
             ! **One exception, and it is narrow on purpose: an enclosing region that is not
             ! actually running in parallel.** `parquet_nested_team_unsafe`
             ! (src/parquet_settings_base.f90) is that predicate and carries the reduction and the
-            ! bisection behind it -- feature_risks.md Risk-104. It lives there rather than here so
-            ! that parquet_random's threaded bulk permutation asks the identical question; two
-            ! copies of a deadlock guard is exactly the shape that comes apart later.
+            ! bisection behind it. It lives there rather than here so that parquet_random's threaded
+            ! bulk permutation asks the identical question; two copies of a deadlock guard is
+            ! exactly the shape that comes apart later.
             !
             ! **This clamps BOTH engines, and that is not a detail to get wrong.** The count
             ! resolved here is the one `drive_engine` hands to `sort_build_permutation_threaded`
@@ -4694,7 +4692,7 @@ contains
             ! `pf_rank` and `parquet_table%join` sorted serially whatever the caller asked for,
             ! while the C++ engine on the other branch had been threading all along. Nothing failed:
             ! the permutation is identical at every team size, so only
-            ! `parquet_debug_sort_threads_used` could see it. See feature_risks.md Risk-189.
+            ! `parquet_debug_sort_threads_used` could see it.
             call sort_build_runs_permutation(keys, nrows, gek, nthreads, perm, tie)
             return
         end if
@@ -5115,9 +5113,9 @@ def gen_select():
     w(BANNER)
     w("""!> `pf_partial_sort` and `pf_partial_argsort` -- ordering only the first `n` elements.
 !!
-!! Same engine, same comparator, same tiers as a full sort (`feature_risks.md` Risk-34): these
-!! reach `std::partial_sort` through the very object `std::sort` is given, so a partial result can
-!! never disagree with the corresponding prefix of a full one.
+!! Same engine, same comparator, same tiers as a full sort: these reach `std::partial_sort`
+!! through the very object `std::sort` is given, so a partial result can never disagree with the
+!! corresponding prefix of a full one.
 !!
 !! **`n` is clamped, not checked.** Asking for more elements than the array holds returns all of
 !! them, in order. That is deliberate -- `n` is very often derived, and refusing it would put
@@ -5402,7 +5400,7 @@ def gen_search():
 !!
 !! **The target is appended to the array's own key and compared as row n+1.** That is the whole
 !! design: there is no compare-a-row-against-a-value arm anywhere, so a search cannot drift from
-!! the order `pf_sort` produces (`feature_risks.md` Risk-34). It costs one element of copy.
+!! the order `pf_sort` produces. It costs one element of copy.
 !!
 !! **Searching unsorted input is the worst failure this module can have** -- a plausible index, no
 !! abort, no symptom. So sortedness is checked by default, at O(n) in front of an O(log n) search,
@@ -5702,7 +5700,7 @@ contains
             w("        ! `%append_from` carries both the bytes and the null state, so nothing is")
             w("        ! materialized per element. `idxs` only ever names non-null elements -- the walk")
             w("        ! in unique_impl_strcol stops at the first null -- so carrying the null state")
-            w("        ! cannot change what lands here. See feature_risks.md Risk-60.")
+            w("        ! cannot change what lands here.")
         w("        do k = 1_int64, nd")
         if family == "strcol":
             w("            call distinct%append_from(values, idxs(k))")
@@ -5906,8 +5904,8 @@ def gen_reduce():
 !!
 !! **The extremes are two `nth_element` calls, not a hand-written scan.** Rank 1 ascending is the
 !! minimum and rank 1 DESCENDING is the maximum, so reaching them through the engine means the
-!! answers cannot disagree with `pf_sort`'s own ends (`feature_risks.md` Risk-34). Both calls are
-!! O(n), the same as the scan would be, and neither needs a per-type comparison written here.
+!! answers cannot disagree with `pf_sort`'s own ends. Both calls are O(n), the same as the scan
+!! would be, and neither needs a per-type comparison written here.
 !!
 !! Rank `n_value` of the ascending order would name the same maximum VALUE, but the last of a tied
 !! run rather than the first -- see `minmax_impl_*`'s own comment for why that asymmetry is not

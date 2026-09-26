@@ -5465,7 +5465,8 @@ contains
     !! the Fortran engine included -- see the "C++-engine pins" banner further down, which must not
     !! be read as saying otherwise.
     !!
-    !! **The engine team floor has to be forced, and this is the Risk-49 trap.** A team is declined
+    !! **The engine team floor has to be forced, and this is the threshold trap.** A team is
+    !! declined
     !! below `max(32768, 1024*nt)` rows, which no fixture here reaches, so without
     !! `parquet_debug_set_sort_engine_min_rows` every arm below runs the same serial code and every
     !! assertion holds for the wrong reason. Measured while writing this: at 4096 elements
@@ -5861,9 +5862,8 @@ contains
     !> **A selection answers by quickselecting or by ordering, and the two must agree.**
     !> `SORT_NTH_ORDER_MIN` is 256 rows, far above every fixture in this suite, so without the
     !> debug override only the quickselect arm would ever run — and the arm that SHIPS for any
-    !> array worth selecting from would be untested. That is `feature_risks.md` Risk-49's shape
-    !> exactly: a size threshold hiding a whole code path from the tests written for everything
-    !> else.
+    !> array worth selecting from would be untested. That is the shape exactly: a size threshold
+    !> hiding a whole code path from the tests written for everything else.
     !>
     !> Both arms are forced on the same fixture and their answers compared **element for element,
     !> at every rank** — not at one probe, because a routing bug that returned a neighbouring rank
@@ -5911,7 +5911,7 @@ contains
         call parquet_debug_set_sort_nth_order_min(1_int64)             ! force the ordering route
         ! The radix path has a floor of its own (SORT_RADIX_MIN_ROWS, 128 rows), well above this
         ! 64-row fixture, so it has to be lowered too or the observable reads 0 for the wrong
-        ! reason -- which is the same Risk-49 trap one level down.
+        ! reason -- which is the same threshold trap one level down.
         call parquet_debug_set_sort_radix_min_rows(2_int64)
         call parquet_debug_reset_sort_radix_passes()
         call pf_nth_element(v, 1_int64, q_ord, i_ord)
@@ -5972,7 +5972,7 @@ contains
     !> oversubscribing: with `threads=` absent, auto takes the machine in a serial region and stays
     !> SERIAL inside a parallel one, because T OpenMP threads each asking for T more would be T*T
     !> threads. An explicit `threads=` is still honoured there -- the caller has said what they want.
-    !> Neither half of the nested-team guard may open a team one level down. See Risk-104.
+    !> Neither half of the nested-team guard may open a team one level down.
     !!
     !! **A deadlock cannot be asserted directly**, so this asserts the DECISION that leads to one
     !! instead: what the library resolves as its thread count, in a region that exists but runs on
@@ -6035,7 +6035,7 @@ contains
         if (allocated(error)) return
         call check(error, auto_inactive == 1_int64, &
             "pf_sort_threads must resolve to 1 inside an inactive parallel region: omp_get_level() is 1 there even " // &
-            "though omp_in_parallel() is .false., and a team opened one level down deadlocks libgomp (Risk-104)")
+            "though omp_in_parallel() is .false., and a team opened one level down deadlocks libgomp")
         if (allocated(error)) return
         call check(error, used_top >= 2_int64, &
             "negative control: an explicit threads=4 must open a team at the top level, or the guard below is vacuous")
@@ -6082,7 +6082,7 @@ contains
         ! arm ran the identical serial code as the default arm and all three held for the wrong
         ! reason. `seen_par > 1` is the one line that could tell those apart, and `seen_ser == 1`
         ! is its negative control: without it, an implementation that ignored `threads=` and always
-        ! opened a full team would pass the first. See feature_risks.md Risk-189.
+        ! opened a full team would pass the first.
 #ifdef _OPENMP
         if (omp_get_num_procs() >= 2) then
             call check(error, seen_par > 1, &
@@ -6103,7 +6103,7 @@ contains
     !! -- so `pf_argsort(..., group_offsets=)`, and with it `pf_match`, `pf_unique`, `pf_rank` and
     !! `parquet_table%join`, sorted serially whatever the caller passed. Nothing else could see it:
     !! the permutation is identical at every team size, so no correctness test can distinguish the
-    !! two and `parquet_debug_sort_threads_used` is the only observable. feature_risks.md Risk-189.
+    !! two and `parquet_debug_sort_threads_used` is the only observable.
     !!
     !! **Three arms.** The grouped path opens what was asked for; `threads=1` still means serial
     !! (without which a policy that ignored `threads=` entirely would pass the first); and the
@@ -6195,8 +6195,8 @@ contains
     !! **The team is asserted on both arms, and that is not decoration.** An A/B that only compares
     !! answers passes just as happily when both arms ran the same serial code -- which is exactly
     !! what happened here for as long as the grouped builder discarded its thread count, and is the
-    !! vacuity trap feature_risks.md Risk-49 describes. Ties are dense on purpose: `group_offsets`
-    !! is about where the runs are, so a fixture of distinct values would exercise one group per row.
+    !! vacuity trap. Ties are dense on purpose: `group_offsets` is about where the runs are, so a
+    !! fixture of distinct values would exercise one group per row.
     subroutine test_group_offsets_threads_identical(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer, parameter :: n = 4096                      !! enough rows for a team to be worth it.
@@ -6373,7 +6373,7 @@ contains
     !! **Nothing on the raw path would notice**: `pf_argsort` hands its answer straight to the caller,
     !! and `pf_permute(..., assume_valid=.true.)` is documented as the way to skip validation for
     !! exactly such a permutation. (`%sort_by` would be caught, by the one remaining `%reindex`
-    !! validation -- `feature_risks.md` Risk-46 -- but that is the other path.)
+    !! validation -- but that is the other path.)
     !!
     !! So this asserts the property directly rather than through the oracle: every index in 1..n
     !! appears exactly once.
@@ -6919,7 +6919,7 @@ contains
         ! Both floors have to come down together or the fixture reaches neither path: the radix floor
         ! gates the only phase Stage 4 threads, and the parallel floor gates threading itself. A
         ! fixture big enough to clear the production values of both would be far too slow for a unit
-        ! test — `feature_risks.md` Risk-49 in its usual form.
+        ! test — the threshold trap in its usual form.
         call parquet_debug_set_sort_radix_min_rows(2_int64)
         ! **1, not 0.** Every floor hook treats a value <= 0 as "restore the built-in", so a floor
         ! of 0 is the DEFAULT floor and would refuse this 4000-row fixture outright. The
@@ -7178,8 +7178,7 @@ contains
     !! `engine_only_introsort` is the only thing keeping the introsort's and the counting path's own
     !! negative controls non-vacuous, and it works by raising this floor to `huge`. A hook that
     !! silently did nothing would leave all six passing while testing a fast path instead -- the
-    !! `had_index` shape from `feature_risks.md` Risk-75, where a hook that forces a state has to
-    !! prove the state took effect.
+    !! `had_index` shape, where a hook that forces a state has to prove the state took effect.
     subroutine test_radix_path_runs(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: above = 4096_int64 !! comfortably over the shipped floor.
@@ -7978,7 +7977,6 @@ contains
     !!
     !! Restoring the radix floor needs its own `<= 0` call, so a test that lowers it here and
     !! leaves it lowered would silently change the path every later test in this suite takes.
-    !! `feature_risks.md` Risk-49.
     subroutine force_fortran_bucket_split(rows)
         integer(int64), intent(in) :: rows !! new floor for all three; <= 0 restores the built-in ones.
 
@@ -8033,8 +8031,7 @@ contains
     !!
     !! Every test that observes the introsort -- its heapsort arm, its depth limit, its presort
     !! invariant -- needs the range actually to reach it. Both fast paths answer identically, so a
-    !! test intercepted by one of them does not fail; it goes quiet, which is worse. That is
-    !! `feature_risks.md` Risk-49.
+    !! test intercepted by one of them does not fail; it goes quiet, which is worse.
     !!
     !! Calling this in pairs (`.true.` ... `.false.`) rather than reading and restoring the previous
     !! values is safe because this suite is excluded from test-drive's per-test parallelism -- both

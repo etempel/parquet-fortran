@@ -184,12 +184,12 @@ contains
     !! | `rt_lo..rt_hi` -- both opaque | none |
     !!
     !! **So the trigger is BOTH bounds being compile-time known AND the range not spanning zero --
-    !! which is narrower than the rule feature_risks.md Risk-101 states**, and narrower in the
-    !! direction that matters: `do i = 1, n` over a runtime `n`, which is the module's own
-    !! documented idiom and the shape a user actually writes, measured clean. That shape had never
-    !! been tested on any machine before this sweep existed -- the two shapes previously measured,
-    !! both-literal and both-dummy, bracket it without covering it. It is swept here anyway,
-    !! because "clean on the two releases tried" is not a property of the next release.
+    !! which is narrower than the stated rule**, and narrower in the direction that matters: `do i =
+    !! 1, n` over a runtime `n`, which is the module's own documented idiom and the shape a user
+    !! actually writes, measured clean. That shape had never been tested on any machine before this
+    !! sweep existed -- the two shapes previously measured, both-literal and both-dummy, bracket it
+    !! without covering it. It is swept here anyway, because "clean on the two releases tried" is
+    !! not a property of the next release.
     !!
     !! **Two traps that make a re-measurement of this silently vacuous.** The comparison body must
     !! stay written out inline in each loop: factoring the three shapes' shared body into one

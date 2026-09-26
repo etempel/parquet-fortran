@@ -127,8 +127,8 @@ module parquet_strings
     !! **Exists because no fixture a test suite can afford reaches the real floor.** Every column
     !! small enough to build in a unit test sits far below 256 KiB, so without this every test would
     !! silently exercise the serial path and a threaded operation would be covered by nothing --
-    !! `feature_risks.md` Risk-49's failure exactly, where a dense sweep over small arrays never
-    !! reached the code it was written for.
+    !! exactly the failure where a dense sweep over small arrays never reached the code it was
+    !! written for.
     integer(int64), save :: dbg_string_min_bytes = 0_int64
     !
     !> Test-only override of `STRING_MAX_AUTO_THREADS`; `<= 0` restores the real constant.
@@ -137,8 +137,7 @@ module parquet_strings
     !! binds when OpenMP offers more threads than the ceiling allows -- 64 on a machine with 8 cores
     !! is never reached, so a change that dropped the ceiling entirely would pass every test written
     !! for it and only show up on a 192-core node. Lowering it is how a small machine exercises the
-    !! same branch. Same reasoning as `dbg_string_min_bytes`, and `feature_risks.md` Risk-49's
-    !! failure mode.
+    !! same branch. Same reasoning as `dbg_string_min_bytes`, and the same failure mode.
     integer, save :: dbg_string_max_auto = 0
     !
     !> An owning, Arrow-LargeUtf8-compatible variable-length string column.
@@ -454,10 +453,10 @@ contains
     !
     !> How many threads one `parquet_string_column` bulk operation would use here, right now.
     !!
-    !! **Public for the same reason `pf_sort_threads` is** (`feature_risks.md` Risk-40): this is the
-    !! ONE place the cap and the OpenMP environment are combined, so a caller asking "what will this
-    !! do?" and the operation itself can never give different answers. A second reader is how the
-    !! two would come to disagree.
+    !! **Public for the same reason `pf_sort_threads` is**: this is the ONE place the cap and the
+    !! OpenMP environment are combined, so a caller asking "what will this do?" and the operation
+    !! itself can never give different answers. A second reader is how the two would come to
+    !! disagree.
     !!
     !! Three rules, in this order:
     !!
@@ -789,8 +788,7 @@ contains
     !!
     !! Serial by necessity, not by omission. A destination row index is a rank among survivors, so a
     !! thread's first output row is not a multiple of 8 and the byte-aligned split every other
-    !! threaded validity phase in this module relies on cannot be constructed — see `feature_risks.md`
-    !! Risk-61 for what splitting it anyway would cost.
+    !! threaded validity phase in this module relies on cannot be constructed.
     subroutine rebuild_validity_compacted(c, keep, old_null, n, nn)
         type(parquet_string_column), intent(inout) :: c !! the column, already compacted and sized.
         logical, intent(in) :: keep(:)                  !! .true. for every source row retained.
@@ -1752,8 +1750,7 @@ contains
     !!
     !! **The allocation-free counterpart of `call src%get(i, s); call dst%append_string(s)`**, which
     !! is the shape every "copy the rows I want into a new column" loop reaches for and which costs
-    !! one heap round trip per row for bytes that are already contiguous in `src`. See
-    !! `feature_risks.md` Risk-60.
+    !! one heap round trip per row for bytes that are already contiguous in `src`.
     !!
     !! It never trims, matching `%append_string`'s own default: the bytes are copied verbatim.
     !!
@@ -1927,7 +1924,7 @@ contains
     !! Offsets, validity and the payload in one loop. What it avoids -- and what any rewrite here
     !! must keep avoiding -- is the pair `%to_string` + `%append_string` per element: a
     !! deferred-length allocation and free, plus a capacity check on a destination that grew
-    !! incrementally. See `feature_risks.md` Risk-60.
+    !! incrementally.
     subroutine build_from_fill_serial(self, handles, want)
         type(parquet_string_column), intent(inout) :: self !! sized and cleared; receives the fill.
         type(parquet_string), intent(in) :: handles(:)      !! source handles, already validated.
@@ -2749,7 +2746,8 @@ contains
         ! among survivors, so thread `t`'s first output row is `row_base(t)+1`, which is not a
         ! multiple of 8 -- the byte-aligned split that makes every other threaded validity phase in
         ! this module safe cannot be constructed here. Writing it serially is correct by
-        ! construction; splitting it on `row_base` would be Risk-61's exact defect.
+        ! construction; splitting it on `row_base` would reintroduce the unaligned
+        ! read-modify-write.
         if (self%has_nulls) then
             call ensure_validity_cap(self, max(kept, 1_int64))
             call rebuild_validity_compacted(self, keep, old_null, n, nn)
@@ -2799,11 +2797,10 @@ contains
     !
     !> Nulls every element whose `valid` entry is `.false.`, in ONE rebuild of the payload.
     !!
-    !! `parquet_column%set_validity`'s contract one tier down (`feature_risks.md` Risk-182): a
-    !! `.false.` entry nulls that element, discarding its bytes exactly as `set_null` would; a
-    !! `.true.` entry changes NOTHING, so an element that is already null stays null and the call
-    !! only ever ADDS nulls. An all-true mask returns before a buffer is touched. `valid` must have
-    !! exactly `size()` entries.
+    !! `parquet_column%set_validity`'s contract one tier down: a `.false.` entry nulls that
+    !! element, discarding its bytes exactly as `set_null` would; a `.true.` entry changes NOTHING,
+    !! so an element that is already null stays null and the call only ever ADDS nulls. An all-true
+    !! mask returns before a buffer is touched. `valid` must have exactly `size()` entries.
     !!
     !! **This exists because `set_null` compacts the payload on every call.** Nulling m elements
     !! one at a time costs O(m * (nchars + nrows)) -- quadratic in the nulls -- where this costs
@@ -2914,8 +2911,8 @@ contains
     !! which the join that motivated this already pays for its gather.
     !!
     !! The validity phase is byte-aligned by construction (`thread_row_ranges`), so no two threads
-    !! ever read-modify-write the same validity byte -- `feature_risks.md` Risk-61's condition,
-    !! and the reason the row ranges are reused for it rather than any even split.
+    !! ever read-modify-write the same validity byte, which is the condition it must meet, and
+    !! the reason the row ranges are reused for it rather than any even split.
     subroutine rebuild_selected(self, sel, rlen, rbytes, to_null, nt)
         type(parquet_string_column), intent(inout) :: self !! the column.
         logical, intent(in) :: sel(:)                       !! .true. for every element to replace.
@@ -3103,8 +3100,8 @@ contains
     !!
     !! `idx` is a gather on `gather`'s terms (any element, any order, repeats allowed, any length,
     !! only the range checked) and `valid` must have exactly `size(idx)` entries. The mask only ever
-    !! ADDS nulls -- `parquet_column%gather_from` rests on that, one tier up (`feature_risks.md`
-    !! Risk-182) -- and the null COUNT is recounted, since a selection may drop or repeat a null.
+    !! ADDS nulls -- `parquet_column%gather_from` rests on that, one tier up -- and the null COUNT
+    !! is recounted, since a selection may drop or repeat a null.
     !!
     !! **Threads.** Absent `threads`, the team is what every bulk operation here resolves to
     !! (`bulk_threads`: the cap, the payload floor, serial inside a parallel region). An explicit
@@ -3501,9 +3498,9 @@ contains
                 ! `c%data(wpos+1:wpos+n) = c%data(lo:hi)` -- is a section assignment whose two sides
                 ! are the SAME array, so the compiler cannot prove they do not overlap and must
                 ! materialise the right-hand side first: one heap temporary per element, which is
-                ! exactly `feature_risks.md` Risk-60's shape. Measured at **5.5x SLOWER** (0.0261 s
-                ! to 0.1439 s over 4 M elements). The threaded path can use a section assignment
-                ! only because its destination is a different array.
+                ! exactly the shape to avoid. Measured at **5.5x SLOWER** (0.0261 s to 0.1439 s over
+                ! 4 M elements). The threaded path can use a section assignment only because its
+                ! destination is a different array.
                 do k = lo, hi
                     wpos = wpos + 1_int64
                     c%data(wpos) = c%data(k)
@@ -3751,7 +3748,7 @@ contains
     !! **Why this exists: so that a min/max scan need not materialize every element.** Finding the
     !! smallest and largest value by fetching each one through `%get` costs a heap allocation per row
     !! — roughly 0.11 s per 4 M elements — where tracking the two winning *indices* through this and
-    !! fetching only those two at the end costs none. See `feature_risks.md` Risk-60.
+    !! fetching only those two at the end costs none.
     !!
     !! **Null elements are not special-cased.** A null is zero-width, so it compares as an empty
     !! string and sorts first; a caller that needs nulls ordered differently must test `%is_null`
@@ -3899,7 +3896,7 @@ contains
     !! allocation, one fill, one copy into `out(i)` and one free **per row** -- which measured as
     !! 71 % of this procedure, not the copying it was there to do. Do not reintroduce a
     !! `character(len=:), allocatable` intermediate here, or in any other bulk operation over this
-    !! type; see `feature_risks.md` Risk-60.
+    !! type.
     !!
     !! **The fill loop threads with no restructure**, unlike `reindex_apply`: `out(i)` is `maxlen`
     !! bytes at a fixed stride, so every element's destination is known from `i` alone and there is
@@ -4095,9 +4092,9 @@ contains
             else
                 ! Written straight from the payload slice. The saving is irrelevant here -- this
                 ! loop is bounded by `lim` and dominated by the formatted write -- but it keeps
-                ! the module free of the shape entirely, so `feature_risks.md` Risk-60's rule
-                ! reads as absolute rather than "except where it does not matter", and a static
-                ! check over this file needs no exemption.
+                ! the module free of the shape entirely, so the rule reads as absolute rather than
+                ! "except where it does not matter", and a static check over this file needs no
+                ! exemption.
                 ! The payload goes out through an implied-do rather than as the section
                 ! `self%data(a:b)`. Identical output list, identical output -- but ifx builds an
                 ! array temporary for a SECTION of an allocatable component used as an I/O list

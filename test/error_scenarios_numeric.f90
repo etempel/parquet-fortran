@@ -3273,9 +3273,9 @@ contains
     end subroutine scenario_table_index_missing_column
     !
     !> The stale index, one scenario per query family: after a row change every query aborts
-    !! naming the table and both generations (feature_risks.md Risk-210). The row change is a
-    !! %filter_rows that keeps every row but one -- the answers would stay in range, which is
-    !! exactly the case a cached flag would answer wrongly.
+    !! naming the table and both generations. The row change is a %filter_rows that keeps
+    !! every row but one -- the answers would stay in range, which is exactly the case a
+    !! cached flag would answer wrongly.
     subroutine scenario_table_index_stale_find()
         type(parquet_table) :: t
         type(parquet_table_index) :: ix
@@ -3545,7 +3545,7 @@ contains
     end subroutine scenario_table_group_container_column
     !
     !> The stale grouping, one scenario per query family: after a row change every per-group
-    !! query aborts naming the table and both generations (feature_risks.md Risk-210's rule).
+    !! query aborts naming the table and both generations.
     !! The row change is a %filter_rows that keeps every row but one -- the answers would stay
     !! in range, which is exactly the case a cached flag would answer wrongly. Each queries once
     !! before the change, as its control.
@@ -3704,7 +3704,7 @@ contains
     !! is the one target that would otherwise fail silently: `%add_column` on it would relocate
     !! the slots the grouping points into, inside the same call, and the column would be
     !! `%ngroups()` values spread over `%nrows()` rows. Refused before anything is computed; the
-    !! key table is the control (feature_risks.md Risk-262).
+    !! key table is the control.
     subroutine scenario_table_group_add_agg_target_is_source()
         type(parquet_table) :: t, kt
         type(parquet_grouping) :: grp
@@ -3922,7 +3922,7 @@ contains
     !
     !> `%add_apply` runs the same target check `%add_agg` does, at its own site and under its own
     !! name: the grouping's own table is refused before the callback is called even once. The key
-    !! table is the control (feature_risks.md Risk-262).
+    !! table is the control.
     subroutine scenario_table_group_add_apply_target_is_source()
         type(parquet_table) :: t, kt
         type(parquet_grouping) :: grp

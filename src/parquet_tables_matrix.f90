@@ -598,7 +598,7 @@ contains
     !! memcpy roughly 8 GB inside the procedure documented as the way to give memory back), and
     !! blank the vacated tail through `reset_column_slot`, the one field list every vacating path
     !! shares. Writing that list out here instead is how the singular verb came to be missing
-    !! `unit` (feature_risks.md Risk-204).
+    !! `unit`.
     !!
     !! Dropping NOTHING returns before any of that, which is what makes `%keep_columns` naming
     !! every column, and `%drop_columns` with `ignore_missing=` and nothing to skip, leave the

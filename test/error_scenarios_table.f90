@@ -2736,7 +2736,7 @@ contains
     !> WARNING must appear -- and both numbers must be rendered exactly, since a message built from
     !> real64 copies would print 0.9007199E+16 for the bound, the value AND the range, i.e. would
     !> quote a different number from the one the comparison used. Its negative half is
-    !> scenario_qc_int64_exact_bound_no_false_violation. See feature_risks.md Risk-68.
+    !> scenario_qc_int64_exact_bound_no_false_violation.
     subroutine scenario_qc_int64_exact_bound_violation()
         type(parquet_schema) :: schema
         type(parquet_writer) :: writer
@@ -8426,7 +8426,7 @@ contains
     end subroutine scenario_table_write_row_index_in_memory
 
     !> A detached table HAD a file and lost it, so the row numbers are no longer derivable; the
-    !! message says to ask before the mutation rather than after (feature_risks.md Risk-23).
+    !! message says to ask before the mutation rather than after.
     subroutine scenario_table_write_row_index_detached()
         type(parquet_table) :: t
         call write_table_scenario_fixture("test_run/es_rowidx_detached_in.parquet")
@@ -9118,8 +9118,7 @@ contains
             ! Second negative control, and the one that matters: this thread opened `mine` itself
             ! inside the region, so it is thread-private and materializing its row index is
             ! permitted. A guard rewritten to key on `omp_in_parallel()` rather than on ownership
-            ! would refuse this too and still pass every abort assertion (feature_risks.md
-            ! Risk-134).
+            ! would refuse this too and still pass every abort assertion.
             call parquet_open_table(mine, src)
             call mine%get(PARQUET_ROW_INDEX, mine_rows)
             print '(a,i0)', "thread-private row index inside the region succeeded, rows=", size(mine_rows)
@@ -9224,9 +9223,9 @@ contains
     !!
     !! **No threads here, deliberately.** The guard fires on whatever thread finds the counter
     !! non-zero, so `parquet_debug_table_set_inflight` -- the test-only hook that exists for exactly
-    !! this (feature_risks.md Risk-6) -- makes the abort deterministic on one thread. Provoking it
-    !! for real would need two threads to overlap on demand, and a timing-dependent scenario is
-    !! worse than none: it passes on a quiet machine, fails on a busy one, and gets disabled.
+    !! this -- makes the abort deterministic on one thread. Provoking it for real would need two
+    !! threads to overlap on demand, and a timing-dependent scenario is worse than none: it passes
+    !! on a quiet machine, fails on a busy one, and gets disabled.
     !!
     !! The successful read BEFORE the hook is set is the negative control, and it is load-bearing: a
     !! guard that fired unconditionally would produce this same stderr, so without it the scenario
@@ -9389,8 +9388,8 @@ contains
     !! the last one partial, and every null and NaN sits on one side or the other of a block
     !! boundary (rows 4096/4097 and 8192/8193), in the first row, or in the last -- the places a
     !! mask carried over from the previous block, or a range bound off by one, would move a count or
-    !! an extreme without anything aborting (feature_risks.md Risk-223). One column per kind family,
-    !! each with a null count and two extremes that no other column's line can be mistaken for.
+    !! an extreme without anything aborting. One column per kind family, each with a null count and
+    !! two extremes that no other column's line can be mistaken for.
     !!
     !! `threads` goes to parquet_set_table_threads: 1 forces the scan serial, 0 lets it open a team,
     !! which it does because the widest column (`i32v`, 16 x 10007 elements) is above the work floor.
@@ -10073,9 +10072,9 @@ contains
         print '(a,i0)', "unexpectedly accepted a mask of the source's length, n=", d%length()
     end subroutine scenario_column_gather_from_mask_length_mismatch
 
-    !> A container column is gathered in place with `%gather`, which is how a join carries one
-    !! (feature_risks.md Risk-188); `%gather_from` refuses it as a source rather than copying a
-    !! layout only the container knows. The in-place gather first is the control.
+    !> A container column is gathered in place with `%gather`, which is how a join carries one;
+    !! `%gather_from` refuses it as a source rather than copying a layout only the container
+    !! knows. The in-place gather first is the control.
     subroutine scenario_column_gather_from_container_source()
         type(parquet_column) :: c, d
         type(parquet_list_column), allocatable :: lc

@@ -167,11 +167,11 @@ contains
     !! the interface's doc-comment for what goes in and what never does.
     !!
     !! A thin wrapper over `build_table_schema`, deliberately: that procedure is the one place
-    !! the descriptor-to-field rules live (`feature_risks.md` Risk-2 pins its `auto` sizes with a
-    !! lint check), and a second copy here would be free to drift from the write path. What this
-    !! adds is the `table:` name rule and the refusal: the schema-less write's answer to "nothing
-    !! resident" is an empty file, which is a valid output, while a schema with no field is not
-    !! a valid schema, so there is nothing to hand back and the caller is told so.
+    !! the descriptor-to-field rules live (a lint check pins its `auto` sizes), and a second copy
+    !! here would be free to drift from the write path. What this adds is the `table:` name rule and
+    !! the refusal: the schema-less write's answer to "nothing resident" is an empty file, which is
+    !! a valid output, while a schema with no field is not a valid schema, so there is nothing to
+    !! hand back and the caller is told so.
     module procedure parquet_derive_schema
         integer :: nfields
         character(len=:), allocatable :: tname, sfx
@@ -907,7 +907,7 @@ contains
     !> Every `column.` key is refused, not just those naming a column the output has: a
     !> `column.x.*` entry for a column the output does not write is metadata about a column that
     !> is not there. A new key that function starts generating must be added here, or it silently
-    !> joins the first case above -- see `feature_risks.md` Risk-137.
+    !> joins the first case above.
     logical function writer_regenerates_key(key) result(regenerated)
         character(len=*), intent(in) :: key !! the source key to test.
         character(len=*), parameter :: COL_PREFIX = "column."
@@ -983,7 +983,7 @@ contains
     !! or, with `chunked`, through the `parquet_write_column_chunk` specific, as one row group's
     !! worth of the column. ONE dispatch for both paths, deliberately: a second copy of the
     !! twenty-one arms would be free to drift from this one, and drift between the table write
-    !! and a hand-written one is exactly what `feature_risks.md` Risk-8 is about.
+    !! and a hand-written one is exactly the hazard.
     !!
     !! Validity is passed as `is_valid=` for every kind that accepts one; the temporal kinds take
     !! no mask because their null state lives inside each element, the string kind carries its
@@ -998,11 +998,11 @@ contains
     !! group 1 happens to be Null-free, row group 7 holds one Null, and the write dies rows away
     !! from anything the caller did wrong. So the mask is always there, the field is always
     !! nullable, and a Null may arrive in any row group. The cost is one mask per column per row
-    !! group plus the null bitmap the writer builds from it (Risk-8's measured ~2.5x, bounded to
+    !! group plus the null bitmap the writer builds from it (a measured ~2.5x, bounded to
     !! one row group's worth); a column declared `protected_cols:` pays neither, because
     !! `parquet_check_protected` erases a protected column's all-`.true.` mask before the write
     !! and the field is stored non-nullable -- a Null in it is then an abort naming the column
-    !! rather than a corrupt file. `feature_risks.md` Risk-226 pins the rule.
+    !! rather than a corrupt file.
     subroutine write_one_column(writer, table, idx, name, chunked)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         type(parquet_table), intent(in) :: table      !! the table being written.

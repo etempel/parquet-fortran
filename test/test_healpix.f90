@@ -932,7 +932,7 @@ contains
                     ! the assumption that it could not overflow. `modulo` then returned a
                     ! NEGATIVE seed, `acos` was handed 2.42, and the disc centre came back a NaN.
                     ! See src/parquet_expkey.f90's `fp_step`, which spells the same LCG without
-                    ! the overflow, and feature_risks.md Risk-94.
+                    ! the overflow.
                     do k = 1, nscatter
                         ! `(k - 0.5)/nscatter` is strictly inside (0, 1), so `z` is strictly
                         ! inside (-1, 1) and `acos` cannot be handed an out-of-range argument.

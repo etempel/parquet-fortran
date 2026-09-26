@@ -3391,8 +3391,8 @@ contains
     !> parquet_filter_real_key (the filter's) and parquet_index_real_key (the index's) agree on
     !> every value but NaN, where the filter keeps the bit pattern -- it never keys a NaN, so any
     !> pattern is as good as another -- and the index maps every NaN onto ONE key, the sort
-    !> comparator's equality (feature_pf_index.md question 6, feature_risks.md Risk-211). The
-    !> temporal helpers are the elements' raw storage, and a null element keys as 0.
+    !> comparator's equality . The temporal helpers are the elements' raw storage, and a null
+    !> element keys as 0.
     subroutine test_real_key_helpers_split_on_nan_only(error)
         type(error_type), allocatable, intent(out) :: error
         real(real64) :: vals(5), nan_a, nan_b
@@ -3706,7 +3706,7 @@ contains
     !> test in this group: the two sides go through completely different arms of the evaluator, so
     !> it fails if the prefix comparison is off by a byte in either direction -- and, because the
     !> right-hand side is an ordinary comparison, it also fails if the operator ever falls through
-    !> to cmp_op_of and becomes `/=` (feature_risks.md Risk-231).
+    !> to cmp_op_of and becomes `/=`.
     subroutine test_starts_with_equals_range_oracle(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int32), allocatable :: got(:), want(:)
@@ -3853,9 +3853,8 @@ contains
     !> The match is over BYTES: case is significant, and so is a trailing space.
     !>
     !> Fortran's own `==` blank-pads the shorter operand, so `"AB " == "AB"` is true there while the
-    !> reader's std::string_view says otherwise (feature_risks.md Risk-199). A matcher written with
-    !> the intrinsic operators, or one that trimmed either operand, passes every ordinary fixture
-    !> and fails this one.
+    !> reader's std::string_view says otherwise. A matcher written with the intrinsic operators, or
+    !> one that trimmed either operand, passes every ordinary fixture and fails this one.
     subroutine test_string_match_is_byte_exact(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_writer) :: writer
@@ -3881,7 +3880,7 @@ contains
         call filtered_ids(file, 's contains "A"', ids)
         call check(error, all(ids == [1, 2, 4]), "contains must be case-sensitive")
         if (allocated(error)) return
-        ! The STORED trailing space is significant, which is the half Risk-199 is about. Rows 1 and
+        ! The STORED trailing space is significant, which is the half that matters. Rows 1 and
         ! 2 both begin with "AB", but only row 1 ends with "B" -- row 2's last byte is the space.
         ! Fortran's own == calls those two values equal, so a matcher written with the intrinsic
         ! operators, or one that trimmed the value, keeps both rows here.
@@ -3899,7 +3898,7 @@ contains
         ! trim_right_spaces_and_nuls; trim(leaf_value(i)) on the in-memory side), so both engines
         ! see the same shortened pattern and agree. `s == "AB "` therefore asks what `s == "AB"`
         ! asks. Asserted rather than left implicit because it is silent -- the rule is accepted and
-        ! answers for a pattern the caller did not write. feature_risks.md Risk-232.
+        ! answers for a pattern the caller did not write.
         call filtered_ids(file, 's == "AB "', ids)
         call check(error, all(ids == [1]), &
             "a trailing space in a rule literal is dropped at the packed-leaf boundary")

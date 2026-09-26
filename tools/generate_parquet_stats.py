@@ -136,9 +136,9 @@ module parquet_stats
     use parquet_sorting
     ! **The second tier edge, and the only one that adds a file to the footprint.**
     ! `pf_normal_scores` maps a rank to a normal quantile, which is `Phi**(-1)`, and the only
-    ! alternative to importing it is a second `Phi**(-1)` in this module. `feature_risks.md`
-    ! Risk-252 records what two spellings of one number cost when the number is a single
-    ! CONSTANT; a duplicated kernel is that defect with far more surface.
+    ! alternative to importing it is a second `Phi**(-1)` in this module. Two spellings of one
+    ! number are costly when the number is a single CONSTANT; a duplicated kernel is that defect
+    ! with far more surface.
     !
     ! **`parquet_utils` is a LEAF** -- it imports the intrinsic `iso_fortran_env` and
     ! `ieee_arithmetic` and nothing else, no module of this library -- so the edge costs

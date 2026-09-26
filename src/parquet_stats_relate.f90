@@ -607,11 +607,11 @@ contains
             keep_x=keep, keep_w=keep_w, n_valid=m, n_null=nnull, n_nan=nnan, saw_nan=saw_nan)
         if (present(n_null)) n_null = nnull
 
-        ! **`saw_nan` is tested here, and `feature_risks.md` Risk-253 is exactly why.** Under
-        ! `skipnan = .false.` a surviving NaN sorts to one end of the ordering and poisons no
-        ! rank -- the other m-1 elements keep the positions they always had -- so a procedure that
-        ! tested only for an empty population would hand back a perfectly ordinary set of scores
-        ! from a population the caller explicitly asked to have poisoned, with `ok = .true.`.
+        ! **`saw_nan` is tested here, and here is exactly why.** Under `skipnan = .false.` a
+        ! surviving NaN sorts to one end of the ordering and poisons no rank -- the other m-1
+        ! elements keep the positions they always had -- so a procedure that tested only for an
+        ! empty population would hand back a perfectly ordinary set of scores from a population the
+        ! caller explicitly asked to have poisoned, with `ok = .true.`.
         ! One test covers that and the empty population both, and they have the same answer.
         if (m == 0_int64 .or. saw_nan) then
             do i = 1_int64, n
@@ -622,11 +622,11 @@ contains
             return
         end if
 
-        ! **The ranks are taken over the SURVIVORS, not over the original array** -- Risk-254, and
-        ! `pf_corr`'s Spearman path carries the same rule for the same reason. Denominating by
-        ! `n` instead would shrink every score toward zero by roughly `m/n`: still ordered, still
-        ! centred, still monotone, and wrong only in SCALE, so no distributional check would see
-        ! it and only a population with something excluded would show it at all.
+        ! **The ranks are taken over the SURVIVORS, not over the original array**, and `pf_corr`'s
+        ! Spearman path carries the same rule for the same reason. Denominating by `n` instead would
+        ! shrink every score toward zero by roughly `m/n`: still ordered, still centred, still
+        ! monotone, and wrong only in SCALE, so no distributional check would see it and only a
+        ! population with something excluded would show it at all.
         allocate(rank(m))
         call midranks(keep, m, rank, threads)
         den = real(m, real64) + 1.0_real64 - 2.0_real64 * a

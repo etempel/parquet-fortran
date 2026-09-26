@@ -1145,8 +1145,8 @@ contains
     !!      `parquet_write_table_chunk` it whenever it reaches the threshold, emptying and
     !!      re-reserving afterwards. That is what the sink does internally, written out, so the
     !!      two should be at PARITY. A sink slower than this loop is the reset-and-reserve after
-    !!      a flush having regressed (feature_risks.md Risk-227): without the reserve, every
-    !!      append after a flush grows the buffer's columns again.
+    !!      a flush having regressed: without the reserve, every append after a flush grows the
+    !!      buffer's columns again.
     !!   3. **the same loop with every column declared `protected_cols:`** -- identical Fortran,
     !!      one schema call different. The writer drops a protected column's all-`.true.` mask,
     !!      stores the field non-nullable and builds no null bitmap, so (2) minus (3) is what the
@@ -1657,7 +1657,7 @@ contains
         do round = 1, nround
             ! Outside the timer: re-scatter the key, so every round sorts scattered data. The
             ! %col pointer is re-fetched each time because the previous round's sort reallocated
-            ! every column's storage (feature_risks.md Risk-11).
+            ! every column's storage.
             call t%col("key", kp)
             call scatter_key(kp)
             t0 = now()

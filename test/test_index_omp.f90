@@ -5,11 +5,11 @@
 !! `test/test_runner_support.f90` excludes `index_omp`), and for two reasons rather than one. The
 !! familiar one is the nested-team hazard: test-drive dispatches a suite's tests inside its own
 !! `!$omp parallel do`, so a test that opens a team of its own would open a nested one, which
-!! libgomp deadlocks on intermittently (`feature_risks.md` Risk-104). The sharper one is that
-!! `parquet_auto_thread_count` answers **1** whenever `omp_get_level() > 0` -- so inside
-!! test-drive's region an automatic `%build` is always serial, and "the threaded build equals the
-!! serial build" would hold because both arms ran the same serial code. A serial suite runs at
-!! level 0, where the threading being asserted actually happens.
+!! libgomp deadlocks on intermittently. The sharper one is that `parquet_auto_thread_count`
+!! answers **1** whenever `omp_get_level() > 0` -- so inside test-drive's region an automatic
+!! `%build` is always serial, and "the threaded build equals the serial build" would hold because
+!! both arms ran the same serial code. A serial suite runs at level 0, where the threading being
+!! asserted actually happens.
 !!
 !! **Every test whose assertion IS that threads interleaved carries the skip guard**, because
 !! without OpenMP those assertions are not merely untestable, they are vacuous: both arms of an

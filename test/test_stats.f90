@@ -2250,7 +2250,7 @@ contains
     !! `%append_values` grows the buffer geometrically, so the slack beyond `%length()` holds
     !! whatever the allocator left there, and a statistic taken over the storage rather than the
     !! rows is a silent wrong answer -- too many elements, moments over garbage, nothing to
-    !! announce it. That is `feature_risks.md` Risk-67 reaching this module.
+    !! announce it. That is the same trap reaching this module.
     !!
     !! **What actually protects it is one level down**, and this test was written believing
     !! otherwise: `parquet_column_data_ptr` returns `col%i32(1:col%nrows)`, so the pointer never
@@ -3577,9 +3577,9 @@ contains
         call pf_mad(v, r, skipnan=.false., ok=ok)
         call check(error, r /= r .and. .not. ok, "and pf_mad")
         if (allocated(error)) return
-        ! **Risk-253, and the vector-valued case is the one that would slip through.** A NaN
-        ! sorts to one end of the ordering and poisons NO rank, so the other eight elements would
-        ! come back with perfectly ordinary scores unless `saw_nan` is tested outright.
+        ! **The vector-valued case is the one that would slip through.** A NaN sorts to one end of
+        ! the ordering and poisons NO rank, so the other eight elements would come back with
+        ! perfectly ordinary scores unless `saw_nan` is tested outright.
         call pf_normal_scores(v, ns, skipnan=.false., ok=ok)
         call check(error, all(ns /= ns) .and. .not. ok, &
             "and pf_normal_scores, where EVERY score must be NaN and not just the NaN's own")
@@ -3946,7 +3946,7 @@ contains
             "the untied elements must stay strictly ordered around the tie")
     end subroutine test_normal_scores_ties_share_a_score
 
-    !> **`feature_risks.md` Risk-254.** The ranks are the SURVIVORS', not the whole array's.
+    !> **The ranks are the SURVIVORS', not the whole array's.**
     !!
     !! Denominating by `size(values)` shrinks every score toward zero by roughly `m/n`: the scores
     !! stay ordered, stay centred on zero and stay monotone in the values, so every distributional
@@ -4256,12 +4256,12 @@ contains
 
     !> `pf_probit_fit`'s `loc` is the MEAN of the survivors, under every token.
     !!
-    !! **This is `feature_risks.md` Risk-255, and equality is the assertion rather than a
-    !! tolerance.** Every one of the six plotting-position rules is symmetric about the median, so
-    !! the normal scores sum to zero and the least-squares intercept IS the mean -- which is why
-    !! `probit_line` evaluates it as the mean. Two changes break that silently: an asymmetric
-    !! `method=` token added later, and replacing the ORDINAL ranks with `pf_normal_scores`'
-    !! midranks, which a tie makes asymmetric. The TIED population below is what sees the second.
+    !! **Equality is the assertion rather than a tolerance.** Every one of the six plotting-position
+    !! rules is symmetric about the median, so the normal scores sum to zero and the least-squares
+    !! intercept IS the mean -- which is why `probit_line` evaluates it as the mean. Two changes
+    !! break that silently: an asymmetric `method=` token added later, and replacing the ORDINAL
+    !! ranks with `pf_normal_scores`' midranks, which a tie makes asymmetric. The TIED population
+    !! below is what sees the second.
     !!
     !! Exclusions are in the fixture too, because the identity is over the SURVIVORS: a `loc`
     !! taken over the whole array would fail here and pass on an unmasked population.
@@ -4320,7 +4320,7 @@ contains
         call check(error, loc == want, &
             "and over the SURVIVORS when a third of the population is excluded")
         if (allocated(error)) return
-        ! And the sub-population computed on its own must give the same line, which is Risk-254's
+        ! And the sub-population computed on its own must give the same line, which is the same
         ! shape one tier up: a denominator of `size(values)` leaves `loc` right and `sigma` wrong.
         call pf_probit_fit(kept, plain, want)
         call check(error, sigma == want, &
@@ -4482,8 +4482,8 @@ contains
             "an empty population's implied scale is a quiet NaN with ok=.false.")
         if (allocated(error)) return
 
-        ! Risk-253: under skipnan=.false. the NaN sorts to one end and the line through the rest
-        ! is an entirely ordinary one, so `saw_nan` has to be tested rather than inherited.
+        ! Under skipnan=.false. the NaN sorts to one end and the line through the rest is an
+        ! entirely ordinary one, so `saw_nan` has to be tested rather than inherited.
         do k = 1, 9
             v(k) = real(k, real64)
         end do
@@ -4550,13 +4550,12 @@ contains
 
     !> The four boundary rows of `pf_probit_mean`, asserted EXACTLY.
     !!
-    !! **`feature_risks.md` Risk-256.** `Phi^-1(0)` is `-Infinity` and `Phi^-1(1)` is `+Infinity`,
-    !! so a zero in the population drags the probit-space mean to `-Inf` and `Phi(-Inf)` is
-    !! exactly `0`; a one does the mirror; a population holding both is `-Inf + Inf` and has no
-    !! mean at all. An implementer meeting an infinity in a mean loop reaches for
-    !! `max(p, tiny)`/`min(p, 1 - eps)`, which turns all three into finite numbers near the
-    !! boundary -- plausible, in range, and wrong. Equality is therefore the assertion; a
-    !! tolerance would accept every clamped answer.
+    !! `Phi^-1(0)` is `-Infinity` and `Phi^-1(1)` is `+Infinity`, so a zero in the population drags
+    !! the probit-space mean to `-Inf` and `Phi(-Inf)` is exactly `0`; a one does the mirror; a
+    !! population holding both is `-Inf + Inf` and has no mean at all. An implementer meeting an
+    !! infinity in a mean loop reaches for `max(p, tiny)`/`min(p, 1 - eps)`, which turns all three
+    !! into finite numbers near the boundary -- plausible, in range, and wrong. Equality is
+    !! therefore the assertion; a tolerance would accept every clamped answer.
     subroutine test_probit_mean_boundary_rows(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64) :: withzero(4), withone(4), both(5), plain(4), flat(6), empty(0)
@@ -4599,11 +4598,11 @@ contains
 
     !> The domain screen reads a NaN as a NaN, and the weight convention is `pf_gmean`'s.
     !!
-    !! **The first assertion is Risk-172's shape.** `p >= 0.0 .and. p <= 1.0` is FALSE for a NaN,
-    !! so a domain screen written that way classifies a NaN as an out-of-domain VALUE -- and the
-    !! two have different answers under `skipnan`: an out-of-range value is a NaN with
-    !! `ok = .false.` whatever `skipnan` says, while a NaN is EXCLUDED at the default and
-    !! propagates only when the caller asks it to.
+    !! **The first assertion matters.** `p >= 0.0 .and. p <= 1.0` is FALSE for a NaN, so a domain
+    !! screen written that way classifies a NaN as an out-of-domain VALUE -- and the two have
+    !! different answers under `skipnan`: an out-of-range value is a NaN with `ok = .false.`
+    !! whatever `skipnan` says, while a NaN is EXCLUDED at the default and propagates only when the
+    !! caller asks it to.
     subroutine test_probit_mean_domain_and_weights(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check.
         real(real64) :: high(4), low(4), withnan(4), p(4), w(4), zw(4)

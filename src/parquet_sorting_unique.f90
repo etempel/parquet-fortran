@@ -391,7 +391,7 @@ contains
         ! `%append_from` carries both the bytes and the null state, so nothing is
         ! materialized per element. `idxs` only ever names non-null elements -- the walk
         ! in unique_impl_strcol stops at the first null -- so carrying the null state
-        ! cannot change what lands here. See feature_risks.md Risk-60.
+        ! cannot change what lands here.
         do k = 1_int64, nd
             call distinct%append_from(values, idxs(k))
         end do

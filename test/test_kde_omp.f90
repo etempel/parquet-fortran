@@ -17,8 +17,8 @@
 !! **This suite is registered SERIALLY** (`suite_is_safe_to_parallelize` in
 !! `test/test_runner_support.f90` excludes `kde_omp`): test-drive dispatches a suite's tests inside
 !! its own `!$omp parallel do`, where a team opened by the library would be a nested one, which
-!! libgomp deadlocks on intermittently (`feature_risks.md` Risk-104), and the counter is
-!! process-global. A serial suite runs at level 0, where the team actually opens.
+!! libgomp deadlocks on intermittently, and the counter is process-global. A serial suite runs at
+!! level 0, where the team actually opens.
 !!
 !! **Every test carries the skip guard**: without OpenMP no team can open and every comparison
 !! below would hold for the wrong reason. The thread count is clamped to the processors available,

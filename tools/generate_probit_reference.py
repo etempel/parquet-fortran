@@ -322,9 +322,9 @@ HEADER = '''!===========================================
 !! A value below `TINY` is written as `transfer(<bits>, 0.0_real64)` rather than as a decimal:
 !! the bit pattern is exact whatever a compiler makes of a subnormal decimal literal.
 !!
-!! `PROBIT_Q3` and `MAD_NORMAL_SCALE_REF` are the two spellings of one number that
-!! `feature_risks.md` Risk-252 is about -- `src/parquet_stats_order.f90` freezes the second as a
-!! literal, and nothing but a test compares them.
+!! `PROBIT_Q3` and `MAD_NORMAL_SCALE_REF` are the two spellings of one number:
+!! `src/parquet_stats_order.f90` freezes the second as a literal, and nothing but a test compares
+!! them.
 module test_probit_golden
     use iso_fortran_env, only : real64, int64
     implicit none
@@ -565,8 +565,8 @@ def self_test():
             fails += 1
     # Every plotting-position rule this library offers is SYMMETRIC about the median, which is
     # what makes `loc` the mean rather than a regression intercept (`probit_line`,
-    # src/parquet_stats_order.f90; feature_risks.md Risk-255). Asserted here rather than assumed,
-    # because a token added later that broke it would leave `loc` quietly wrong.
+    # src/parquet_stats_order.f90). Asserted here rather than assumed, because a token added later
+    # that broke it would leave `loc` quietly wrong.
     for label, a, fil in (("blom", mpf("0.375"), False), ("weibull", mpf(0), False),
                           ("tukey", mpf(1) / 3, False), ("hazen", mpf("0.5"), False),
                           ("cunnane", mpf("0.4"), False), ("filliben", mpf(0), True)):
@@ -606,7 +606,7 @@ def self_test():
               % ("unreadable" if qs is None else "%.17g" % qs[0], QSPLIT), file=sys.stderr)
         fails += 1
 
-    # 5. feature_risks.md Risk-252, from the generator's side: the scale pf_mad multiplies by is
+    # 5. The two spellings, from the generator's side: the scale pf_mad multiplies by is
     #    frozen as a literal, and the double nearest 1/Phi^-1(3/4) is what it has to be.
     order = REPO_ROOT / "src" / "parquet_stats_order.f90"
     checks += 1

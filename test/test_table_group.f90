@@ -86,7 +86,7 @@ module test_table_group
     !> `test_add_apply_names_and_forms`' second reducer, the object twin of `cb_add_nan_small`:
     !! `out(1)` is the payload's sum over the group and `out(2)` a NaN for a group of fewer than
     !! three rows -- the "could not compute" answer, so that the Null rule is asserted on the
-    !! OBJECT form as well as the procedure one (feature_risks.md Risk-263).
+    !! OBJECT form as well as the procedure one.
     type, extends(parquet_group_reducer) :: nan_small_reducer
         real(real64), pointer :: p(:) => null() !! the payload column.
     contains
@@ -589,7 +589,7 @@ contains
     !! names relocate nothing -- a `%col` pointer taken before them still reads the key column
     !! and `%generation()` has not moved. The negative control is the same key table built
     !! WITHOUT `reserve=`, where `parquet_new_table`'s headroom carries five adds and the ninth
-    !! column is the one that grows the slot array (feature_risks.md Risk-262).
+    !! column is the one that grows the slot array.
     subroutine test_key_table_reserve(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, kt, kt2
@@ -1846,7 +1846,7 @@ contains
     !! call replaces; `%is_null` and `%get(..., is_valid=)` must agree with each other and with
     !! where `%agg`'s array is NaN, the kind must be `PK_FLOAT64`, and the unit must be the source
     !! column's for the statistics that keep its dimension and absent for the counts and `"var"`,
-    !! with `unit=` overriding either way (feature_risks.md Risk-263).
+    !! with `unit=` overriding either way.
     subroutine test_add_agg_equals_agg_and_add_column(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=8), parameter :: tokens(15) = [character(len=8) :: "size", "count", "nunique", "sum", &
@@ -2062,7 +2062,7 @@ contains
 
     !> Every table-target binding is a READ of the SOURCE table: `%generation()`, the row order
     !! and a `%col` pointer taken before the calls all survive `%add_agg` in both forms and
-    !! `%add_size`. The target is the only thing that changes (feature_risks.md Risk-235).
+    !! `%add_size`. The target is the only thing that changes.
     subroutine test_add_forms_are_reads_of_the_source(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, kt
@@ -2147,7 +2147,7 @@ contains
     !! an empty key table, and the callback form never calls the procedure. Then the other half of
     !! the column-less rule, which an empty grouping cannot see because 0 rows and 0 groups agree
     !! whatever the check is: a fresh `parquet_new_table` under a grouping of FOUR groups takes
-    !! `%ngroups()` rows from the first add (feature_risks.md Risk-262).
+    !! `%ngroups()` rows from the first add.
     subroutine test_add_forms_on_empty_grouping(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, kt, bare, u, fresh
@@ -2245,8 +2245,8 @@ contains
     !! `%apply(func, 2, out)`, bit for bit; one name is the one-result case and equals the
     !! arithmetic over `%csr`; the reducer object form equals the procedure form; `unit=` reaches
     !! every column named; a result the callback could not compute is a Null row in ITS column
-    !! only (feature_risks.md Risk-263); and `as` is read by the tokenizer `%group_by`'s keys go
-    !! through, so blanks around a comma and a `;` separator name the same two columns.
+    !! only; and `as` is read by the tokenizer `%group_by`'s keys go through, so blanks around a
+    !! comma and a `;` separator name the same two columns.
     subroutine test_add_apply_names_and_forms(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, kt
@@ -2577,8 +2577,8 @@ contains
     !! five buffer kinds with `is_valid=` given and absent, and `%broadcast` with `fill=` given
     !! and absent each equal their `int64` siblings, entry for entry -- on a fixture with four
     !! unequal groups and a null in every value column, then on one with dropped rows so that the
-    !! fill is observable (feature_risks.md Risk-264). A forwarder that dropped an optional or
-    !! narrowed the wrong quantity would answer something plausible and different.
+    !! fill is observable. A forwarder that dropped an optional or narrowed the wrong quantity
+    !! would answer something plausible and different.
     subroutine test_int32_forms_equal_int64(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t, u

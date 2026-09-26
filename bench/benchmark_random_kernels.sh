@@ -15,9 +15,9 @@
 #
 # THE CHECKSUM GATE IS THE POINT. The two kernels compute the same algorithm by different
 # arithmetic, so they must agree bit for bit. gfortran is known to miscompile the wrapping kernel
-# under LTO (feature_risks.md Risk-101), and a timing from a miscompiled arm is a timing for
-# something that is not this library. So this script REFUSES to report a comparison whose two
-# halves disagree, rather than printing the numbers with a warning nobody reads.
+# under LTO, and a timing from a miscompiled arm is a timing for something that is not this
+# library. So this script REFUSES to report a comparison whose two halves disagree, rather than
+# printing the numbers with a warning nobody reads.
 #
 # It also carries check_random_kernels.sh's vacuity guard, for the same reason that script does: if
 # -U__GFORTRAN__ ever stops defeating the allowlist, this would build the SAME kernel twice and
@@ -56,10 +56,9 @@
 # different kernel names -- if `-U__GFORTRAN__` ever stops defeating the allowlist, this would build
 # the same kernel twice and print a perfectly reasonable 1.00x. The checksum gate requires the two
 # halves to agree bit for bit, which they must, being the same algorithm by different arithmetic;
-# gfortran is known to miscompile the wrapping kernel under LTO (`feature_risks.md` Risk-101), and a
-# timing from a miscompiled arm is a timing for something that is not this library. LTO is therefore
-# not the default `OPT`, and a disagreeing run is refused outright rather than printed with a
-# warning.
+# gfortran is known to miscompile the wrapping kernel under LTO, and a timing from a miscompiled arm
+# is a timing for something that is not this library. LTO is therefore not the default `OPT`, and a
+# disagreeing run is refused outright rather than printed with a warning.
 #
 # Measured on machine B, gfortran 15.2.1 at fpm's release flags, checksums identical throughout: the
 # wrapping kernel is 1.58x faster than the shipped `int128` one on the `real64` bulk fill, 1.57x on
@@ -170,7 +169,7 @@ fi
 if [ "$c_ship" != "$c_forc" ]; then
     echo "FAIL: the two kernels DISAGREE (CHECK=$c_ship vs $c_forc)." >&2
     echo "      They compute the same algorithm and must match bit for bit, so one of them is" >&2
-    echo "      miscompiled at '$OPT'. Refusing to report timings -- see feature_risks.md Risk-101." >&2
+    echo "      miscompiled at '$OPT'. Refusing to report timings." >&2
     cleanup; finished=1; exit 1
 fi
 

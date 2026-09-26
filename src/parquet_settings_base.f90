@@ -122,8 +122,7 @@ module parquet_settings_base
     !
     !> What `0` resolves to for the counting path's bucket ceiling, and what the getter reports
     !! after a reset. MUST equal `kSortCountingBucketLimit`'s initialiser in
-    !! src/parquet_wrapper.cpp, which is what applies before anything has been pushed
-    !! (feature_risks.md Risk-42).
+    !! src/parquet_wrapper.cpp, which is what applies before anything has been pushed.
     integer(int64), parameter :: sort_counting_bucket_limit_builtin = 4194304_int64 !! 2**22 buckets.
     !
     !> How much the library prints. Written by `parquet_set_verbosity`/`parquet_reset_settings`
@@ -134,12 +133,12 @@ module parquet_settings_base
     !! "auto" (as many as OpenMP offers). Written by `parquet_set_string_threads`
     !! (parquet_settings.f90); read only by `parquet_string_threads` (src/parquet_strings.f90),
     !! deliberately, for the same reason cfg_sort_threads has a single reader: one question asked in
-    !! one place cannot give two answers (feature_risks.md Risk-40).
+    !! one place cannot give two answers.
     integer, save :: cfg_string_threads = 0
     !> Cap on the threads one bulk `pf_random_permutation`/`pf_random_subset` call may use. `0`
     !! means "auto" (as many as OpenMP offers). Written by `parquet_set_random_threads`
     !! (parquet_settings.f90); read only by `random_threads` (src/parquet_random.f90), for the same
-    !! single-reader reason as cfg_sort_threads and cfg_string_threads (feature_risks.md Risk-40).
+    !! single-reader reason as cfg_sort_threads and cfg_string_threads.
     integer, save :: cfg_random_threads = 0
     !> Fewest elements a thread must be given before a bulk permutation opens a team at all.
     !!
@@ -152,12 +151,12 @@ module parquet_settings_base
     !> Default thread count for every sort that does not name one. `0` means "auto", which is what
     !! pf_sort_threads resolves against the OpenMP environment -- and that is the ONLY place this is
     !! read, deliberately, so a read-time `sort_by=` and a raw-array sort can never disagree about
-    !! it (feature_risks.md Risk-40).
+    !! it.
     integer, save :: cfg_sort_threads = 0
     !> Cap on the threads one bulk `pf_spatial_index` query may use internally. `0` means "auto" (as
     !! many as OpenMP offers). Written by `parquet_set_spatial_threads` below; read only by
     !! `spatial_threads` (src/parquet_spatial_bulk.f90), for the same single-reader reason as
-    !! cfg_sort_threads and cfg_string_threads (feature_risks.md Risk-40).
+    !! cfg_sort_threads and cfg_string_threads.
     integer, save :: cfg_spatial_threads = 0
     !> Cap on the threads one bulk HEALPix conversion may use internally. `0` means "auto", which
     !! for this tier is NOT simply "as many as OpenMP offers": the automatic answer is additionally
@@ -165,7 +164,7 @@ module parquet_settings_base
     !! (src/parquet_healpix_bulk.f90), which a positive value replaces, above or below it.
     !! Written by `parquet_set_healpix_threads` below; read only by
     !! `hpx_threads` (same file), for the same single-reader reason as cfg_sort_threads and
-    !! cfg_string_threads (feature_risks.md Risk-40).
+    !! cfg_string_threads.
     !!
     !! **This knob exists so that `parquet_set_threads` means what it says.** Before it, the bulk
     !! HEALPix forms were the one threading area that read no setting at all, so a program that
@@ -179,7 +178,7 @@ module parquet_settings_base
     !!
     !! Written by `parquet_set_index_threads` below; read only by `ix_auto_cap`
     !! (src/parquet_index_map.f90), for the same single-reader reason as cfg_sort_threads and
-    !! cfg_string_threads (feature_risks.md Risk-40).
+    !! cfg_string_threads.
     !!
     !! A scalar `%get` opens no team and is untouched. The sorted backend's `pf_argsort` call
     !! answers to `sort_threads` instead, because that is the sort's own work being done -- so a
@@ -194,8 +193,8 @@ module parquet_settings_base
     !!
     !! Deliberately NOT mirrored to C++, unlike its counting-path neighbour: the radix path exists
     !! only in the Fortran engine, so there is nothing on the other side of the `bind(C)` boundary
-    !! for a mirror to govern. Adding one would be a global that no code reads, which is the shape
-    !! `feature_risks.md` Risk-42 warns about from the other end.
+    !! for a mirror to govern. Adding one would be a global that no code reads, which is the drift
+    !! this arrangement exists to prevent, from the other end.
     logical, save :: cfg_sort_radix_path = .true.
     !> Largest key value RANGE (not cardinality) the counting path will accept. `0` = built-in.
     integer(int64), save :: cfg_sort_counting_bucket_limit = 0
@@ -285,7 +284,7 @@ contains
     !! one thread -- `!$omp parallel if(cond)` with `cond` false, or any region at all under
     !! `OMP_NUM_THREADS=1`. That is still a nested region, and the rule above still applies to it,
     !! so the old spelling let every such caller open a full team one level down. It also deadlocks
-    !! libgomp; see `parquet_nested_team_unsafe` below and feature_risks.md Risk-104.
+    !! libgomp; see `parquet_nested_team_unsafe` below.
     !!
     !! **The cap only ever LOWERS the answer, and never overrides the parallel-region rule** -- a
     !! caller who capped sorting at 8 said nothing about what should happen inside someone else's
@@ -426,7 +425,7 @@ contains
     !! hangs 7 runs in 8. Bisected, every clause is load-bearing: `master` instead of `single` never
     !! hangs, an enclosing team of 2 never hangs, and no environment setting fixes it
     !! (`GOMP_SPINCOUNT=0` only moves 7/8 to 2/8). The library's own code is standard-conforming;
-    !! this predicate is what stops it building the shape. See feature_risks.md Risk-104.
+    !! this predicate is what stops it building the shape.
     !!
     !! **This is what clamps an EXPLICIT `threads=`**, which `parquet_auto_thread_count`'s rule
     !! deliberately does not touch. The two are different questions and the narrowness is the point:
@@ -654,9 +653,9 @@ contains
     !> Enables or disables the sort's single-key radix fast path.
     !>
     !> The radix path is a stable LSD radix sort that performs **no comparisons at all**, so it is a
-    !> third independent statement of the ordering beside the two comparators
-    !> (`feature_risks.md` Risk-89). Turning it off is how a test compares it against the comparison
-    !> sort on one fixture, which is the only way to grade a path that cannot fail slowly.
+    !> third independent statement of the ordering beside the two comparators.
+    !> Turning it off is how a test compares it against the comparison sort on one fixture, which is
+    !> the only way to grade a path that cannot fail slowly.
     !>
     !> **The one reason a program might turn it off is MEMORY.** The radix path allocates up to four
     !> `n`-element `int64` buffers -- about 32 bytes per row -- where the comparison sort allocates
@@ -686,7 +685,7 @@ contains
     !>
     !> **Range, not cardinality** -- the bound is `max(key) - min(key)`, so a thousand values spread
     !> over a billion is far outside a limit that a million densely-packed values sit inside. This
-    !> distinction has already misled one test author here (feature_risks.md Risk-39).
+    !> distinction has already misled one test author here.
     !>
     !> The number IS the memory control: `n` buckets costs `8n` bytes of counters, so the built-in
     !> value caps the counting path at 32 MB. Raising it trades memory for speed on wide-ranged
@@ -866,7 +865,7 @@ contains
     !>
     !> **No C++ counterpart.** The C++ half emits no message of this class -- its three warnings are
     !> genuine data findings -- and an `emit_advice_cpp` that nothing called would be a global no
-    !> code reads, which is the shape `feature_risks.md` Risk-42 warns about and the stated reason
+    !> code reads, which is the drift this guards against and the stated reason
     !> `cfg_sort_radix_path` is deliberately unmirrored. Add one on the day C++ acquires such a
     !> message.
     subroutine parquet_emit_advice(text)
@@ -911,9 +910,9 @@ contains
     !> **One function for the whole library, which is the point.** Every emit channel above and every
     !> explicitly-called `%print*` procedure that was not given a `unit=` resolves its destination
     !> here, so the setting cannot mean one thing to a warning and another to a listing. A second
-    !> copy of these four lines is the failure `feature_risks.md` Risk-40 describes for
-    !> `cfg_sort_threads`, arriving through a destination rather than through a thread count: both
-    !> answers look right in isolation and only disagree once someone changes the setting.
+    !> copy of these four lines is the failure mode for `cfg_sort_threads`, arriving through a
+    !> destination rather than through a thread count: both answers look right in isolation and only
+    !> disagree once someone changes the setting.
     !>
     !> **Public only because Fortran has no package scope.** The printers live in other modules, so
     !> they cannot reach a private name here; both facades give it a `private ::` line

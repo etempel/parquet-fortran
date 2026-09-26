@@ -322,8 +322,8 @@ contains
     !! so `ek_contract_fp` is the same constant it always was and a mismatch still means `exp_key`
     !! moved. The plain spelling relied on the multiply and the add both wrapping, which is
     !! undefined rather than merely implementation-defined: it aborts under `nagfor -C=intovf` and
-    !! `gfortran -ftrapv`, and an optimiser is entitled to reason from it (see `feature_risks.md`
-    !! Risk-94, where exactly that deleted a branch two functions away in a sibling module).
+    !! `gfortran -ftrapv`, and an optimiser is entitled to reason from it (where exactly that
+    !! deleted a branch two functions away in a sibling module).
     !!
     !! 16-bit limbs for the product and 32-bit halves for the sum, which is the same construction
     !! `parquet_random`'s `mul64_lo_strict` and `add64` use; nothing here reaches `2**35`. This runs

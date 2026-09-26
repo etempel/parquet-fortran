@@ -177,9 +177,9 @@ module parquet_argsort
     !!
     !! A hook that FORCES a state needs a way to prove the state took effect, or the test it enables
     !! passes just as happily against a hook that does nothing -- both paths answer identically here,
-    !! so no assertion on the permutation can tell them apart. This is the `had_index` shape from
-    !! `feature_risks.md` Risk-75. It costs one increment per heapsort call, i.e. at most O(log n)
-    !! per sort and never anything per comparison.
+    !! so no assertion on the permutation can tell them apart. This is the `had_index` shape.
+    !! It costs one increment per heapsort call, i.e. at most O(log n) per sort and never anything
+    !! per comparison.
     integer(int64), save :: dbg_sort_heapsort_calls = 0_int64
     !> .true. makes the introsort's final insertion pass record how far it moved anything.
     !!
@@ -200,13 +200,13 @@ module parquet_argsort
     !! Needed in BOTH directions, which is unusual for a threshold hook. Raising it (to `huge`)
     !! declines the radix path, which is how the introsort's own negative controls stay non-vacuous
     !! once the floor drops below their fixture sizes; lowering it (to 2) drives every engine fixture
-    !! in the suite through the radix path. Both are the `feature_risks.md` Risk-49 shape -- a
-    !! size threshold hiding a code path from the tests written for everything else.
+    !! in the suite through the radix path. Both are the same trap -- a size threshold hiding a
+    !! code path from the tests written for everything else.
     integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
     !> Overrides the row floor above which a SELECTION orders instead; NEGATIVE restores
     !! `SORT_NTH_ORDER_MIN`.
     !!
-    !! Risk-49 again, and here the threshold hides not a tuning choice but a whole second answer
+    !! The same threshold trap, and here it hides not a tuning choice but a whole second answer
     !! path: below the floor `sort_nth_index` quickselects, above it the same question is answered
     !! by the ordering engine. Every fixture in the suite is small, so without this override only
     !! the quickselect arm would ever run and the routing would be untested in the direction that
@@ -214,7 +214,7 @@ module parquet_argsort
     integer(int64), save :: dbg_sort_nth_order_min = -1_int64
     !> Overrides the balanced split's smallest task size; NEGATIVE restores `SORT_TASK_FLOOR`.
     !!
-    !! Risk-49 again, and the sharpest instance of it in this module: the floor binds only when
+    !! The same threshold trap, the sharpest instance in this module: the floor binds only when
     !! `nv / team` falls below it, i.e. small `n` with a large team, which is precisely the regime
     !! no fixture in the suite reaches -- so the constant ships unexercised rather than merely
     !! untuned. It is also the reason a value for it cannot be measured by rebuilding: a crossover
@@ -283,12 +283,12 @@ module parquet_argsort
     integer, save :: dbg_sort_radix_fail_alloc = 0
     !> Radix scatter passes actually EXECUTED since the counter was last reset.
     !!
-    !! The `had_index` shape from `feature_risks.md` Risk-75, and the only observable an optimisation
-    !! that changes the PASS COUNT has. Several of them exist -- the constant-digit skip, and the
-    !! narrow-integer bias that exists to make that skip fire -- and every one of them leaves the
-    !! permutation bit-identical by construction. So no assertion on an answer can distinguish a
-    !! build where the optimisation fires from one where it never does, and without this counter a
-    !! test for any of them is vacuous rather than merely weak.
+    !! The `had_index` shape again, and the only observable an optimisation that changes the PASS
+    !! COUNT has. Several of them exist -- the constant-digit skip, and the narrow-integer bias that
+    !! exists to make that skip fire -- and every one of them leaves the permutation bit-identical
+    !! by construction. So no assertion on an answer can distinguish a build where the optimisation
+    !! fires from one where it never does, and without this counter a test for any of them is
+    !! vacuous rather than merely weak.
     !!
     !! Counts a pass that scatters, never one the skip declined, and never the string refine's own
     !! recursion -- it is a measure of the LSD loop's work, which is what those optimisations move.
@@ -296,12 +296,12 @@ module parquet_argsort
     integer(int64), save :: dbg_sort_radix_passes = 0_int64
     !> Threads the engine's permutation build actually opened on its last call; 1 means serial.
     !!
-    !! Stage 4, and the same `had_index` shape as `dbg_sort_radix_passes` above (`feature_risks.md`
-    !! Risk-75). It is the ONLY thing that can tell a threaded build from a serial one, because the
-    !! permutation is bit-identical either way: `sort_row_less` is a total order, so exactly one
-    !! correct answer exists and no assertion on `perm` can see the team size. Without this counter
-    !! every threading test is vacuous, and a policy bug that silently never threads -- the easiest
-    !! one to write -- passes the whole suite.
+    !! Stage 4, and the same `had_index` shape as `dbg_sort_radix_passes` above. It is the ONLY
+    !! thing that can tell a threaded build from a serial one, because the permutation is
+    !! bit-identical either way: `sort_row_less` is a total order, so exactly one correct answer
+    !! exists and no assertion on `perm` can see the team size. Without this counter every
+    !! threading test is vacuous, and a policy bug that silently never threads -- the easiest one
+    !! to write -- passes the whole suite.
     !!
     !! Records what the policy RESOLVED, not `omp_get_num_threads()` from inside the region. The two
     !! differ when the runtime gives a smaller team than asked for, and it is the decision under test
@@ -321,11 +321,11 @@ module parquet_argsort
     !> Threads the last tie pass (`sort_build_runs_permutation`) ran on; 1 = serial. Written on
     !! every run detection, so a test reads the pass it just asked for. The same reasoning as
     !! `dbg_sort_threads_used`: the flags are identical at every team size, so this is the only
-    !! thing that can see whether the pass threaded -- feature_risks.md Risk-189.
+    !! thing that can see whether the pass threaded.
     integer(int64), save :: dbg_sort_tie_threads_used = 1_int64
     !> Threads the last `runs_to_offsets` ran on; 1 = serial. Its own record rather than a
     !! share of the tie pass's, because the two are handed the count separately -- a driver
-    !! that drops it on the way to one and not the other has to be visible (Risk-189's shape).
+    !! that drops it on the way to one and not the other has to be visible.
     integer(int64), save :: dbg_sort_offsets_threads_used = 1_int64
     !> Buckets Design B's split produced on the last permutation build; 0 means B did not run.
     !!
@@ -566,7 +566,7 @@ module parquet_argsort
             !> Receives the count `resolve_thread_count` produced, for a caller's own pass over
             !! the result (`drive_engine_grouped` hands it to `runs_to_offsets`); 1 for fewer
             !! than two rows, where nothing is resolved. Resolved once and handed to every
-            !! branch, which is the rule feature_risks.md Risk-189 states.
+            !! branch, which is the rule here.
             integer(int64), intent(out), optional :: resolved_threads
         end subroutine engine_build_runs
         !> Narrows a 1-based int64 permutation to int32, aborting rather than truncating.
@@ -985,7 +985,7 @@ module parquet_argsort
         !! The index tiebreaker makes this a TOTAL ORDER in which no two distinct rows compare
         !! equal, which is what makes an unstable sort produce the stable answer, makes
         !! nth_element deterministic, and makes a parallel result bit-identical to a serial one
-        !! by construction. Keep it beside `sort_keys_compare` -- feature_risks.md Risk-34.
+        !! by construction. Keep it beside `sort_keys_compare`.
         module function sort_row_less(keys, a, b) result(less)
             type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
             integer(int64), intent(in) :: a           !! first row, 1-based.
@@ -1135,7 +1135,7 @@ module parquet_argsort
         !> Binary search for a target row the caller APPENDED past the rows being searched.
         !!
         !! **Preserve the appending.** It is what removes any compare-a-row-against-a-value arm
-        !! and so makes drift from the sort comparator structurally impossible — Risk-34.
+        !! and so makes drift from the sort comparator structurally impossible.
         !!
         !! `target_row` names which appended row to search for, so that ONE extracted key can
         !! serve many searches: a caller appending m targets at rows `n_search+1 .. n_search+m`

@@ -629,8 +629,8 @@ contains
         ! the widest of them -- the indexing stat_strv uses. The row's longest element is measured
         ! with %length, which allocates nothing, and ONE scratch slot is sized from it, so the loop
         ! below copies into a fixed-length buffer rather than taking a fresh deferred-length string
-        ! out of the column per element (feature_risks.md Risk-60, and
-        ! tools/check_source_conventions.py's "no per-element string allocation in a bulk loop").
+        ! out of the column per element (and tools/check_source_conventions.py's "no per-element
+        ! string allocation in a bulk loop").
         if (values%kindof() == PK_STRING_VEC) then
             call values%string_column(store)
             slen = 1

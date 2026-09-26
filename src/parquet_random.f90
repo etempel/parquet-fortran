@@ -33,13 +33,13 @@
 ! (`tools/check_random_kernels.sh`'s forced half, which reaches it by pre-expanding this file --
 ! nagfor has no `-U`). So safe64 buys `-C=intovf` and nothing else there. Worth contrasting with
 ! the compiler that does have a problem with it: gfortran's *wrapping* arm fails at `-O3 -flto`
-! and `-Ofast -flto` (504 mismatches, Risk-101), which is the exposure the whole fork exists for.
+! and `-Ofast -flto` (504 mismatches), which is the exposure the whole fork exists for.
 !
 ! The arms are bit-exact, and that is asserted rather than assumed: `tools/check_random_kernels.sh`
 ! builds all three against the same golden vectors at every optimisation setting. Worth knowing
 ! what that found -- the wrapping arm FAILS there under `-O3 -flto` and `-Ofast -flto` (504
-! mismatches, feature_risks.md Risk-101), and the safe64 arm passes at every setting. Removing the
-! undefined behaviour removed a real miscompilation, not a theoretical one.
+! mismatches), and the safe64 arm passes at every setting. Removing the undefined behaviour removed
+! a real miscompilation, not a theoretical one.
 !
 ! "The compiler wraps this expression" is NOT the same claim as "this expression is safe", and
 ! conflating the two has already cost this module one silent wrong answer. ifx wraps the round
@@ -250,8 +250,8 @@ module parquet_random
     !!
     !! **The case rule is contract, not a tuning knob.** Which proposal runs decides which value
     !! comes back, so moving either threshold moves draws while every distributional test still
-    !! passes (`feature_risks.md` Risk-248). It is in the string for the same reason the Poisson's
-    !! crossover is in `pf_poisson_algorithm`.
+    !! passes. It is in the string for the same reason the Poisson's crossover is in
+    !! `pf_poisson_algorithm`.
     !!
     !! **Bit-identical for a given libm, and there is no portable form.** The uniform and tilted
     !! proposals both weigh an `exp` from libm, and `parquet_expkey` freezes a logarithm only, so a
@@ -298,7 +298,7 @@ module parquet_random
 
     !> Label separating the coordinate-addressed Ziggurat's sub-streams from every other family.
     !!
-    !! **Not decoration -- `feature_risks.md` Risk-123.** Without it, `pf_random_normal_at` and
+    !! **Not decoration -- `feature_risks.md` Risk-2.** Without it, `pf_random_normal_at` and
     !! `pf_random_normal_portable_at` would run their rejection loops over the SAME words at the
     !! same coordinate, so two draws a caller believes are independent would be two different
     !! functions of one uniform. Every marginal test still passes in that state; only a joint test
@@ -309,7 +309,7 @@ module parquet_random
 
     ! ---- Points on a sphere: the family labels ----
     !
-    ! **Not decoration -- `feature_risks.md` Risk-123**, for the reason `normal_zig_label` gives. A
+    ! **Not decoration -- `feature_risks.md` Risk-2**, for the reason `normal_zig_label` gives. A
     ! direction consumes two uniforms, so a family reading the raw words at its own coordinate would
     ! hand a caller who also draws `pf_random_at` there a weight that IS its direction's `z`. Each
     ! family therefore reads `(pf_random_key(seed, label), i)` at block `draw - 1`, and the values
@@ -545,7 +545,7 @@ module parquet_random
     ! whole of block `d-1` and using its first pair -- which made it equal `pf_random_bits_at` at
     ! draw `2d-1`, so rule 1 above was false and an integer at draw 2 collided with a real at draw
     ! 3. Aligning the strides fixed that, halved the cost of a draw-axis integer fill, and left draw
-    ! 1 bit-identical. See `feature_risks.md` Risk-113.
+    ! 1 bit-identical.
     !
     ! Domain-separating the generics -- folding a per-generic constant into the key -- would remove
     ! rule 2 as well, and would break the property `pf_random_stream` exists to provide: that a
@@ -1064,10 +1064,11 @@ module parquet_random
     !> Highest 0-based word position a stream may hold. A stream addresses `2**63` words, which at
     !! the measured cost of a draw is some thousands of times the age of the universe -- so this
     !! bound exists to keep the position arithmetic provably free of signed overflow, not because a
-    !! program will approach it. **That is a correctness requirement, not tidiness**: Risk-94 records
-    !! this module being caught with a compiler using one overflowing expression's undefinedness to
-    !! delete a branch hundreds of lines away, so a new unguarded overflow site on a hot path would
-    !! be a regression against Risk-95's "every remaining wrapping site is `#else`-arm only".
+    !! program will approach it. **That is a correctness requirement, not tidiness**: this
+    !! repository has seen a compiler use one overflowing expression's undefinedness to delete a
+    !! branch hundreds of
+    !! lines away, so a new unguarded overflow site on a hot path would be a regression against the
+    !! rule that every remaining wrapping site is `#else`-arm only.
     integer(int64), parameter :: stream_pos_max = huge(1_int64)
 
     !> A walk along one stream: the same values tier 0 addresses, reached in sequence.
@@ -1136,9 +1137,9 @@ module parquet_random
     !! **The type is plain scalars: no allocatable components, no `FINAL`, deliberately and
     !! permanently.** gfortran does not reliably default-initialise an OpenMP `private()` copy of a
     !! finalizable type, and ifx segfaults on a block-local instance of a type with allocatable
-    !! components inside a parallel region (`feature_risks.md` Risk-45). A type that is neither is
-    !! safe in both shapes, which is what makes a per-thread instance usable at all. Adding either to
-    !! this type would break every parallel use of it, on one compiler or the other.
+    !! components inside a parallel region. A type that is neither is safe in both shapes, which is
+    !! what makes a per-thread instance usable at all. Adding either to this type would break every
+    !! parallel use of it, on one compiler or the other.
     !!
     !! It holds the block it last enciphered, keyed by that block's index. One enciphering carries
     !! two `real64` values or four `real32`s, so keeping it is worth **1.70x (gfortran) / 1.78x (ifx)**
@@ -3490,9 +3491,9 @@ contains
         ! exactly `huge(int64)`, which the suite tests -- the intermediate `i0 + k` forms
         ! `huge + 1` and overflows, wraps, and the `- 1` brings it back to the right answer. The
         ! result is correct on both compilers and the arithmetic is undefined, which is precisely
-        ! the shape feature_risks.md Risk-94 records the optimiser exploiting two functions away.
+        ! the shape the optimiser has been caught exploiting two functions away.
         ! Since `k >= 1`, `k - 1` is non-negative and `i0 + (k - 1)` cannot exceed the sum the
-        ! precondition already bounds. Found by UBSan; see feature_risks.md Risk-112.
+        ! precondition already bounds. Found by UBSan.
         do k = 1_int64, m
             call random_block(seed, i0 + (k - 1_int64), ior(DOM_REAL64, blk), w0, w1, w2, w3)
             if (second) then
@@ -3610,7 +3611,7 @@ contains
         blk = ishft(position, -1)
         ! Every draw index below is `draw + (something <= m - 1)`, with the inner sum parenthesised,
         ! so none can form `huge + 1` even when the fill ends exactly at the representable boundary
-        ! -- the hazard `fill_streams_r64` spells out at length. Risk-112.
+        ! -- the hazard `fill_streams_r64` spells out at length.
         do while (k + 2_int64 <= m)                 ! steady state: one block, two values
             call random_block(seed, stream, ior(DOM_INT_WIDE, blk), w0, w1, w2, w3)
             v(k + 1_int64) = int_reduce(ior(ishft(w1, 32), w0), a, s, seed, stream, draw + k)
@@ -3850,8 +3851,7 @@ contains
             ! `random_block` site and no call at all -- which sounds strictly better -- makes the
             ! body bigger still and costs gfortran the same 13 % while saving ifx 4 %. This shape
             ! costs gfortran 3.6 % and ifx 11.7 % on the wide path, which is the best worst case of
-            ! the three, over all six measured shapes. See `feature_risks.md` Risk-115 for why
-            ! nothing here may be "simplified" without re-measuring both compilers.
+            ! the three, over all six measured shapes.
             r = int_at_narrow32(seed, stream, a, s, draw)
             return
         end if
@@ -4081,7 +4081,7 @@ contains
     !!
     !! Split hot/cold exactly as `int_reduce`/`int_reduce_retry` are, and for the same reason: an
     !! A/B that let this one inline differently from the rule it is being compared against would be
-    !! measuring the inline budget rather than the grid. See `feature_risks.md` Risk-114.
+    !! measuring the inline budget rather than the grid.
     !! **The threshold is LAZY, exactly as the 64-bit rule's is, and this is not a detail.** An
     !! eager `modulo(2**32, s)` is an integer division on every call. A bulk fill hoists it once and
     !! never notices; `pf_random_int_at` cannot, and paying it per call measured a **6 % regression
@@ -4281,15 +4281,15 @@ contains
     !! "UB site 2 of 2, and the only one carried on BOTH sides of the fork" -- each 32x32 partial
     !! product can exceed `huge(int64)` and wrap -- and where a 128-bit kind exists that is no
     !! longer so. The remaining wrapping sites are both on the `#else` arm: this one, and
-    !! `random_block`'s multiplies. See `feature_risks.md` Risk-95.
+    !! `random_block`'s multiplies.
     !!
     !! **Why only ONE operand is split, and why the obvious spelling is wrong.** The full unsigned
     !! product reaches nearly 2**128, which does NOT fit a signed 128-bit integer -- so
     !! `iand(int(a,k128), MASK64_128) * iand(int(b,k128), MASK64_128)` **overflows**, and would add
     !! a third wrapping site while appearing to remove one. It measures faster than what ships here
-    !! (a single wide multiply against two) and must not be adopted on that basis: Risk-95's first
-    !! rule is that a wrapping measurement is not evidence. Splitting `b` alone bounds each product
-    !! by 2**96 and every intermediate below 2**97, which is provably in range.
+    !! (a single wide multiply against two) and must not be adopted on that basis: a wrapping
+    !! measurement is not evidence. Splitting `b` alone bounds each product by 2**96 and every
+    !! intermediate below 2**97, which is provably in range.
     !!
     !! **Cost.** Two wide multiplies against four narrow ones plus their carries: `pf_random_int_at`
     !! at a narrow range measured 26.14 -> 25.03 ns and at a rejecting width 48.12 -> 41.64 on
@@ -4406,8 +4406,7 @@ contains
     !! with the sign bit REVERSES the order it maps, and the comparison collapses to the signed
     !! `a < b` -- the exact inverse of this function's contract for a pair straddling `2**63`. It
     !! computes both `ieor`s correctly and then compares them wrongly, so printing the operands
-    !! shows nothing amiss; only a comparison reveals it. See `feature_risks.md` Risk-125 for the
-    !! same defect's other two shapes, and CLAUDE.md's compiler-gotchas section.
+    !! shows nothing amiss; only a comparison reveals it. See CLAUDE.md's compiler-gotchas section.
     !!
     !! **What that cost, and why the shape is worth protecting.** `ult` is `int_reduce`'s lazy
     !! guard, so it is reached for every width above the narrow-32 cap. A wrong answer there sends
@@ -4536,8 +4535,8 @@ contains
     !
     ! The POSITION GUARDS (`advance_by`, `set_pos`) exist so that no arithmetic on `pos` can
     ! overflow. This module has already been caught once with a compiler using an overflowing
-    ! expression's undefinedness to delete a branch far away (`feature_risks.md` Risk-94), so an
-    ! unguarded `pos + 2` on the hot path would be a real regression rather than a theoretical one.
+    ! expression's undefinedness to delete a branch far away, so an unguarded `pos + 2` on the hot
+    ! path would be a real regression rather than a theoretical one.
 
     !> `%seed` with no stream index: stream 0.
     pure subroutine stream_seed_base(self, seed)
@@ -4709,7 +4708,7 @@ contains
     !! returns the rounding error of `a*a` instead -- some hundreds -- which comes back out of the
     !! `exp` as a threshold near `1e53`. That sends a wide tail interval into the uniform proposal,
     !! whose acceptance there underflows to zero, and the draw HANGS (`feature_risks.md`
-    !! Risk-251). Rationalising `a - s = -4/(a + s)` removes the cancellation instead of guarding
+    !! Risk-4). Rationalising `a - s = -4/(a + s)` removes the cancellation instead of guarding
     !! it, so no rounding barrier is needed and no compiler flag can reintroduce it. `hypot`
     !! rather than `sqrt(a*a + 4)` keeps `a*a` from overflowing for an `a` above `1.3e154`, which
     !! would otherwise make `s` infinite and the threshold 0.
@@ -4919,7 +4918,7 @@ contains
         ! The uniform proposal, for an interval too narrow for its arm's alternative. `m` is the
         ! point of `[a, b]` nearest zero and therefore where the target is largest, so the accept
         ! probability is at most 1, with equality only at `m` -- getting `m` wrong returns a
-        ! UNIFORM draw that no coarse test can tell from this one (`feature_risks.md` Risk-249).
+        ! UNIFORM draw that no coarse test can tell from this one.
         path = 2
         do
             tries = tries + 1_int64
@@ -4938,12 +4937,12 @@ contains
     !> Un-mirrors, de-standardises and CLAMPS one truncated normal draw.
     !!
     !! **The clamp is the only thing that makes `lo <= x <= hi` true, and it is not redundant
-    !! tidying for a later reader to delete** (`feature_risks.md` Risk-250). `z` is drawn inside
-    !! `[(lo-mu)/sigma, (hi-mu)/sigma]`, but `mu + sigma*z` does not round back inside `[lo, hi]`
-    !! whenever `mu` and `sigma` are not aligned with the bounds: measured over 1.27 M evaluations
-    !! at independently chosen `mu`, `sigma` and bounds, 74 453 landed outside. The case that
-    !! matters is a positivity truncation, where a draw on the lower boundary comes back negative
-    !! and flows into a `sqrt`, a `log` or a physical count somewhere else entirely.
+    !! tidying for a later reader to delete**. `z` is drawn inside `[(lo-mu)/sigma, (hi-mu)/sigma]`,
+    !! but `mu + sigma*z` does not round back inside `[lo, hi]` whenever `mu` and `sigma` are not
+    !! aligned with the bounds: measured over 1.27 M evaluations at independently chosen `mu`,
+    !! `sigma` and bounds, 74 453 landed outside. The case that matters is a positivity truncation,
+    !! where a draw on the lower boundary comes back negative and flows into a `sqrt`, a `log` or a
+    !! physical count somewhere else entirely.
     !!
     !! **Two `if`s rather than `min`/`max`**, which compile to `minsd`/`maxsd` and raise
     !! `IEEE_INVALID` on a quiet NaN. Nothing here can be a NaN -- `normal_truncated_draw` refused

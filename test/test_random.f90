@@ -1415,12 +1415,12 @@ contains
     !> The bulk forms are the scalar form: identity, subsets, prefixes, kinds and loop bounds.
     !!
     !! **This is the test that binds `pf_random_permutation`/`pf_random_subset` to
-    !! `pf_random_perm_at`, and it may not be deleted as redundant** (`feature_risks.md` Risk-109).
-    !! The agreement is structural today -- both routes reach one copy of the round loop, and differ
-    !! only in whether `(l, r)` comes from a division or from the loop indices -- but that is
-    !! precisely why it needs asserting: an identity that holds by construction fails loudly the
-    !! moment someone restructures one side, and silently produces two different permutations if
-    !! nothing is watching.
+    !! `pf_random_perm_at`, and it may not be deleted as redundant**. The agreement is structural
+    !! today -- both routes reach one copy of the round loop, and differ only in whether `(l, r)`
+    !! comes from a division or from the loop indices -- but that is precisely why it needs
+    !! asserting: an identity that holds by construction fails loudly the moment someone
+    !! restructures one side, and silently produces two different permutations if nothing is
+    !! watching.
     !!
     !! The `m` sweep is chosen for the bulk form's own failure modes rather than the kernel's. `100`
     !! has `a*b == m` exactly, so the fill stops on the last iteration of both loops; `5` and `7`
@@ -3216,12 +3216,12 @@ contains
         ! 1..40 and still sees nothing.
         !
         ! **Both signs are swept because both were measured to fire, and that is wider than
-        ! feature_risks.md Risk-101 records.** Its table lists the broken ranges as the
-        ! non-negative ones (`1..1`, `0..7`, `1..8`, `1..24`, `1..64`) against zero-spanning ones
-        ! that are clean; it never tried a strictly negative range. `-40..-1` fires here, harder
-        ! than `1..40` does. So the rule is one-sided-versus-spanning-zero rather than anything
-        ! about the sign itself, and a sweep that covered only the non-negative half on the
-        ! strength of that table would be resting on an untested asymmetry.
+        ! recorded for gfortran under LTO.** The broken ranges are the non-negative ones (`1..1`,
+        ! `0..7`, `1..8`, `1..24`, `1..64`) against zero-spanning ones that are clean; it never
+        ! tried a strictly negative range. `-40..-1` fires here, harder than `1..40` does. So the
+        ! rule is one-sided-versus-spanning-zero rather than anything about the sign itself, and a
+        ! sweep that covered only the non-negative half on the strength of that table would be
+        ! resting on an untested asymmetry.
         !
         ! Two things a future reader must not undo. `do i = 1, n` is the module's own documented
         ! idiom, so a broken range is one users actually write; and "cover the negatives too" is
@@ -3258,7 +3258,7 @@ contains
         call check(error, bad_pos == 0, &
             "a PROVABLY NON-NEGATIVE stream range disagrees with the strict reference -- this is the range an " // &
             "optimiser can reason about and the one `do i = 1, n` produces, and it is the range the sweeps above " // &
-            "cannot see, because their bounds span zero (feature_risks.md Risk-101)")
+            "cannot see, because their bounds span zero")
         if (allocated(error)) return
         call check(error, bad_neg == 0, &
             "a strictly negative stream range disagrees with the strict reference: it is swept as its own loop " // &
@@ -3294,7 +3294,7 @@ contains
 
         ! The same one-sided stream ranges `test_agreement_scalar` closes with, for the same
         ! reason: the sweep above runs `-3..3`, whose bounds span zero, and that is the shape the
-        ! Risk-101 fault class is invisible in. Both fills reach the same cipher the scalar draws
+        ! LTO fault class is invisible in. Both fills reach the same cipher the scalar draws
         ! do, so a miscompiled `random_block` can reach them too.
         !
         ! **Precautionary rather than demonstrated, and the distinction is the honest one to keep
@@ -3330,7 +3330,7 @@ contains
         end do
         call check(error, bad_pos == 0, &
             "a fill over a provably non-negative stream range disagrees with the strict reference -- the sweep " // &
-            "above cannot see this, because its bounds span zero (feature_risks.md Risk-101)")
+            "above cannot see this, because its bounds span zero")
         if (allocated(error)) return
         call check(error, bad_neg == 0, &
             "a fill over a strictly negative stream range disagrees with the strict reference")
@@ -3437,8 +3437,8 @@ contains
         ! the gap `test_agreement_scalar` closes: every stream loop above is non-negative, so until
         ! this existed the integer agreement layer never asked for a negative stream at all -- one
         ! golden row carries stream -1 and nothing else did. The sign matters for the same reason
-        ! it does there (feature_risks.md Risk-101): the two one-sided ranges and the range that
-        ! spans zero are three different compilations, so covering one says nothing about another.
+        ! it does there: the two one-sided ranges and the range that spans zero are three different
+        ! compilations, so covering one says nothing about another.
         bad = 0
         do g = 1, 9
             do i = -20_int64, -1_int64

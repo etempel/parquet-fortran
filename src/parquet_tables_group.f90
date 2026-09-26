@@ -20,22 +20,21 @@
 !!
 !! **`dropna` asks the column, never the sort.** Whether a group is a null-keyed one is read off
 !! each key column at the group's representative row (`parquet_column_is_null`), not off where the
-!! sort placed the group -- the second half of feature_risks.md Risk-208, for several keys: the
-!! null group is last today, and a version that assumed so would break the day a `nulls_first`
-!! reaches this verb.
+!! sort placed the group -- the second half of the same rule, for several keys: the null group is
+!! last today, and a version that assumed so would break the day a `nulls_first` reaches this verb.
 !!
-!! **The generation is compared on EVERY per-group query, never cached** (Risk-210's rule,
-!! restated for this object). A stale grouping hands out in-range row numbers naming the wrong
-!! rows, and anything computed from those is a plausible answer about the wrong rows; one
-!! `integer(int64)` comparison per query is the whole cost of not having it. The five
-!! introspection bindings describe the object itself and skip it, as their interfaces say.
+!! **The generation is compared on EVERY per-group query, never cached**, restated here for this
+!! object. A stale grouping hands out in-range row numbers naming the wrong rows, and anything
+!! computed from those is a plausible answer about the wrong rows; one `integer(int64)` comparison
+!! per query is the whole cost of not having it. The five introspection bindings describe the object
+!! itself and skip it, as their interfaces say.
 !!
 !! **`%first_rows`/`%last_rows` are computed, not read off the permutation's ends** -- the choice
 !! `%drop_duplicates` made (`src/parquet_tables_verbs.f90`, header), so that "first" does not rest
 !! on the engine's tie rule.
 !!
-!! **`%key_table` gathers COPIES** (Risk-208): a gather on the source column would reorder the
-!! caller's table with nothing to show it.
+!! **`%key_table` gathers COPIES**: a gather on the source column would reorder the caller's
+!! table with nothing to show it.
 !!
 !! **`%apply` calls the caller's procedure once per group with the group's rows and nothing
 !! else**, in group order when serial, and stores each result at its own `g` when on a team, so
@@ -44,7 +43,7 @@
 !! a decision made at the call (`group_team`), not a floor that declined, and an explicit
 !! request is the caller's declaration. The team is recorded on every call for the test-only
 !! hook, because a loop that resolved a team it never opened, or opened one nobody asked for,
-!! is invisible in every answer (feature_risks.md Risk-189's shape).
+!! is invisible in every answer.
 !!
 !! **`%agg` is `parquet_stats` called once per group, and nothing else.** Every token delegates
 !! to the named `pf_*` procedure over the group's values gathered into a real64 buffer -- the
@@ -172,7 +171,7 @@ contains
                 rep = perm(go(g))
                 ! ANY null key drops the group (pandas' rule). Asked of the column at the group's
                 ! representative row -- every row of a group shares its key tuple, nulls comparing
-                ! equal -- and never inferred from the sort's null placement (Risk-208).
+                ! equal -- and never inferred from the sort's null placement.
                 do k = 1, size(grp%slots)
                     if (parquet_column_is_null(self%cache%cols(grp%slots(k))%values, rep)) then
                         keep(g) = .false.
@@ -261,7 +260,7 @@ contains
     !!
     !! The comparison is made HERE, on every query, and the answer is never cached: a "still
     !! valid" flag would be the stale-flag hazard `table-mutate.md` refuses for sortedness, and
-    !! the check is one integer comparison (feature_risks.md Risk-210).
+    !! the check is one integer comparison.
     subroutine grp_resolve(self, proc)
         class(parquet_grouping), intent(in) :: self !! the grouping.
         character(len=*), intent(in) :: proc        !! calling binding, for the message.
@@ -465,7 +464,7 @@ contains
     ! range check -- so a refusal prints the number the caller wrote -- forwards every other
     ! argument by keyword, and narrows the answer through `grp_narrow` or its scalar twin, which
     ! abort naming the value rather than wrapping. One walk, one set of rules, whichever kind was
-    ! asked for (feature_risks.md Risk-264).
+    ! asked for.
     !
     module procedure grp_rows_g32_i64
         call grp_rows_i64(self, int(g, int64), rows)
@@ -572,15 +571,15 @@ contains
         call grp_first_rows_i64(self, first)
         call parquet_new_table(out)
         ! The reservation is made BEFORE the first add and over the TOTAL this call will reach,
-        ! `reserve` being the caller's INCREMENT on top of it (feature_risks.md Risk-261):
-        ! %reserve_columns takes a total and is a no-op at or below the current capacity, so the
-        ! key adds themselves never relocate either, and the caller's next `reserve` adds cannot.
+        ! `reserve` being the caller's INCREMENT on top of it: %reserve_columns takes a total and
+        ! is a no-op at or below the current capacity, so the key adds themselves never relocate
+        ! either, and the caller's next `reserve` adds cannot.
         if (present(reserve)) call out%reserve_columns(size(self%slots) + nsize + reserve)
         do k = 1, size(self%slots)
             ! A copy, then a gather on the copy: the source column must come out of this
-            ! unchanged (Risk-208). The gather carries each row's null state with it, which is
-            ! how a `dropna=.false.` null group's key comes out null without this code knowing
-            ! how the kind stores one.
+            ! unchanged. The gather carries each row's null state with it, which is how a
+            ! `dropna=.false.` null group's key comes out null without this code knowing how
+            ! the kind stores one.
             call self%cache%cols(self%slots(k))%values%deep_copy(vals)
             call vals%gather(first)
             ! %add_column's parquet_column form reads kind, width and unit off the column it is
@@ -642,7 +641,7 @@ contains
     !! parallel region as the index tier honours its own; a loop of fewer than two groups is
     !! serial whatever was asked. The answer is recorded for
     !! `parquet_debug_get_group_threads_used` on EVERY route, 1 included, so a test can tell
-    !! "declined" from "ran" (feature_risks.md Risk-189).
+    !! "declined" from "ran".
     subroutine group_team(n, threads, proc, auto, nt)
         integer(int64), intent(in) :: n          !! groups in the loop.
         integer, intent(in), optional :: threads !! the caller's request, or absent.
@@ -898,7 +897,7 @@ contains
             g = codes(rep)
             if (g == 0_int64) cycle          ! a row in no group: a null key under the build's dropna
             if (drop) then
-                ! The null run of the column, asked of the column (Risk-208), never of its place.
+                ! The null run of the column, asked of the column, never of its place.
                 if (parquet_column_is_null(self%cache%cols(idx)%values, rep)) cycle
             end if
             out(g) = out(g) + 1_int64
@@ -1582,7 +1581,7 @@ contains
     !
     !> The two refusals every table-target binding runs BEFORE it computes anything: the target
     !! may not be the table this grouping was built from, and a target that already has columns
-    !! must have one row per group (feature_risks.md Risk-262).
+    !! must have one row per group.
     !!
     !! The first is also the aliasing guard. `self` holds a pointer into its table's column
     !! store, so an `%add_column` on that table could relocate the slots underneath a grouping
@@ -1729,9 +1728,9 @@ contains
     !
     !> The ONE route by which a table-target binding's column reaches the target, real64 half:
     !! the unit (already resolved by the caller) and the NaN-to-Null rule live here and nowhere
-    !! else, so a future binding that called `%add_column` itself would silently apply neither
-    !! (feature_risks.md Risk-263). These are exactly the two calls a caller makes by hand after
-    !! `%agg`, which is why this is the two-step form and not a new route.
+    !! else, so a future binding that called `%add_column` itself would silently apply neither.
+    !! These are exactly the two calls a caller makes by hand after `%agg`, which is why this is the
+    !! two-step form and not a new route.
     !!
     !! `%set_null` only ever ADDS nulls and is a VALUE mutation, so it neither resurrects a value
     !! nor advances the target's `%generation()`; the add under a new name within the target's

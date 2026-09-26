@@ -2339,7 +2339,7 @@ contains
     end subroutine test_table_index_missing_column_aborts
     !
     !> See `scenario_table_index_stale_find` (test/error_scenarios.f90): the generation check on
-    !! every query (feature_risks.md Risk-210), one scenario per query family.
+    !! every query, one scenario per query family.
     subroutine test_table_index_stale_find_aborts(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         call check_scenario_exit_status_and_stderr(error, "table_index_stale_find", expect_abort=.true., &

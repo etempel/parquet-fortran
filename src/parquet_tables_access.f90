@@ -812,8 +812,8 @@ contains
         ! two candidates' payload bounds across the scan and pays one byte comparison per element,
         ! where a `%compare` against each running winner re-validated both indices and re-read
         ! both offset pairs twice per element, and `%get` would allocate a deferred-length string
-        ! per row for a scan that only ever keeps two of them (feature_risks.md Risk-60). Its
-        ! ordering is Fortran's own `<`, blanks and all.
+        ! per row for a scan that only ever keeps two of them. Its ordering is Fortran's own `<`,
+        ! blanks and all.
         call store%argminmax(imin, imax)
         if (imin == 0_int64) return
         ! Only the two winners are materialized. Trimmed for display only: a vector string column
@@ -1261,8 +1261,8 @@ contains
         ! two candidates' payload bounds across the scan and pays one byte comparison per element,
         ! where a `%compare` against each running winner re-validated both indices and re-read
         ! both offset pairs twice per element, and `%get` would allocate a deferred-length string
-        ! per row for a scan that only ever keeps two of them (feature_risks.md Risk-60). Its
-        ! ordering is Fortran's own `<`, blanks and all.
+        ! per row for a scan that only ever keeps two of them. Its ordering is Fortran's own `<`,
+        ! blanks and all.
         call store%argminmax(imin, imax)
         if (imin == 0_int64) return
         ! Only the two winners are materialized. Trimmed for display only: a vector string column

@@ -1073,7 +1073,7 @@ contains
                 chi2 = independence(stat(a, :), stat(b, :), NBIN)
                 call check(error, chi2 <= limit, &
                     "two region families, or one and parquet_random's disc or pf_random_at, are dependent at one " // &
-                    "coordinate: they share a label (feature_risks.md Risk-123)")
+                    "coordinate: they share a label (feature_risks.md Risk-2)")
                 if (allocated(error)) return
             end do
         end do

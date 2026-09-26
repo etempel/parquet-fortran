@@ -162,16 +162,16 @@ contains
     !! **Both passes are invisible in any answer**: the flags and the offsets are pure functions of
     !! the permutation, identical at every team size, so `parquet_debug_sort_tie_threads_used` and
     !! `parquet_debug_sort_offsets_threads_used` are the only observations that the resolved count
-    !! reached them -- feature_risks.md Risk-189: the count was resolved and dropped on this very
-    !! path once, and the two passes are handed it separately, hence two records. Four arms: the
-    !! Fortran engine at `threads=4` records 4 in both; at `threads=1` it records 1 in both -- the
-    !! control, without which a pass that always opened the machine would pass the first; the
-    !! offsets of the two agree element for element, which is the serial-against-threaded A/B of
-    !! `runs_to_offsets` and, through them, of the tie pass; and the C++ engine at `threads=4`,
-    !! whose own tie walk is serial, gives the same offsets again -- the cross-engine A/B of the
-    !! threaded tie pass. Ties are dense on purpose: run detection over distinct values detects
-    !! nothing. The tail floor is lowered so a 4096-element fixture opens the team at all, and
-    !! restored with the engine floors before the first assertion.
+    !! reached them: the count was resolved and dropped on this very path once, and the two passes
+    !! are handed it separately, hence two records. Four arms: the Fortran engine at `threads=4`
+    !! records 4 in both; at `threads=1` it records 1 in both -- the control, without which a pass
+    !! that always opened the machine would pass the first; the offsets of the two agree element for
+    !! element, which is the serial-against-threaded A/B of `runs_to_offsets` and, through them, of
+    !! the tie pass; and the C++ engine at `threads=4`, whose own tie walk is serial, gives the same
+    !! offsets again -- the cross-engine A/B of the threaded tie pass. Ties are dense on purpose:
+    !! run detection over distinct values detects nothing. The tail floor is lowered so a
+    !! 4096-element fixture opens the team at all, and restored with the engine floors before the
+    !! first assertion.
     subroutine test_runs_tail_passes_threads(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: n = 4096_int64          !! rows; 97 distinct values, dense ties.
@@ -247,12 +247,12 @@ contains
     !! 8192 in C++) -- so it compares serial against serial. That is a perfectly good correctness
     !! test and no evidence at all about threading, and it was being cited as evidence about
     !! threading while `engine_build_runs` discarded its resolved thread count on the Fortran
-    !! branch. See `feature_risks.md` Risk-189.
+    !! branch.
     !!
     !! **What makes it non-vacuous is asserting BOTH counters**, which are two different counters:
     !! `threads_used()` reads the C++ engine's and `parquet_debug_sort_threads_used()` the
     !! Fortran one. Without both, a run in which either engine quietly declined would still pass
-    !! the equality below -- the vacuous A/B shape `feature_risks.md` Risk-49 describes.
+    !! the equality below -- the vacuous A/B shape.
     !!
     !! The oracle is the usual one: every comparator ends in a row-index tiebreaker, so exactly one
     !! permutation is correct and a disagreement is a defect rather than a variation.
@@ -571,7 +571,7 @@ contains
     !!
     !! Each case asserts BOTH halves: that the two engines really diverged (zero comparisons on the
     !! fast half, nonzero on the slow one) and that they agree. Without the first, a fast path that
-    !! silently declined would pass the equality against itself -- feature_risks.md Risk-35/Risk-52.
+    !! silently declined would pass the equality against itself.
     subroutine test_counting_path_nulls_agree(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int32) :: v(40)
@@ -701,8 +701,8 @@ contains
     end subroutine test_partial_is_partial
 
     !
-    !> **Risk-35 discipline.** A low-cardinality integer array takes the counting fast path, which
-    !> performs zero comparisons -- so a test that only ever runs it proves nothing about the
+    !> **Both-paths discipline.** A low-cardinality integer array takes the counting fast path,
+    !> which performs zero comparisons -- so a test that only ever runs it proves nothing about the
     !> comparator's run detection. Both paths are forced and required to agree.
     subroutine test_unique_both_paths(error)
         type(error_type), allocatable, intent(out) :: error
@@ -736,7 +736,7 @@ contains
     end subroutine test_unique_both_paths
 
     !
-    !> **Risk-35 discipline**, for the same reason as `test_unique_both_paths`: ranking turns on
+    !> **Both-paths discipline**, for the same reason as `test_unique_both_paths`: ranking turns on
     !> run detection, and a counting-path fixture never invokes the comparator that finds the runs.
     subroutine test_rank_both_paths(error)
         type(error_type), allocatable, intent(out) :: error
@@ -777,7 +777,7 @@ contains
     !> one fixture down both sort engines and assert the two agree -- but "both engines" is a claim
     !> about which code ran, and nothing in an equality assertion can see it. Turn the setting the
     !> wrong way round, or stop it reaching C++, and both halves take the SAME path: the comparison
-    !> holds trivially and the test passes while testing nothing (feature_risks.md Risk-35).
+    !> holds trivially and the test passes while testing nothing.
     !>
     !> The counting path performs exactly zero comparisons by construction, so `0` on one half and
     !> nonzero on the other proves the two halves really diverged.
@@ -849,7 +849,7 @@ contains
     !> **Without this the whole feature is untestable.** A `threads=` that is silently ignored
     !> returns the serial permutation, which is CORRECT -- so every assertion above passes just as
     !> happily against an implementation that never spawns anything. Zero parallelism is a passing
-    !> test, exactly as zero comparisons was for the partial sort (`feature_risks.md` Risk-35).
+    !> test, exactly as zero comparisons was for the partial sort.
     subroutine test_threads_really_used(error)
         type(error_type), allocatable, intent(out) :: error
         real(real64) :: v(2000)
@@ -914,7 +914,7 @@ contains
                 "an explicit threads= must still be honoured inside an ACTIVE parallel region")
         else
             ! A team of one: the region exists but runs serially, which is the shape that deadlocks
-            ! libgomp when a team is opened inside it. See feature_risks.md Risk-104.
+            ! libgomp when a team is opened inside it.
             call check(error, explicit_inside == 1_int64, &
                 "inside a region running on a single thread an explicit threads= must clamp to serial")
         end if
@@ -957,7 +957,7 @@ contains
     !! piece — which is exactly the old, correct, single-threaded merge. So a dense sweep over small
     !! arrays exercises the path this feature *replaced*, calls the co-rank zero times, and passes.
     !! Found by mutation, not by reasoning: two deliberate co-rank defects survived the entire suite
-    !! until the sweeps started calling this. `feature_risks.md` Risk-49.
+    !! until the sweeps started calling this.
     subroutine force_merge_segments(min_segment)
         integer(int64), intent(in) :: min_segment !! new floor in elements; 0 restores the built-in one.
         interface
@@ -986,7 +986,7 @@ contains
     !> **Without this the co-ranked merge is untestable, exactly as `threads=` itself was.** A merge
     !! that quietly stopped splitting its final round would still return the identical permutation --
     !! that identity is what makes every thread count safe -- so every assertion above passes just as
-    !! happily against the old single-threaded tail. `feature_risks.md` Risk-49.
+    !! happily against the old single-threaded tail.
     !!
     !! The final round is asked about specifically, not the maximum over rounds: a merge that
     !! co-ranked only its first round would report a high maximum while leaving the whole O(n) tail
@@ -1584,7 +1584,7 @@ contains
     !! permutations agree, and if `parquet_debug_use_fortran_sort_engine` did nothing at all -- a
     !! flag never read, a branch placed after the return, a regenerated file that lost the wiring --
     !! both halves would be the C++ engine and every one of them would pass while testing nothing.
-    !! That is `feature_risks.md` Risk-35's failure mode exactly.
+    !! That is the vacuous-test failure mode exactly.
     !!
     !! The counter lives inside the C++ comparator, so it can only move when the C++ comparator
     !! runs. The key is real-valued with distinct values so that the integer counting fast path --
@@ -1934,8 +1934,7 @@ contains
         !! range exceeds `SORT_INSERTION_CUTOFF` (16), so a fixture at or below that size runs
         !! straight into the final insertion sort and never partitions at all — a deliberate
         !! off-by-one in the side selection survived a 12-row version of this test for exactly that
-        !! reason. `feature_risks.md` Risk-49 is the general form: a size threshold is a fast path
-        !! wearing different clothes.
+        !! reason. The general form: a size threshold is a fast path wearing different clothes.
         integer(int32) :: v(60)
         integer(int32), parameter :: sa(5) = [3, 10, 10, 21, 40] !! ordered, with a tie inside it.
         integer(int32), parameter :: sb(4) = [1, 10, 22, 40]     !! ordered, and ties across sa.
@@ -2319,7 +2318,7 @@ contains
     !! `""`/`char(0)` and `"a"`/`"a"//char(0)`/`"a"//char(0)//char(0)` are distinct strings sharing
     !! one zero-padded image, so a run of them is ordered by LENGTH and the radix leaves them in file
     !! order. The NUL at case 5 does not reach this — it sits past the window, where the refine pass
-    !! runs anyway. See `feature_risks.md` Risk-89.
+    !! runs anyway.
     subroutine test_radix_path_string_shapes(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: n = 4096_int64
@@ -2380,9 +2379,9 @@ contains
     !! has to get right is that every key carries its OWN tiers and its own flags.
     !!
     !! The fixture is built so the later keys are actually reached: the primary is low-cardinality
-    !! (16 distinct values over 1024 rows), which is the shape `feature_risks.md` Risk-35 is about —
-    !! a multi-key test whose primary key has no ties never consults the second key and silently
-    !! measures a single-key sort. Both keys carry nulls, the real key carries NaNs, and
+    !! (16 distinct values over 1024 rows), which is the shape that matters here — a multi-key test
+    !! whose primary key has no ties never consults the second key and silently measures a
+    !! single-key sort. Both keys carry nulls, the real key carries NaNs, and
     !! `descending`/`nulls_first` are swept INDEPENDENTLY per key, because a pass that applied one
     !! key's flags to another would agree with C++ on every fixture where the two happen to match.
     !!
@@ -2593,8 +2592,8 @@ contains
     !! **Every equality assertion here would pass against a build where the bias never fires**, since
     !! both images are order-preserving and the permutation is identical either way. That is what the
     !! pass counter is for, and the counter assertions at the end are the half of this test that
-    !! cannot be satisfied by accident. `feature_risks.md` Risk-75's shape: a hook that reports what
-    !! changed, because nothing about the answer can.
+    !! cannot be satisfied by accident. A hook that reports what changed, because nothing about the
+    !! answer can.
     !!
     !! Five fixtures, spanning the shapes the range test has to get right:
     !!
@@ -2812,11 +2811,11 @@ contains
     !! the scatter — dropping the stability the row-index tiebreaker depends on — survived every
     !! other shape here, because their byte-identical groups are all smaller than
     !! `SORT_INSERTION_CUTOFF` and so end at the introsort, which re-sorts them correctly and hides
-    !! the damage. That is `feature_risks.md` Risk-86 one level down: a complete sort underneath
-    !! makes everything above it invisible. This pair gives ~455 byte-identical rows per bucket,
-    !! comfortably over the cutoff, in a run that really splits — so they leave through the
-    !! `minlen == maxlen` return in whatever order the scatter left them, and an unstable scatter
-    !! fails. Do not shrink `n` or add cases without checking this group stays over the cutoff.
+    !! the damage. That is the same trap one level down: a complete sort underneath makes everything
+    !! above it invisible. This pair gives ~455 byte-identical rows per bucket, comfortably over the
+    !! cutoff, in a run that really splits — so they leave through the `minlen == maxlen` return in
+    !! whatever order the scatter left them, and an unstable scatter fails. Do not shrink `n` or add
+    !! cases without checking this group stays over the cutoff.
     subroutine test_radix_path_deep_strings(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: n = 4096_int64
@@ -3012,9 +3011,9 @@ contains
     !
     ! The counting path is a SECOND code path to the same answer, and it fails fast rather than slow:
     ! it performs zero comparisons by construction, so a fixture that reaches it exercises none of
-    ! the comparator. That is the shape behind `feature_risks.md` Risk-35, where a comparator
-    ! mutation survived twice because the fixture took this path and called the comparator zero
-    ! times. So every fixture here is run BOTH ways and the two are required to agree.
+    ! the comparator. That is the shape this guards against, where a comparator mutation survived
+    ! twice because the fixture took this path and called the comparator zero times. So every
+    ! fixture here is run BOTH ways and the two are required to agree.
     !
     !> Runs one key set three ways — C++, Fortran counting, Fortran comparator — and requires agreement.
     !!
@@ -3358,8 +3357,8 @@ contains
     !! pair shorter than twice that is merged in one piece by the old, correct, single-threaded
     !! merge: without this the dense sweep calls the co-rank ZERO times and passes. Two deliberate
     !! co-rank defects survived the entire suite before the sweeps started calling it
-    !! (`feature_risks.md` Risk-49) -- and that helper drives a **C++** override, which is the
-    !! whole reason this sweep cannot live beside the Fortran ones.
+    !! -- and that helper drives a **C++** override, which is the whole reason this sweep cannot
+    !! live beside the Fortran ones.
     !!
     !! **`merge_threads_used() > 1` is the positive control**, for the same reason the helper is
     !! needed: a merge that quietly stopped splitting returns the identical permutation, so the

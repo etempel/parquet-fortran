@@ -238,7 +238,7 @@ module parquet_bindings
         !>
         !> One push rather than five setters so that parquet_reset_settings cannot restore some
         !> knobs and forget others: restoring the Fortran variables and calling this once is the
-        !> whole job (feature_risks.md Risk-42).
+        !> whole job.
         subroutine parquet_push_performance_settings(sort_counting_path, &
                 sort_counting_bucket_limit, target_row_group_bytes, statistics_prescreen) &
                 bind(C, name="parquet_push_performance_settings")
@@ -1095,8 +1095,8 @@ module parquet_bindings
             integer(c_long_long), value :: pre_groups !! the file's row-group count; checked C++-side.
             !> n_pre * pre_rows Kleene values (0 false, 1 true, 2 unknown), leaf-major: leaf p's
             !! verdict for physical row r is at (p-1)*pre_rows + r. Indexed by PHYSICAL row --
-            !! never by live or surviving row, the coordinate-system trap feature_risks.md Risk-131
-            !! records for the sample mask, whose shape and size this array deliberately matches.
+            !! never by live or surviving row, the same coordinate-system trap the sample mask
+            !! carries, whose shape and size this array deliberately matches.
             integer(c_int8_t) :: pre_verdicts(*)
             !> n_pre * pre_groups * 3 screen flags (may_true, may_false, may_unknown), leaf-major
             !! then row-group-major, derived from the verdicts above rather than from statistics --

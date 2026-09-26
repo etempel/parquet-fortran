@@ -1214,7 +1214,7 @@ contains
     !> -- by placing it under screen_row_groups' own prescreen return, where it reads as part of the
     !> screen -- gives the narrow scope a whole-file mask and makes every later whole-column read
     !> decode the row groups the scope excludes, with every answer still correct. Nothing else in
-    !> this suite can see that (feature_risks.md Risk-221).
+    !> this suite can see that.
     !>
     !> This test lives in the filter_screen suite because both hooks are process-global, and
     !> test/test_runner_support.f90 excludes exactly this suite from its per-test parallelism -- a

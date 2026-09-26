@@ -607,9 +607,9 @@ contains
     !> fixture down both sort engines and assert the two agree -- but "both engines" is a claim about
     !> which code ran, and an equality assertion cannot see it. Turn parquet_set_sort_counting_path
     !> the wrong way round, or stop it reaching C++, and both halves take the SAME path: the
-    !> comparison holds trivially and the test passes while testing nothing (feature_risks.md
-    !> Risk-35). The counting path performs exactly zero comparisons by construction, so `0` on one
-    !> half and nonzero on the other proves they really diverged.
+    !> comparison holds trivially and the test passes while testing nothing. The counting path
+    !> performs exactly zero comparisons by construction, so `0` on one half and nonzero on the
+    !> other proves they really diverged.
     subroutine arm_sort_comparisons()
         interface
             subroutine count_cmp(enable) bind(C, name="parquet_debug_set_count_sort_comparisons")
@@ -648,7 +648,7 @@ contains
     !> * **The key is float64 with distinct values**, so the integer counting fast path declines it.
     !>   That path performs zero comparisons by construction, and zero is not less than zero -- a
     !>   low-cardinality integer key would make both halves count 0 and the test would pass while
-    !>   measuring nothing (feature_risks.md Risk-35).
+    !>   measuring nothing.
     !> * **The fixture is 2000 rows, not a handful.** std::partial_sort saves roughly log(N)/log(n)
     !>   comparisons, which is only a visible margin once N is well past n.
     !> * **Sorting is forced serial**, because the counter is one process-global integer and a

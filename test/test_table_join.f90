@@ -1261,11 +1261,11 @@ contains
     !> The payoff: a column the join never read is still readable afterwards, at the right length
     !! and holding its own values.
     !!
-    !! This is `feature_risks.md` Risk-184's failure mode stated as an assertion. Widening the
-    !! condition to "any left join" leaves the table attached with its rows duplicated, and the
-    !! next read of an unread column then comes back at the FILE's row count -- a column of the
-    !! wrong length aligned to nothing, with no error anywhere. Asserting the length as well as
-    !! the values is what makes that visible; the values alone would still line up at the front.
+    !! This is that failure mode stated as an assertion. Widening the condition to "any left join"
+    !! leaves the table attached with its rows duplicated, and the next read of an unread column
+    !! then comes back at the FILE's row count -- a column of the wrong length aligned to nothing,
+    !! with no error anywhere. Asserting the length as well as the values is what makes that
+    !! visible; the values alone would still line up at the front.
     subroutine test_join_no_detach_lazy(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: f = "test_run/join_nodetach_lazy.parquet"
@@ -2495,10 +2495,9 @@ contains
     !> The automatic engine choice is a function of the key kinds and `order=` alone: the same
     !! call reports the same engine at `threads=1` and `threads=64`, on a fixture of distinct keys
     !! and on one where every key is the same value, and on a table of 5 rows and one of 5000 --
-    !! and an ineligible call reports the sort engine on every one of those. feature_risks.md
-    !! Risk-218: a data-dependent choice would make one program's join take different paths on
-    !! different inputs, with correct answers, which is a debugging trap that hides behind the
-    !! floor.
+    !! and an ineligible call reports the sort engine on every one of those.
+    !! A data-dependent choice would make one program's join take different paths on different
+    !! inputs, with correct answers, which is a debugging trap that hides behind the floor.
     subroutine test_join_engine_rule_is_data_independent(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b, w
@@ -2771,10 +2770,9 @@ contains
     end subroutine test_join_real_key_signed_zero_and_nan_payloads
     !
     !> A string key matches by its EXACT bytes: `"ab"` against `"ab "` is a miss, not a hit after
-    !! a trim (the sort engine's rule, and the index tier's, feature_risks.md Risk-211). A
-    !! `character` array is trimmed on the way into a column, so the padded value is put in with
-    !! the scalar `%set_element`, which does not trim -- and the fixture asserts it kept the
-    !! blank before anything is joined.
+    !! a trim (the sort engine's rule, and the index tier's). A `character` array is trimmed on the
+    !! way into a column, so the padded value is put in with the scalar `%set_element`, which does
+    !! not trim -- and the fixture asserts it kept the blank before anything is joined.
     subroutine test_join_string_key_exact_bytes(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b

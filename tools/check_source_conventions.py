@@ -10244,6 +10244,10 @@ RISK_ENTRY_HEADING = re.compile(r"^### Risk-(\d+) — \S")
 RISK_NEXT_NUMBER = re.compile(r"^Next number: Risk-(\d+)\s*$")
 #: A citation of a register entry anywhere in prose.
 RISK_CITATION = re.compile(r"\bRisk-(\d+)\b")
+#: The file kinds `check_risk_register_shape` reads out of `src/`, `test/`, `tools/` and `bench/`.
+RISK_SCANNED_SUFFIXES = (".f90", ".cpp", ".h", ".hpp", ".py", ".sh")
+#: Fewest files that scan may see before it is treating itself as blind (the trees hold ~400).
+RISK_SCANNED_MIN_FILES = 300
 
 
 def risk_register_problems(text, name="feature_risks.md"):
@@ -10345,11 +10349,12 @@ def check_risk_register_shape():
     The register holds at most `RISK_REGISTER_MAX_ENTRIES` entries of at most
     `RISK_REGISTER_MAX_BODY_LINES` body lines each; every `### ` heading is an entry heading
     (`### Risk-<n> — <title>`), no number repeats, and exactly one `Next number: Risk-<n>` line
-    sits above every entry number. The instruction and CI files (CLAUDE.md, CONTRIBUTING.md,
-    .gitlab-ci.yml, `.claude/**/*.md`, and this script) cite only open entries: a closed entry's
-    requirement lives in the rule or the test that states it, and a citation of it leads nowhere.
-    Comments in `src/`, `test/`, `tools/` and `bench/` are exempt -- a closed number there is
-    attribution. Rules for the register: `.claude/rules/workflow.md`.
+    sits above every entry number. Everything that can cite an entry -- the instruction and CI
+    files (CLAUDE.md, CONTRIBUTING.md, .gitlab-ci.yml, `.claude/**/*.md`, this script) AND every
+    source, test, tooling and benchmark file -- cites only open entries: a closed entry's
+    requirement lives in the rule, the comment at the site, or the test that states it, so a
+    citation of a deleted number leads nowhere and cannot be told from a live one. Rules for the
+    register: `.claude/rules/workflow.md`.
     """
     if not RISK_REGISTER.is_file():
         return ["feature_risks.md: not found -- the register is tracked and must exist (%s)"
@@ -10358,11 +10363,21 @@ def check_risk_register_shape():
     paths = [REPO_ROOT / "CLAUDE.md", REPO_ROOT / "CONTRIBUTING.md", REPO_ROOT / ".gitlab-ci.yml",
              Path(__file__).resolve()]
     paths += sorted((REPO_ROOT / ".claude").rglob("*.md"))
+    # The four source trees too. A closed number in a comment is a pointer to an entry that no
+    # longer exists -- the same dead pointer as one in an instruction file, and worse, because a
+    # reader at the site cannot tell a covered risk from a live one.
+    for tree in ("src", "test", "tools", "bench"):
+        paths += sorted(path for path in (REPO_ROOT / tree).rglob("*")
+                        if path.suffix in RISK_SCANNED_SUFFIXES and "__pycache__" not in path.parts)
+    paths = sorted(set(paths))
     sources = [(str(path.relative_to(REPO_ROOT)), path.read_text(encoding="utf-8", errors="replace"))
                for path in paths if path.is_file()]
-    if len(sources) < 4:
-        problems.append("check_risk_register_shape found only %d of the files it scans -- its file "
-                        "list has gone stale, so a green citation result proves nothing" % len(sources))
+    # A vacuity guard, not a file count: the trees hold ~400 files, so anything near zero means the
+    # globbing broke and a green result would prove nothing.
+    if len(sources) < RISK_SCANNED_MIN_FILES:
+        problems.append("check_risk_register_shape found only %d of the files it scans, under "
+                        "the %d it expects -- its file list has gone stale, so a green citation "
+                        "result proves nothing" % (len(sources), RISK_SCANNED_MIN_FILES))
     problems += risk_citation_problems(open_numbers, sources)
     return problems
 

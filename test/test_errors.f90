@@ -2779,8 +2779,8 @@ contains
     end subroutine test_filter_list_bare_dot_aborts
 
     !> A narrowing, deliberately: strtod refuses `x == 1d3` for a bare literal, so accepting it in a
-    !> list would make the list the more permissive parser -- feature_risks.md Risk-195. Fortran's
-    !> own `read` accepts it, so only the shape check refuses it.
+    !> list would make the list the more permissive parser. Fortran's own `read` accepts it, so only
+    !> the shape check refuses it.
     subroutine test_filter_list_fortran_exponent_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -4181,7 +4181,7 @@ contains
     !> parquet_reader_print_stat, C++, with its own output_is_suppressed() call, and nothing
     !> asserted it: deleting that line broke no test before this one existed. Same shape as
     !> test_settings_verbosity_reaches_cpp, which closes the equivalent gap for the warning
-    !> channel (feature_risks.md Risk-42).
+    !> channel.
     subroutine test_settings_silent_gates_reader_print_stat(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -4195,10 +4195,10 @@ contains
     end subroutine test_settings_silent_gates_reader_print_stat
 
     !> The mirror. Every Fortran-side assertion above passes against a C++ half that ignores the
-    !> pushed verbosity entirely, so this is the only test that would catch the two drifting apart
-    !> (feature_risks.md Risk-42). The warning provoked here is printed from parquet_wrapper.cpp.
-    !> The mirrored settings reach C++ at reader/writer OPEN, not when a setter is called -- so a
-    !> knob changed while a reader is already open does not apply to that reader.
+    !> pushed verbosity entirely, so this is the only test that would catch the two drifting
+    !> apart. The warning provoked here is printed from parquet_wrapper.cpp. The mirrored settings
+    !> reach C++ at reader/writer OPEN, not when a setter is called -- so a knob changed while a
+    !> reader is already open does not apply to that reader.
     !>
     !> **This is the negative control for that relocation, and it asserts a deliberate behaviour
     !> change rather than merely tolerating one.** `test_settings_verbosity_reaches_cpp` above is
@@ -5012,7 +5012,7 @@ contains
     !! through scenario_capture_contains, which searches BOTH captured streams -- so a context line
     !! that stopped honouring `message_stream` and stayed on stdout would look byte-identical to it.
     !! check_scenario_streams asserts the text is on one stream *and absent from the other*, which
-    !! is the half with teeth (feature_risks.md Risk-41's decorative-knob rule).
+    !! is the half with teeth (the decorative-knob rule).
     !!
     !! **The negative control is the warning the scenario emits first.** Under the same two settings
     !! it must reach neither stream. Without it, this test would pass just as happily against a
@@ -5595,9 +5595,9 @@ contains
     !> The absence half is the entire point. Every other helper here redirects with `2>&1`, so a
     !> message that moved from stdout to stderr produces a byte-identical capture -- a
     !> `message_stream` test written against those helpers passes whether the setting works or is
-    !> ignored completely, which is the decorative-knob failure feature_risks.md Risk-41 exists to
-    !> forbid. Asserting presence alone here would have the same hole, since the message is present
-    !> either way; it is asserting it is *gone from the other stream* that has teeth.
+    !> ignored completely, which is the decorative-knob failure this exists to forbid. Asserting
+    !> presence alone here would have the same hole, since the message is present either way; it is
+    !> asserting it is *gone from the other stream* that has teeth.
     subroutine check_scenario_streams(error, scenario, text, expect_on, failure_message)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario, text, expect_on, failure_message

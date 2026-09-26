@@ -777,10 +777,10 @@ contains
 
     !> `1/pf_probit(0.75)` is the scale `pf_mad(scale="normal")` multiplies by.
     !!
-    !! **`feature_risks.md` Risk-252.** `src/parquet_stats_order.f90` freezes that scale as a
-    !! literal, so that every `pf_mad` answer stays bit-stable and independent of any kernel. Once
-    !! `pf_probit` exists there are two spellings of one number in one library and nothing
-    !! structural keeps them together -- this test is the thing that does.
+    !! `src/parquet_stats_order.f90` freezes that scale as a literal, so that every `pf_mad` answer
+    !! stays bit-stable and independent of any kernel. Once `pf_probit` exists there are two
+    !! spellings of one number in one library and nothing structural keeps them together -- this
+    !! test is the thing that does.
     !!
     !! **The bound is bit-for-bit equality, and it was not always met.** Up to v2.3.0 the frozen
     !! literal was `1.482602218505602`, which is `0x3ff7b8bd1a975674`: one ulp ABOVE the nearest
@@ -1480,8 +1480,7 @@ contains
     !! format, so they satisfy the contract whatever rule `rendered_ok` (`src/parquet_utils.f90`)
     !! uses, while flang reports the rejection and still leaves partial text -- `1`, and
     !! `377600000000000000000` for the `real64` form -- which was returned as if it were a
-    !! rendering. See `feature_risks.md` Risk-187 for why this function has no single build in
-    !! which both of its rules are live.
+    !! rendering. This function has no single build in which both of its rules are live.
     subroutine test_to_str_bad_fmt(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
         character(len=:), allocatable :: got

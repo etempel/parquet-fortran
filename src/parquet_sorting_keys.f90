@@ -468,8 +468,7 @@ contains
     !! column calling `%get` per element, which allocates a deferred-length string, fills it, copies
     !! it out and frees it, **once per row**; that measured at roughly 0.11 s per allocation per 4 M
     !! elements, i.e. 19 % of a `parquet_string_column` sort and 33 % of a `parquet_column` one,
-    !! because the latter paid it twice. Do not reintroduce a per-element `%get` here; see
-    !! `feature_risks.md` Risk-60.
+    !! because the latter paid it twice. Do not reintroduce a per-element `%get` here.
     !!
     !! **A null is zero-width in both layouts** (`set_null` compacts the payload), so the copy needs
     !! no null special-casing -- a null row simply occupies an empty range, which is what the old

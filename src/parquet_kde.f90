@@ -490,7 +490,7 @@ module parquet_kde
 
     !> The label `pf_kde%sample` derives its key from `seed` with, so that its draws share no bit
     !! with a caller's own `pf_random_at(seed, ...)` at the same coordinates (`feature_risks.md`
-    !! Risk-123: a new construction over the generator takes its own label). Distinct from every
+    !! Risk-2: a new construction over the generator takes its own label). Distinct from every
     !! other label in the library; it needs only to differ from them and from 0.
     integer(int64), parameter :: KDE_FAMILY_LABEL = 7089359947230782746_int64
 

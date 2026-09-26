@@ -14,7 +14,7 @@
 !! which is why `%clear_null` refuses a temporal kind outright ("a temporal element becomes valid
 !! by writing a value to it"). A fill that only writes the value leaves a bitmap column reading
 !! back as the sentinel AND as Null -- which is the workaround `%fillna` exists to replace, and
-!! the one failure in this file that no `%get` can see. See feature_risks.md Risk-201.
+!! the one failure in this file that no `%get` can see.
 !!
 !! **Nothing here reallocates**, so no `%col` pointer dies and no table detaches -- except
 !! `%dropna`, which computes a mask and hands it to `table_apply_keep`, inheriting that

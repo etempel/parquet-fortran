@@ -217,7 +217,7 @@ contains
         ! check_row_permutation in parquet_columns_structural.f90). The one validation is what stands
         ! between a defective sort engine and silently duplicated rows -- an invalid permutation is
         ! not reachable from user input here, only from a library bug, but that is exactly the class
-        ! of failure this project refuses to leave undetected (feature_risks.md Risk-46).
+        ! of failure this project refuses to leave undetected.
         !
         ! **The validating column is HOISTED OUT of the parallel path, not selected inside it.** A
         ! `validated` flag read and written by every thread would be a race, and a needless one --
@@ -311,7 +311,7 @@ contains
             ! total cannot jump from below 2**63 to past 2**64 in one step without landing in
             ! between, where it reads as negative -- so this is not about the answer. It is about
             ! undefined behaviour: signed overflow is UB, and an optimiser entitled to assume it
-            ! does not happen may delete the very branch that tests for it (Risk-94's hazard).
+            ! does not happen may delete the very branch that tests for it.
             ! scenario_explode_row_count_overflow's header records the same reasoning.
             if (c > huge(total) - total) then
                 write(got, "(I0)") i
@@ -342,7 +342,7 @@ contains
         ! abort every explode of more than one row. What stays is %gather's own per-column RANGE
         ! check -- every index really is a row of the column it is applied to -- which is the only
         ! thing standing between a mis-sized index list and a read into a column's uninitialised
-        ! slack (feature_risks.md Risk-67, and Risk-206 for this pair).
+        ! slack.
         call table_mutable_slots(self, slots)
         call table_colwork(self%cache, PCW_GATHER, slots, rows=idx)
         self%row_count = total

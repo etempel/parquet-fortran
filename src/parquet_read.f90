@@ -887,7 +887,7 @@ contains
             ! build, which keys each by its exact bytes -- the same rule %bind deduplicated them
             ! under, so the strict `%build` contract holds here as it does for every other family.
             ! %append_from copies each member's bytes across without materialising a deferred-
-            ! length string for it (feature_risks.md Risk-60).
+            ! length string for it.
             do i = lo, hi
                 call members%append_from(filter%set_text, i)
             end do
@@ -2121,7 +2121,7 @@ contains
                 ! and `message_stream`. That mirror is refreshed when a reader or writer is opened,
                 ! so without this push a setting changed AFTER the open would not reach it: a
                 ! program that opened a reader and then asked for silence still got the report.
-                ! The grouped push, never a half-refresh (feature_risks.md Risk-42).
+                ! The grouped push, never a half-refresh.
                 call parquet_push_settings_to_cpp()
                 call parquet_reader_print_stat(reader%handle)
             end if

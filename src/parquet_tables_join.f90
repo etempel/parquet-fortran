@@ -25,8 +25,7 @@
 !!   * **The HASH engine** (`join_pairs_hash`, `parquet_tables_join_hash.f90`): a
 !!     `pf_index_multimap` built over the right keys and probed once per left row, for every
 !!     other call under `order="left"`. Its equality is the index tier's, which is the sort
-!!     comparator's by construction (feature_risks.md Risk-211), so it is not a second null
-!!     policy either.
+!!     comparator's by construction, so it is not a second null policy either.
 !!
 !! Which engine runs is `join_choose_engine`'s decision -- the hash engine whenever the call is
 !! eligible, from the key kinds and `order=` alone and never from the data's values -- and a
@@ -180,7 +179,7 @@ contains
         ! sweep and a team is not worth opening over a few thousand rows. Recorded before
         ! anything can abort, on every route including the serial one, for the reason the
         ! engine is: the pair list is identical at every team size, so the record is the only
-        ! observation that `threads=` reached these passes (feature_risks.md Risk-189).
+        ! observation that `threads=` reached these passes.
         call resolve_thread_count(threads, nl + nr, nt64)
         team = tail_team(nt64, nl + nr)
         call join_note_group_threads(team)
@@ -775,12 +774,12 @@ contains
     !! computed condition the non-detaching join turns on.
     !!
     !! It is deliberately a property of the PAIR LIST rather than of `how=`, which is what
-    !! `feature_risks.md` Risk-184 is about and what S1's third convention requires: a left join
-    !! keeps every left row, but keeps it ONCE only when the right key is unique within each
-    !! matched group, so "any left join" is the wrong rule and would leave a table attached to a
-    !! file its rows no longer line up with. Being computed also means the condition costs nothing
-    !! to extend -- an inner join that happens to match every row exactly once takes the same path,
-    !! and so will `how="semi"` when P6 adds it, with no clause of their own.
+    !! the pair-list rule is about and what S1's third convention requires: a left join keeps every
+    !! left row, but keeps it ONCE only when the right key is unique within each matched group, so
+    !! "any left join" is the wrong rule and would leave a table attached to a file its rows no
+    !! longer line up with. Being computed also means the condition costs nothing to extend -- an
+    !! inner join that happens to match every row exactly once takes the same path, and so will
+    !! `how="semi"` when P6 adds it, with no clause of their own.
     logical function join_keeps_left_rows(il, n_out, nl) result(kept)
         integer(int64), intent(in) :: il(:)     !! per output row: the left row it came from.
         integer(int64), intent(in) :: n_out     !! output rows.
@@ -894,8 +893,8 @@ contains
     !! into `%gather(rows, valid=)`, so the mask is folded into each column's rebuild rather than
     !! applied in a second pass afterwards (until stage 4 it was a serial `%set_validity` per
     !! column after the threaded gather). It only ever ADDS nulls, which is what leaves this
-    !! table's own nulls exactly where the gather put them (`feature_risks.md` Risk-182). The
-    !! mask exists only under `how="right"`/`"outer"` with an unmatched right row.
+    !! table's own nulls exactly where the gather put them. The mask exists only under
+    !! `how="right"`/`"outer"` with an unmatched right row.
     subroutine join_rewrite_left(self, lslots, lidx, lvalid, n_out, nl)
         class(parquet_table), intent(inout) :: self   !! the left table.
         integer, intent(in) :: lslots(:)              !! its rewritable slots.
@@ -1036,11 +1035,11 @@ contains
     !! **The rule: the hash engine whenever the call is eligible, the sort engine otherwise.** It
     !! is a function of the key kinds and `order=` alone (`join_hash_eligible`) -- never of the
     !! data's values, and not of the row counts either -- so the same call takes the same engine
-    !! on every run, on every input and at every thread count (feature_risks.md Risk-218). There
-    !! is deliberately no size clause: the sweep at stage 3 found the hash engine ahead of the
-    !! sort engine on both compilers at every size down to a thousand rows against ten, so no
-    !! shape exists at which a build plus a probe loses to the sort's counting path, and a clause
-    !! for one would be a second rule with nothing to select.
+    !! on every run, on every input and at every thread count. There is deliberately no size
+    !! clause: the sweep at stage 3 found the hash engine ahead of the sort engine on both
+    !! compilers at every size down to a thousand rows against ten, so no shape exists at which a
+    !! build plus a probe loses to the sort's counting path, and a clause for one would be a
+    !! second rule with nothing to select.
     !!
     !! The test-only hook is read ONCE, here, and outranks nothing it should not: forcing the
     !! sort engine takes it whatever the call; forcing the hash engine takes it only where

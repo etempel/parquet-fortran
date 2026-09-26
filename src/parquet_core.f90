@@ -148,7 +148,7 @@ module parquet_core
     !> value, -0.0 included, takes exactly the filter's key.
     !>
     !> A caller building a filter must NOT use this function, and a caller building an index must
-    !> not use the other; which callers take which is feature_risks.md Risk-211, and
+    !> not use the other; which callers take which matters, and
     !> test_real_key_helpers_split_on_nan_only pins the difference.
     interface
         elemental module function parquet_index_real_key(v) result(key)
@@ -250,7 +250,7 @@ module parquet_core
 
     !> Label separating the row sample's stream from every other family drawn from the same seed.
     !!
-    !! **Not decoration -- feature_risks.md Risk-123.** Without it, `sample_seed=42_int64` would
+    !! **Not decoration -- feature_risks.md Risk-2.** Without it, `sample_seed=42_int64` would
     !! draw the very words `pf_random_at(42_int64, 0_int64, ...)` hands a caller, so a program
     !! seeding both from one number would find its sample correlated with its own draws. Every
     !! marginal test still passes in that state; only a joint one sees it.
@@ -1601,9 +1601,9 @@ module parquet_core
     !> The KEY CONVERSION, public for the same reason again and hidden by both facades: a
     !! parquet_table's %build_index (parquet_tables_index) must key a real or temporal column
     !! exactly as the filter's `in` leaf does, or a table's `in` filter and its index would
-    !! disagree about a row (feature_risks.md Risk-211) -- so the helpers live here, once, and the
-    !! table layer imports them. parquet_set_family_for_column is the matching "which columns can
-    !! be keyed" rule, for the same reason. Not user API: a user keys nothing by hand.
+    !! disagree about a row -- so the helpers live here, once, and the table layer imports them.
+    !! parquet_set_family_for_column is the matching "which columns can be keyed" rule, for the
+    !! same reason. Not user API: a user keys nothing by hand.
     public :: parquet_filter_real_key, parquet_index_real_key
     public :: parquet_date_key, parquet_time_key, parquet_timestamp_key
     public :: parquet_set_family_for_column, parquet_filter_column_tokens
@@ -5131,7 +5131,7 @@ contains
         base = this%set_text%size()
         ndist = distinct%size()
         ! One bulk append rather than a get/append_string loop: %get materialises a deferred-length
-        ! string per element, which is the per-element allocation feature_risks.md Risk-60 is about.
+        ! string per element, which is the per-element allocation to avoid.
         call this%set_text%append_column(distinct)
 
         call parquet_filter_new_set(this, name, FSET_STRING)
@@ -5195,7 +5195,7 @@ contains
     !> The members are deduplicated through the map's own string `%get_or_add_many` -- the
     !> primitive every other family's %bind runs (parquet_filter_store_keys) -- rather than by a
     !> sort, so a string set is keyed at %bind exactly as the leaf keys the column at read time:
-    !> by its exact bytes, under one equality (feature_risks.md Risk-211).
+    !> by its exact bytes, under one equality.
     subroutine bind_chr(this, name, values, is_valid)
         class(parquet_filter), intent(inout) :: this !! filter gaining the set.
         character(len=*), intent(in) :: name !! the set's name, without the '@'.

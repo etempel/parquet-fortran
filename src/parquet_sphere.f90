@@ -121,7 +121,7 @@ module parquet_sphere
 
     ! ---- Family labels ----
     !
-    ! One `pf_random_key` label per family (`feature_risks.md` Risk-123: a new construction takes its
+    ! One `pf_random_key` label per family (`feature_risks.md` Risk-2: a new construction takes its
     ! own label), distinct from each other, from `parquet_random`'s sphere labels and from 0. The
     ! mask's point is deliberately NOT the pixel family's point for the chosen pixel.
 

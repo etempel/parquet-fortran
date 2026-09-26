@@ -22,9 +22,9 @@
 !! A value below `TINY` is written as `transfer(<bits>, 0.0_real64)` rather than as a decimal:
 !! the bit pattern is exact whatever a compiler makes of a subnormal decimal literal.
 !!
-!! `PROBIT_Q3` and `MAD_NORMAL_SCALE_REF` are the two spellings of one number that
-!! `feature_risks.md` Risk-252 is about -- `src/parquet_stats_order.f90` freezes the second as a
-!! literal, and nothing but a test compares them.
+!! `PROBIT_Q3` and `MAD_NORMAL_SCALE_REF` are the two spellings of one number:
+!! `src/parquet_stats_order.f90` freezes the second as a literal, and nothing but a test compares
+!! them.
 module test_probit_golden
     use iso_fortran_env, only : real64, int64
     implicit none

@@ -79,8 +79,8 @@ contains
         ! The LIST-column policy travels too, and for a sharper reason than the transform does:
         ! clone_reopen_reader opens a second reader over the same file, and if the clone classified
         ! a plain-LIST column differently from its source the two tables would report different
-        ! kinds for the same column with nothing to announce it. That is feature_risks.md Risk-152
-        ! reappearing between a table and its own clone.
+        ! kinds for the same column with nothing to announce it. That is the reappearing between a
+        ! table and its own clone.
         if (allocated(self%cache%list_columns)) out%cache%list_columns = self%cache%list_columns
         ! The bounded-read flag travels for the same reason the transform does, and with a sharper
         ! consequence than a policy mismatch: clone_reopen_reader below goes through

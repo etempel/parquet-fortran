@@ -982,10 +982,10 @@ contains
     !!
     !!   * **the thread count comes from `resolve_thread_count`** (`parquet_argsort`), which is the
     !!     one place that honours an explicit `threads=`, refuses a nested team where libgomp would
-    !!     deadlock (`feature_risks.md` Risk-104), reads `sort_threads` for the automatic
-    !!     case and clamps to `omp_get_num_procs()`. The design's settings analysis is explicit that
-    !!     this module adds no thread knob of its own: a `parquet_set_stats_threads` would be a
-    !!     second answer to a question that already has one.
+    !!     deadlock, reads `sort_threads` for the automatic case and clamps to
+    !!     `omp_get_num_procs()`. The design's settings analysis is explicit that this module adds
+    !!     no thread knob of its own: a `parquet_set_stats_threads` would be a second answer to a
+    !!     question that already has one.
     !!   * **the work floor is this module's own**, because pass two is compute-bound where the
     !!     sort's tail pass is memcpy-shaped. See `STATS_MIN_PER_THREAD` for the ladder it was
     !!     measured from and for why a team opened too early is a 1.8x loss rather than a rounding
@@ -1486,8 +1486,7 @@ contains
     !! adding `-Infinity` -- and, for a population holding both, `-Inf + Inf`, which raises
     !! IEEE_INVALID and is fatal under nagfor's default `-ieee=stop`. `pf_gmean` screens its zero
     !! ahead of `log` for the same reason. **A clamp of `p` away from `{0, 1}` "to avoid the
-    !! infinity" would silently replace all three answers with finite numbers near the boundary**
-    !! (`feature_risks.md` Risk-256).
+    !! infinity" would silently replace all three answers with finite numbers near the boundary**.
     subroutine probit_mean_kept(keep, m, poisoned, res, ok, w)
         real(real64), intent(in) :: keep(:)         !! the survivors; the first `m` are live.
         integer(int64), intent(in) :: m             !! how many survivors there are.
@@ -1511,9 +1510,9 @@ contains
             ! keep(i) <= 1.0` is false for a NaN, so a screen written that way would classify a
             ! NaN as an out-of-domain VALUE -- and the two have different answers under
             ! `skipnan = .false.`, where a NaN is what the caller asked to propagate rather than
-            ! an input to reject. Risk-172 is this exact shape. It is unreachable as things stand,
-            ! because `poisoned` above is what a kept NaN produces, which is precisely why the
-            ! ordering is written down rather than left to be re-derived.
+            ! an input to reject. It is unreachable as things stand, because `poisoned` above is
+            ! what a kept NaN produces, which is precisely why the ordering is written down rather
+            ! than left to be re-derived.
             if (keep(i) /= keep(i)) return
             if (keep(i) < 0.0_real64 .or. keep(i) > 1.0_real64) return
             if (keep(i) == 0.0_real64) saw_zero = .true.

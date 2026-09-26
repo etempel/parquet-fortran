@@ -395,7 +395,7 @@ def exp_ref_at(seed, stream, draw=1):
 # The labels below must equal `normal_zig_label` / `normal_polar_label` in
 # `src/parquet_random.f90`.  They are what separate the two realisations' sub-streams from each
 # other and from the stream walk; `self_test` checks that they differ and that the separation
-# actually decorrelates the two, which is the property `feature_risks.md` Risk-123 is about.
+# actually decorrelates the two, which is the property `feature_risks.md` Risk-2 is about.
 # ---------------------------------------------------------------------------------------------
 
 NORMAL_ZIG_LABEL = 4839268151750326891
@@ -1141,7 +1141,7 @@ def self_test():
                        "which is what a mis-walked ziggurat looks like when the first two moments "
                        "survive" % (label, kurt))
 
-    # Risk-123: the two realisations must not read the same words at the same coordinate. Asserted
+    # Risk-2: the two realisations must not read the same words at the same coordinate. Asserted
     # STRUCTURALLY -- the two sub-keys, and hence the first word pair each one reads, must differ --
     # because a statistical test cannot see this coupling at all.
     #
@@ -1151,7 +1151,7 @@ def self_test():
     # correlation test would pass the broken construction as confidently as the correct one. The
     # reason is that the two algorithms extract different functions of the same bits -- the
     # Ziggurat's sign is bit 8 and the polar's is bit 63 of the same word, so even the signs are
-    # independent -- and linear correlation is blind to that kind of dependence. Risk-123's own
+    # independent -- and linear correlation is blind to that kind of dependence. Risk-2's own
     # measured instance was likewise invisible to every marginal test and showed up only as a 66 %
     # agreement in one rare joint cell.
     #
@@ -1197,7 +1197,7 @@ def self_test():
     #
     # The labels, cross-checked against the SOURCE for the reason SAMPLE_LABEL is, and required to
     # be distinct from each other, from 0 and from every other label this oracle knows: two families
-    # sharing a label would be two functions of one pair of uniforms (Risk-123).
+    # sharing a label would be two functions of one pair of uniforms (Risk-2).
     random_src = pathlib.Path(__file__).resolve().parent.parent / "src" / "parquet_random.f90"
     if random_src.exists():
         text = random_src.read_text()

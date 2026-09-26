@@ -473,7 +473,7 @@ module parquet_sampling
     !! nowhere else. Every marginal was clean (2.72 % overall agreement against 2.64 % by chance),
     !! and so was the different-stream control, which is why nothing caught it: it is invisible to
     !! any test of one family, and the suite's own cross-family test asserts only that the two
-    !! DIFFER. See `feature_risks.md` Risk-113 for the same class found in the stride axis.
+    !! DIFFER.
     !!
     !! Deriving each family's seed through `pf_random_key` costs one mix per call and separates
     !! three things at once -- the two families from each other, and both from a caller drawing
@@ -907,7 +907,7 @@ contains
     !!
     !! **Do not "simplify" this away because every structural test still passes without it** -- they
     !! all do. A whole-coset loss is invisible to fixed points, cycle counts, position marginals and
-    !! inversions alike; only a parity test sees it. See `feature_risks.md` Risk-116.
+    !! inversions alike; only a parity test sees it.
     pure function perm_parity_flip(seed, m) result(f)
         integer(int64), intent(in) :: seed          !! the permutation family's seed
         integer(int64), intent(in) :: m             !! population size; see the note above
@@ -972,11 +972,11 @@ contains
     !! **Every operand is masked to 31 bits before each multiply, and that is a correctness
     !! requirement rather than tidiness.** The multipliers are below `2**32`, so each product is
     !! bounded by `(2**31 - 1) * (2**32 - 1) < 2**63` and no signed overflow can occur.
-    !! `feature_risks.md` Risk-94 records this repository being caught with a wrapping multiply that
-    !! *measured* correct while the optimiser used the overflow's undefinedness to delete a branch
-    !! two functions away, so a new kernel must be free of it by construction. **Do not remove the
-    !! masks**; the alternative, routing through `mul64_lo_strict`, is correct but builds the product
-    !! from 16-bit limbs on the wrapping arm and is far too expensive for a per-round path.
+    !! This repository has been caught with a wrapping multiply that *measured* correct while the
+    !! optimiser used the overflow's undefinedness to delete a branch two functions away, so a new
+    !! kernel must be free of it by construction. **Do not remove the masks**; the alternative,
+    !! routing through `mul64_lo_strict`, is correct but builds the product from 16-bit limbs on the
+    !! wrapping arm and is far too expensive for a per-round path.
     !!
     !! A Feistel network is a bijection for **any** round function, so the mask costs a little
     !! mixing and can cost nothing else. What it costs was measured: nothing on gfortran, and it is
@@ -1057,8 +1057,8 @@ contains
     !!
     !! **The scalar and bulk entry points differ only in how they obtain `(l, r)`**, and both reach
     !! the rounds through here, so their agreement is structural rather than something two
-    !! implementations have to be kept equal by testing. `feature_risks.md` Risk-109 is the rule that
-    !! it stays that way, and it survived the transposition below intact.
+    !! implementations have to be kept equal by testing. The rule is that it stays that way, and it
+    !! survived the transposition below intact.
     !!
     !! **The loops are ROUNDS OUTSIDE, ELEMENTS INSIDE, and that order is the whole point.** Run the
     !! other way round -- all `nr` rounds for one element, then the next element -- each element is a
@@ -1431,9 +1431,10 @@ contains
     !> How many threads a bulk permutation of `n` elements should use.
     !!
     !! **All three OpenMP rules come from `parquet_settings_base`** -- `parquet_auto_thread_count`
-    !! for the automatic answer, `parquet_nested_team_unsafe` for the Risk-104 deadlock guard on an
-    !! explicit request, and `parquet_clamp_to_affinity` for the CPU-affinity bound on an explicit
-    !! request, which the automatic answer already carries from inside `parquet_auto_thread_count`.
+    !! for the automatic answer, `parquet_nested_team_unsafe` for the nested-team deadlock guard
+    !! on an explicit request, and `parquet_clamp_to_affinity` for the CPU-affinity bound on an
+    !! explicit request, which the automatic answer already carries from inside
+    !! `parquet_auto_thread_count`.
     !! This module deliberately holds no copy of any of them; CLAUDE.md's auto-threading
     !! note names a further copy as the mistake, and `pf_sort_threads` asks the identical questions.
     !!
@@ -1485,7 +1486,7 @@ contains
     !! `parquet_set_random_parallel_min_elements` changes the answer, and it cannot assert that the
     !! fill went on to honour that answer. The bit-identity of the 1-thread and N-thread results is
     !! what the suite checks instead, and `bench/probe_random_perm.f90 --mode=floor` is what shows the
-    !! threading actually happens. See `feature_risks.md` Risk-111.
+    !! threading actually happens.
     integer function parquet_debug_random_bulk_threads(n, threads) result(nth)
         integer(int64), intent(in) :: n             !! elements a bulk call would produce
         integer, intent(in), optional :: threads    !! the caller's request, if any
@@ -1693,7 +1694,7 @@ contains
     !! `perm_feistel` rather than duplicating a split-aware walk.
     !!
     !! **The loop bounds are the highest-risk edit in this file.** An off-by-one produces an array
-    !! that looks entirely plausible and is not a permutation. `feature_risks.md` Risk-109.
+    !! that looks entirely plausible and is not a permutation.
     !!
     !! **Threading is answer-invariant here by construction, not by care.** Element `k` is a pure
     !! function of `(seed, m, k)` and reads nothing any other element writes, so splitting `1 .. n`

@@ -458,15 +458,15 @@ contains
 
     !> The three substring operators, on both engines.
     !>
-    !> Risk-198 makes this obligatory rather than optional: the reader answers them in
-    !> eval_filter_clause over Arrow arrays and the table answers them in
-    !> parquet_eval_string_match_leaf over resident storage, and the two bodies do not even look
-    !> alike -- C++ && short-circuits so the length guard is one expression there, while Fortran's
-    !> .and. does not, so the guard has to be a nested if. Nothing but an A/B can see them
-    !> disagree; a single-engine test is satisfied by either one being wrong on a case the fixture
-    !> does not contain.
+    !> This is obligatory rather than optional: the reader answers them in eval_filter_clause over
+    !> Arrow arrays and the table answers them in parquet_eval_string_match_leaf over resident
+    !> storage, and the two bodies do not even look alike -- C++ && short-circuits so the length
+    !> guard is one expression there, while Fortran's .and. does not, so the guard has to be a
+    !> nested if. Nothing but an A/B can see them disagree; a single-engine test is satisfied by
+    !> either one being wrong on a case the fixture does not contain.
     !>
-    !> write_string_fixture stores `"ab "` beside `"ab"`, so the trailing-space value that Risk-199
+    !> write_string_fixture stores `"ab "` beside `"ab"`, so the trailing-space value that the
+    !> stored-bytes rule
     !> exists for is in every rule below. `"aa"` and the empty value keep each rule off the
     !> degenerate answers expect_rule refuses.
     subroutine test_ab_string_match(error)

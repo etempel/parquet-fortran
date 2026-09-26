@@ -671,7 +671,7 @@ contains
             ! Reaching the column through `cache` (a pointer) is what lets that compile under
             ! `self` being intent(in), so nothing but this comment stands between the two forms.
             ! The cost of the safe one is that a dirty temporal column rescans per call instead of
-            ! memoising. See feature_risks.md Risk-136.
+            ! memoising.
             any_null = parquet_column_any_null(self%cache%cols(idx)%values)
             return
         end if
@@ -1162,9 +1162,9 @@ contains
     !> One column's statistics into its text cell: the body of `table_print_stat`'s scan loop.
     !!
     !! A subroutine rather than inline in the loop so the parallel region's body is one call with
-    !! no allocatable temporaries of its own (feature_risks.md Risk-45 is about a finalizable local
-    !! inside a region; a deferred-length string is not one, but keeping the region's body to a
-    !! call is the shape every other region in this layer has).
+    !! no allocatable temporaries of its own (the trap is a finalizable local inside a region; a
+    !! deferred-length string is not one, but keeping the region's body to a call is the shape every
+    !! other region in this layer has).
     subroutine fill_stat_cell(values, cell)
         type(parquet_column), intent(in), target :: values !! the resident column to scan.
         type(stat_cell), intent(out) :: cell               !! its statistics as text.

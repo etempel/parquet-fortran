@@ -494,8 +494,8 @@ contains
     !! this binding, and the container kinds, which rebuild themselves in place and cannot be copied
     !! from outside -- nor null-filled by a mask, since their row nullness lives inside the
     !! container, which is why `parquet_table%join` refuses the two `how=` values that could ask for
-    !! it before anything reaches here (`feature_risks.md` Risk-188: a container column is carried
-    !! across a join by exactly this route).
+    !! it before anything reaches here (a container column is carried across a join by exactly this
+    !! route).
     !!
     !! **Repeats are permitted** -- see the interface's doc-comment for why the duplicate scan is
     !! deliberately absent rather than merely omitted.
@@ -584,8 +584,7 @@ contains
     !! elements, expanded by `expand_row_perm`/`expand_row_mask` exactly as `gather` always did),
     !! and it threads by its own rule. Every other kind is copied here, one range of destination
     !! rows per thread, and its validity bitmap is written a whole word at a time from the
-    !! source's bits at `idx` OR-ed with the mask -- so the add-only rule holds by construction
-    !! (`feature_risks.md` Risk-182).
+    !! source's bits at `idx` OR-ed with the mask -- so the add-only rule holds by construction.
     !!
     !! **Two threads never write one bitmap word.** `gather_ranges` cuts the rows so that every
     !! range boundary is a multiple of `BITS_PER_BLOCK / gcd(width, BITS_PER_BLOCK)` rows -- the
@@ -593,7 +592,7 @@ contains
     !! owns whole words and the last range owns the ragged tail alone. That is the reasoning
     !! `paste_row_group_safely` (`src/parquet_tables_read.f90`) applies to a row-group boundary it
     !! cannot move, done the cheaper way round here, where the boundary is free to choose
-    !! (`feature_risks.md` Risk-64: disjoint rows are not disjoint bits).
+    !! (disjoint rows are not disjoint bits).
     subroutine gather_build(dst, src, idx, valid, threads)
         type(parquet_column), intent(inout) :: dst  !! the destination; cleared first.
         type(parquet_column), intent(in) :: src     !! the source, never written.

@@ -459,8 +459,8 @@ module parquet_tables
         !! **It is on the cache because every reader this table opens must agree with it.** `%clone`
         !! reopens the file and the internally-parallel `%prefetch` opens a reader per thread; a
         !! policy held anywhere else would let two readers over one table disagree about whether a
-        !! column is a `PK_LIST` or a `*_VEC`, which is `feature_risks.md` Risk-152's
-        !! whole-file-versus-slice disagreement reappearing INSIDE one table.
+        !! column is a `PK_LIST` or a `*_VEC` -- a whole-file-versus-slice disagreement reappearing
+        !! INSIDE one table.
         !!
         !! Unallocated is read as `"auto"` everywhere, so a cache built by `parquet_new_table` --
         !! which has no file and classifies nothing -- needs no initialiser and no special case.
@@ -1603,16 +1603,16 @@ module parquet_tables
     !! `pf_index_map` under `unique=.true.` (the default; a repeated key aborts at build, naming
     !! it), a `pf_index_multimap` under `unique=.false.` -- holding the table's ROW NUMBERS
     !! `1 .. nrows` as its values. The key is converted exactly as the filter's `in` leaf converts
-    !! it (parquet_core's key helpers, feature_risks.md Risk-211): an integer column as it is, a
-    !! real column by its normalised bit pattern with EVERY NaN one key and -0.0 equal to +0.0, a
-    !! date or time column by its raw storage, a timestamp column by its unit-free (seconds,
-    !! nanoseconds) pair, a string column by its exact bytes (the engine's string keys, so
-    !! `"ab"` and `"ab "` are two keys, and a `character` array's elements are trimmed on the way
-    !! in as everywhere in this library). A NULL row is never indexed, so no key finds it and two
-    !! null rows are not a repeat. A boolean column is refused, as is a vector or container one.
+    !! it (parquet_core's key helpers): an integer column as it is, a real column by its normalised
+    !! bit pattern with EVERY NaN one key and -0.0 equal to +0.0, a date or time column by its raw
+    !! storage, a timestamp column by its unit-free (seconds, nanoseconds) pair, a string column by
+    !! its exact bytes (the engine's string keys, so `"ab"` and `"ab "` are two keys, and a
+    !! `character` array's elements are trimmed on the way in as everywhere in this library). A NULL
+    !! row is never indexed, so no key finds it and two null rows are not a repeat. A boolean column
+    !! is refused, as is a vector or container one.
     !!
     !! **It goes stale LOUDLY.** The index stamps the table's `%generation()` when it is built and
-    !! re-checks it on EVERY query -- never a cached "still valid" flag (Risk-210) -- so after any
+    !! re-checks it on EVERY query -- never a cached "still valid" flag -- so after any
     !! row-structural change (`%filter_rows`, `%sort_by`, `%delete_rows`, `%append`, ...) a query
     !! aborts naming the table and both generations instead of answering in-range row numbers that
     !! name the wrong rows; `%is_current()` is the non-aborting way to ask. A change that moves no
@@ -1831,21 +1831,21 @@ module parquet_tables
     !! row.
     !!
     !! **It goes stale LOUDLY.** The grouping stamps the table's `%generation()` when it is built
-    !! and re-checks it on EVERY per-group query -- never a cached "still valid" flag
-    !! (feature_risks.md Risk-210's rule) -- so after any row-structural change (`%filter_rows`,
-    !! `%sort_by`, `%delete_rows`, `%append`, ...) a query aborts naming the table and both
-    !! generations instead of handing out in-range row numbers that name the wrong rows;
-    !! `%is_current()` is the non-aborting way to ask. A change that moves no row (`%set`,
-    !! `%fillna`, an `%add_column` that relocated no column slot) leaves it usable. The five
-    !! introspection bindings (`%ngroups`, `%nrows`, `%max_size`, `%nkeys`, `%key_names`)
-    !! describe the object itself and answer without a check: 0, or no names, before a build.
+    !! and re-checks it on EVERY per-group query -- never a cached "still valid" flag -- so after
+    !! any row-structural change (`%filter_rows`, `%sort_by`, `%delete_rows`, `%append`, ...) a
+    !! query aborts naming the table and both generations instead of handing out in-range row
+    !! numbers that name the wrong rows; `%is_current()` is the non-aborting way to ask. A change
+    !! that moves no row (`%set`, `%fillna`, an `%add_column` that relocated no column slot) leaves
+    !! it usable. The five introspection bindings (`%ngroups`, `%nrows`, `%max_size`, `%nkeys`,
+    !! `%key_names`) describe the object itself and answer without a check: 0, or no names, before a
+    !! build.
     !! It points at the table's column STORE, like the row and column handles, so the caller
     !! need not declare the table `target`; like them it does not survive the table itself.
     !!
     !! **Every binding is a READ** of the table: none reorders, touches a row, detaches or
     !! advances `%generation()`; the only side effect is that a key column, or the column
     !! `%count` is asked about, is read from the file if nothing has read it yet. `%key_table`
-    !! gathers a deep COPY of each key column (feature_risks.md Risk-208).
+    !! gathers a deep COPY of each key column.
     !!
     !! **`%apply` is the per-group callback**: a procedure of the caller's, or an object of
     !! theirs extending `parquet_group_reducer`, called once per group with the group number and
@@ -2347,8 +2347,7 @@ module parquet_tables
         !! rule hold rather than merely being followed: a slot recycled by an `%add_column` after a
         !! drop used to inherit whatever the vacating path forgot to clear, and the field it
         !! forgot -- `unit` -- is read in preference to the column's own, so a fresh column
-        !! reported a unit nobody gave it and wrote it into the file. See feature_risks.md
-        !! Risk-204.
+        !! reported a unit nobody gave it and wrote it into the file.
         !!
         !! Written field-by-field rather than through a default structure constructor, which ifx
         !! rejects for this type: `values` is a `parquet_column`, whose own components are private
@@ -4533,8 +4532,8 @@ module parquet_tables
         !! hooks, which a test reaches through its own local `bind(C)` interface, a Fortran-side hook
         !! has no such escape hatch: these counters live on `parquet_table_cache`, whose components
         !! are private to this module, so forcing them requires a public procedure here. That cost
-        !! was accepted deliberately (feature_risks.md Risk-6); it is excluded from README.md's API
-        !! overview and no library code calls it.
+        !! was accepted deliberately; it is excluded from README.md's API overview and no library
+        !! code calls it.
         !!
         !! Both arguments are optional and independent: `appending=.true.` makes every READ on this
         !! table abort, `reading=.true.` makes every `%append` abort. Pass `.false.` to clear.
@@ -4704,7 +4703,7 @@ module parquet_tables
         !! rows `idx` names in a single pass -- kind, width, unit and values, the source's own
         !! nulls carried with their rows, and every row `valid` marks `.false.` null on top of
         !! them. That mask only ever ADDS nulls, so the source column's own nulls survive
-        !! untouched and no read-back of the mask is needed (`feature_risks.md` Risk-182).
+        !! untouched and no read-back of the mask is needed.
         !!
         !! `idx` therefore names a real source row for EVERY output row, unmatched ones included
         !! (they are given row 1, whose values the mask then declares null and which nothing may
@@ -5399,9 +5398,9 @@ module parquet_tables
         !! **This is a debug hook, not API**, public for the same reason
         !! `parquet_debug_table_set_inflight` is: the buffer is a private component nothing
         !! exposes, and the property it observes -- the buffer keeps `chunk_size` rows of
-        !! capacity across a flush, so a run of appends reallocates nothing (feature_risks.md
-        !! Risk-227) -- is invisible to every assertion on the output file. No library code
-        !! calls it. 0 for a sink that was never opened.
+        !! capacity across a flush, so a run of appends reallocates nothing -- is invisible
+        !! to every assertion on the output file. No library code calls it. 0 for a sink that
+        !! was never opened.
         module subroutine parquet_debug_table_writer_capacity(out, cap)
             type(parquet_table_writer), intent(in) :: out !! the sink to observe.
             integer(int64), intent(out) :: cap            !! rows every buffer column has room for.
@@ -8747,9 +8746,9 @@ module parquet_tables
         !!
         !! Deliberately the only way to reduce a table to a chosen set of rows in a chosen order:
         !! there is no `%take(indices)` taking a caller-supplied permutation, because applying one
-        !! partially, or applying a stale one, breaks row correspondence with nothing to report it
-        !! (`feature_risks.md` Risk-33). Here the indices are produced inside the call, from this
-        !! table's own columns, and applied to every column together.
+        !! partially, or applying a stale one, breaks row correspondence with nothing to report
+        !! it. Here the indices are produced inside the call, from this table's own columns, and
+        !! applied to every column together.
         module subroutine table_top_n(self, keys, n, descending, nulls_first)
             class(parquet_table), intent(inout) :: self       !! the table.
             character(len=*), intent(in) :: keys(:)           !! key columns, primary first.
@@ -10169,11 +10168,11 @@ module parquet_tables
         !! the mask.
         !!
         !! **The ONE key conversion of the table layer**, shared by `%build_index` and the join's
-        !! hash engine (feature_risks.md Risk-211: a second copy is exactly what that entry
-        !! forbids), with parquet_core's helpers underneath it. Reached through the typed
-        !! accessor tier (`parquet_column_data_ptr`, `parquet_column_is_null`) rather than any
-        !! binding on the column. The validity pass is one `parquet_column_is_null` per row and
-        !! runs on the team `index_team(nrows, threads)` resolves.
+        !! hash engine (a second copy is what the one-conversion rule forbids), with parquet_core's
+        !! helpers underneath it. Reached through the typed accessor tier
+        !! (`parquet_column_data_ptr`, `parquet_column_is_null`) rather than any binding on the
+        !! column. The validity pass is one `parquet_column_is_null` per row and runs on the team
+        !! `index_team(nrows, threads)` resolves.
         module subroutine index_extract_keys(col, kind, nrows, keys, pairs, valid, threads)
             type(parquet_column), intent(in), target :: col !! the resident key column.
             integer, intent(in) :: kind                     !! its PK_* kind, already accepted.
@@ -10355,9 +10354,8 @@ module parquet_tables
         !! so the result carries every key's kind, width and unit -- nothing here reads a value,
         !! which is what lets one binding answer for every column kind. `size_name=` adds an
         !! `int64` column of rows per group, refused when a key column already has that name.
-        !! The gathers are of deep COPIES, and the source table is untouched (feature_risks.md
-        !! Risk-208). An ordinary table: sort it, filter it, `%add_agg` or `%add_column` the
-        !! aggregates onto it, write it.
+        !! The gathers are of deep COPIES, and the source table is untouched. An ordinary table:
+        !! sort it, filter it, `%add_agg` or `%add_column` the aggregates onto it, write it.
         !!
         !! `reserve=` is how many SPARE column slots the result is to carry beyond the columns
         !! this call creates (the keys, plus one when `size_name=` is given) -- an INCREMENT,

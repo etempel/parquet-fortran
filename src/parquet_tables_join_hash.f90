@@ -15,12 +15,12 @@
 !! structure of one permutation, this one has to provide itself, clause by clause:
 !!
 !!   * **Key codes.** Every key column goes through `index_extract_keys`, the table layer's ONE
-!!     key conversion (feature_risks.md Risk-211): an integer as it is, a real by
-!!     `parquet_index_real_key` -- every NaN one key, `-0.0` equal to `+0.0`, which is the sort
-!!     comparator's equality and the guide page's rule -- a date or time by its raw storage, a
-!!     timestamp as its unit-free `(seconds, nanoseconds)` pair. One key is a scalar code; more
-!!     than one, or a timestamp, is an `(n, ncomp)` tuple. A row's validity is the CONJUNCTION
-!!     over its keys of each column's, so a null in any key column makes the row match nothing.
+!!     key conversion: an integer as it is, a real by `parquet_index_real_key` -- every NaN one
+!!     key, `-0.0` equal to `+0.0`, which is the sort comparator's equality and the guide page's
+!!     rule -- a date or time by its raw storage, a timestamp as its unit-free `(seconds,
+!!     nanoseconds)` pair. One key is a scalar code; more than one, or a timestamp, is an `(n,
+!!     ncomp)` tuple. A row's validity is the CONJUNCTION over its keys of each column's, so a
+!!     null in any key column makes the row match nothing.
 !!     A single string key is handed to the multimap's own string forms in place, by its exact
 !!     bytes, with no conversion at all.
 !!   * **Build over the RIGHT keys, probe with the LEFT.** Always that way round: the probe order

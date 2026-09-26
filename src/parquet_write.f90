@@ -404,12 +404,12 @@ contains
     !> Only a parquet_string_column write can make this necessary, and it does so in two ways. A
     !> column declared `array_size: auto` and written only that way has no declared length anywhere
     !> to resolve from -- left alone it would reach the sidecar as the raw parquet_size_auto
-    !> sentinel, i.e. `array_size: -1`, which is not a valid MAML at all (feature_risks.md Risk-83).
-    !> And a column whose declaration is simply too small is written anyway: the compact path stores
-    !> each element's own bytes and does not enforce array_size, which is deliberate -- a reader
-    !> takes each length from the data and never needs the declaration. **Accepting an inaccurate
-    !> declaration on the way in is a choice; repeating it on the way out is not**, so the value
-    !> reported here is the longest element actually written whenever that exceeds the declaration.
+    !> sentinel, i.e. `array_size: -1`, which is not a valid MAML at all. And a column whose
+    !> declaration is simply too small is written anyway: the compact path stores each element's own
+    !> bytes and does not enforce array_size, which is deliberate -- a reader takes each length from
+    !> the data and never needs the declaration. **Accepting an inaccurate declaration on the way in
+    !> is a choice; repeating it on the way out is not**, so the value reported here is the longest
+    !> element actually written whenever that exceeds the declaration.
     !>
     !> Deliberately at CLOSE rather than per write: raising the value mid-write would also raise the
     !> ceiling `any_item_too_long` enforces on the padded (character-array) paths, so a column

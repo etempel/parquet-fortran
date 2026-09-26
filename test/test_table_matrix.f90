@@ -722,7 +722,7 @@ contains
     !! the SLOT's unit in preference to the parquet_column's own, so a stale one shadows the unit
     !! `%add_column(..., unit=)` was given and is then written into the file's MAML. The fixture
     !! is a generated table type because its predefined columns carry declared units (`flux` is
-    !! "Jy"), which is what makes a leak visible at all. See feature_risks.md Risk-204.
+    !! "Jy"), which is what makes a leak visible at all.
     subroutine test_recycled_slot_is_blank(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         type(parquet_table_test) :: t

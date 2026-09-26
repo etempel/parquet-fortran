@@ -1788,8 +1788,7 @@ contains
     ! ---- The keys, as a column ----
 
     !> Copies every live string of the store into `list`, in store order, through the column's
-    !! bulk append: two contiguous copies, never a per-element `%append_string`
-    !! (feature_risks.md Risk-60).
+    !! bulk append: two contiguous copies, never a per-element `%append_string`.
     subroutine ix_str_collect(self, list)
         type(pf_index_map), intent(in) :: self                !! the map.
         type(parquet_string_column), intent(inout) :: list    !! cleared, then filled.

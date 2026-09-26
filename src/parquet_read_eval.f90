@@ -678,10 +678,10 @@ contains
     !> The three substring operators over a string column: starts_with, ends_with and contains.
     !>
     !> Byte-exact and case-sensitive, like the ordering comparison beside it and for the same
-    !> reason (Risk-199): the reader compares the stored bytes through std::string_view, so
-    !> anything here that trimmed, blank-padded or case-folded would make the two engines disagree
-    !> about every value with a trailing space. Nothing in this body may call `trim` on either
-    !> operand. The pattern is a literal, never a wildcard pattern.
+    !> reason: the reader compares the stored bytes through std::string_view, so anything here
+    !> that trimmed, blank-padded or case-folded would make the two engines disagree about every
+    !> value with a trailing space. Nothing in this body may call `trim` on either operand. The
+    !> pattern is a literal, never a wildcard pattern.
     !>
     !> Kleene-honest about nullness -- a Null row is unknown for all three, exactly as it is for a
     !> comparison -- so nullness stays governed solely by is_null/is_not_null even under `not`.

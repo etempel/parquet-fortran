@@ -520,7 +520,7 @@ contains
     !! **This is the exact opposite of what the normal's two realisations require**, and stating
     !! it here is what stops the contrast being read as an oversight. The normal's Ziggurat and
     !! polar forms consume different numbers of words and must be domain-separated with their own
-    !! `pf_random_key` labels, or they couple (`feature_risks.md` Risk-123). The exponential's two
+    !! `pf_random_key` labels, or they couple (`feature_risks.md` Risk-2). The exponential's two
     !! forms read the SAME two words and differ only in which logarithm rounds them, so they must
     !! agree to a couple of ulp -- and a change that domain-separated them would be a defect.
     subroutine test_exp_realisations(error)
@@ -864,14 +864,14 @@ contains
             "the first normal cost exactly two words in this fixture")
     end subroutine test_normal_cost
 
-    !> Risk-123: the two realisations must be INDEPENDENT, not merely different.
+    !> Risk-2: the two realisations must be INDEPENDENT, not merely different.
     !!
     !! **A correlation test has no power here, and that is measured rather than assumed.** Running
     !! both realisations over the SAME sub-key -- a deliberate coupling, in which they transform the
     !! very same 64 bits -- and correlating 40000 pairs gives `r = -0.00005`, 0.01 standard errors
     !! from zero. The two algorithms extract different functions of the same bits (the Ziggurat's
     !! sign is bit 8, the polar's is bit 63 of the same word), and linear correlation is blind to
-    !! that. Risk-123's own instance was likewise invisible to every marginal test.
+    !! that. Risk-2's own instance was likewise invisible to every marginal test.
     !!
     !! **The statistic that does have power is a joint cell**, and it is chosen from the mechanism:
     !! a Ziggurat draw leaves its immediate-acceptance branch when its first uniform is LARGE, and
@@ -1576,10 +1576,10 @@ contains
     !> The truncated normal has the right shape on an interval from each of its three cases.
     !!
     !! **The negative control is a UNIFORM sample on the same interval**, not a rescaled normal,
-    !! because that is precisely what a wrong envelope anchor returns (`feature_risks.md`
-    !! Risk-249). A gate that accepted it would be measuring nothing on the narrow intervals where
-    !! the uniform proposal runs -- which are the intervals where a truncated normal most resembles
-    !! a uniform, and so the ones a careless gate passes blind.
+    !! because that is precisely what a wrong envelope anchor returns. A gate that accepted it
+    !! would be measuring nothing on the narrow intervals where the uniform proposal runs -- which
+    !! are the intervals where a truncated normal most resembles a uniform, and so the ones a
+    !! careless gate passes blind.
     subroutine test_normal_trunc_distribution(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: NDRAW = 200000_int64
@@ -1781,8 +1781,8 @@ contains
     !! Asserted DIRECTLY rather than through a moment, the way `test_squeezes_are_valid` asserts
     !! the Gamma squeeze. An envelope anchored at the wrong point makes the accept test pass for
     !! every candidate over part of the interval, which returns the PROPOSAL -- a uniform, or a
-    !! truncated exponential -- and no coarse distributional gate can see the difference
-    !! (`feature_risks.md` Risk-249). The formulas are written out here from the specification.
+    !! truncated exponential -- and no coarse distributional gate can see the difference. The
+    !! formulas are written out here from the specification.
     subroutine test_normal_trunc_envelopes(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer, parameter :: NPT = 400
@@ -1962,7 +1962,7 @@ contains
 
         ! A mu a full range from the bound, where the CENTRING is what overflows. `sigma` is large
         ! enough to bring the standardised bound back to 1e8: a bound past about 9e307 makes
-        ! `tn_threshold`'s own `a + s` overflow, which is the regime `feature_risks.md` Risk-251
+        ! `tn_threshold`'s own `a + s` overflow, which is the regime `feature_risks.md` Risk-4
         ! argues is unreachable from bounds a caller would write, and which hangs rather than
         ! aborts where the trap is masked. This arm is about the centring, not about that.
         do k = 1, 50
@@ -2050,7 +2050,7 @@ contains
 
     !> A far-out interval must reach the tilted case and terminate, not spin in the uniform one.
     !!
-    !! **Regression for `feature_risks.md` Risk-251, and it is a HANG rather than a wrong answer**,
+    !! **Regression for `feature_risks.md` Risk-4, and it is a HANG rather than a wrong answer**,
     !! which is why it is asserted through the path rather than through a value. The case rule's
     !! threshold is a difference of two nearly-equal large doubles if written directly; formed that
     !! way it comes back around `1e53` for a standardised bound near `1e10`, every wide tail
@@ -2124,7 +2124,7 @@ contains
         ! lived in. It stops at 1e16 because that is as far as a fixture can go and still assert a
         ! MEANINGFUL interval; the separate overflow of `a*a` above 1.3e154, which `hypot` exists to
         ! prevent, is not reachable from a bound a caller would write and is argued rather than
-        ! tested (`feature_risks.md` Risk-251).
+        ! tested (`feature_risks.md` Risk-4).
         do k = 1, 6
             a = 10.0_real64 ** (real(2 * k + 4, real64))
             call parquet_debug_normal_truncated_path(rng, a, a * 1.000001_real64, x, path, tries)
@@ -2717,7 +2717,7 @@ contains
                 chi2 = sph_independence(stat(a, :), stat(b, :), NBIN)
                 call check(error, chi2 <= limit, &
                     "two points-on-a-sphere families, or a family and pf_random_at, are dependent at one coordinate: " // &
-                    "they share a label or a block (feature_risks.md Risk-123)")
+                    "they share a label or a block (feature_risks.md Risk-2)")
                 if (allocated(error)) return
             end do
         end do

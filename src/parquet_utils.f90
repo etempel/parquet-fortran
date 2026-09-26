@@ -1678,7 +1678,7 @@ contains
         ! answer still comes out right, because those bytes are then overwritten. Only a
         ! bounds-checking build reports it (--profile debug and --profile nagdeb both do; a plain
         ! `fpm test`, and CI, do not). Starting at `first` removes the reset from both loops, which
-        ! is why neither has an "absolute" case at all. See feature_risks.md Risk-173.
+        ! is why neither has an "absolute" case at all. See feature_risks.md Risk-3.
         first = 1
         do k = n, 1, -1
             ln = len_trim(parts(k))

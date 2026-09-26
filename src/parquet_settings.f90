@@ -204,7 +204,7 @@ module parquet_settings
     !> Default thread count for every sort that does not name one. `0` means "auto", which is what
     !! pf_sort_threads (src/parquet_sorting_keys.f90) resolves against the OpenMP environment -- and
     !! that is the ONLY place this is read, deliberately, so a read-time `sort_by=` and a raw-array
-    !! sort can never disagree about it (feature_risks.md Risk-40).
+    !! sort can never disagree about it.
     !> Cap on the threads the table's internally-parallel %prefetch/%materialize_all may use. `0`
     !! means "auto" (as many as OpenMP offers). Read only in src/parquet_tables_read.f90, which owns
     !! the table's OpenMP plumbing.
@@ -233,14 +233,14 @@ module parquet_settings
     !! parquet_wrapper.cpp receives a usable number and never has to know a default -- but its own
     !! globals still need initialisers for the window before anything is pushed, which is why the
     !! `*_builtin` parameters below must equal the initialisers of `g_sort_counting_bucket_limit`
-    !! and `g_target_row_group_bytes` there (feature_risks.md Risk-42).
+    !! and `g_target_row_group_bytes` there.
     !> Whether the sort's integer counting fast path may be taken at all.
     !> Whether the sort's single-key radix fast path may be taken at all.
     !!
     !! Deliberately NOT mirrored to C++ by `push_performance_settings`, unlike its counting-path
     !! neighbour: the radix path exists only in the Fortran engine, so there is nothing on the other
     !! side of the `bind(C)` boundary for a mirror to govern. Adding one would be a global that no
-    !! code reads, which is the shape `feature_risks.md` Risk-42 warns about from the other end.
+    !! code reads, which is the drift this guards against, from the other end.
     !> Largest key value RANGE (not cardinality) the counting path will accept. `0` = built-in.
     !> Target size in bytes of one auto-sized row group. `0` = built-in.
     integer(int64), save :: cfg_target_row_group_bytes = 0
@@ -777,8 +777,8 @@ contains
     !> states -- apply settings before opening anything. Outside that contract, a knob changed while
     !> a reader is open no longer reaches C++ mid-flight.
     !>
-    !> **One entry point, both groups**, so a caller cannot refresh half the mirror -- Risk-42's
-    !> "one push per group, never one per knob" carried forward rather than weakened. It is
+    !> **One entry point, both groups**, so a caller cannot refresh half the mirror -- the
+    !> "one push per group, never one per knob" rule carried forward rather than weakened. It is
     !> `private ::`'d in the `parquet` facade, so it never reaches a user's namespace.
     subroutine parquet_push_settings_to_cpp()
 
@@ -802,7 +802,7 @@ contains
     !> initialisers are only ever what applies before the first push.
     !>
     !> One push rather than four, so parquet_reset_settings cannot restore some knobs and leave
-    !> others stale on the far side of the boundary (feature_risks.md Risk-42).
+    !> others stale on the far side of the boundary.
     subroutine push_performance_settings()
 
         call parquet_push_performance_settings( &
@@ -819,7 +819,7 @@ contains
     !> parquet_wrapper.cpp is told which of the two things to do rather than being left to read an
     !> empty string as policy. That is the same rule push_performance_settings follows for its own
     !> `0`-means-built-in values, and it keeps the C++ globals' initialisers -- the only thing that
-    !> applies before the first push -- equal to this module's defaults (feature_risks.md Risk-42).
+    !> applies before the first push -- equal to this module's defaults.
     !>
     !> Its own group rather than an arm of one of the two above: it is neither an output nor a
     !> performance knob, and one push per group is what stops parquet_reset_settings restoring

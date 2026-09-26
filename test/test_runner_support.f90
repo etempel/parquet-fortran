@@ -104,11 +104,11 @@ contains
     !!
     !! libgomp deadlocks on that shape. Measured on gfortran 15.2 / macOS arm64: a full `fpm test`
     !! hung about one run in three, always somewhere in "sorting", with the main thread and its
-    !! workers parked on one libgomp mutex that nobody held. See `feature_risks.md` Risk-104 for
-    !! the reduction and the bisect. `parquet_sorting` now refuses to open a team when it can see
-    !! it would be nested, which is the library-side half of that fix -- but the refusal would then
-    !! apply to EVERY test in an excluded suite, including the nine whose whole purpose is to assert
-    !! that a requested team really is opened. Those nine would have had to stop asserting it.
+    !! workers parked on one libgomp mutex that nobody held. See the reduction and the bisect.
+    !! `parquet_sorting` now refuses to open a team when it can see it would be nested, which is the
+    !! library-side half of that fix -- but the refusal would then apply to EVERY test in an
+    !! excluded suite, including the nine whose whole purpose is to assert that a requested team
+    !! really is opened. Those nine would have had to stop asserting it.
     !!
     !! Driving the tests through `run_selected` instead runs each with no enclosing region at all.
     !! The library sees `omp_get_level() == 0` and threads exactly as it does for a caller in a

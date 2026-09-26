@@ -48,7 +48,7 @@
 # rather than pattern matching, and the rest are idle while they finish: the two mpmath oracles
 # re-derive `parquet_kde`'s and `parquet_cosmology`'s golden expectations, and the ziggurat and
 # golden-vector generators re-derive their contracts from scratch (the ziggurat's twice, at two
-# working precisions -- see Risk-130 for why that second derivation is the check with power).
+# working precisions -- that second derivation is the check with power).
 # The checks write nothing and share no state, which is what makes that safe; each one's output is
 # captured whole and reported in the `CHECKS` order below, never interleaved. `RUN_LINT_CHECK_JOBS=1`
 # forces the plain serial run.

@@ -961,8 +961,7 @@ contains
     !! Both scenarios do a successful call FIRST, with the hook clear, and only then set it -- that
     !! is the negative control, and without it either test would pass just as happily against a
     !! guard that fired on every call. Neither uses threads: the guard reads a counter and does not
-    !! care which thread set it, which is exactly what makes the hook enough (feature_risks.md
-    !! Risk-6).
+    !! care which thread set it, which is exactly what makes the hook enough.
     subroutine test_table_read_during_append_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "table_read_during_append", &
@@ -1712,9 +1711,9 @@ contains
 
     !> The twelve rows scenario_table_print_stat_scan prints, one per column kind, asserted WHOLE --
     !! name, kind, width, null count, minimum and maximum, padded exactly as %print_stat pads them --
-    !! so a count or an extreme moved by one row at a block boundary cannot pass (feature_risks.md
-    !! Risk-223). Shared by the serial and the on-a-team wrapper, which differ only in the
-    !! "parallel scan:" line they then assert.
+    !! so a count or an extreme moved by one row at a block boundary cannot pass.
+    !! Shared by the serial and the on-a-team wrapper, which differ only in the "parallel scan:"
+    !! line they then assert.
     subroutine check_print_stat_scan_rows(error, scenario)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), intent(in) :: scenario !! the scenario whose stdout carries the rows.
@@ -2179,7 +2178,7 @@ contains
         ! The control that earns the test: a table this thread opened INSIDE the region is
         ! thread-private, and materializing its row index must still be allowed. A guard keying on
         ! omp_in_parallel() instead of on ownership would abort here too and satisfy every
-        ! assertion above -- feature_risks.md Risk-134.
+        ! assertion above.
         call scenario_capture_contains(out_file, err_file, &
             "thread-private row index inside the region succeeded", seen)
         call check(error, seen, &

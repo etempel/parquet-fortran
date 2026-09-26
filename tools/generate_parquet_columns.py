@@ -1173,24 +1173,24 @@ module parquet_columns
         !! the three calls promise holds here by construction. In particular the mask only ever
         !! ADDS nulls: a `.true.` entry leaves the row exactly as the source had it, so a mask may
         !! describe the unmatched rows alone and the source's own nulls survive untouched -- the
-        !! add-only rule of `feature_risks.md` Risk-182, of which this is the second home.
+        !! add-only rule, of which this is the second home.
         !!
         !! **`idx` is a gather, not a permutation**, on `gather`'s terms: any row of `src`, in any
         !! order, a row named more than once, a list shorter or longer than the source; only the
         !! range is checked. `valid` must have exactly `size(idx)` entries. A container column
         !! cannot be a source -- it is gathered in place with `gather`, which is how a join carries
-        !! one (`feature_risks.md` Risk-188) -- and a source with no rows is gathered only by an
-        !! empty list, since there is no row for `idx` to name.
+        !! one -- and a source with no rows is gathered only by an empty list, since there is no
+        !! row for `idx` to name.
         !!
         !! **`threads` above 1 splits the destination rows across a team.** Each thread copies its
         !! own range of rows and writes its own whole words of the validity bitmap: the ranges are
         !! cut on bitmap-word boundaries, so no two threads ever touch one word and no ragged end
-        !! needs serialising (`feature_risks.md` Risk-64's rule, met by construction). The count is
-        !! taken as given -- bounded by the affinity mask and by the row count -- and there is no
-        !! automatic answer here, because whether to spend a team inside one column or across
-        !! several is a decision for the caller that can see the other columns (`table_colwork`,
-        !! `src/parquet_tables_parallel.f90`). Absent, or 1, the copy is serial. A string column
-        !! hands the count to its own store, whose payload floor and break-even still apply.
+        !! needs serialising (met by construction). The count is taken as given -- bounded by the
+        !! affinity mask and by the row count -- and there is no automatic answer here, because
+        !! whether to spend a team inside one column or across several is a decision for the caller
+        !! that can see the other columns (`table_colwork`, `src/parquet_tables_parallel.f90`).
+        !! Absent, or 1, the copy is serial. A string column hands the count to its own store, whose
+        !! payload floor and break-even still apply.
         module subroutine gather_from_i64(self, src, idx, valid, threads)
             class(parquet_column), intent(inout) :: self !! the destination; cleared first.
             type(parquet_column), intent(in) :: src      !! the source column, never written.
@@ -1226,7 +1226,7 @@ module parquet_columns
         !! through the table's `cache` POINTER is what makes that possible from a table accessor
         !! declared `intent(in)`, so the compiler cannot object either. Anything on a read path
         !! must call `parquet_column_any_null` below instead; `%has_nulls` learned this the hard
-        !! way. See feature_risks.md Risk-136.
+        !! way.
         module function any_null(self) result(res)
             class(parquet_column), intent(inout) :: self !! the column (null cache may be refreshed).
             logical :: res                               !! .true. when at least one row is null.
@@ -1364,8 +1364,7 @@ module parquet_columns
         !! DEPENDS on that, one module away and invisible from here: it hands in a mask describing
         !! the unmatched output rows alone and relies on the incoming column's own nulls, carried
         !! across by the gather, surviving untouched. Making this assign rather than add would
-        !! leave a join silently returning values for rows the source file said were null
-        !! (`feature_risks.md` Risk-182).
+        !! leave a join silently returning values for rows the source file said were null.
         module subroutine set_validity_rows(self, valid)
             class(parquet_column), intent(inout) :: self !! the column.
             logical, intent(in) :: valid(:)              !! one entry per row; .false. marks the row null.
@@ -1752,8 +1751,8 @@ module parquet_columns
         !! PURE procedure"). Restoring `pure` therefore means removing the atomic, which silently
         !! reintroduces a lost-update race: validity is packed `BITS_PER_BLOCK` elements to one
         !! `integer(int64)`, so two threads writing *different rows* of one column collide whenever
-        !! those rows share a block -- see feature_risks.md Risk-135. Nothing here needs purity;
-        !! no caller is `pure` or `elemental`, and no `do concurrent` reaches this.
+        !! those rows share a block. Nothing here needs purity; no caller is `pure` or `elemental`,
+        !! and no `do concurrent` reaches this.
         module subroutine bit_set(map, b)
             integer(int64), intent(inout) :: map(:) !! the bitmap.
             integer(int64), intent(in) :: b         !! 1-based bit index.

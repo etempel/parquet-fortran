@@ -90,10 +90,17 @@ A covered risk is not in it. Read the entries for an area before editing it.
   what it forbids. A sixteenth closes or replaces one. `check_risk_register_shape` enforces the shape
   and the next-number line.
 - **Covering a risk deletes its entry in the same change**, after its "must not" moves into a
-  comment at the site or a rule file; the change rewrites every citation of the number in
-  `.claude/`, CLAUDE.md, CONTRIBUTING.md, `.gitlab-ci.yml` and lint messages to name the test.
+  comment at the site or a rule file; the change then removes or rewrites every citation of the
+  number **anywhere in the repository** -- `src/`, `test/`, `tools/` and `bench/` comments as much
+  as `.claude/`, CLAUDE.md, CONTRIBUTING.md, `.gitlab-ci.yml` and lint messages -- so that what the
+  entry required is stated at the site, or names the test that now holds it.
 - **`Risk-N` numbers are never reused**: a new entry takes the `Next number:` line's value and
-  increments it. Cite a number only for an open entry.
+  increments it. Renumbering the register wholesale is a maintainer decision, not a routine one,
+  and rewrites every citation in the same change; after one, a number in the git history no longer
+  names the entry of that number. **Cite a number only for an open entry, wherever the citation
+  sits.** A closed number is not attribution: its entry is deleted, so the pointer leads nowhere
+  and a reader cannot tell a covered risk from a live one. `check_risk_register_shape` enforces
+  this over the instruction files and the four source trees.
 
 ## Scripted edits to documents
 

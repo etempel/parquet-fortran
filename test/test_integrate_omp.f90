@@ -12,8 +12,8 @@
 !! `test/test_runner_support.f90` excludes `integrate_omp`), for the nested-team reason
 !! `test_index_omp.f90`'s header states: test-drive dispatches a suite's tests inside its own
 !! `!$omp parallel do`, so a test opening a team of its own would open a nested one, which libgomp
-!! deadlocks on intermittently (`feature_risks.md` Risk-104). A serial suite runs at level 0, where
-!! the team this asserts actually opens.
+!! deadlocks on intermittently. A serial suite runs at level 0, where the team this asserts
+!! actually opens.
 !!
 !! **Every test here carries the skip guard**, because without OpenMP its assertions are not merely
 !! untestable but VACUOUS: the loop runs on one thread, the concurrent arm becomes a second serial

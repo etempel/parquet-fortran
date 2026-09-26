@@ -364,7 +364,7 @@ contains
         end do
         ! Reset the vacated tail slot through the shared blanker, which every vacating path and
         ! table_new_slot itself use -- three hand-written copies of the same field list is how one
-        ! of them came to be missing `unit` (feature_risks.md Risk-204).
+        ! of them came to be missing `unit`.
         call reset_column_slot(self%cache%cols(self%cache%ncols))
         self%cache%ncols = self%cache%ncols - 1
         ! A drop shifts every slot above it down by one, so the whole name index is renumbered --

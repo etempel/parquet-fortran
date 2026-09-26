@@ -33,8 +33,7 @@ contains
     !! file created, and the writer's own chunk-size estimate sees every width (contract 4:
     !! without it a vector column counts as width 1 and the estimate skips its own clamp). The
     !! open itself is `parquet_open_writer_like` with the resolved schema, which forwards
-    !! every writer option still absent when the caller omitted it (`feature_risks.md`
-    !! Risk-8).
+    !! every writer option still absent when the caller omitted it.
     module procedure parquet_open_table_writer
         type(parquet_schema) :: own
         character(len=:), allocatable :: stem, fname, sfx, names(:)
@@ -257,7 +256,7 @@ contains
     !> Writes the pending rows as one row group and resets the buffer; nothing when none are
     !! pending. The reset is `%truncate(0)` -- which rebuilds every column exact-fit, at zero
     !! capacity -- followed by `%reserve(chunk_size)`, so the next row group's appends allocate
-    !! nothing (contract 7; `feature_risks.md` Risk-227 is what dropping the reserve costs).
+    !! nothing (contract 7; dropping the reserve costs a reallocation per append).
     subroutine sink_flush_worker(self)
         class(parquet_table_writer), intent(inout) :: self !! the sink.
         integer(int64) :: n

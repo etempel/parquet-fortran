@@ -350,7 +350,7 @@ contains
     !> half, scenario_qc_int64_exact_bound_no_false_violation). Under the old real64 route the
     !> equal value was reported as a violation -- qc contradicting a declaration the data honoured
     !> exactly -- and `max: 9223372036854775807` was rejected outright at validation time, so that
-    !> scenario would abort rather than merely warn. See feature_risks.md Risk-68.
+    !> scenario would abort rather than merely warn.
     subroutine test_qc_int64_exact_bound_past_2_53(error)
         type(error_type), allocatable, intent(out) :: error
         integer :: exitstat, cmdstat

@@ -4843,7 +4843,7 @@ contains
     !> ignores the mirrored verbosity completely. This is the C++ printer's own gate, and before
     !> this scenario existed, deleting `if (output_is_suppressed()) return;` from
     !> parquet_reader_print_stat broke nothing in the whole suite. Same class of gap as the one
-    !> scenario_settings_cpp_warning closes for the warning channel (feature_risks.md Risk-42).
+    !> scenario_settings_cpp_warning closes for the warning channel.
     !>
     !> The column is read before the verbosity is set, so the report has a populated row to print
     !> and the "silent" arm is suppressing real output rather than an empty table.
@@ -6443,8 +6443,8 @@ contains
 
     !> Fortran's own `d` exponent is refused, which is a NARROWING and deliberately so: C++'s
     !> strtod does not accept `x == 1d3` for a bare literal, so accepting it inside a list would
-    !> make the list the more permissive of the two parsers -- the divergence feature_risks.md
-    !> Risk-195 exists to forbid. `read` would happily accept it, so only the shape check refuses.
+    !> make the list the more permissive of the two parsers -- the divergence this shape check
+    !> exists to forbid. `read` would happily accept it, so only the shape check refuses.
     subroutine scenario_filter_list_fortran_exponent()
         type(parquet_reader) :: reader
         type(parquet_filter) :: filt
@@ -6806,8 +6806,7 @@ contains
 
     !> The in-memory twin of filter_starts_with_non_string_column: the table's engine refuses a
     !> matcher on a non-string column too, and says the same thing about it. Two engines answer one
-    !> grammar (feature_risks.md Risk-198), so a refusal proved on the reader alone is proved on
-    !> half the library.
+    !> grammar, so a refusal proved on the reader alone is proved on half the library.
     subroutine scenario_row_mask_starts_with_on_int()
         call row_mask_scenario("test_run/row_mask_starts_with_on_int.parquet", 'id starts_with "1"')
     end subroutine scenario_row_mask_starts_with_on_int
@@ -7684,7 +7683,7 @@ contains
     !> where it reads as negative -- so the two forms answer identically under wrapping arithmetic.
     !> The reason the check sits BEFORE the addition is therefore not observable behaviour but
     !> undefined behaviour: signed overflow is UB, and an optimiser entitled to assume it does not
-    !> happen may delete a branch that tests for it (CLAUDE.md's own Risk-94 hazard). That belongs
+    !> happen may delete a branch that tests for it (CLAUDE.md's own compiler hazard). That belongs
     !> in the comment beside the check, which is where it is; this scenario covers the refusal.
     subroutine scenario_explode_row_count_overflow()
         type(parquet_table) :: t
@@ -8716,8 +8715,7 @@ contains
     !> its row-group range spans. Both ranges can be individually valid and still describe
     !> disjoint parts of the file, in which case the caller used to receive their intersection --
     !> possibly empty, and an empty result is indistinguishable from a selective filter that
-    !> matched nothing, so the mistake reported as data rather than as an error
-    !> (feature_risks.md Risk-81).
+    !> matched nothing, so the mistake reported as data rather than as an error.
     !>
     !> Negative control first: row groups 2..4 span rows 3..8, which DOES contain rows 5..8, so a
     !> guard that fired unconditionally would fail here instead of passing.

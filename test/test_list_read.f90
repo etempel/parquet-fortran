@@ -1028,9 +1028,9 @@ contains
     !> The other half of the struct-nested boundary, and the one `test_deferred_list_width` (the
     !> `table` suite) cannot show: a RAGGED list under a struct behaves exactly as a ragged list at
     !> the top level does. `parquet_table` resolves it to width 1 and the scalar kind, which is
-    !> `feature_risks.md` Risk-152 -- a state a 2-D read cannot use -- and Phase 6 owns it. Pinned
-    !> here so the equivalence is explicit: accepting a LIST leaf through a dotted path introduced
-    !> no dotted-path-specific behaviour, good or bad.
+    !> A state a 2-D read cannot use, and Phase 6 owns it. Pinned here so the equivalence is
+    !> explicit: accepting a LIST leaf through a dotted path introduced no dotted-path-specific
+    !> behaviour, good or bad.
     subroutine test_struct_nested_ragged_matches_top_level(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error.
         type(parquet_table) :: t
@@ -1047,7 +1047,7 @@ contains
             "and resolves to the same width a ragged TOP-LEVEL list does")
         if (allocated(error)) return
         call check(error, t%width("struct_of_list.values") == 1, &
-            "which is 1 -- no width covers rows of 3, 0 and 2 (feature_risks.md Risk-152)")
+            "which is 1 -- no width covers rows of 3, 0 and 2")
         if (allocated(error)) return
         call check(error, t%kind("struct_of_list.values") == t%kind("list_col"), &
             "and to the same kind")

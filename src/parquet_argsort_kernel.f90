@@ -630,17 +630,16 @@ contains
         !
         ! **The rule itself lives in parquet_auto_thread_count (src/parquet_settings_base.f90)** --
         ! the serial-inside-a-parallel-region default, why the predicate is omp_get_level rather
-        ! than omp_in_parallel, the libgomp deadlock behind that choice (feature_risks.md Risk-104),
-        ! why a cap may only lower the answer, and the omp_get_num_procs clamp. It was moved there
-        ! when parquet_random gained a threaded bulk permutation and needed the same answer:
-        ! CLAUDE.md's auto-threading note names a further copy of this rule as the mistake, and
-        ! parquet_random is pure Fortran, so it cannot reach this module without acquiring the C++
-        ! dependency parquet_sorting carries. Behaviour here is unchanged.
+        ! than omp_in_parallel, the libgomp deadlock behind that choice, why a cap may only lower
+        ! the answer, and the omp_get_num_procs clamp. It was moved there when parquet_random gained
+        ! a threaded bulk permutation and needed the same answer: CLAUDE.md's auto-threading note
+        ! names a further copy of this rule as the mistake, and parquet_random is pure Fortran, so
+        ! it cannot reach this module without acquiring the C++ dependency parquet_sorting carries.
+        ! Behaviour here is unchanged.
         !
         ! What stays here is which SETTING caps the sort, and this is the ONE place it is read:
-        ! Risk-40 records that pf_sort_threads is public precisely so a read-time sort_by= and a
-        ! raw-array sort ask the same question, and a second reader is how the two would come to
-        ! disagree.
+        ! pf_sort_threads is public precisely so a read-time sort_by= and a raw-array sort ask the
+        ! same question, and a second reader is how the two would come to disagree.
         n = parquet_auto_thread_count(parquet_get_sort_threads(), "sorting")
     end procedure pf_sort_threads
     !
@@ -658,9 +657,9 @@ contains
             ! **One exception, and it is narrow on purpose: an enclosing region that is not
             ! actually running in parallel.** `parquet_nested_team_unsafe`
             ! (src/parquet_settings_base.f90) is that predicate and carries the reduction and the
-            ! bisection behind it -- feature_risks.md Risk-104. It lives there rather than here so
-            ! that parquet_random's threaded bulk permutation asks the identical question; two
-            ! copies of a deadlock guard is exactly the shape that comes apart later.
+            ! bisection behind it. It lives there rather than here so that parquet_random's threaded
+            ! bulk permutation asks the identical question; two copies of a deadlock guard is
+            ! exactly the shape that comes apart later.
             !
             ! **This clamps BOTH engines, and that is not a detail to get wrong.** The count
             ! resolved here is the one `drive_engine` hands to `sort_build_permutation_threaded`
@@ -865,7 +864,7 @@ contains
             ! `pf_rank` and `parquet_table%join` sorted serially whatever the caller asked for,
             ! while the C++ engine on the other branch had been threading all along. Nothing failed:
             ! the permutation is identical at every team size, so only
-            ! `parquet_debug_sort_threads_used` could see it. See feature_risks.md Risk-189.
+            ! `parquet_debug_sort_threads_used` could see it.
             call sort_build_runs_permutation(keys, nrows, gek, nthreads, perm, tie)
             return
         end if

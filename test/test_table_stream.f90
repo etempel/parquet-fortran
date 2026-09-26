@@ -1137,7 +1137,7 @@ contains
     !! takes a mask is stored nullable -- the column that never held a Null included, which is
     !! the visible sign that the mask was passed on the first row group. Without the always-mask
     !! rule the first row group fixes the field non-nullable and the second row group's mask is
-    !! a hard abort inside the writer (feature_risks.md Risk-226).
+    !! a hard abort inside the writer.
     subroutine test_chunked_write_nullability_survives_a_late_null(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b, back
@@ -1428,8 +1428,8 @@ contains
     end subroutine test_chunked_write_containers
     !
     !> `row_mask=` drops rows from the output entirely, chunk by chunk, while a Null stays
-    !! indexed against the table's own rows (Risk-24): a Null at row 2 of a chunk whose row 3 is
-    !! dropped is still the output's row 2, and the dropped row leaves no trace.
+    !! indexed against the table's own rows: a Null at row 2 of a chunk whose row 3 is dropped
+    !! is still the output's row 2, and the dropped row leaves no trace.
     subroutine test_chunked_write_row_mask(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b, back
@@ -1703,8 +1703,7 @@ contains
     !
     !> Without `chunk_size=` the threshold is the library's estimate from the schema, with every
     !! vector column's width resolved from the template first: a wide vector column gives a
-    !! threshold far below the one a width-1 reading of the same schema gives (feature_risks.md
-    !! Risk-228).
+    !! threshold far below the one a width-1 reading of the same schema gives.
     subroutine test_sink_auto_chunk_size(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table_writer) :: out
@@ -1919,7 +1918,7 @@ contains
     !
     !> The buffer keeps at least `chunk_size` rows of capacity across a flush, through the debug
     !! observer -- a reset without the reserve leaves it at zero, and every later append then
-    !! grows it geometrically at full correctness (feature_risks.md Risk-227).
+    !! grows it geometrically at full correctness.
     subroutine test_sink_buffer_keeps_capacity(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table_writer) :: out
@@ -1988,7 +1987,7 @@ contains
     !> A Null-free template, then batches holding Nulls: the Nulls read back and the field is
     !! nullable. The derived schema reads descriptors only; a derivation that measured the
     !! template's null state would have declared the column non-nullable and the second batch
-    !! would abort inside the writer (feature_risks.md Risk-225, contract 8).
+    !! would abort inside the writer (contract 8).
     subroutine test_derive_schema_does_not_measure_nullability(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table_writer) :: out

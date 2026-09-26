@@ -3208,7 +3208,7 @@ contains
     end subroutine test_spatial_rebuild_los_length_aborts
 
     !> The warning must land on the stream the settings name and nowhere else, or it is decorative
-    !> (`feature_risks.md` Risk-41's shape); the scenario itself exits cleanly, since a `los` that
+    !> (the decorative-knob shape); the scenario itself exits cleanly, since a `los` that
     !> is not a function of the distance is accepted.
     subroutine test_spatial_los_not_a_function_warns(error)
         type(error_type), allocatable, intent(out) :: error

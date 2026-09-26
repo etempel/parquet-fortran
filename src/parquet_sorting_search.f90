@@ -11,7 +11,7 @@
 !!
 !! **The target is appended to the array's own key and compared as row n+1.** That is the whole
 !! design: there is no compare-a-row-against-a-value arm anywhere, so a search cannot drift from
-!! the order `pf_sort` produces (`feature_risks.md` Risk-34). It costs one element of copy.
+!! the order `pf_sort` produces. It costs one element of copy.
 !!
 !! **Searching unsorted input is the worst failure this module can have** -- a plausible index, no
 !! abort, no symptom. So sortedness is checked by default, at O(n) in front of an O(log n) search,

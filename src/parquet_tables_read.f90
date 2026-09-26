@@ -371,10 +371,10 @@ contains
         ! ever indexes an existing element. `chunks` is here for the same reason `readers` is: a
         ! derived type with ALLOCATABLE COMPONENTS declared in a block lexically inside a parallel
         ! region makes ifx emit privatization scaffolding (`mold_ctor` -> `for_alloc_private` ->
-        ! `do_alloc_copy`) that segfaults at -O1+ on every thread entering the region --
-        ! feature_risks.md Risk-45. Reusing one chunk per thread across the row groups the
-        ! scheduler hands it is also what `materialize_slice` does serially, so the chunk's own
-        ! contract (each `table_materialize_chunk_kind` call resizes it) is already relied on.
+        ! `do_alloc_copy`) that segfaults at -O1+ on every thread entering the region.
+        ! Reusing one chunk per thread across the row groups the scheduler hands it is also what
+        ! `materialize_slice` does serially, so the chunk's own contract (each
+        ! `table_materialize_chunk_kind` call resizes it) is already relied on.
         allocate(readers(nslots))
         allocate(chunks(nslots))
         allocate(reader_open(nslots))
@@ -389,7 +389,7 @@ contains
             ! reached from inside the library rather than left to the caller, who never asked for
             ! this parallelism and cannot see it. No test can catch its absence -- the window is a
             ! few instructions wide and the mutation passes every time here -- so see
-            ! feature_risks.md Risk-57 before removing it.
+            ! feature_risks.md Risk-1 before removing it.
             !
             ! Asked of the FOOTER first (`parquet_column_has_nulls`, the same query the ordinary
             ! whole-column read uses to skip building a mask at all), so a null-free column -- the
@@ -415,9 +415,8 @@ contains
         do rg = 1_int64, nrg
             block
                 ! Plain locals ONLY -- a derived type with allocatable components declared in a
-                ! block lexically inside a parallel region segfaults ifx at -O1+
-                ! (feature_risks.md Risk-45), which is why `readers` and `chunks` are arrays
-                ! allocated before the region instead.
+                ! block lexically inside a parallel region segfaults ifx at -O1+, which is why
+                ! `readers` and `chunks` are arrays allocated before the region instead.
                 integer(int64) :: rows_rg
                 !
                 rows_rg = bounds(2, rg) - bounds(1, rg) + 1_int64
@@ -460,8 +459,8 @@ contains
     !!
     !! **This is the arithmetic behind a silent wrong answer, so it is a separate, pure procedure
     !! that can be tested on its own** — the race it prevents is a few instructions wide and an
-    !! end-to-end test cannot be relied on to see it (`feature_risks.md` Risk-61 records the same
-    !! division of labour for `parquet_string_column`'s own byte-aligned split).
+    !! end-to-end test cannot be relied on to see it (`parquet_string_column`'s own byte-aligned
+    !! split follows the same division of labour).
     !!
     !! `parquet_column` packs validity as a bitmap indexed by ELEMENT, `parquet_validity_block_bits`
     !! of them to a block. **That constant is imported, never copied** — a second definition of it
@@ -955,10 +954,10 @@ contains
     !!   * **A `sample_fraction=` and a `qc=` are CARRIED by every per-thread reader**, because
     !!     `table_open_reader_with_transform` opens them rather than a bare `parquet_open_reader`.
     !!     The sample is reproduced from `cache%read_sample_seed`, which `parquet_open_table`
-    !!     settles before any reader exists (feature_risks.md Risk-55) -- so there is deliberately
-    !!     **no** seed test here, and adding one back would read as though that invariant were in
-    !!     doubt. A qc schema installs its rules per reader but runs its checks per COLUMN, and
-    !!     each column is read by exactly one thread, so nothing is checked or warned twice.
+    !!     settles before any reader exists -- so there is deliberately **no** seed test here, and
+    !!     adding one back would read as though that invariant were in doubt. A qc schema installs
+    !!     its rules per reader but runs its checks per COLUMN, and each column is read by exactly
+    !!     one thread, so nothing is checked or warned twice.
     !!     Measured on a 16-column x 2 M-row file, 8 threads, best of 5, four rounds: **3.5x** for
     !!     the sample and **3.3x** for qc, against 4.5x with no transform at all.
     !!   * **A `sort=` and a `filter=` are CARRIED too, and there is deliberately no clause for
@@ -1057,7 +1056,7 @@ contains
     !!     parses the footer; below `colread_min_elements` (rows x width) that costs more than the
     !!     split saves. The floor is in ELEMENTS, not rows, so a narrow long column and a wide short
     !!     one are judged by the same measure -- and it is overridable, because no fixture a test can
-    !!     afford reaches the real one (`feature_risks.md` Risk-49's lesson).
+    !!     afford reaches the real one.
     !!   * **Not a string column.** `%paste` is what puts each row group's chunk into its place
     !!     without reallocating, and a `parquet_string_column` is a packed variable-length store with
     !!     no fixed row slots, so it cannot be overwritten in place. The serial grow-and-append shape
@@ -1158,9 +1157,9 @@ contains
     !> The count is Fortran-side state with no other way out: parquet_table's components are private
     !> and the number is a local of the region below, so nothing outside could observe whether
     !> parquet_set_prefetch_threads had any effect -- and a knob that is stored but never acted on
-    !> passes every set/get test ever written for it (feature_risks.md Risk-41). Pushing it to a C++
-    !> global keeps the hook out of the library's own Fortran interface, which CLAUDE.md's
-    !> "A Fortran-side debug hook has to be PUBLIC, so prefer a C++ one" asks for.
+    !> passes every set/get test ever written for it. Pushing it to a C++ global keeps the hook out
+    !> of the library's own Fortran interface, which CLAUDE.md's "A Fortran-side debug hook has to
+    !> be PUBLIC, so prefer a C++ one" asks for.
     !>
     !> Called once per prefetch, on a path that has just opened parquet readers and is about to
     !> decode whole columns, so the cost is unmeasurable. **That ratio is the rule**: a debug hook
@@ -1255,8 +1254,7 @@ contains
     !! straight back, at `-O2` only, with a backtrace naming no library code. A `parquet_table` is
     !! the one finalizable type this library exposes that would be safe, because it deliberately
     !! has no allocatable components at all -- do not read that as permission, since the next
-    !! component added to it would silently make this region crash too. See `feature_risks.md`
-    !! Risk-45.
+    !! component added to it would silently make this region crash too.
     subroutine materialize_marked_parallel(cache, sc, want)
         use omp_lib, only : omp_get_thread_num, omp_get_max_threads
         type(parquet_table_cache), intent(inout) :: cache !! the column store.
@@ -1295,7 +1293,7 @@ contains
         do g = 1, ngroups
             block
                 ! Plain integers ONLY. A finalizable derived type declared here segfaults ifx at
-                ! -O1+ -- see this subroutine's own doc-comment and feature_risks.md Risk-45.
+                ! -O1+ -- see this subroutine's own doc-comment.
                 integer :: k
                 !
                 t = omp_get_thread_num() + 1

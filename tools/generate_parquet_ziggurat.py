@@ -94,8 +94,8 @@ than the digits. Two traps worth knowing if you re-derive it. The closure residu
 stack that runs out of layers below the peak. And every number is computed in `decimal`, never in
 `float` -- the first version of this script used `math.exp`/`log`/`sqrt`/`erfc` and emitted a
 different table on CI than on the machine that committed it, because a one-ulp change in `R` moves
-254 of the 255 widths and libm is not identical between glibc versions (`feature_risks.md`
-Risk-130). `--self-test` re-derives the whole table at a higher working precision and requires
+254 of the 255 widths and libm is not identical between glibc versions.
+`--self-test` re-derives the whole table at a higher working precision and requires
 identical doubles, which is the check that has power against that; the property checks all passed
 on the broken version. `--check` verifies the committed output as usual. Maintainer-only (stripped
 from the fpm-published package).

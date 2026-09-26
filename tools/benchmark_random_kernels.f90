@@ -13,8 +13,8 @@
 !> **The checksum is not decoration -- it is the gate.** The two kernels compute the same algorithm
 !> by different arithmetic, so they must agree BIT FOR BIT; a speed figure from an arm that
 !> disagrees is a figure for something that is not this library. gfortran is known to miscompile the
-!> wrapping arithmetic under LTO (`feature_risks.md` Risk-101), which is exactly the failure this
-!> gate catches, and exactly why the wrapper refuses to report timings unless the checksums match.
+!> wrapping arithmetic under LTO, which is exactly the failure this gate catches, and exactly why
+!> the wrapper refuses to report timings unless the checksums match.
 !>
 !> Output is one `KERNEL=... CHECK=... NS_R64=... NS_R32=... NS_SCALAR=...` line, machine-readable
 !> so the wrapper can compare two runs without parsing prose.

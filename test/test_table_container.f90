@@ -169,9 +169,9 @@ contains
         call check(error, back%width("vec") == 2, "and keeps its schema-declared width")
     end subroutine test_list_columns_ignores_vectors
 
-    !> **feature_risks.md Risk-152.** Under `"auto"`, a slice and the whole file legitimately
-    !! disagree about the same column's kind, because the width is measured over the rows each one
-    !! covers. `"container"` is what makes them agree.
+    !> Under `"auto"`, a slice and the whole file legitimately disagree about the same column's
+    !! kind, because the width is measured over the rows each one covers. `"container"` is what
+    !! makes them agree.
     !!
     !! `late` is uniform (length 3) in row groups 1-3 and ragged only in the last, so rows 1..12
     !! are a uniform vector column while the file as a whole is not -- which is exactly the shape
@@ -180,7 +180,7 @@ contains
     !! **When the 3.0.0 default flip lands** (`"container"` becoming the default), the first two
     !! assertions become the behaviour of an explicit `list_columns="auto"` rather than of a plain
     !! open, and the last two become the default. Do not delete them: the disagreement is still
-    !! real under `"auto"`, which is why Risk-152 is not closed by the flip either.
+    !! real under `"auto"`, which is why the flip does not close it either.
     subroutine test_slice_whole_file_agreement(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         type(parquet_table) :: whole, part

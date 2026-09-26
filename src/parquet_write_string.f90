@@ -138,7 +138,7 @@ contains
         ! time. Two things replace it: the running min/max track INDICES and compare through
         ! `%compare`, which is Fortran's own `<` on the stored bytes; and the value the qc predicate
         ! needs is copied into one scratch buffer, sized once from the column's longest element and
-        ! reused every row. See `feature_risks.md` Risk-60.
+        ! reused every row.
         call values%statistics(max_len=widest)
         allocate(character(len=max(widest, 0_int64)) :: scratch)
         imin = 0_int64
@@ -427,7 +427,7 @@ contains
     !! not needed to read the column back. A caller may therefore write elements longer than the
     !! schema declares, and that stays legal. What it must not do is leave the file *claiming* the
     !! declaration -- accepting an inaccurate declaration on the way in is a choice, repeating it on
-    !! the way out is not. See feature_risks.md Risk-83.
+    !! the way out is not.
     !!
     !! A chunked write calls this per chunk and the maximum accumulates, so the value settles at the
     !! longest element across the whole column rather than the first row group's. Costs one pass

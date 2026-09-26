@@ -4,9 +4,9 @@
 !
 !> Asserts that every `parquet_table` materialization path releases its Arrow-side buffers.
 !!
-!! `feature_risks.md` Risk-1: if a materialization path forgets to release the Arrow column after
-!! copying it into the table, **nothing fails**. The values are right, every test passes, and the
-!! table simply holds two copies of every column it reads. Only the Arrow pool counter notices.
+!! If a materialization path forgets to release the Arrow column after copying it into the table,
+!! **nothing fails**. The values are right, every test passes, and the table simply holds two copies
+!! of every column it reads. Only the Arrow pool counter notices.
 !!
 !! **This is a check, not a benchmark** -- it exits nonzero when a path retains more than its
 !! tolerance, so it can be run as a regression gate. It lives under `app/` rather than `test/` for

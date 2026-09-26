@@ -282,8 +282,7 @@ enum class CmpOp
 // an operator that is not one of the six and reaches here becomes `column /= value` -- no error,
 // no warning, just a plausible and wrong row set. Every operator that is not a comparison must
 // therefore return from its own arm ABOVE the cmp_op_of call in eval_filter_clause, as is_null,
-// the four value-class operators and the three substring operators all do. feature_risks.md
-// Risk-231.
+// the four value-class operators and the three substring operators all do.
 static CmpOp cmp_op_of(const std::string &op)
 {
 	if (op == ">") return CmpOp::Gt;
@@ -1068,7 +1067,7 @@ extern "C"
 	// policy decided in two places is a policy that can disagree with itself.
 	//
 	// Initialisers equal parquet_settings' own defaults (blank, i.e. read the clock), since they are
-	// what applies in the window before the first push -- feature_risks.md Risk-42.
+	// what applies in the window before the first push.
 	//
 	// **This is the one mirrored setting with a heap buffer behind it, and it must never be
 	// assigned unguarded.** `g_file_date = std::string(date)` frees whatever the global was
@@ -1168,8 +1167,8 @@ extern "C"
 	// `g_x > 0 ? g_x : kBuiltIn` conditional anywhere below and no second place the default can be
 	// spelled. The initializers here are what applies before Fortran has pushed anything at all,
 	// which is why they MUST equal parquet_settings' own parameters of the same name -- the drift
-	// feature_risks.md Risk-42 is about, and what test/test_settings.f90 asserts by reading each
-	// default back through the C++-observable effect rather than through the Fortran getter alone.
+	// this arrangement prevents, and what test/test_settings.f90 asserts by reading each default back
+	// through the C++-observable effect rather than through the Fortran getter alone.
 	//
 	// These replaced three test-only parquet_debug_* override hooks (sort_parallel_min_rows,
 	// disable_sort_counting_path, disable_statistics_prescreen). **Do not reintroduce a debug
@@ -1205,9 +1204,8 @@ extern "C"
 	// Test-only override for kSortParallelMinRows, which is otherwise unreachable now that the
 	// published `sort_parallel_min_rows` setting has been retired. Every fixture a test can
 	// build is orders of magnitude below 8192 rows, so without a way down every C++-engine
-	// threading test would assert "serial matches serial" -- feature_risks.md Risk-35's vacuous
-	// shape, and Risk-49's unreachable-threshold shape at the same time. Negative = use the
-	// real constant.
+	// threading test would assert "serial matches serial" -- the vacuous A/B shape and an unreachable
+	// threshold at the same time. Negative = use the real constant.
 	static int64_t g_debug_sort_parallel_min_rows = -1;
 	// Atomic for the same reason as the output mirror above: parquet_push_settings_to_cpp writes
 	// all four on every open, from every thread that opens a reader or writer. A relaxed same-value
@@ -4621,7 +4619,7 @@ extern "C"
 	// Test-only: the resolved use_threads value the most recently opened reader or writer was
 	// given. parquet_set_default_use_threads' effect is otherwise unobservable -- the value
 	// disappears into a handle with no getter -- so without this the setting could be stored and
-	// never acted on while passing every set/get test (feature_risks.md Risk-41).
+	// never acted on while passing every set/get test.
 	//
 	// Atomic because both create_parquet_reader and create_parquet_writer store to it on every
 	// open, and opening one per thread is supported usage -- the same reason the mirrored settings
@@ -4934,8 +4932,8 @@ extern "C"
 	// join, written by that engine's body on every route (1 when it ran serially) and as 0 by the
 	// hash engine, which has no such passes. And the team join_apply's two side-index passes ran
 	// on, written on every join whatever the engine. The pair list is identical at every team
-	// size, so these records are the only observation that `threads=` reached the passes at all
-	// (feature_risks.md Risk-189); std::atomic for the reason g_debug_join_engine_used is.
+	// size, so these records are the only observation that `threads=` reached the passes at all;
+	// std::atomic for the reason g_debug_join_engine_used is.
 	static std::atomic<int64_t> g_debug_join_group_threads_used{0};
 	static std::atomic<int64_t> g_debug_join_side_threads_used{0};
 
@@ -4963,7 +4961,7 @@ extern "C"
 	// written by that loop's one resolver (group_team, src/parquet_tables_group.f90) on every
 	// route, 1 included. The callback forms are serial unless threads= is given, and a loop that
 	// resolved a team it never opened, or opened one nobody asked for, is invisible in every
-	// answer (feature_risks.md Risk-189); std::atomic for the reason g_debug_join_engine_used is.
+	// answer; std::atomic for the reason g_debug_join_engine_used is.
 	static std::atomic<int64_t> g_debug_group_threads_used{0};
 
 	void parquet_debug_set_group_threads_used(int64_t n)
@@ -5310,9 +5308,9 @@ extern "C"
 	static int64_t g_debug_sort_comparison_count = 0;
 
 	// THE comparator. Every ordering entry point in this file routes through this one object --
-	// full sort, partial sort, nth_element -- which is what feature_risks.md Risk-34 requires: three
-	// public entry points agree on null placement, NaN placement and tie order only because none of
-	// them owns a comparison of its own.
+	// full sort, partial sort, nth_element -- which is what makes it true that three public entry
+	// points agree on null placement, NaN placement and tie order only because none of them owns a
+	// comparison of its own.
 	//
 	// The final `a < b` on the row index is what makes this a TOTAL order, and two separate
 	// contracts rest on it. Stability: a full tie falls back to original file order, so plain
@@ -5344,9 +5342,9 @@ extern "C"
 	// under the tiebreaker no two rows ever are. Binary search, run detection (pf_unique/pf_rank),
 	// merging and is_sorted all key on that distinction; sorting is the only caller that must not.
 	//
-	// Keep this beside SortRowLess. The two are one decision expressed twice, and feature_risks.md
-	// Risk-34 is about them never drifting apart: both walk the keys in precedence order and both
-	// delegate every actual comparison to sort_compare_key.
+	// Keep this beside SortRowLess. The two are one decision expressed twice, and they must
+	// never drift apart: both walk the keys in precedence order and both delegate every actual
+	// comparison to sort_compare_key.
 	// `nkeys` is how many LEADING keys take part. Every caller but the run detection below passes
 	// keys.size(); that one passes a prefix, because grouping and ordering are different questions
 	// -- "sort by field then magnitude, but group by field alone" needs every key to order and only
@@ -5447,8 +5445,7 @@ extern "C"
 	// **A test that needs the parallel path at a small row count therefore cannot lower a setting
 	// any more** -- it has to use parquet_debug_set_sort_engine_min_rows, which is what
 	// force_parallel_threshold now drives. Without a way in, a test asserting "parallel matches
-	// serial" would be asserting "serial matches serial", the vacuous shape feature_risks.md
-	// Risk-35 exists to warn about.
+	// serial" would be asserting "serial matches serial", a vacuous shape.
 
 	// Test-only: how many threads the last threaded build actually put to work, counting the
 	// calling thread. 1 means the sort ran serially, whatever was asked for.
@@ -5475,7 +5472,7 @@ extern "C"
 	// **The final round specifically, not a maximum over rounds.** A co-ranked merge that silently
 	// degraded to one segment per pair everywhere except the first round would still report a high
 	// maximum while leaving the whole tail in place -- and it would return the correct permutation
-	// while doing so, because every thread count returns the same answer. This is Risk-39's shape one
+	// while doing so, because every thread count returns the same answer. This is the same shape one
 	// level deeper: without an assertion on this counter, a merge that co-ranks nothing passes every
 	// correctness test ever written for it. g_debug_sort_threads_used is NOT reused for this; it
 	// keeps its own meaning (phase 1's count), which four existing tests assert against.
@@ -5552,7 +5549,7 @@ extern "C"
 	// order in which no two rows compare equal, so the wrong form would pass every test written here.
 	// The correct form is written anyway, so this is right by derivation rather than by accident --
 	// and so that anyone reusing it for pf_merge (which has real ties, and takes from the first input
-	// on equal) starts from the right expression. See feature_risks.md Risk-37.
+	// on equal) starts from the right expression.
 	//
 	// **The search.** P(i) := "condition (1) holds at i" is monotone decreasing in i, and the answer
 	// is the LARGEST i in [max(0, k - nB), min(k, nA)] with P(i) true. Two facts make that exact:
@@ -5612,7 +5609,7 @@ extern "C"
 	// co-rank defects survived the entire suite until the sweep was made to lower this. Same
 	// process-global, subprocess-free convention as parquet_debug_set_col_size_limit and the other
 	// ceiling overrides, and the same reason the `sorting` suite is excluded from test-drive's
-	// per-test parallelism. See feature_risks.md Risk-49.
+	// per-test parallelism.
 	static int64_t g_debug_sort_merge_min_segment = -1;
 
 	// The floor actually in force: the debug override when one is set, otherwise the real constant.
@@ -5660,8 +5657,8 @@ extern "C"
 			// The invariant every later reader depends on: i and j = k - i are each non-decreasing
 			// across s, i + j == k exactly, and the last boundary is (nA, nB). Break any of those and
 			// the segments stop being a partition -- some rows are merged twice and others not at all,
-			// and the result is silently no longer a permutation (feature_risks.md Risk-50). O(nseg)
-			// against the round's O(n), so this costs nothing worth measuring.
+			// and the result is silently no longer a permutation. O(nseg) against the round's O(n), so
+			// this costs nothing worth measuring.
 			if (i < i_prev || i > m - a || k - i < k_prev - i_prev || k - i > b - m)
 			{
 				report_fatal_error("sort_merge_boundaries",             // GCOVR_EXCL_LINE
@@ -6661,7 +6658,7 @@ extern "C"
 			// recognise to CmpOp::Ne (see its own comment), so an operator reaching it unhandled
 			// does not fail -- it silently becomes `column /= value`, a plausible and completely
 			// wrong row set. Every other site in the filter path refuses an unknown operator
-			// loudly; this one does not. feature_risks.md Risk-231.
+			// loudly; this one does not.
 			arrow::Type::type tid = array->type_id();
 			if (tid != arrow::Type::STRING && tid != arrow::Type::LARGE_STRING &&
 				tid != arrow::Type::STRING_VIEW)
@@ -7245,7 +7242,7 @@ extern "C"
 		// with `p` exactly when it lies in [p, p+) -- so it falls through to the kString arm below,
 		// which computes p+ and marks the leaf a prefix test; screen_leaf_in_row_group then routes
 		// it to screen_prefix_from_bounds instead, keeping that `default:` arm unreached either
-		// way. See feature_risks.md Risk-233.
+		// way.
 		if (op == "ends_with" || op == "contains") return leaf;
 		if (op == "is_nan" || op == "is_not_nan" || op == "is_finite" || op == "is_not_finite")
 		{
@@ -7599,7 +7596,7 @@ extern "C"
 		// Gating it on the setting instead gives a scoped filter a whole-file mask under
 		// parquet_set_statistics_prescreen(.false.), and leaves every later whole-column read
 		// decoding the row groups the scope excludes -- with the answer still correct, so nothing
-		// but the mask's own length can see it (feature_risks.md Risk-221).
+		// but the mask's own length can see it.
 		for (int64_t rg = 1; rg_lo > 0 && rg <= reader_handle->num_row_groups; ++rg)
 		{
 			if (rg < rg_lo || rg > rg_hi)
@@ -7839,7 +7836,7 @@ extern "C"
 			// empty -- and an empty result is indistinguishable from a selective filter that
 			// matched nothing, so the mistake reports as data rather than as an error. Checked
 			// after the resolution above, so "all row groups" spans the whole file and can never
-			// fail it. (feature_risks.md Risk-81)
+			// fail it.
 			if (scoped)
 			{
 				int64_t span_lo = reader_handle->row_group_offsets[static_cast<size_t>(rg_lo - 1)] + 1;
@@ -9091,7 +9088,7 @@ extern "C"
 	// and the LAST row is the target value, appended by the caller. That is what makes drift from
 	// the sort comparator structurally impossible -- the target is compared by the very same
 	// sort_compare_key over the very same key layout, with no compare-a-row-against-a-value arm to
-	// keep in step (feature_risks.md Risk-34).
+	// keep in step.
 	//
 	// `which` is 0 for lower_bound (first position not ordered before the target) and 1 for
 	// upper_bound (first position the target is ordered before). Returns a 1-BASED insertion point
@@ -12586,7 +12583,7 @@ extern "C"
 	// It was instead verified OUT OF PROCESS, against a genuinely sliced array carrying a null row
 	// and a null element, by replicating this logic exactly: base=10, and all four rows' lengths,
 	// values, row nullness and element nullness came back correct. Re-run that check rather than
-	// trusting a green suite if this arithmetic is ever changed. See feature_risks.md Risk-154.
+	// trusting a green suite if this arithmetic is ever changed.
 	//
 	// `child_out` comes back already Sliced to exactly the elements these rows use, so every
 	// consumer downstream (the convert_values_to_* family, the string byte copy, the element
@@ -14540,9 +14537,7 @@ static std::shared_ptr<arrow::Array> assemble_struct_array(const std::shared_ptr
 // boundary directly either, because `parquet_writer%handle` is a PRIVATE component, so there is
 // no way to obtain the writer handle these functions take. A mutation removing the field-count
 // check therefore survives the whole suite; that is a fact about what is reachable, not a
-// coverage gap to be closed with a contrived hook. See feature_risks.md Risk-156 and CLAUDE.md,
-// "If a mutation cannot be caught by any fixture this repository can build, the branch is
-// defensive".
+// coverage gap to be closed with a contrived hook.
 static void check_struct_staging(ParquetWriterHandle *writer_handle, const char *name, int64_t nrows,
 	const char *context)
 {
@@ -14880,8 +14875,8 @@ extern "C"
 	// check_struct_staging wants to be told, so no new staging state and no new validation exist
 	// here at all -- the finisher simply passes nentries where the struct finisher passes nrows.
 	//
-	// The cost of that reuse is that this path inherits feature_risks.md Risk-156: the
-	// "staging already open" / "no staging open" guards are not reachable from any test, because
+	// The cost of that reuse is that this path inherits an untestable pair of guards: the "staging
+	// already open" / "no staging open" guards are not reachable from any test, because
 	// parquet_writer%handle is a private component and no public API can call these entry points
 	// out of order. Phase 5 neither improves nor worsens that, and must not claim otherwise.
 
@@ -15918,7 +15913,7 @@ extern "C"
 	// a permutation IDENTICAL to the serial one -- that identity is what makes the feature safe, and
 	// it is also what makes a `threads=` that is silently ignored pass every correctness test ever
 	// written for it. Zero parallelism is a passing test, exactly as zero comparisons was for the
-	// partial sort above (feature_risks.md Risk-35).
+	// partial sort above.
 	int64_t parquet_debug_get_sort_threads_used(void)
 	{
 		return g_debug_sort_threads_used;
@@ -15952,8 +15947,7 @@ extern "C"
 	// **This is the only thing that can tell a co-ranked merge from a decorative one.** Every thread
 	// count returns the same permutation -- that identity is what makes `threads=` safe -- so a merge
 	// that silently stopped splitting its final round would pass every correctness assertion in the
-	// suite while putting the O(n) serial tail straight back. See g_debug_sort_merge_threads_used,
-	// and feature_risks.md Risk-49.
+	// suite while putting the O(n) serial tail straight back. See g_debug_sort_merge_threads_used.
 	int64_t parquet_debug_get_sort_merge_threads_used(void)
 	{
 		return g_debug_sort_merge_threads_used;
@@ -16501,8 +16495,7 @@ extern "C"
 		// streaming parquet_new_row_group path there). Restating the
 		// arithmetic inline again would silently give one of the two its
 		// own copy of the byte target, so parquet_set_target_row_group_bytes
-		// would govern only one kind of write -- see feature_risks.md
-		// Risk-43 and tools/check_source_conventions.py's
+		// would govern only one kind of write -- see tools/check_source_conventions.py's
 		// check_row_group_sizing_not_duplicated, which enforces this.
 		//
 		// The two steps below that are NOT part of the shared arithmetic

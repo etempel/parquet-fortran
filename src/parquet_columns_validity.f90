@@ -24,7 +24,7 @@
 !! for a null row while `%any_null()` answered `.false.` about the same column, with nothing to
 !! announce the disagreement. The writers were delegated and the readers were not, and nothing in
 !! the language connects the two sets: **a query added here must be checked against all four rows,
-!! not against the bitmap it happens to be written around** (feature_risks.md Risk-159).
+!! not against the bitmap it happens to be written around**.
 !!
 !! Hoisting everything into the column bitmap was rejected: it would mean two sources of truth
 !! kept in sync by every mutation path, and for the temporal kinds it would fight
@@ -946,7 +946,7 @@ contains
     !! words, so a concurrent reader sees the value before or after another thread's write and
     !! never a mixture -- and BOTH are legitimate snapshots of a column something is mutating at
     !! that moment. What made `any_null` unsafe was never the reads; it was the write that
-    !! discarded another thread's `nulls_dirty = .true.` (feature_risks.md Risk-136).
+    !! discarded another thread's `nulls_dirty = .true.`.
     !!
     !! It calls `parquet_column_is_null`, not `col%is_null`, because a type-bound call on a
     !! non-polymorphic dummy is the conversion the typed tier exists to remove -- enforced by
@@ -1006,7 +1006,7 @@ contains
     !!
     !! **Writes to the column, so only `any_null` and `compact_validity` may reach it** -- both
     !! are declared `intent(inout)` and neither is on a read path. Clearing `nulls_dirty` at the
-    !! end is what discards a concurrent `set_null`'s dirty flag; see feature_risks.md Risk-136.
+    !! end is what discards a concurrent `set_null`'s dirty flag.
     subroutine rescan_temporal_nulls(self)
         class(parquet_column), intent(inout) :: self !! the temporal column.
         integer(int64) :: k

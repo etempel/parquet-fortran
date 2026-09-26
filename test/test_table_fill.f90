@@ -37,7 +37,7 @@
 !! the default from its opposite. And `test_fillna_string` fills with `"n/a"` rather than `""`,
 !! because a null string already reads back as `""`, so filling with `""` would pass against a fill
 !! that routed the string column through the bitmap class's null-clearing pass -- which writes `""`
-!! over what it just wrote. See feature_risks.md Risk-201 and Risk-203.
+!! over what it just wrote.
 !!
 !! Abort paths live in test/error_scenarios.f90 as `fillna_*`/`ffill_*`/`dropna_*` scenarios.
 !! Every test writes its own fixture path -- the suite runs its tests concurrently, so a shared

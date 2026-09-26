@@ -4315,7 +4315,7 @@ contains
     !> through to a bitmap that is deliberately never allocated for a container kind -- so
     !> `%is_null(2)` answered `.true.` for the null row below while `%any_null()` answered
     !> `.false.` about the same column. Two public queries, one column, opposite answers, nothing
-    !> announcing it (feature_risks.md Risk-159).
+    !> announcing it.
     !>
     !> **The assertions are written as AGREEMENT rather than as literals on purpose.** A test
     !> that merely checked `%any_null()` is `.true.` would pass against a query hard-wired to say
@@ -4636,8 +4636,7 @@ contains
     !> row_validity_range must agree with is_null on every row of every range, including ranges
     !! whose bits share a 64-bit word with rows outside them (the walk touches whole words and
     !! must not mark a neighbour), on a bitmap kind, a vector kind with element nulls, a temporal
-    !! kind, a string kind and a null-free column -- and must write nothing past the range
-    !! (feature_risks.md Risk-223).
+    !! kind, a string kind and a null-free column -- and must write nothing past the range.
     subroutine test_row_validity_range_matches_is_null(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int64), parameter :: n = 200_int64

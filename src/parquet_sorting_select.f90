@@ -8,9 +8,9 @@
 !
 !> `pf_partial_sort` and `pf_partial_argsort` -- ordering only the first `n` elements.
 !!
-!! Same engine, same comparator, same tiers as a full sort (`feature_risks.md` Risk-34): these
-!! reach `std::partial_sort` through the very object `std::sort` is given, so a partial result can
-!! never disagree with the corresponding prefix of a full one.
+!! Same engine, same comparator, same tiers as a full sort: these reach `std::partial_sort`
+!! through the very object `std::sort` is given, so a partial result can never disagree with the
+!! corresponding prefix of a full one.
 !!
 !! **`n` is clamped, not checked.** Asking for more elements than the array holds returns all of
 !! them, in order. That is deliberate -- `n` is very often derived, and refusing it would put

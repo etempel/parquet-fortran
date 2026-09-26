@@ -268,7 +268,7 @@ contains
     !! are restored afterwards: the counting fast path is O(n) and returns before phase 0 is ever
     !! timed, and the parallel path declines below a row threshold far above any test fixture. Both
     !! are the "a threshold no test-sized fixture can reach is a threshold no test exercises" case
-    !! CLAUDE.md describes (`feature_risks.md` Risk-49).
+    !! CLAUDE.md describes.
     subroutine test_sort_phase_timers(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive error handle.
         integer, parameter :: N = 40000

@@ -542,9 +542,9 @@ contains
         end if
         ! The names come out through %copy_to into ONE scratch slot sized from the longest of
         ! them, rather than through %get per field. %get allocates a deferred-length string per
-        ! call, which check_no_per_element_string_alloc forbids in a loop -- see
-        ! feature_risks.md Risk-60. The loop here is over FIELDS rather than rows, so the saving
-        ! is small; following the rule everywhere is what keeps it checkable.
+        ! call, which check_no_per_element_string_alloc forbids in a loop.
+        ! The loop here is over FIELDS rather than rows, so the saving is small; following the rule
+        ! everywhere is what keeps it checkable.
         call name_slot(self, nm)
         out = "struct<"
         do j = 1, size(self%fields)
@@ -2036,8 +2036,7 @@ contains
     !!
     !! Sized with `%length`, which measures without allocating, so that every name-copying loop
     !! in this module can use `%copy_to` into one slot instead of `%get` per field. See
-    !! `check_no_per_element_string_alloc` (tools/check_source_conventions.py) for the rule and
-    !! feature_risks.md Risk-60 for what it costs when the loop really is per row.
+    !! `check_no_per_element_string_alloc` (tools/check_source_conventions.py) for the rule.
     subroutine name_slot(self, slot)
         class(parquet_struct_column), intent(in) :: self   !! the column.
         character(len=:), allocatable, intent(out) :: slot !! blank slot, as wide as the longest name.

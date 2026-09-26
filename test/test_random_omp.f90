@@ -168,10 +168,10 @@ contains
     !! seed from a run-invariant label at the top of the iteration -- not anything about the type.
     !!
     !! **The stream is declared in a `block`, never in a `private()` clause**, and that is
-    !! load-bearing rather than stylistic: it is the library-wide rule for a per-thread derived type
-    !! (`feature_risks.md` Risk-45). `pf_random_stream` is deliberately plain scalars with no
-    !! allocatable components and no `FINAL`, which is what keeps *both* shapes safe here -- but the
-    !! example a user copies must be the one that stays safe if the type ever gains either.
+    !! load-bearing rather than stylistic: it is the library-wide rule for a per-thread derived
+    !! type. `pf_random_stream` is deliberately plain scalars with no allocatable components and no
+    !! `FINAL`, which is what keeps *both* shapes safe here -- but the example a user copies must be
+    !! the one that stays safe if the type ever gains either.
     subroutine test_stream_schedule(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         real(real64) :: serial(n), stat(n), dyn(n), many(n)
@@ -236,7 +236,7 @@ contains
         integer, intent(in) :: i                    !! the iteration's run-invariant label
         real(real64) :: last                        !! the last value this iteration drew
         block
-            type(pf_random_stream) :: rng           ! in a block, NOT in private() -- see Risk-45
+            type(pf_random_stream) :: rng           ! in a block, NOT in private()
             real(real64) :: x
             integer :: taken
             call rng%seed(20260816_int64, i)
@@ -441,7 +441,7 @@ contains
     !!  * what a **parallel region** does to the count, which is two different rules and not one:
     !!    the *automatic* form goes serial inside any region, while an *explicit* request is honoured
     !!    in full inside an active one and clamped to a single worker only when the enclosing team has
-    !!    one thread (Risk-104). And the values must still be right when called from in there.
+    !!    one thread. And the values must still be right when called from in there.
     subroutine test_resample_threads(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer :: saved_floor !! the knob's value on entry, restored on every exit path.
@@ -499,7 +499,7 @@ contains
         ! full inside an ACTIVE region -- CLAUDE.md's auto-threading note is precisely that
         ! `omp_in_parallel()` picks a default and does not veto a request -- and is clamped to 1 only
         ! when the enclosing team has ONE thread, which is the shape libgomp deadlocks on
-        ! (`parquet_nested_team_unsafe`, Risk-104).
+        ! (`parquet_nested_team_unsafe`).
         inside = 0
 #ifdef _OPENMP
         !$omp parallel num_threads(2) default(shared)
@@ -519,7 +519,7 @@ contains
         !$omp end parallel
         call check(error, inside == 1, &
             "an explicit threads= inside an inactive region was not clamped to one worker, which is " // &
-            "the nested-team shape libgomp deadlocks on -- see feature_risks.md Risk-104")
+            "the nested-team shape libgomp deadlocks on")
         if (allocated(error)) return
 #endif
 

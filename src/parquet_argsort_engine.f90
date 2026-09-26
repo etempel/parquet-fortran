@@ -72,8 +72,8 @@
 !! ## Keep the two comparators adjacent
 !!
 !! `sort_row_less` and `sort_keys_compare` are one decision expressed twice, and `feature_risks.md`
-!! **Risk-34** is about them never drifting apart. Both walk the keys in precedence order and both
-!! delegate every actual comparison to `sort_compare_key`. A change to one is a change to the other.
+!! **They must never drift apart.** Both walk the keys in precedence order and both delegate every
+!! actual comparison to `sort_compare_key`. A change to one is a change to the other.
 !!
 !! ## Performance shape
 !!
@@ -88,10 +88,9 @@
 !! `keys(k)%ints`/`%reals` into local `contiguous` pointers once, rather than re-reaching through the
 !! derived type on every comparison. **It was not done, and the reason is worth recording**: hoisting
 !! means a comparator that takes the hoisted state, i.e. a *second* expression of the ordering, and
-!! `feature_risks.md` Risk-34 is precisely about those two never drifting apart. That is a real cost
-!! against an unmeasured gain, so it stays a measurement to take later rather than a design decision
-!! taken now — and if it is ever taken, the hoisted comparator must be generated from the same source
-!! as this one, not written twice.
+!! Those two must never drift apart. That is a real cost against an unmeasured gain, so it stays a
+!! measurement to take later rather than a design decision taken now — and if it is ever taken, the
+!! hoisted comparator must be generated from the same source as this one, not written twice.
 submodule (parquet_argsort) parquet_argsort_engine
 #ifdef _OPENMP
     ! Stage 4. Guarded because a build without OpenMP must still COMPILE, not merely run serially:
@@ -237,7 +236,7 @@ submodule (parquet_argsort) parquet_argsort_engine
     !
 contains
 
-    ! ---- The two comparators. Adjacent on purpose -- Risk-34. ----------------------------------
+    ! ---- The two comparators. Adjacent on purpose. ---------------------------------------------
 
     module procedure sort_tier_of
         ! **This returns the RAW tier and `nulls_first` does not appear.** That flag only ever
@@ -853,8 +852,8 @@ contains
     ! worth far more than making them cheaper: 9-17x per single-key arm on machine B.
     !
     ! **What makes it produce the SAME permutation, which is the only thing that matters.** This is a
-    ! third expression of the ordering (feature_risks.md Risk-34), so each rule is stated against the
-    ! comparator clause it reproduces:
+    ! third expression of the ordering, so each rule is stated against the comparator clause it
+    ! reproduces:
     !
     !   * The three TIERS are split first, in row order. Two rows in the same non-value tier compare
     !     EQUAL under `sort_compare_key`, so the index tiebreaker leaves them in file order -- which
@@ -924,8 +923,8 @@ contains
     !> The 64-bit images of a LIST of rows, each one's UNSIGNED order being that row's order under
     !! the key.
     !!
-    !! Kept in one place so that the three families cannot drift apart -- that is
-    !! `feature_risks.md` Risk-34's rule, and it is why there is no scalar twin of this beside it.
+    !! Kept in one place so that the three families cannot drift apart, which is also why there is
+    !! no scalar twin of this beside it.
     !! It is also why the caller's loop reads as a walk over rows rather than as three interleaved
     !! encodings.
     !!
@@ -1049,7 +1048,7 @@ contains
     !! which puts it squarely in the class where ifx segfaults on a `block`-local declaration inside a
     !! parallel region, while gfortran is the one that mishandles a `private()` copy — the two forbid
     !! opposite shapes, so a type in the intersection can use neither. Declaring no instance at all
-    !! sidesteps both. See `feature_sort_parallel.md` §11 step 3 and `feature_risks.md` Risk-45.
+    !! sidesteps both.
     !!
     !! Falls back to the identical serial code when there is no team or no OpenMP, so the answer
     !! cannot depend on either.
@@ -2720,8 +2719,7 @@ contains
     !! and shares an image" reads like it already means byte-identical. It does not: the image is
     !! zero-PADDED, so `"a"` and `"a"//char(0)` produce the same 8 bytes at lengths 1 and 2, and
     !! `compare_bytes` calls the shorter one less. Dropping the test leaves such a run in file order,
-    !! which is a wrong permutation with no abort and nothing to notice it — `feature_risks.md`
-    !! Risk-89.
+    !! which is a wrong permutation with no abort and nothing to notice it.
     !! **`ra` and `perm` must be DIFFERENT arrays.** This reads the row order from one while
     !! permuting the other, so passing the same actual for both would associate one array with a
     !! defined dummy and an `intent(in)` one at once -- which F2018 15.5.2.13 forbids and which
@@ -3171,7 +3169,7 @@ contains
     ! would always be exactly one element wide and the extra branch would be pure cost.
     !
     ! Every comparison goes through `sort_row_less` and there is no second ordering anywhere in this
-    ! section. That is Risk-34 again: an "optimised" inline comparison here would be a third copy of
+    ! section. Same drift risk: an "optimised" inline comparison here would be a third copy of
     ! the decision, and the conformance tests compare permutations, so a drifting copy would show up
     ! only on the fixtures that happen to exercise it.
     !
@@ -3450,7 +3448,7 @@ contains
     !
     ! Six operations that answer something other than "order every row". Not one of them writes a
     ! comparison out again: each routes through `sort_row_less` or `sort_keys_compare`, so the
-    ! ordering rule keeps appearing exactly once (feature_risks.md Risk-34).
+    ! ordering rule keeps appearing exactly once.
     !
     ! **Which of the two comparators an operation takes is a correctness decision, not a style one.**
     ! `sort_row_less` carries the row-index tiebreaker and is for ORDERING -- partial selection and
@@ -3599,7 +3597,7 @@ contains
         ! clamp -- so this hands it straight on and `sort_build_permutation_threaded` applies the
         ! two clauses that need the DATA: the row floor, and one thread meaning the serial path.
         ! Calling the serial `sort_build_permutation` here is what made `threads=` a no-op on the
-        ! whole grouped family; feature_risks.md Risk-189 records the shape.
+        ! whole grouped family.
         call sort_build_permutation_threaded(keys, n, nthreads, perm)
         dbg_sort_tie_threads_used = 1_int64
         if (n < 1_int64) return
@@ -3617,7 +3615,7 @@ contains
         ! 10M-row lookup join at one thread, scattered loads through `perm` -- and it is what a
         ! `threads=` on `pf_unique`, `pf_rank`, `pf_match` or a sort-engine `%join` was otherwise
         ! buying nothing on. `tail_team` applies the tail floor; the team is recorded because no
-        ! answer can show it (feature_risks.md Risk-189).
+        ! answer can show it.
         team = tail_team(nthreads, n)
         dbg_sort_tie_threads_used = int(team, int64)
         tie(1) = 0_c_int8_t
@@ -3640,7 +3638,7 @@ contains
     !! **That appending is the whole design and must survive any rewrite.** The target is compared by
     !! the very same `sort_keys_compare` over the very same key layout, so there is no
     !! compare-a-row-against-a-value arm to keep in step with the sort -- which is what makes drift
-    !! structurally impossible rather than merely tested for (`feature_risks.md` Risk-34).
+    !! structurally impossible rather than merely tested for.
     !!
     !! `upper` selects the first position the target is ordered before; otherwise the first position
     !! not ordered before the target. The result is a 1-based insertion point in `1 .. n_search+1`.

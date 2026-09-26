@@ -13,7 +13,7 @@
 !> is the only form that survives running on a different machine.
 !>
 !> **A setter/getter round-trip is the weakest possible test of a setting** -- it passes just as
-!> happily against a value that is stored and never used, which is `feature_risks.md` Risk-41. So
+!> happily against a value that is stored and never used, which is the decorative-knob failure. So
 !> every knob here is asserted three ways: its factory value, its round trip, and an **observed
 !> effect with a negative control**. The observations differ per knob because nothing generic can
 !> see them:
@@ -35,8 +35,7 @@
 !>   the comparator path -- again, the two produce the same permutation;
 !> * `target_row_group_bytes` through `parquet_get_num_row_groups` on a written file AND through
 !>   `parquet_get_chunk_size(writer)`, because the byte target has two callers serving two different
-!>   writers and a copy re-inlined into either one would be invisible to a test of the other
-!>   (feature_risks.md Risk-43);
+!>   writers and a copy re-inlined into either one would be invisible to a test of the other;
 !> * `statistics_prescreen` through `parquet_debug_get_row_groups_pruned` alongside an A/B equality,
 !>   the shape CLAUDE.md prescribes for the screen: equality alone passes just as happily against a
 !>   screen that never prunes.
@@ -1105,7 +1104,7 @@ contains
         call parquet_reset_settings()
     end subroutine test_random_work_floor_is_gradual
 
-    !> Risk-40: an unqualified sort inside an OpenMP parallel region runs SERIALLY, and a setting
+    !> An unqualified sort inside an OpenMP parallel region runs SERIALLY, and a setting
     !> must not lift that back up -- eight threads each asking for eight more is the oversubscription
     !> the rule exists to prevent. Without this, a cap applied after the region check would look
     !> perfectly correct everywhere else.
@@ -1195,9 +1194,9 @@ contains
     !>
     !> **This knob has no observable in the answer at all**, by design: the parallel and serial
     !> paths produce an identical table, which is the property that makes the feature safe and
-    !> simultaneously makes it untestable by ordinary means (`feature_risks.md` Risk-39's shape). So
-    !> the assertion is on the thread count the mutation resolved to, read back through a C++ debug
-    !> hook, and it needs all three of the observations below to mean anything:
+    !> simultaneously makes it untestable by ordinary means. So the assertion is on the thread count
+    !> the mutation resolved to, read back through a C++ debug hook, and it needs all three of the
+    !> observations below to mean anything:
     !>
     !>   * **automatic, above the work floor** -- the positive control. Without it, the capped
     !>     assertion below is satisfied by an implementation that never threads at all.
@@ -1702,7 +1701,7 @@ contains
     !> **The bulk test, and the one that catches a crossed pair.** Every variable set to its own
     !> distinguishable value in one call, each read back through its own getter -- so a variable
     !> wired to the wrong setter fails on both knobs at once, and a variable left out of
-    !> parquet_settings_from_env's sequence fails on its own (feature_risks.md Risk-44).
+    !> parquet_settings_from_env's sequence fails on its own.
     !>
     !> Adding a variable to the loader means adding it HERE and to `unset_all_env` as well. The three
     !> pool knobs added after the first draft -- spatial, HEALPix and index -- were read by the
@@ -2026,7 +2025,7 @@ contains
     !> on every comparison sort and, on a scrambled fixture, always moves something; the radix path
     !> never calls it at all for a non-string key. So "did the tracker record anything" answers
     !> which path ran, and asserting BOTH directions is what stops a knob that is stored and never
-    !> read from passing (feature_risks.md Risk-41).
+    !> read from passing.
     !>
     !> A REAL key at 512 rows: real because the counting path takes integer keys and would confound
     !> the observation, 512 because the radix path has a row floor beneath which it declines
@@ -2124,8 +2123,8 @@ contains
     !>
     !> The knob bounds the key's value RANGE rather than its cardinality, so both arms use the same
     !> data and only the limit moves -- which is what shows the setting is read rather than merely
-    !> stored (feature_risks.md Risk-41). The first arm doubles as the control: at the built-in
-    !> limit this key is accepted, so a limit that declined everything could not pass both halves.
+    !> stored. The first arm doubles as the control: at the built-in limit this key is accepted, so
+    !> a limit that declined everything could not pass both halves.
     subroutine test_sort_counting_bucket_limit_effect_fortran(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int64) :: v(512)
@@ -2157,10 +2156,10 @@ contains
             "a bucket limit below the key's value range must push the Fortran engine onto the radix path")
     end subroutine test_sort_counting_bucket_limit_effect_fortran
 
-    !> The bound is on the key's value RANGE, not its cardinality (feature_risks.md Risk-39), so
-    !> both halves here use the SAME 500 values and the same cardinality -- only the spread differs,
-    !> and the limit is what decides. A limit that never reached C++ would leave the built-in 2**22
-    !> in force and both halves would take the counting path.
+    !> The bound is on the key's value RANGE, not its cardinality, so both halves here use the SAME
+    !> 500 values and the same cardinality -- only the spread differs, and the limit is what
+    !> decides. A limit that never reached C++ would leave the built-in 2**22 in force and both
+    !> halves would take the counting path.
     subroutine test_sort_counting_bucket_limit_effect(error)
         type(error_type), allocatable, intent(out) :: error
         integer(int32) :: v(500)
@@ -2193,7 +2192,7 @@ contains
     !> Row groups written by the whole-table path (close_parquet_writer). This is one of the two
     !> callers of chunk_size_from_bytes_per_row, and the reason the S4 refactor de-duplicated that
     !> arithmetic: before it, this path had its own copy of the byte target and the setting could
-    !> not have reached it (feature_risks.md Risk-43).
+    !> not have reached it.
     subroutine test_target_row_group_bytes_effect(error)
         type(error_type), allocatable, intent(out) :: error
         character(len=*), parameter :: default_file = "test_run/settings_rowgroup_default.parquet"
@@ -2986,9 +2985,9 @@ contains
     !> reach the threaded path at all.
     !>
     !> Without the override every fixture a suite can afford would sit below 256 KiB and silently
-    !> take the serial path, so a threaded operation would be covered by nothing -- `feature_risks.md`
-    !> Risk-49's failure exactly. The negative control is the same column measured at the real floor,
-    !> which must resolve to 1: a floor that never declined would pass any test written for it.
+    !> take the serial path, so a threaded operation would be covered by nothing -- that failure
+    !> exactly. The negative control is the same column measured at the real floor, which must
+    !> resolve to 1: a floor that never declined would pass any test written for it.
     !>
     !> **This lives in the settings suite, not the string one, for two independent reasons** -- and
     !> it was written there first and found vacuous by mutation testing. `parquet_debug_set_string_min_bytes`

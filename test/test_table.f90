@@ -2078,10 +2078,10 @@ contains
     !
     !> The handle forms answer the same as the table forms, in both directions.
     !!
-    !! Per `feature_risks.md` Risk-72, an accessor with a name form and a handle form needs the
-    !! cross-check rather than one test each — the two can silently disagree. Also asserts that
-    !! `%set_user_populated` does NOT bump `%generation()`: if it did, the handle would go stale on
-    !! its own call and the `%ref`-write case this exists for could never use it.
+    !! An accessor with a name form and a handle form needs the cross-check rather than one test
+    !! each — the two can silently disagree. Also asserts that `%set_user_populated` does NOT bump
+    !! `%generation()`: if it did, the handle would go stale on its own call and the `%ref`-write
+    !! case this exists for could never use it.
     subroutine test_user_populated_handle(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: t

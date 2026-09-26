@@ -10,7 +10,7 @@
 !! lowest-weight cell where a shared uniform would concentrate -- plus a reconstruction of the
 !! coupled rule from public API alone, so the statistic's power is visible in the same run.
 !!
-!! It found the coupling recorded as Risk-123 in `feature_risks.md`. `test_families_independent` is
+!! It found the coupling recorded as Risk-2 in `feature_risks.md`. `test_families_independent` is
 !! the cheap in-suite version; this is the one to reach for at 500 000 seeds.
 !!
 !! Build and run with `--profile release`, as for every measurement program under `app/`.

@@ -1041,7 +1041,7 @@ contains
     !! **Run serially here, and that is a deliberate deviation from the page.** The example is
     !! written as an `!$omp parallel do`, but test-drive runs each suite's tests inside its OWN
     !! `!$omp parallel do` (`examples` is not in `run_tester.f90`'s exclusion list), so a nested
-    !! region here would be exactly the libgomp nesting hazard `feature_risks.md` Risk-104 records.
+    !! region here would be exactly the libgomp nesting hazard.
     !! Nothing is lost: the claim under test is the SLICE ARITHMETIC -- that
     !! `parquet_table_row_group_bounds` partitions the file and each slice reads its own rows --
     !! which is what the example is really teaching and is independent of who runs the loop.
@@ -1663,7 +1663,7 @@ contains
     !! page's example is an `!$omp parallel do schedule(dynamic)`, but test-drive runs each suite's
     !! tests inside its OWN `!$omp parallel do` (`examples` is not in `run_tester.f90`'s exclusion
     !! list), so writing the page's directive here opens a NESTED region -- the same hazard
-    !! `test_per_thread_slices_example` above declines for, `feature_risks.md` Risk-104.
+    !! `test_per_thread_slices_example` above declines for.
     !!
     !! Nothing is lost, and something is gained. Nested parallelism is off by default and nothing
     !! in this project turns it on, so such a region gets a team of ONE: measured under ifx

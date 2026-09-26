@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Asserts that every parquet_table materialization path releases its Arrow-side buffers.
 #
-# feature_risks.md Risk-1: a path that forgets to release the Arrow column after copying it into
-# the table fails NOTHING -- the values are right, every test passes, and the table quietly holds
-# two copies of every column it reads. Only Arrow's own pool counter notices, and RSS cannot answer
-# the question at all (Arrow's pool keeps freed pages rather than returning them to the OS, so a
-# correct release and a complete failure to release look nearly identical in `ps` -- see CLAUDE.md's
-# "Measuring whether Arrow memory was actually freed").
+# A path that forgets to release the Arrow column after copying it into the table fails NOTHING --
+# the values are right, every test passes, and the table quietly holds two copies of every column it
+# reads. Only Arrow's own pool counter notices, and RSS cannot answer the question at all (Arrow's
+# pool keeps freed pages rather than returning them to the OS, so a correct release and a complete
+# failure to release look nearly identical in `ps` -- see CLAUDE.md's "Measuring whether Arrow
+# memory was actually freed").
 #
 # This is a CHECK, not a benchmark: it exits nonzero if any path retained more than its tolerance,
 # so it can be run as a regression gate after touching the materialization paths. It is NOT part of
@@ -41,8 +41,7 @@
 # `parquet_write_table(release=.true.)` -- and exits nonzero if any of them still holds more than
 # `TOLERANCE` of one copy of the data it just read in Arrow's pool. That failure is otherwise
 # completely silent: a path that forgets to release leaves the values correct and every test
-# passing, with the table quietly holding two copies of every column (feature_risks.md
-# (feature_risks.md) Risk-1).
+# passing, with the table quietly holding two copies of every column.
 #
 # Three things about it are load-bearing rather than incidental:
 #
@@ -82,7 +81,7 @@ else
     trap 'rm -f check_arrow_release_out.parquet' EXIT
 fi
 
-echo "=== Arrow release check (feature_risks.md Risk-1) ==="
+echo "=== Arrow release check ==="
 echo "file        : $TEST_FILE"
 echo "target size : ${TARGET_FILE_SIZE_GB} GB uncompressed"
 echo "columns     : ${NCOLS} x float64"

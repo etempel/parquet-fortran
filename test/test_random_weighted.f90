@@ -819,7 +819,7 @@ contains
     !! is coupled by construction. It must fire; a run where BOTH arms look independent proves only
     !! that the fixture is too small to resolve anything, which is exactly how a statistic like this
     !! rots into a pass. See `.claude/rules/testing.md`'s "Assertions" for the
-    !! shape, and `feature_risks.md` Risk-123 for what the separation forbids.
+    !! shape, and `feature_risks.md` Risk-2 for what the separation forbids.
     subroutine test_families_independent(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error carrier
         integer, parameter :: n = 10                    !! small, so item 1 is reached often enough

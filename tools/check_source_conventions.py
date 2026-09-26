@@ -11250,6 +11250,70 @@ def check_error_page_names_every_supported_compiler():
     return problems
 
 
+def check_random_objects_count_matches_the_source():
+    """The guide's written-out count of `parquet_random`'s objects must match the module.
+
+    `parquet_random` is the one tier the guide describes as having nothing to say about
+    concurrency, and the sentence that says so immediately qualifies itself: its OBJECTS are
+    ordinary and do have rules. Both the group index and the concurrency page spell the number of
+    them out in prose -- "its two objects" -- and the number is owned by `src/parquet_random.f90`,
+    not by either page. A third object would make three sentences wrong at once with nothing to
+    notice: `.claude/rules/documentation.md` says a count written beside the list it counts needs
+    a check rather than careful review.
+
+    **The count is measured, never listed here**: the `type, public ::` declarations in
+    `src/parquet_random.f90`. Today those are `pf_random_disc_cap` and `pf_random_stream`; this
+    check does not know that and must not be taught it.
+
+    **Every occurrence on both pages is checked, not the first.** The concurrency page states the
+    count twice -- once where the objects get their rules and once in the summary bullet that
+    points there -- and a fix applied to one of the two is the failure this catches.
+
+    **Blind means FAIL**: a module with no public type parsed, and a page that no longer states
+    the count at all, are reported rather than passed (CLAUDE.md, "A static check that enumerates
+    names goes stale silently"). A page losing the sentence is not a pass: it is the sentence
+    moving out from under the check.
+    """
+    problems = []
+    src = SRC / "parquet_random.f90"
+    types = re.findall(r"^\s*type, *public *:: *([a-z0-9_]+)", src.read_text(encoding="utf-8"),
+                       re.M | re.I)
+    if not types:
+        return ["src/parquet_random.f90: parsed no `type, public ::` declaration -- either the "
+                "module declares its objects another way now or this pattern went stale; this "
+                "check is blind and must not pass"]
+    want = len(types)
+
+    pages = ("doc/pages/operating/index.md", "doc/pages/operating/thread-safety.md")
+    for rel in pages:
+        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        # Matched over the whole text, not line by line: these pages are wrapped at 100 columns
+        # and a rewrap that put "its two" and "objects" on either side of a line break would
+        # otherwise report the sentence as GONE, which is a false alarm of the kind that gets a
+        # check deleted rather than fixed. The line number comes from the match offset.
+        hits = [(text.count("\n", 0, m.start()) + 1, m.group(1))
+                for m in re.finditer(r"\bits\s+([a-z]+)\s+objects\b", text, re.I)]
+        if not hits:
+            problems.append(
+                "%s: no sentence stating how many objects `parquet_random` has -- the phrase this "
+                "check reads (\"its <number> objects\") is gone, so the count beside the list went "
+                "unchecked. Restore it, or re-anchor this check deliberately." % rel)
+            continue
+        for lineno, word in hits:
+            said = _NUMBER_WORDS.get(word.lower())
+            if said is None:
+                problems.append(
+                    "%s:%d: \"its %s objects\" is not a number word this check knows; add it to "
+                    "_NUMBER_WORDS rather than leaving the count unchecked." % (rel, lineno, word))
+            elif said != want:
+                problems.append(
+                    "%s:%d: says `parquet_random` has %s (%d) objects; src/parquet_random.f90 "
+                    "declares %d public type(s): %s. The guide's number is owned by the module, "
+                    "so fix the page (every occurrence, on both pages -- the concurrency page "
+                    "states it twice)." % (rel, lineno, word, said, want, ", ".join(sorted(types))))
+    return problems
+
+
 CHECKS = (
     ("the spatial cell caps are named from their parameters",
      check_spatial_cell_caps_are_named_from_their_parameters),
@@ -11396,6 +11460,8 @@ CHECKS = (
      check_module_tables_leave_behind_list),
     ("the concurrency page names every Arrow-free tier",
      check_thread_safety_names_every_arrow_free_tier),
+    ("the guide's count of parquet_random's objects matches the module",
+     check_random_objects_count_matches_the_source),
     ("prose footprint counts match the measured footprints", check_prose_footprint_counts),
     ("no doc/pages code fence is indented", check_no_indented_code_fence),
     ("a guide page spells an optional argument one way", check_bracket_convention),

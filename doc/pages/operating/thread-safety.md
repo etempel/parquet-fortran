@@ -436,7 +436,7 @@ takes the lock below.
   each takes one module-wide lock on entry. What that does not cover is a document's lifetime:
   closing one while another thread still holds a handle taken from it is yours to prevent. See
   [Thread safety](../utilities/configuration-files.html#thread-safety).
-- **`parquet_random`'s free functions need no rules at all** — see [Random numbers need no
+- **`parquet_random`'s free functions need no lock** — see [Random numbers need no
   lock](#random-numbers-need-no-lock) above, which is the one part of this library with nothing to
   say in this page's terms, and which is also where its two objects, a `pf_random_stream` and a
   `pf_random_disc_cap`, get theirs.

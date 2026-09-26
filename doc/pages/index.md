@@ -70,9 +70,9 @@ point in the library.
   key-to-index lookup, logging for your own program, TOML configuration files, numeric, text and
   path helpers, generated table types, and embedding your own MAML schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
-  something is wrong or has to be tuned: which module to import, what an abort means, why a build
-  or read fails, what may run concurrently, what memory and speed to expect, and the process-global
-  knobs.
+  something is wrong or has to be tuned: which module to import, what an error means, why a build,
+  a link or a run fails, what may run concurrently, what memory and speed to expect, and the
+  process-global knobs.
 
 ### Every page at a glance
 

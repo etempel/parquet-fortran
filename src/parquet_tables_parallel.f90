@@ -265,7 +265,7 @@ contains
         ! bandwidth-saturated -- 24 columns summing to 0.068 s serially take 0.031 s on 8 threads,
         ! a 2.2x speedup, so the machine binds before the schedule does. **Do not "fix" this either
         ! way on reasoning alone; the ordering fix (expensive columns first) beats both and is what
-        ! a change here should actually do.** See `feature_table.md` for the numbers and the option.
+        ! a change here should actually do.**
         !
         ! Nothing finalizable is declared inside this construct -- the body only references slots
         ! that already exist. That is what keeps feature_risks.md Risk-45 (gfortran and ifx forbid
@@ -401,9 +401,9 @@ contains
     !! rows, and every row `valid` marks `.false.` null on top of them. That mask only ever ADDS
     !! nulls, which is what lets it describe the unmatched rows alone and leaves the nulls the
     !! source column already had exactly where the gather put them (`feature_risks.md` Risk-182).
-    !! Until stage 4 of `feature_join.md` this was three calls -- `deep_copy`, `%gather`,
-    !! `%set_validity` -- which copied the whole source before rebuilding the copy, held two
-    !! transient copies where this holds one, and walked the rows three times.
+    !! Until stage 4 this was three calls -- `deep_copy`, `%gather`, `%set_validity` -- which
+    !! copied the whole source before rebuilding the copy, held two transient copies where this
+    !! holds one, and walked the rows three times.
     subroutine join_one_column(src, dst, sslot, dslot, idx, valid, threads)
         type(parquet_table_cache), intent(in) :: src      !! the source column store.
         type(parquet_table_cache), intent(inout) :: dst   !! the destination column store.
@@ -441,8 +441,7 @@ contains
     !! **The two levels are never combined.** This library enables no nested parallelism, so a
     !! team opened inside a team collapses to one thread, silently, and a "hybrid" would measure
     !! exactly as the outer level alone. `bench/benchmark_join.sh --mode=payload` times the two
-    !! levels side by side per column count; feature_join.md's stage 4 records the measurement
-    !! that fixed the rule.
+    !! levels side by side per column count; stage 4's measurement is what fixed the rule.
     !!
     !! The test-only hook `parquet_debug_set_colwork_level` (`src/parquet_wrapper.cpp`) forces one
     !! level -- 1 across, 2 within -- for that benchmark and for the negative controls in

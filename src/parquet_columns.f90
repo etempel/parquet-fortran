@@ -39,10 +39,10 @@
 !! it symmetrically without a circular dependency.
 module parquet_columns
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
-    ! The TYPED tier of parquet_string_column (feature_ifx.md): every `str` access below goes
-    ! through these, never through a binding -- a `type` actual passed to a `class` dummy makes
-    ! ifx build a runtime type descriptor in STATIC storage in the caller's prologue, on every
-    ! call, which turns a per-element scan into cross-thread cache-line contention.
+    ! The TYPED tier of parquet_string_column: every `str` access below goes through these,
+    ! never through a binding -- a `type` actual passed to a `class` dummy makes ifx build a
+    ! runtime type descriptor in STATIC storage in the caller's prologue, on every call, which
+    ! turns a per-element scan into cross-thread cache-line contention.
     use parquet_strings, only : parquet_string_column, &
         parquet_string_column_append_column, parquet_string_column_append_from, parquet_string_column_append_nulls, &
         parquet_string_column_append_values, parquet_string_column_capacity, &
@@ -98,12 +98,12 @@ module parquet_columns
     public :: PK_MAP
     public :: PK_STRUCT
     !
-    ! The typed per-cell accessor tier (feature_ifx.md). INTERNAL API: public only because
-    ! `parquet_tables` is a different module and this type's components are private, so there is
-    ! no other way for it to reach storage without a type-bound call -- which is the thing being
-    ! avoided. `src/parquet.f90` privatises every one of these again, so none reaches a
-    ! `use parquet` program, and none is covered by the library's semantic-versioning promise or
-    ! listed in README's API overview. Only the generics are public; every specific is private.
+    ! The typed per-cell accessor tier. INTERNAL API: public only because `parquet_tables` is a
+    ! different module and this type's components are private, so there is no other way for it to
+    ! reach storage without a type-bound call -- which is the thing being avoided.
+    ! `src/parquet.f90` privatises every one of these again, so none reaches a `use parquet`
+    ! program, and none is covered by the library's semantic-versioning promise or listed in
+    ! README's API overview. Only the generics are public; every specific is private.
     public :: parquet_column_get_at
     public :: parquet_column_set_at
     public :: parquet_column_get_elem
@@ -871,10 +871,10 @@ module parquet_columns
         !! when present, has one entry per DESTINATION row and marks every element of a `.false.`
         !! row null on top of whatever the source row carried -- `set_validity`'s add-only rule,
         !! applied in the same pass rather than afterwards. `threads` above 1 splits the rows
-        !! across a team. Both are `gather_from`'s, which does the work: since stage 4 of
-        !! `feature_join.md` this is a `gather_from` of the column's own rows into a fresh column,
-        !! handed back over the original in O(1). A container column keeps its own route (the
-        !! container rebuilds itself) and takes no mask.
+        !! across a team. Both are `gather_from`'s, which does the work: since stage 4 this is a
+        !! `gather_from` of the column's own rows into a fresh column, handed back over the
+        !! original in O(1). A container column keeps its own route (the container rebuilds
+        !! itself) and takes no mask.
         module subroutine gather_i64(self, idx, valid, threads)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: idx(:)         !! 1-based source row per destination row.
@@ -2079,7 +2079,7 @@ module parquet_columns
         end subroutine data_ptr_tsv
     end interface
     !
-    ! ---- Typed per-cell access: the NON-POLYMORPHIC implementation tier (feature_ifx.md) ----
+    ! ---- Typed per-cell access: the NON-POLYMORPHIC implementation tier ---------------------
     !
     ! Every per-cell accessor's body lives here, behind a `type(parquet_column)` dummy. The
     ! type-bound bindings declared above are one-line forwarders onto these, and `parquet_tables`
@@ -2640,7 +2640,7 @@ module parquet_columns
         end subroutine parquet_column_check_width
     end interface
     !
-    ! ---- The typed tier's generics: the ONLY names parquet_tables uses (feature_ifx.md) ----
+    ! ---- The typed tier's generics: the ONLY names parquet_tables uses ---------------------
     interface parquet_column_get_at
         module procedure parquet_column_get_at_i32
         module procedure parquet_column_get_at_i64
@@ -3046,9 +3046,9 @@ module parquet_columns
         !!
         !! Takes a NON-polymorphic dummy, unlike its neighbours here: the typed `set_null` forms
         !! call it, and a typed body handing a `type(parquet_column)` to a `class` dummy rebuilds
-        !! the whole descriptor block the typed tier exists to remove (feature_ifx.md). It is
-        !! private plumbing and never a binding, so it needs no polymorphic form at all -- every
-        !! existing caller passes a `class` actual, which a `type` dummy accepts for free.
+        !! the whole descriptor block the typed tier exists to remove. It is private plumbing and
+        !! never a binding, so it needs no polymorphic form at all -- every existing caller
+        !! passes a `class` actual, which a `type` dummy accepts for free.
         module subroutine ensure_bitmap(col)
             type(parquet_column), intent(inout) :: col !! the column.
         end subroutine ensure_bitmap

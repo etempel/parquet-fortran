@@ -287,7 +287,7 @@ module parquet_prima
     !
     ! One specific rather than two, unlike the other entry points of this tier: a plain function
     ! cannot carry constraints, so `f` is a `pf_constrained_objective` and there is no function
-    ! form to distinguish it from (`feature_optimizer.md` 5.2).
+    ! form to distinguish it from.
 
     interface
 

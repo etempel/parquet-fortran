@@ -6631,7 +6631,7 @@ contains
     !> A NaN from the objective, which PRIMA's moderated extreme barrier would absorb.
     !!
     !! Upstream replaces the value by a large finite one and carries on, so the search continues
-    !! against a value the objective never returned; here it aborts (`feature_optimizer.md` Q7).
+    !! against a value the objective never returned; here it aborts.
     subroutine scenario_prima_nonfinite_value()
         real(real64) :: x(2), fmin
 

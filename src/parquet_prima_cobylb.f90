@@ -4,8 +4,8 @@
 !! **Provenance.** Derived from PRIMA (Zaikun Zhang, `https://github.com/libprima/prima`),
 !! BSD-3-Clause, at commit `43863c69`: `fortran/cobyla/cobylb.f90`, `geometry.f90`,
 !! `initialize.f90`, `trustregion.f90` and `update.f90`, which are one module each upstream and one
-!! module here (`feature_optimizer.md` 4.1's ten-file layout). The licence text and the deviations
-!! shared by every file of this tier are in `parquet_prima_linalg`.
+!! module here (the ten-file layout). The licence text and the deviations shared by every file of
+!! this tier are in `parquet_prima_linalg`.
 !!
 !! The algorithm is M. J. D. Powell's, *A direct search optimization method that models the
 !! objective and constraint functions by linear interpolation* (1994); the comments citing equation
@@ -15,11 +15,11 @@
 !! **A bug found here is checked against upstream before it is fixed here.** Every formula, every
 !! branch and every tolerance below is upstream's.
 !!
-!! **Constraint values are `c(x) <= 0` where feasible** -- PRIMA's convention and this library's
-!! (`feature_optimizer.md` Q16), the opposite of SciPy's. The linear constraints reach the module
-!! as `amat^T x <= bvec` and are evaluated here rather than through the objective; the nonlinear
-!! ones come from the caller's `pf_constrained_objective` through `evaluate_fc`, and `constr`
-!! carries the two halves in that order.
+!! **Constraint values are `c(x) <= 0` where feasible** -- PRIMA's convention and this library's,
+!! the opposite of SciPy's. The linear constraints reach the module as `amat^T x <= bvec` and are
+!! evaluated here rather than through the objective; the nonlinear ones come from the caller's
+!! `pf_constrained_objective` through `evaluate_fc`, and `constr` carries the two halves in that
+!! order.
 !!
 !! **What changed beyond the tier-wide list.**
 !!
@@ -347,7 +347,7 @@ contains
                     constr(1:m_lcon) = matprod(x, amat) - bvec  ! Linear constraints
                     call evaluate_fc(obj, st, x, f, constr(m_lcon + 1:m))  ! Nonlinear constraints
                     ! Neither half is moderated here: a non-finite value aborts in `evaluate_fc`, so the
-                    ! violation below is the true one (`feature_optimizer.md` Q7).
+                    ! violation below is the true one.
                     cstrv = maximum([ZERO, constr])
                     nf = nf + 1
                     ! Save X, F, CONSTR, CSTRV into the history.
@@ -544,7 +544,7 @@ contains
                     constr(1:m_lcon) = matprod(x, amat) - bvec  ! Linear constraints
                     call evaluate_fc(obj, st, x, f, constr(m_lcon + 1:m))  ! Nonlinear constraints
                     ! Neither half is moderated here: a non-finite value aborts in `evaluate_fc`, so the
-                    ! violation below is the true one (`feature_optimizer.md` Q7).
+                    ! violation below is the true one.
                     cstrv = maximum([ZERO, constr])
                     nf = nf + 1
                     ! Save X, F, CONSTR, CSTRV into the history.
@@ -612,7 +612,7 @@ contains
             constr(1:m_lcon) = matprod(x, amat) - bvec  ! Linear constraints
             call evaluate_fc(obj, st, x, f, constr(m_lcon + 1:m))  ! Nonlinear constraints
             ! Neither half is moderated here: a non-finite value aborts in `evaluate_fc`, so the
-            ! violation below is the true one (`feature_optimizer.md` Q7).
+            ! violation below is the true one.
             cstrv = maximum([ZERO, constr])
             nf = nf + 1
             ! Save X, F, CONSTR, CSTRV into the history.
@@ -724,7 +724,7 @@ contains
                 constr(1:m_lcon) = matprod(x, amat) - bvec  ! Linear constraints.
                 call evaluate_fc(obj, st, x, f, constr(m_lcon + 1:m))  ! Nonlinear constraints.
                 ! Neither half is moderated here: a non-finite value aborts in `evaluate_fc`, so the
-                ! violation below is the true one (`feature_optimizer.md` Q7).
+                ! violation below is the true one.
             end if
             cstrv = maximum([ZERO, constr])
 

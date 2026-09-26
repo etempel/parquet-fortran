@@ -141,7 +141,7 @@ module parquet_utils
     !! `q = min(p, 1-p)`.
     !!
     !! **Not a tuning knob and not a fitted number: it is where each branch's starting estimate is
-    !! good enough for its own fixed step count**, which is the sweep recorded in feature_probit.md.
+    !! good enough for its own fixed step count**, which is what the sweep found.
     !! Below it the series start is too far out for two Halley steps to close; above it the tail's
     !! asymptotic start is too far out for three. Moving it in either direction costs accuracy at
     !! the edge it moves toward, and the golden-vector test is what reports that.
@@ -154,7 +154,7 @@ module parquet_utils
     !! Maclaurin series, so each has a closed form and `tools/generate_probit_reference.py`
     !! re-derives all six by reversion in `--self-test` and compares them with these literals. That
     !! matters for provenance as well as for correctness -- this library is BSD-3 and a published
-    !! minimax coefficient set is not (feature_probit.md, alternative A1).
+    !! minimax coefficient set is not.
     !!
     !! **They set only the SPEED of `pf_probit`, never its answer.** The refinement that follows
     !! converges from any starting point; six terms is what makes two Halley steps enough.
@@ -603,8 +603,8 @@ contains
     ! ================================================================================
     !
     ! The three forward functions are one intrinsic call each. `pf_probit` is the work, and its
-    ! two branches, its step counts and the seam between them are all recorded in feature_probit.md
-    ! with the sweep that chose them. What the code below must preserve, whatever is tuned:
+    ! two branches, its step counts and the seam between them were all chosen by a sweep.
+    ! What the code below must preserve, whatever is tuned:
     !
     !   * the NaN screen is an EQUALITY test and comes before every ordered comparison;
     !   * the magnitude is computed from `q = min(p, 1-p)` and the sign applied last, which is

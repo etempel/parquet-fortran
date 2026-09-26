@@ -6,11 +6,10 @@
 !! substitutes a default, and warns: `rhobeg` and `rhoend` are swapped if reversed, `npt` is
 !! clamped into range, a start too close to a bound is moved, a bound wider than `BOUNDMAX` is
 !! treated as absent. Here an absent argument gets upstream's default and an INVALID one is
-!! refused with the message of `feature_optimizer.md` 5.6, because this library has no channel
-!! for a warning and a silently adjusted argument is how a caller comes to believe they asked for
-!! something they did not. The refusals themselves are `refuse_bad_call` in
-!! `parquet_prima_common`, shared with the other two drivers so that one set of abort sites serves
-!! all three.
+!! refused with the shared message, because this library has no channel for a warning and a
+!! silently adjusted argument is how a caller comes to believe they asked for something they did
+!! not. The refusals themselves are `refuse_bad_call` in `parquet_prima_common`, shared with the
+!! other two drivers so that one set of abort sites serves all three.
 !!
 !! **Where this driver's defaults differ from upstream's**, beyond those refusals:
 !!

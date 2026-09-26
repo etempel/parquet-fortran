@@ -556,7 +556,7 @@ contains
                 ! A container value is nesting, and %init cannot express it: it is handed one PK_*
                 ! discriminator, while a nested value is a kind PLUS an inner schema. Build the inner
                 ! container, hand it to a parquet_column with %adopt_container, and pass that column
-                ! to %adopt_rows. See feature_container_phase7.md's D1.
+                ! to %adopt_rows.
                 error stop EP//"init: "//kname//" is a nested value and cannot be declared here; "// &
                     "build the inner container, hand it to a parquet_column with %adopt_container, "// &
                     "and pass that column to %adopt_rows"
@@ -2189,8 +2189,7 @@ contains
     !! Wider than `is_supported_value` by exactly the three container kinds. `%init` fixes a value
     !! KIND; a nested value is a kind plus a whole inner schema, which `%init` has no argument shape
     !! for -- so nesting is reachable only by building the inner container and handing it over with
-    !! `%adopt_container` + `%adopt_values`. The `*_VEC` kinds stay refused on both paths. See
-    !! feature_container_phase7.md's D1 and D2.
+    !! `%adopt_container` + `%adopt_values`. The `*_VEC` kinds stay refused on both paths.
     pure function is_adoptable_value(kind) result(res)
         integer, intent(in) :: kind !! a PK_* discriminator.
         logical :: res              !! whether it may be adopted as a map value.
@@ -2229,8 +2228,7 @@ contains
     !! `value_kind_text` is `pure` and answers from the discriminator alone, which is all an error message
     !! needs. A NESTED a map value's spelling additionally needs the inner container to describe itself --
     !! so it cannot be pure, and it cannot be derived from the kind at all. Keeping the two apart is
-    !! what lets every error message stay pure while `%kind_text` reports the nested form. See
-    !! feature_container_phase7.md's D3.
+    !! what lets every error message stay pure while `%kind_text` reports the nested form.
     !!
     !! `%kind_text` is the ONLY name in this library that recurses: `%kindof()` stays `PK_MAP` at every
     !! depth and `parquet_kind_name` stays `"PK_MAP"`. A caller that needs the inner shape descends and

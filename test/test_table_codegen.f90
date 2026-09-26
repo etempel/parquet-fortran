@@ -589,7 +589,7 @@ contains
         ! Each form is bound to a local pointer before the call, rather than passed inline as
         ! `t%ra()`. That matches how every other column is checked below, and it is also required:
         ! nagfor 7.2 emits invalid C under -C=undefined for a POINTER-valued function result used
-        ! directly as an actual argument (16-line reproducer in feature_nag_ice_scope_id.md).
+        ! directly as an actual argument.
         w_f64  => t%ra()
         o_f64  => t%ra(3)
         o2_f64 => t%ra(3_int64)

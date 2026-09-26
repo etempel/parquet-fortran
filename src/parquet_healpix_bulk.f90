@@ -48,10 +48,10 @@ submodule(parquet_healpix) parquet_healpix_bulk
 
     !> The largest team the AUTOMATIC path will open, whatever the machine offers.
     !!
-    !! Measured rather than assumed: see `feature_healpix_tier_b.md` section 15. Past this size
-    !! libgomp's own fork/join cost grows faster than the work another thread removes, for a tier
-    !! whose per-element work is tens of nanoseconds. A positive `healpix_threads` replaces it, in
-    !! either direction (`hpx_auto_cap`), and an explicit `threads=` bypasses both.
+    !! Measured rather than assumed. Past this size libgomp's own fork/join cost grows faster than
+    !! the work another thread removes, for a tier whose per-element work is tens of nanoseconds.
+    !! A positive `healpix_threads` replaces it, in either direction (`hpx_auto_cap`), and an
+    !! explicit `threads=` bypasses both.
     integer, parameter :: hpx_max_auto_threads = 64
 
 contains

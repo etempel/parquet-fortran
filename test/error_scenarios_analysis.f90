@@ -5905,7 +5905,7 @@ contains
     !! more as an out-of-process assertion that the ASSEMBLY is right. The row lengths are checked
     !! rather than only the row count, because an assembly that used the outer offsets for the
     !! inner container -- the likeliest way to get this wrong -- still produces the right number of
-    !! rows. See feature_container_phase7.md's D4 (7b).
+    !! rows.
     subroutine scenario_list_read_nested_payload()
         type(parquet_reader) :: reader
         type(parquet_list_column) :: lc
@@ -6814,7 +6814,7 @@ contains
     !! `%init` is handed one `PK_*` discriminator; a nested value is a kind PLUS an inner schema,
     !! so `%init(PK_LIST)` could only produce a map whose values are a list column with no payload
     !! kind -- an unusable state with no way out of it. Nesting is reachable through
-    !! `%adopt_container` + `%adopt_rows` instead. See feature_container_phase7.md's D1.
+    !! `%adopt_container` + `%adopt_rows` instead.
     subroutine scenario_map_init_nested_value()
         type(parquet_map_column) :: mc
         call mc%init(PK_LIST)

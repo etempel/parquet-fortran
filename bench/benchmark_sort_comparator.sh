@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Drives bench/benchmark_sort_comparator.f90 -- feature_sort.md Stage 1e.
+# Drives bench/benchmark_sort_comparator.f90 -- Stage 1e.
 #
 # Answers ONE question: what does a single comparison cost, in the new Fortran comparator core and
-# in the shipped C++ one? That is feature_sort.md section 11.3's open question O3, and
-# bench/benchmark_sort_engine.sh cannot answer it -- it measures whole sorts, so at Stage 2 a slow
-# comparator and a slow introsort would arrive together and be indistinguishable.
+# in the shipped C++ one? That is open question O3, and bench/benchmark_sort_engine.sh cannot
+# answer it -- it measures whole sorts, so at Stage 2 a slow comparator and a slow introsort would
+# arrive together and be indistinguishable.
 #
 # This is a SEPARATE harness rather than a mode of the sort-engine one, deliberately: its arms are
 # per-CALL nanoseconds where that one's are per-element, and mixing the two invites a reader to
@@ -41,9 +41,9 @@
 # `control` row is a plain array sum neither comparator can influence, so its movement between two
 # builds is code layout rather than cost.
 #
-# The wrapper also runs the `objdump` descriptor-block check from `feature_sort.md` Stage 1e. That
-# check is x86-64-specific -- the relocation it greps for cannot exist on arm64, so on an Apple
-# Silicon machine it prints `SKIPPED` rather than a zero that would prove nothing.
+# The wrapper also runs the `objdump` descriptor-block check from Stage 1e. That check is
+# x86-64-specific -- the relocation it greps for cannot exist on arm64, so on an Apple Silicon
+# machine it prints `SKIPPED` rather than a zero that would prove nothing.
 #
 # | variable | default | meaning |
 # |---|---|---|
@@ -170,11 +170,11 @@ fpm build --profile release >/dev/null
 fpm run benchmark_sort_comparator --profile release -- \
     --rows="$ROWS" --reps="$REPS" --rounds="$ROUNDS"
 
-# The ifx descriptor-block check (feature_sort.md Stage 1e). It is x86-64-specific: the relocation
-# name it greps for does not exist on arm64, where it reports 0 whatever the code does. So it is
-# printed as evidence only where it can mean something, and labelled where it cannot.
+# The ifx descriptor-block check (Stage 1e). It is x86-64-specific: the relocation name it greps
+# for does not exist on arm64, where it reports 0 whatever the code does. So it is printed as
+# evidence only where it can mean something, and labelled where it cannot.
 echo
-echo "---- descriptor-block check (feature_sort.md Stage 1e) ----"
+echo "---- descriptor-block check (Stage 1e) ----"
 ENGINE_OBJ="$(find "$FPM_BUILD_DIR" -name "src_parquet_argsort_engine.f90.o" | head -n 1 || true)"
 if [[ -z "$ENGINE_OBJ" ]]; then
     echo "  engine object not found under $FPM_BUILD_DIR -- cannot check."

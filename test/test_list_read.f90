@@ -1077,8 +1077,7 @@ contains
     !! correct while nothing could receive one, and wrong the moment `parquet_map_column` could.
     !! `collect_column_leaf_paths` has always LISTED `struct_of_map.attrs`, so refusing to resolve
     !! it made `parquet_get_column_names` advertise a name that then failed: the same "listing that
-    !! lies" T6 had Phase 2 fix for lists, left open for maps. See feature_container_phase7.md's
-    !! M4/D5/Q3.
+    !! lies" T6 had Phase 2 fix for lists, left open for maps.
     !!
     !! **The refusal that REMAINS is what makes this a control**: an intermediate STRUCT still does
     !! not resolve, because a dotted path names a LEAF by this library's long-standing convention

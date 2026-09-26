@@ -101,19 +101,19 @@
 #             `bandwidth_max`, whose ratio of the widest bandwidth to the global one is what
 #             decides how wide the corrected zone is.
 #
-#   scan      Where the boundary scan's time goes, on the workload feature_kde_speedup.md is
-#             written against: the quantiles of the linear density `f(x) = x/2` on `[0, 2]`, the
-#             bspline kernel, `lower = 0`, `upper = 2`. That density VANISHES at its lower bound,
-#             so the adaptive rule widens without bound there and the corrected zone the `"linear"`
-#             correction scans is the whole support, stepped at the resolution of the narrowest
-#             kernel: `adaptive = yes` + `linear` is the row whose `lookup` grows faster than the
-#             sample does, and every other row is its control. `{isj, lscv}` x `{fixed, adaptive}`
-#             x `{linear, renormalise, reflect}` at three sizes, with the fit's three phases
+#   scan      Where the boundary scan's time goes, on the workload this is written against: the
+#             quantiles of the linear density `f(x) = x/2` on `[0, 2]`, the bspline kernel, `lower
+#             = 0`, `upper = 2`. That density VANISHES at its lower bound, so the adaptive rule
+#             widens without bound there and the corrected zone the `"linear"` correction scans is
+#             the whole support, stepped at the resolution of the narrowest kernel: `adaptive =
+#             yes` + `linear` is the row whose `lookup` grows faster than the sample does, and
+#             every other row is its control. `{isj, lscv}` x `{fixed, adaptive}` x `{linear,
+#             renormalise, reflect}` at three sizes, with the fit's three phases
 #             (`parquet_debug_kde_fit_nanos`) and two spread columns: `h_max/h`, what
 #             `bandwidth_max` caps, and `h_max/h_min`, the bandwidth SPREAD, which is what bounds
 #             the scan's step count and what the default cap binds on. It closes with the target
-#             feature_kde_speedup.md sets -- a 100 000-point adaptive linear fit under a second --
-#             reported as a verdict, never as a gate: the mode does not exit nonzero on a timing.
+#             it sets -- a 100 000-point adaptive linear fit under a second -- reported as a
+#             verdict, never as a gate: the mode does not exit nonzero on a timing.
 #             The slow cells are the adaptive linear ones; `MODE=scan POINTS=10000` is the quick
 #             form.
 #

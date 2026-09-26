@@ -2271,11 +2271,11 @@ contains
     end subroutine test_join_thread_split
     !
     !> **The sort engine's passes over the runs, and the side-index passes of the apply, run on
-    !! the join's team -- and give the serial answer.** Since feature_join.md stage 5 the sort
-    !! engine resolves ONE team by the sort's own rule and runs the classification, the
-    !! cardinality check, the counting, `matched=` and the left-order emission on it, and
-    !! `join_apply` turns the pair list into gather indices on the same team. Nothing in a result
-    !! can see any of that -- the pair list is identical at every team size -- so the two records
+    !! the join's team -- and give the serial answer.** Since stage 5 the sort engine resolves
+    !! ONE team by the sort's own rule and runs the classification, the cardinality check, the
+    !! counting, `matched=` and the left-order emission on it, and `join_apply` turns the pair
+    !! list into gather indices on the same team. Nothing in a result can see any of that -- the
+    !! pair list is identical at every team size -- so the two records
     !! `parquet_debug_get_join_group_threads_used` and `parquet_debug_get_join_side_threads_used`
     !! are the only observables, and the A/B against `threads=1` is what proves the threaded
     !! passes right (feature_risks.md Risk-189, Risk-220).
@@ -2652,7 +2652,7 @@ contains
         ! ---- Arm 8: the work floor sees the OUTPUT rows. The right table has 100 rows, far under a
         ! floor of 5000 elements, and the join produces NROW rows, far over it -- a floor measured
         ! on the source alone would keep this rewrite serial, which is exactly what kept a
-        ! lookup join's 10M-row carry serial before stage 4 of feature_join.md.
+        ! lookup join's 10M-row carry serial before stage 4.
         call parquet_new_table(r)
         call r%add_column("k", k(1:100))
         call r%add_column("p", n(1:100))

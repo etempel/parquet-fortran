@@ -37,8 +37,8 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent.parent / "test" / "test_path_vectors.f90"
 
 # ---------------------------------------------------------------------------
-# The fixtures. Every row of the two tables in feature_utils.md is here, plus the cases the
-# design calls out as the ones a hand-rolled implementation gets wrong.
+# The fixtures. Every row of the two published tables is here, plus the cases the design calls
+# out as the ones a hand-rolled implementation gets wrong.
 # ---------------------------------------------------------------------------
 
 # Join fixtures: each is a tuple of components, 2 to 5 of them.

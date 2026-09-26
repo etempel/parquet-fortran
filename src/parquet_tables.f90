@@ -9125,7 +9125,7 @@ module parquet_tables
         !> `%append(table)` for `parquet_table_writer`'s buffer: the same lock, checks and worker,
         !! with one rule the sink decides -- `ignore_unknown=.true.` skips a resident source
         !! column this table lacks instead of refusing it, which is what an explicit `schema=`
-        !! means (feature_pandas_S2.md, question 18). Private to the module.
+        !! means. Private to the module.
         module subroutine table_append_table_ext(self, other, ignore_unknown)
             class(parquet_table), intent(inout) :: self !! the table to grow.
             class(parquet_table), intent(in) :: other   !! the table whose rows are appended.

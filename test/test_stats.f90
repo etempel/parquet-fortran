@@ -1533,7 +1533,7 @@ contains
     !! distinguishable, and two differing only in the kind of an OPTIONAL argument are rejected at
     !! the declaration. `n`'s kind therefore selects the specific and `n_null`/`n_nan` follow it.
     !! Every other generic in this module has nothing but optional integers and so cannot have this
-    !! pair -- see feature_stats_int32.md.
+    !! pair.
     !!
     !! **What this cannot assert, and where that is enforced instead.** A MIXED call -- int32 `n`
     !! beside an int64 `n_null` -- matches neither specific and is a COMPILE error, so no runtime

@@ -50,13 +50,13 @@
 !! to the named `pf_*` procedure over the group's values gathered into a real64 buffer -- the
 !! widening that module applies to every kind itself -- so a group's answer is that procedure's
 !! answer over the same rows, bit for bit, whatever the thread count; a second moment or
-!! quantile engine here is the copy `feature_pandas_S4.md`'s one-engine rule forbids. Validity
-!! is passed as `is_valid=` only when the group holds a null and weights only when the caller
-!! gave some, so a null-free, unweighted group takes each procedure's fast path. The exact
-!! `int64` family never touches the buffer. The first group of a threaded loop is computed
-!! BEFORE the team opens, so an argument the statistics module refuses (an unknown `method=`, a
-!! `q=` outside 0..1) aborts serially and names itself; the data-dependent aborts inside the
-!! team (an `int64` sum overflowing, a group with no exact answer) go through one `critical`.
+!! quantile engine here is the copy the one-engine rule forbids. Validity is passed as `is_valid=`
+!! only when the group holds a null and weights only when the caller gave some, so a null-free,
+!! unweighted group takes each procedure's fast path. The exact `int64` family never touches the
+!! buffer. The first group of a threaded loop is computed BEFORE the team opens, so an argument the
+!! statistics module refuses (an unknown `method=`, a `q=` outside 0..1) aborts serially and names
+!! itself; the data-dependent aborts inside the team (an `int64` sum overflowing, a group with no
+!! exact answer) go through one `critical`.
 !!
 !! **`%nunique` is one more sort**, over the keys and then the column, so that distinctness is
 !! the comparator's own equality and its outer groups are this grouping's; a walk over the
@@ -69,7 +69,7 @@
 !! team. `%gather` copies one group's run of the permutation into a buffer the caller sized once
 !! by `%max_size()`, widening as `%get` does, and ABORTS rather than truncates when the buffer is
 !! shorter than the group: a statistic over the first `size(buf)` rows of a group is a plausible
-!! wrong answer (feature_pandas_S5.md, R-e).
+!! wrong answer.
 submodule (parquet_tables) parquet_tables_group
     ! The ASCII fold the direction-token refusal and the statistic tokens use. parquet_utils is
     ! already in this module's footprint (the module itself imports it), so a submodule import
@@ -82,7 +82,7 @@ submodule (parquet_tables) parquet_tables_group
     use parquet_settings, only : parquet_get_table_threads
     ! The statistics tier: %agg's vocabulary IS these procedures called per group. This import is
     ! the six files `use parquet_tables` compiles beyond what it did without %agg
-    ! (tools/module_footprints.txt; feature_pandas_S5.md, answer 3).
+    ! (tools/module_footprints.txt).
     use parquet_stats, only : pf_count_valid, pf_sum, pf_mean, pf_variance, pf_stddev, pf_sem, pf_moments, &
         pf_median, pf_quantile, pf_iqr, pf_mad
     ! The NaN "first" and "last" answer over a group with no non-null value.
@@ -1041,10 +1041,10 @@ contains
     !> Resolves `weights=` or `weight_column=` into one real64 weight per TABLE row, or leaves
     !! `wall` unallocated when neither was given. Both together are refused; a weight column is
     !! a scalar numeric one, widened as `%get` widens it, a null weight zero (a missing
-    !! membership probability is no membership; answer F3 of feature_pandas_S5.md). Then every
-    !! GROUPED row's weight is checked once, here, serially: a NaN, negative or infinite weight
-    !! aborts naming its table row -- the statistics module's own rule, applied before the loop
-    !! so that the abort is one and names a row of the table rather than a position in a buffer.
+    !! membership probability is no membership; answer F3). Then every GROUPED row's weight is
+    !! checked once, here, serially: a NaN, negative or infinite weight aborts naming its table
+    !! row -- the statistics module's own rule, applied before the loop so that the abort is one
+    !! and names a row of the table rather than a position in a buffer.
     subroutine agg_weights(self, proc, weights, weight_column, wall)
         class(parquet_grouping), intent(in) :: self             !! the grouping.
         character(len=*), intent(in) :: proc                    !! calling binding, for the message.

@@ -91,8 +91,8 @@ module test_optimize_support
         procedure :: constraints => unit_disc_constraints     !! The disc, as `c(x) <= 0`.
     end type unit_disc
 
-    !> `feature_optimizer.md` 5.9's constrained objective: squared distance from `(1, 2)`,
-    !! restricted to the unit disc.
+    !> The worked constrained objective: squared distance from `(1, 2)`, restricted to the unit
+    !! disc.
     !!
     !! Two variables exactly, unlike `unit_disc`: this one exists to reproduce the guide's own
     !! examples, whose answers are worked out on the page in two dimensions. The constrained
@@ -106,11 +106,11 @@ module test_optimize_support
 
     !> Squared distance from the origin, restricted to the OUTSIDE of the unit disc.
     !!
-    !! The constraint-sign test (`feature_optimizer.md` 8). `c(x) = 1 - |x|^2 <= 0` keeps the
-    !! search OUT of the disc, which is the harder side: the unconstrained minimum, the origin,
-    !! is infeasible, so the answer is on the circle with value `1`. Write the constraint the
-    !! other way round -- SciPy's convention, `c(x) >= 0` feasible -- and the same solver returns
-    !! the origin with value `0`, which is what the test asserts against.
+    !! The constraint-sign test. `c(x) = 1 - |x|^2 <= 0` keeps the search OUT of the disc, which
+    !! is the harder side: the unconstrained minimum, the origin, is infeasible, so the answer is
+    !! on the circle with value `1`. Write the constraint the other way round -- SciPy's
+    !! convention, `c(x) >= 0` feasible -- and the same solver returns the origin with value `0`,
+    !! which is what the test asserts against.
     type, extends(pf_constrained_objective) :: outside_disc
     contains
         procedure :: eval => outside_disc_eval               !! Squared distance from the origin.
@@ -132,7 +132,7 @@ module test_optimize_support
     !!
     !! Exists only so the constraint screen has something to catch. Upstream's `moderatec` would
     !! clamp the value and carry on, and the NaN would then decide which point COBYLA's filter
-    !! keeps (`feature_optimizer.md` Q7).
+    !! keeps.
     type, extends(outside_disc) :: nan_constraint_disc
     contains
         procedure :: constraints => nan_constraint                !! Returns a NaN.

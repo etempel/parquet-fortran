@@ -4,8 +4,7 @@
 !! **Why these live apart from the tests they are about.** Every test here drives
 !! `test/error_scenarios.f90` through `run_error_scenario`/`check_scenario_*`, i.e. it spawns a
 !! subprocess and asserts on its exit status and stderr. That is the one thing `run_tester_cpp`
-!! must not do -- see `feature_tests.md` section 5 -- so they gather in `run_tester_errors`
-!! beside the 913 tests already there.
+!! must not do, so they gather in `run_tester_errors` beside the 913 tests already there.
 !!
 !! **The cost is locality and it is real**: a test asserting that a bad maml call aborts is a
 !! test *about maml*, and it no longer sits beside the maml tests. Run
@@ -206,9 +205,9 @@ contains
             required_stderr="invalid data_type 'date[us]'")
     end subroutine test_schema_add_field_date_with_unit_aborts
 
-    !> qc: min:/max: on a date/time/timestamp field is deliberately unsupported (see
-    !> feature_temporal.md); parquet_validate_maml rejects it with a clear message rather than
-    !> silently ignoring the declared bound.
+    !> qc: min:/max: on a date/time/timestamp field is deliberately unsupported;
+    !> parquet_validate_maml rejects it with a clear message rather than silently ignoring the
+    !> declared bound.
     subroutine test_validate_qc_on_temporal_column_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 

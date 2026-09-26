@@ -59,7 +59,17 @@ Rules for how work is done in this repository. Read before any change.
   open, leave every original in place, list what was carried across from each, put a "superseded
   by" banner at the top of a fully superseded document, and hand the list to the maintainer, who
   archives by hand.
-- A source comment citing a planning document that is no longer present is attribution and stays.
+- **Never cite a `feature_*.md` planning document from source, tests, tooling, benchmarks or any
+  documentation page.** They are git-ignored, so git holds no copy: once the working tree loses
+  one, every pointer to it dangles and the reader has no way to recover what it said. Write the
+  reasoning the citation was standing in for into the comment itself, or point at something git
+  keeps — a rule under `.claude/rules/`, a guide page under `doc/pages/`, a test, or the source.
+  This holds for a document that still exists: it is one `git clean` from being unrecoverable, so
+  a live pointer is a dangling one that has not happened yet.
+- `feature_risks.md` is the exception, because it is **tracked**: `Risk-NNN` citations are expected
+  and stay. Naming the category as a glob is machinery, not a citation, and also stays —
+  `.gitignore`'s `feature_*.md`, `count_lines.py`'s shipped/planning split, `check_doc_anchors.py`'s
+  existence exemption.
 
 ## The `feature_risks.md` open-risks register
 

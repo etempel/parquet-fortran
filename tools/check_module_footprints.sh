@@ -175,11 +175,11 @@ measure_module() {
     # probe's own `build/dependencies/<name>/` instead and flatten differently, so they do not.
     # Without the filter, `toml-f`'s ~35 files would appear in every section that reaches
     # `parquet_toml` -- and the committed expectation, the guide's Files column and README's would
-    # all start counting somebody else's parser. The decision (feature_toml.md section 3) is that
-    # this bookkeeping tracks THIS library's own sources; the dependency still compiles, and the
-    # guide page says so next to the `parquet_toml` row. Note the filter also drops the probe's own
-    # `src_m.f90.o`, which the `grep -v` below then no longer has to catch -- it is kept anyway, so
-    # that neither guard alone is silently doing all the work.
+    # all start counting somebody else's parser. The decision is that this bookkeeping tracks THIS
+    # library's own sources; the dependency still compiles, and the guide page says so next to the
+    # `parquet_toml` row. Note the filter also drops the probe's own `src_m.f90.o`, which the `grep
+    # -v` below then no longer has to catch -- it is kept anyway, so that neither guard alone is
+    # silently doing all the work.
     find "$_probe/build" -type f -name '*.o' \
         | sed 's#.*/##' \
         | grep '_pf_src_' \

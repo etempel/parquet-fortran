@@ -35,8 +35,8 @@ contains
     !!
     !! **This is the implementation; `check_kind` below forwards to it.** Every guard in this
     !! file comes in that pair, because a typed per-cell accessor calling a `class`-dummy guard
-    !! would reintroduce the descriptor block the typed tier exists to remove -- feature_ifx.md
-    !! §7.2 lists the guards as part of the problem for exactly this reason.
+    !! would reintroduce the descriptor block the typed tier exists to remove; the guards are part
+    !! of that problem for exactly this reason.
     module procedure parquet_column_check_kind
         if (col%kind /= expected) then
             error stop EP//proc//": column kind is "//trim(kind_text(col%kind))// &
@@ -314,8 +314,8 @@ contains
     end procedure container_ptr
     !
     module procedure has_validity_storage
-        ! The three validity mechanisms, in the order feature_table.md's "three dispatch classes"
-        ! lists them. Only the first two allocate anything, so only they can be raced on.
+        ! The three validity mechanisms, in the order the three dispatch classes list them. Only the
+        ! first two allocate anything, so only they can be raced on.
         if (is_temporal_kind(self%kind)) then
             res = .true.
         else if (is_string_kind(self%kind)) then

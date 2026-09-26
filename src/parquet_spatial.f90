@@ -6,12 +6,12 @@
 !! *cubesort* is its name and that is the acknowledgement -- but nothing here depends on qfeet, and
 !! the bucketing goes through `pf_argsort` from the tier below rather than a second counting sort.
 !!
-!! **The engine choice was measured, not assumed** (`feature_pandas_S3.md`): against nanoflann's
-!! KD-tree over 1M uniform points in a 100^3 box, a grid built in 0.025 s against 0.18-0.20 s and
-!! answered a radius query in 4.27 us against 6.74 -- on a uniform cloud, a clustered one and a
-!! sparse wedge alike. The one operation a tree does better is k-nearest, and `%nearest` answers it
-!! on this grid rather than reopening the engine question -- by a ball that expands until it holds
-!! enough points, which is exact for the reason `spatial_shell_search` sets out.
+!! **The engine choice was measured, not assumed**: against nanoflann's KD-tree over 1M uniform
+!! points in a 100^3 box, a grid built in 0.025 s against 0.18-0.20 s and answered a radius query
+!! in 4.27 us against 6.74 -- on a uniform cloud, a clustered one and a sparse wedge alike. The one
+!! operation a tree does better is k-nearest, and `%nearest` answers it on this grid rather than
+!! reopening the engine question -- by a ball that expands until it holds enough points, which is
+!! exact for the reason `spatial_shell_search` sets out.
 !!
 !! **This module is Arrow-free by construction and that is the point of its tier.** It reaches
 !! `parquet_argsort`, `parquet_healpix` and `parquet_settings_base` and nothing else, so
@@ -29,8 +29,7 @@
 !!
 !! **Two dimensions are the three-dimensional index with `z` omitted**, not a second type or a
 !! second walk: a zero `z` array gives a bounding box of zero extent in z, so `nz` collapses to 1
-!! and the walk's `k` loop runs exactly once. Measured cost about 22%; see
-!! `feature_pandas_S3_cubesort.md`, capability (f).
+!! and the walk's `k` loop runs exactly once. Measured cost about 22%.
 module parquet_spatial
     use, intrinsic :: iso_fortran_env, only: int32, int64, real64
     use parquet_argsort, only: pf_argsort, &
@@ -204,7 +203,7 @@ module parquet_spatial
     !! Refusing says so, where returning everything slowly would not.
     real(real64), parameter :: spatial_max_sky_deg = 90.0_real64
 
-    ! ---- Tuning constants. None of these is a setting; see feature_pandas_S3_cubesort.md ----
+    ! ---- Tuning constants. None of these is a setting ---------------------------------------
 
     !> Centre of the cell-size bracket, `h = kappa * (r_eff / ((4/3) pi rho))^(1/(1+ndim))`.
     !!
@@ -256,10 +255,10 @@ module parquet_spatial
     !! every cell is occupied and this is the 0.3 cells per point that keeps the bucketing on
     !! `pf_argsort`'s counting fast path; on a partial footprint the box count passes that and the
     !! bucketing takes the radix path, measured to cost the same at a million points
-    !! (`feature_spatial_phase0.md`). What bounds the box count, and with it the memory of the
-    !! dense `start` array, is `spatial_max_box_cells_per_point`. cubesort's own budget rule admits
-    !! `8 * n` cells; do not copy it. A HEALPix sky index applies this figure to its pixel count,
-    !! every pixel of the sphere counted (`spatial_set_nside`).
+    !! What bounds the box count, and with it the memory of the dense `start` array, is
+    !! `spatial_max_box_cells_per_point`. cubesort's own budget rule admits `8 * n` cells; do not
+    !! copy it. A HEALPix sky index applies this figure to its pixel count, every pixel of the
+    !! sphere counted (`spatial_set_nside`).
     real(real64), parameter :: spatial_max_cells_per_point = 0.3_real64
     !> Ceiling on cells of the BOUNDING BOX per point: the memory bound on the dense `start` array,
     !! eight bytes per box cell, so at most 32 bytes per point.

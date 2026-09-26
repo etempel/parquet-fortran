@@ -1300,8 +1300,7 @@ contains
     !> Shared worker for parquet_new_row_group_int32/_int64 -- see the parquet_new_row_group
     !> generic interface in parquet_core.f90. Also resets the current row group's masking state and,
     !> for a writer using the shared whole-file mask (parquet_write_row_mask) together with row
-    !> groups, claims this row group's window (the next `nrows` positions of the stored mask) --
-    !> see "Chunked masking mechanics -- shared whole-file mask" in feature_write_mask.md.
+    !> groups, claims this row group's window (the next `nrows` positions of the stored mask).
     subroutine parquet_new_row_group_impl(writer, nrows)
         type(parquet_writer), intent(inout) :: writer !! open writer.
         integer(c_long_long), intent(in) :: nrows !! row count for the new row group; must be positive.

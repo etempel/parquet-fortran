@@ -4,7 +4,7 @@
 !
 !> Where a READ-TIME sort spends its time: `parquet_open_reader(..., sort_by=)`, phase by phase.
 !!
-!! Written for `feature_sort.md`'s **P13**, whose first step is a measurement rather than a design.
+!! Written for **P13**, whose first step is a measurement rather than a design.
 !! After R1 routed the permutation build to the Fortran engine, the phase shares that item quotes
 !! were *derived* -- taken before R1 and rescaled by the measured engine ratio -- and the whole
 !! point of this program is to replace them with measured ones.
@@ -162,7 +162,7 @@ contains
         ! Both counts, because they are the two arms of what the install does with the cache and
         ! only the pair says which one ran: `taken` is the prefetch case, `released` the ordinary
         ! one, and a lone `taken 0` would read the same whether the key was dropped or the install
-        ! never happened at all. See feature_sort.md's P13.
+        ! never happened at all.
         write (output_unit, '(a,a,a,i0,a,i0,a)') "## sort_by=""", key, " asc""   (", b_cols, &
             " column(s) taken, ", b_rel, " released)"
         write (output_unit, '(a)') ""

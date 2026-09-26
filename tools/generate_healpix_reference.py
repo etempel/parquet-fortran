@@ -67,10 +67,9 @@ import sys
 # --------------------------------------------------------------------------------------------
 # The model: the HEALPix pixelisation, derived from the published algorithm.
 #
-# Every formula here is stated in feature_healpix_tier_a.md section 4, which is the design
-# document the Fortran implementation is written from. Keep the two in step: this file and
-# src/parquet_healpix.f90 are two transcriptions of one specification, and their agreement is
-# what the emitted vectors measure.
+# Every formula here is transcribed from the same specification the Fortran implementation is
+# written from. Keep the two in step: this file and src/parquet_healpix.f90 are two transcriptions
+# of one specification, and their agreement is what the emitted vectors measure.
 # --------------------------------------------------------------------------------------------
 
 # Per-face ring and phi offsets. Faces 0-3 are the north cap, 4-7 the equatorial belt, 8-11 the
@@ -240,7 +239,6 @@ def pix2zphi_ring(nside, p):
 
     Building the centre from z directly is load-bearing rather than an optimisation: a round trip
     through acos moves a pixel whose centre lies exactly on a disc's rim to the wrong side of it.
-    See feature_healpix_tier_a.md section 4.5.
     """
     i, j, nr, shifted = ring_decompose(nside, p)
     z = ring_z(nside, i)
@@ -374,7 +372,7 @@ def max_pixrad(nside):
     return angdist(c, v)
 
 
-# ---- Tier B: the additions of feature_healpix.md section 3.2 --------------------------------
+# ---- Tier B: the later additions ------------------------------------------------------------
 
 
 def ang2vec(theta, phi):
@@ -387,7 +385,7 @@ def vec2ang(v):
     """Direction vector -> (theta, phi), phi in [0, 2*pi). Any nonzero length.
 
     **Scaled by the largest component before anything is squared** (the rule
-    feature_healpix_tier_a.md TA-12 established for `pf_query_disc`). A direction is
+    established for `pf_query_disc`). A direction is
     scale-invariant, so `(1e-300, 0, 1e-300)` names a perfectly good one at 45 degrees from the
     pole -- and squaring it first underflows both terms to zero, giving `atan2(0, 1e-300) = 0`,
     which is wrong by the whole 45 degrees rather than by a rounding. `(1e300, 0, 1e300)`
@@ -1398,7 +1396,7 @@ def verify_oracle():
         nside, v0, r = c["nside"], c["vec"], c["radius"]
         if c["inclusive"]:
             # The two libraries enlarge differently, so the contract is a bounded superset rather
-            # than equality -- see feature_healpix_tier_a.md section 8.7.
+            # than equality.
             #
             # `fact` is healpy's oversampling factor and decides how TIGHT its superset is: a
             # larger one returns fewer pixels that do not really overlap. It is also bounded --

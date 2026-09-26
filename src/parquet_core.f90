@@ -138,14 +138,14 @@ module parquet_core
     !> The int64 key a real64 value is stored under in a TABLE INDEX (`parquet_table%build_index`)
     !> and, later, in the join's hash path -- the CANONICALISING twin of parquet_filter_real_key.
     !>
-    !> The two agree on every value but NaN, and the split is deliberate (feature_pf_index.md,
-    !> question 6): a filter compares as IEEE does, where a NaN equals nothing, so it refuses a NaN
-    !> in a set and never keys one; an index answers the SORT COMPARATOR's question -- "which row
-    !> holds this value", where every NaN is one value, the equality pf_match, %duplicated and
-    !> %drop_duplicates already use -- so here every NaN, whatever its payload or sign, maps onto
-    !> ONE key. Without that a real column holding two NaN rows would be two keys or one by
-    !> accident of payload, and would abort under `unique=.true.` for a reason nobody could see in
-    !> the data. Every other value, -0.0 included, takes exactly the filter's key.
+    !> The two agree on every value but NaN, and the split is deliberate:
+    !> a filter compares as IEEE does, where a NaN equals nothing, so it refuses a NaN in a set and
+    !> never keys one; an index answers the SORT COMPARATOR's question -- "which row holds this
+    !> value", where every NaN is one value, the equality pf_match, %duplicated and %drop_duplicates
+    !> already use -- so here every NaN, whatever its payload or sign, maps onto ONE key. Without
+    !> that a real column holding two NaN rows would be two keys or one by accident of payload, and
+    !> would abort under `unique=.true.` for a reason nobody could see in the data. Every other
+    !> value, -0.0 included, takes exactly the filter's key.
     !>
     !> A caller building a filter must NOT use this function, and a caller building an index must
     !> not use the other; which callers take which is feature_risks.md Risk-211, and
@@ -180,9 +180,9 @@ module parquet_core
     !> set taken from a millisecond file matches a microsecond column by instant, exactly and with
     !> no unit arithmetic (S7 answer F4). Two components rather than one folded int64 because
     !> `seconds * 10**9 + nanoseconds` overflows outside about +-292 years of 1970; the fold is a
-    !> later, internal optimisation (feature_pf_index.md, question 8). A set or an index over a
-    !> timestamp column is therefore a composite pf_index_map, with the tuples shaped `(n, 2)`. A
-    !> null element gives (0, 0) and is masked out by every caller.
+    !> later, internal optimisation. A set or an index over a timestamp column is therefore a
+    !> composite pf_index_map, with the tuples shaped `(n, 2)`. A null element gives (0, 0) and is
+    !> masked out by every caller.
     interface
         elemental module subroutine parquet_timestamp_key(ts, seconds, nanoseconds)
             type(parquet_timestamp), intent(in) :: ts !! the element to key.
@@ -4866,7 +4866,7 @@ contains
     ! target is a SEPARATE MODULE PROCEDURE, under -C=undefined. An empty submodule is enough.
     ! Keeping the target module-contained is the documented ingredient that avoids it, and it costs
     ! nothing: each body is four lines and needs only parquet_bindings, which this module already
-    ! uses. See feature_nag_ice_scope_id.md for the 15-line reproducer and the ingredient table.
+    ! uses.
     ! Do not move these back into a submodule, and give any FUTURE finalizer the same treatment.
 
     !> FINAL procedure: releases the guard `self` holds, if any. Runs implicitly at every exit from

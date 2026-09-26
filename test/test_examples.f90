@@ -1034,7 +1034,7 @@ contains
     !! The example as printed opens a file that must already exist, so the fixture is written here
     !! first; nothing else about it changes. One deviation from the page is unavoidable: the
     !! example says `use parquet_tables`, and this module already carries `use parquet`, so the
-    !! narrow import is NOT what is exercised here -- see the note in feature_doc_table.md.
+    !! narrow import is NOT what is exercised here.
     !> `doc/pages/tables/table-open.md`'s per-thread slice example: one slice per row group covers
     !! every row of the file exactly once.
     !!

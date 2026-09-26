@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The argsort A/B: the shipped C++ sort engine against the pure-Fortran one, on one machine.
 #
-# This is the measurement feature_sort.md's Stage 6 acceptance bar is judged on, taken one stage at
-# a time. It drives bench/benchmark_sort_engine.sh twice -- ENGINE=cpp and ENGINE=fortran, the same
+# This is the measurement the Stage 6 acceptance bar is judged on, taken one stage at a time. It
+# drives bench/benchmark_sort_engine.sh twice -- ENGINE=cpp and ENGINE=fortran, the same
 # build, the same data, the same seed -- and joins the two tables into one, so the ratio per arm is
 # read off directly rather than by eye across two logs.
 #
@@ -171,7 +171,7 @@ load1() { uptime | sed 's/.*load average[s]*: *//' | tr -d ',' | awk '{print $1}
 # this project twice.
 # --------------------------------------------------------------------------------------------
 echo "=============================================================================="
-echo "argsort A/B -- C++ engine vs Fortran engine (feature_sort.md Stage 3 state)"
+echo "argsort A/B -- C++ engine vs Fortran engine (Stage 3 state)"
 echo "=============================================================================="
 echo "  date        : $(date -u '+%Y-%m-%dT%H:%M:%SZ')    host: $(hostname)"
 echo "  FPM_FC      : ${FPM_FC:-(unset -- fpm default)}"
@@ -284,7 +284,7 @@ awk '
 cat <<EOF
 
 ------------------------------------------------------------------------------
-Reading this table (Stage 3 state -- see feature_sort.md):
+Reading this table (Stage 3 state):
 
   * The Fortran engine is SERIAL. Its two \`thr\` rows for a given arm should agree to within this
     machine's noise; if they do not, the harness moved, not the engine.

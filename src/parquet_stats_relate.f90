@@ -306,7 +306,7 @@ contains
     !! **This is not a second ranking implementation.** The expensive half of ranking is the sort,
     !! and that sort is `pf_argsort` -- shared with every other ordering in this library. What is
     !! here is one walk over the sorted order, in `real64` because a midrank is a half-integer and
-    !! `pf_rank`'s output is deliberately an integer array (see feature_pandas_S4.md's F1).
+    !! `pf_rank`'s output is deliberately an integer array.
     subroutine midranks(v, m, r, threads)
         real(real64), intent(in) :: v(:)              !! the values, in any order.
         integer(int64), intent(in) :: m               !! how many are live.

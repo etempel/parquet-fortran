@@ -93,8 +93,7 @@ module parquet_temporal
     !! difference/offset operators traffic in. The `_per_X` pair are exact integer(int64)
     !! divisors (for a whole-unit result, e.g. `ns_value/parquet_ns_per_day` for a whole day
     !! count); the `_to_X` pair are real(real64) multiplicative factors (for a fractional
-    !! result, e.g. a fractional day count) -- see feature_temporal.md's "Design: unit-conversion
-    !! convenience constants" for the naming rationale.
+    !! result, e.g. a fractional day count).
     integer(int64), parameter :: parquet_ns_per_sec = NS_PER_SECOND !! exact; ns in one second.
     integer(int64), parameter :: parquet_ns_per_day = NS_PER_DAY   !! exact; ns in one day.
     real(real64), parameter :: parquet_ns_to_sec = 1.0e-9_real64   !! convenience; ns -> fractional seconds.
@@ -803,7 +802,7 @@ contains
     !! them from this file's other, correctly-attributed procedure headers -- e.g. ts_set_civil,
     !! same `impure elemental` + optional-argument shape, IS attributed normally). Treated as
     !! the same class of line-attribution artifact as the documented end module/end submodule
-    !! exclusion in CLAUDE.md, not a real gap -- see the coverage note in feature_temporal.md.)
+    !! exclusion in CLAUDE.md, not a real gap.)
     impure elemental subroutine date_parse(self, str, success) ! GCOVR_EXCL_LINE
         class(parquet_date), intent(out) :: self  !! receives the parsed date (or null on caught failure).
         character(len=*), intent(in) :: str       !! ISO-8601 date string.
@@ -1190,8 +1189,7 @@ contains
     !! `offset` nanoseconds and always wraps into a valid time-of-day, [0, 86400e9 - 1] --
     !! `offset` itself must already be validated to fit in [-86400e9, 86400e9] by the caller
     !! (the 24h magnitude guard), so this worker never aborts once entered. Uses floor_div-style
-    !! floored modulo, not the intrinsic MOD, so a negative offset wraps correctly (see
-    !! feature_temporal.md's implementation notes).
+    !! floored modulo, not the intrinsic MOD, so a negative offset wraps correctly.
     impure elemental function time_offset_ns_impl(self, offset) result(res)
         class(parquet_time), intent(in) :: self !! the element to shift.
         integer(int64), intent(in) :: offset    !! signed ns offset, already within [-86400e9, 86400e9].
@@ -1738,10 +1736,10 @@ contains
     !
     !> Shared worker for the ns-offset operator(+)/operator(-) specifics: shifts self by
     !! `n` nanoseconds, carrying the normalized nanosecond-of-second component back into
-    !! [0, 999999999] via floor_div (see feature_temporal.md's implementation
-    !! notes). Aborts on a null operand or if the shifted result overflows int64
-    !! seconds -- unlike parquet_date/parquet_time, there is no smaller domain-specific range to
-    !! enforce, only int64 itself.
+    !! [0, 999999999] via floor_div.
+    !! Aborts on a null operand or if the shifted result overflows int64 seconds -- unlike
+    !! parquet_date/parquet_time, there is no smaller domain-specific range to enforce, only int64
+    !! itself.
     impure elemental function ts_offset_ns_impl(self, n) result(res)
         class(parquet_timestamp), intent(in) :: self !! the instant to shift.
         integer(int64), intent(in) :: n              !! signed ns offset (+ forward, - backward).

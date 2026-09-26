@@ -19,7 +19,7 @@
 #   `run_tester_pf` and `run_tester` in full -- the two runners that execute no `bind(C)` call at
 #   all -- then re-tries each `run_tester_noundef` suite one at a time and REPORTS any that now
 #   pass. It never moves one: membership there is decided by a person after looking at why the
-#   result changed (feature_tests.md decision 8).
+#   result changed.
 #
 # A COMPILE FAILURE HERE IS USUALLY A SHAPE, NOT A DEFECT
 #   `fpm test` compiles every file of src/, test/, app/ and bench/ under this option, and nagfor 7.2

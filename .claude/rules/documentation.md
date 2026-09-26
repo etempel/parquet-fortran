@@ -104,8 +104,8 @@ Working rules:
 - Never write out a count or a list the repository owns; point at the source
   ("the `new_testsuite(...)` array in `test/run_tester.f90`").
 - Before adding a paragraph, pick its file: `.claude/rules/` (a rule for future work), the tool's
-  header (how the tool works), `feature_*.md` (a campaign's measurements), `doc/pages/` (what a
-  user needs). CONTRIBUTING.md is the residue.
+  header (how the tool works), `feature_*.md` (a campaign's measurements, which nothing else may
+  cite -- see `workflow.md`), `doc/pages/` (what a user needs). CONTRIBUTING.md is the residue.
 
 ## A guide page describes the CURRENT state, never a former one
 

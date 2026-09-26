@@ -603,7 +603,7 @@ contains
         allocate (rank_row(n))
         ! A scatter through a permutation: every element is written once, so the threads never
         ! meet. Measured at a third of the line-of-sight sweep's whole call when serial, with the
-        ! gather below (`feature_spatial_phase0.md`).
+        ! gather below.
         !$omp parallel do num_threads(nt) schedule(static) default(shared) private(k)
         do k = 1_int64, n
             rank_row(ord(k)) = k
@@ -750,8 +750,7 @@ contains
     !> buffer at most twice its share, from the doubling) and once in the output: up to three lists,
     !! against one plus 16 bytes per point for the count-then-fill shape the ball sweeps keep.
     !> Accepted because a line-of-sight list is small by construction -- the linking lengths are a
-    !> fraction of the mean separation -- and the second pass was most of the sweep's cost
-    !> (`feature_spatial_phase0.md`).
+    !> fraction of the mean separation -- and the second pass was most of the sweep's cost.
     module procedure spatial_pairs_los_worker
 #ifdef _OPENMP
         use omp_lib, only: omp_get_thread_num
@@ -844,9 +843,8 @@ contains
         call spatial_storage(self, xs, ys, zs)
         direct = self%owns
         ! The cell side the walk choice is keyed on: a covering ball no wider than this touches at
-        ! most two cells per axis, which the cylinder cannot beat by enough to pay its own setup
-        ! (`feature_fof_S2.md`, Stage 3's measurement). Zero switches the rule off, for the forced
-        ! cylinder walk.
+        ! most two cells per axis, which the cylinder cannot beat by enough to pay its own setup.
+        ! Zero switches the rule off, for the forced cylinder walk.
         hcell = min(self%cell(1), self%cell(2), self%cell(3))
         if (dbg_los_walk == 2) hcell = 0.0_real64
         call system_clock(count=ck(1))
@@ -1153,10 +1151,9 @@ contains
     !> It is `spatial_scan`'s free-box walk and `spatial_scan_axis`'s slab walk with everything the
     !> sweep never uses removed -- the optional-argument cascade, the buffer caps, the annulus, the
     !> per-pair bound, the sort -- which is where the per-emitter time went
-    !> (`feature_spatial_phase0.md`, section 4). The cells are visited in the order those two walks
-    !> visit them, and the direct/borrowed fork sits at the run as it does there, so the pairs come
-    !> out in the order they would. Every route counts itself here, in its own body, so a test can
-    !> tell which one ran.
+    !> The cells are visited in the order those two walks visit them, and the direct/borrowed fork
+    !> sits at the run as it does there, so the pairs come out in the order they would. Every route
+    !> counts itself here, in its own body, so a test can tell which one ran.
     subroutine los_sweep_lean(self, xs, ys, zs, direct, t, irow, p, q, rwalk, hcell, keys, lrule, want_tie, ls, &
                               bps, bls, ball_all, qlo, qhi, want_sep, buf, ncyl, nbal, ntest)
         type(pf_spatial_index), intent(in), target :: self !! the index being swept.
@@ -1400,8 +1397,8 @@ contains
     !> cells per axis, and the cylinder, thinner but paying a slab walk's setup per emitter, cannot
     !> visit enough fewer points to earn it back; where the ball spans several cells per axis its
     !> cell count grows with the cube of the ratio and the cylinder's with the first power, and the
-    !> cylinder wins. The measurement behind the rule is in `feature_fof_S2.md`, Stage 3. Either
-    !> choice is complete, since both regions contain the accepted set; only the cost differs.
+    !> cylinder wins. Either choice is complete, since both regions contain the accepted set; only
+    !> the cost differs.
     pure subroutine los_walk_shape(obs, q, dself, pw, hcell, qlo, qhi, use_ball, r, pa, pb, rw)
         real(real64), intent(in) :: obs(3) !! the observer.
         real(real64), intent(in) :: q(3) !! the emitter relative to the observer.

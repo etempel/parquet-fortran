@@ -2144,9 +2144,9 @@ contains
         !
         ! `m_intkey` is the current choice and should be the LAST one, because its unreadability is
         ! not a deferral: a map's keys must be strings, which is a decided scope for v1 rather than
-        ! a phase's unfinished business (feature_map_list_struct.md, "Map key type and duplicate
-        ! handling"). Every predecessor named a type some later phase went on to read. If this one
-        ! ever has to move too, prefer another DECIDED restriction over anything a roadmap mentions.
+        ! a phase's unfinished business. Every predecessor named a type some later phase went on
+        ! to read. If this one ever has to move too, prefer another DECIDED restriction over
+        ! anything a roadmap mentions.
         call parquet_open_table(t, f)
         call check(error, t%nrows() > 0, "a file with a foreign column should still open")
         if (allocated(error)) return
@@ -3568,7 +3568,7 @@ contains
         ! 7244) dies with an internal compiler error ("Panic: Unexpected leaf array") on a named
         ! CONSTANT array used as a vector subscript in this procedure, while the same subscript
         ! through a variable compiles fine; PICK itself stays a parameter for every non-subscript
-        ! use. Reported to NAG support; see feature_nag_ice_leaf_array.md for the reproducer.
+        ! use. Reported to NAG support.
         integer :: pick_rows(3)
         character(len=*), parameter :: f = "test_run/table_slice_every_kind.parquet"
 
@@ -8777,8 +8777,7 @@ contains
     !
     !> A source column that exists but was never read is absent to the table form of `%append`,
     !! exactly as it is to the row form: this table's column is null-filled for those rows and the
-    !! resident columns copy. It used to abort with a message about kinds (feature_pandas_S2.md,
-    !! question 14).
+    !! resident columns copy. It used to abort with a message about kinds.
     subroutine test_append_null_fills_an_unread_column(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: dest, src
@@ -8809,7 +8808,7 @@ contains
     end subroutine test_append_null_fills_an_unread_column
     !
     !> A source `parquet_row_index` is dropped when this table lacks it, for every table, and a
-    !! destination that has the column still copies it (feature_pandas_S2.md, question 17).
+    !! destination that has the column still copies it.
     subroutine test_append_drops_a_source_row_index(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: dest, src, with_index

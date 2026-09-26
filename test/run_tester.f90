@@ -15,7 +15,7 @@
 !! **The name is deliberately unchanged** even though the contents are completely different:
 !! `CONTRIBUTING.md`, `tools/coverage.sh`, `tools/coverage_cpp.sh` and `fpm.toml`'s own comment
 !! all name `run_tester`, and a rename would silently change what those commands measure rather
-!! than fail (`feature_tests.md` section 6.1).
+!! than fail.
 !!
 !! Like (a) this executes no `bind(C)` call and is undef-safe.
 program run_tester

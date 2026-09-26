@@ -1,10 +1,9 @@
 !> The in-repo HEALPix benchmark: conversion throughput, bulk thread scaling and `pf_query_disc`.
 !!
-!! **This is TA-5**, the in-repository half of `feature_healpix_tier_a.md` section 8.8 and the
-!! whole measurement instrument for `feature_healpix_tier_b.md` section 7.8 (gates G2/G3, targets
-!! T1/T2). It links **no HEALPix at all**, so it travels with the repository and any machine can
-!! reproduce the native side; the GPL-linking comparison against `libhealpix` stays out of tree in
-!! `test_run/healpix_bench/` (decision D16).
+!! **This is TA-5**, the in-repository half of the tier-A work and the whole measurement
+!! instrument for tier B (gates G2/G3, targets T1/T2). It links **no HEALPix at all**, so it
+!! travels with the repository and any machine can reproduce the native side; the GPL-linking
+!! comparison against `libhealpix` stays out of tree in `test_run/healpix_bench/` (decision D16).
 !!
 !! **What each mode answers.**
 !!
@@ -20,9 +19,9 @@
 !!   at more than one thread count is the point: the crossover is not one number unless it happens
 !!   not to move with the team size.
 !! - `--mode=disc` -- `pf_query_disc` in microseconds per disc across `nside` and radius, for the
-!!   two call shapes `feature_healpix_tier_a.md` section 1.2 measured `libhealpix` in: the pixel
-!!   disc (`nside` 1024, RING, exact) and candidate generation (`nside` 256, NEST, inclusive). The
-!!   three output forms -- caller buffer, count-only and self-sizing -- are timed side by side.
+!!   two call shapes `libhealpix` was measured in: the pixel disc (`nside` 1024, RING, exact) and
+!!   candidate generation (`nside` 256, NEST, inclusive). The three output forms -- caller buffer,
+!!   count-only and self-sizing -- are timed side by side.
 !!
 !! **The fixtures are deterministic and compiler-independent, by construction rather than by
 !! seeding.** Directions come from a Fibonacci spiral (`z` stepped linearly, longitude advanced by
@@ -1140,7 +1139,7 @@ contains
             'dec [-70, +20] band,'
         write(output_unit, '(a)') 'which is the footprint test_run/healpix_bench uses, so these rows are ' // &
             'directly'
-        write(output_unit, '(a)') 'comparable with the libhealpix columns recorded in feature_healpix_tier_a.md.'
+        write(output_unit, '(a)') 'comparable with the recorded libhealpix columns.'
         write(output_unit, '(a)') ''
         write(output_unit, '(a)') 'PIXEL DISC -- nside 1024, RING, inclusive=.false. (the query_disc(inclusive=0) shape)'
         call disc_header()

@@ -10,13 +10,12 @@
 !!   --mode=check   identity (scalar vs bulk vs subset) and bijectivity over a sweep of `m`
 !!   --mode=bench   per-element cost of the scalar form and of the bulk form, serial and automatic
 !!   --mode=floor   wall ns/element by explicit thread count, for BOTH the permutation and the
-!!                  subset -- what sets the work floor's default, and `feature_random_phase2.md`
-!!                  §11 item 3's thread-scaling obligation for the trio
-!!   --mode=guarantee  what coordinate addressing COSTS: the shipped permutation against a
-!!                  stream-driven Fisher-Yates (the cheapest shuffle there is, and unusable in a
-!!                  parallel loop) and against key-and-argsort. `feature_random_phase2.md` §11
-!!                  item 2, restated -- its original phrasing became self-referential when the
-!!                  construction stopped being a Fisher-Yates.
+!!                  subset -- what sets the work floor's default, and the trio's thread-scaling
+!!                  obligation --mode=guarantee what coordinate addressing COSTS: the shipped
+!!   permutation against a stream-driven Fisher-Yates (the cheapest shuffle there is, and unusable
+!!                  in a parallel loop) and against key-and-argsort. The comparison is restated
+!!                  here -- its original phrasing became self-referential when the construction
+!!                  stopped being a Fisher-Yates.
 !!
 !! Always build with `--profile release`; a default-profile run measures nothing (see CLAUDE.md,
 !! "Manual (never-`fpm test`) large-scale/benchmark tools").
@@ -266,10 +265,10 @@ contains
 
     !> What the reproducibility guarantee costs, priced against the two things it rules out.
     !!
-    !! **The comparison `feature_random_phase2.md` §11 item 2 asked for, restated.** Its original
-    !! phrasing -- "`pf_random_permutation` (argsort-based) against a serial Fisher-Yates" -- was
-    !! written when the construction was expected to be one of those two, and became
-    !! self-referential when D9 made it a Fisher-Yates and then the Feistel bijection replaced both.
+    !! **The comparison originally asked for, restated.** Its original phrasing --
+    !! "`pf_random_permutation` (argsort-based) against a serial Fisher-Yates" -- was written when
+    !! the construction was expected to be one of those two, and became self-referential when D9
+    !! made it a Fisher-Yates and then the Feistel bijection replaced both.
     !! The question that survives is the one worth asking anyway:
     !!
     !!  * **arm B, stream Fisher-Yates** -- the cheapest shuffle this library can express, and the
@@ -280,9 +279,8 @@ contains
     !!    cannot do is give element `k` without producing elements `1..k-1` first, which is exactly
     !!    what a dynamically scheduled loop needs. So `A/B` is **the price of coordinate
     !!    addressing** -- of being able to ask for element 5000 alone, on any thread, in any order.
-    !!  * **arm C, key-and-argsort** -- reproducible, and the construction `feature_random.md`
-    !!    §6.3.1 originally specified. So `A/C` is **the price of the algorithm choice**, holding
-    !!    the guarantee fixed.
+    !!  * **arm C, key-and-argsort** -- reproducible, and the construction originally specified.
+    !!    So `A/C` is **the price of the algorithm choice**, holding the guarantee fixed.
     !!
     !! Two properties no timing column can show, and they are the reason the ratios are not the
     !! whole answer: arm B cannot produce a subset without materialising the whole population, and

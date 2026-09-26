@@ -2,13 +2,13 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Stage 1e of `feature_sort.md`: what does ONE comparison cost, in Fortran and in C++?
+!> Stage 1e: what does ONE comparison cost, in Fortran and in C++?
 !!
 !! `bench/benchmark_sort_engine.f90` measures whole sorts. That cannot answer the question Stage 1
-!! leaves open (`feature_sort.md` §11.3 **O3**, *"whether the comparator can be made cheap enough in
-!! Fortran"*), because at Stage 2 the introsort is new as well — a slow comparator and a slow sort
-!! would arrive together and be indistinguishable. This program isolates the comparator while it is
-!! the only thing that has changed.
+!! leaves open (**O3**, *"whether the comparator can be made cheap enough in Fortran"*), because at
+!! Stage 2 the introsort is new as well — a slow comparator and a slow sort would arrive together
+!! and be indistinguishable. This program isolates the comparator while it is the only thing that
+!! has changed.
 !!
 !! ## What it measures, and why it is shaped like this
 !!
@@ -357,7 +357,7 @@ contains
     !> Provenance, printed before any number.
     subroutine banner()
         write(output_unit,'(a)') "=============================================================="
-        write(output_unit,'(a)') "benchmark_sort_comparator -- feature_sort.md Stage 1e"
+        write(output_unit,'(a)') "benchmark_sort_comparator -- Stage 1e"
         write(output_unit,'(a,i0,a,i0,a,i0)') "  rows: ", nrows, "   reps: ", nreps, &
             "   rounds (min reported): ", rounds
         write(output_unit,'(a,i0)') "  comparisons per timed sweep: ", nrows * nreps

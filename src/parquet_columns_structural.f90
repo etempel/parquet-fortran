@@ -34,7 +34,7 @@ contains
         ! placeholder -- it allocates a kind's storage from a row count, and `init(PK_LIST, 100)`
         ! would have to mean "a hundred rows of what?", which has no answer. A container column's
         ! contents come from an object the caller has already built, so the entry point is
-        ! `adopt_container` (feature_map_list_struct.md, Phase 1).
+        ! `adopt_container`.
         !
         ! `self%kind` therefore has exactly FIVE writers: this one (never a container kind),
         ! `clear` (writes PK_NONE), `move_from` (copies whatever the source held), the sixteen
@@ -487,15 +487,15 @@ contains
     !
     !> Keeps the rows `idx` lists, in the order it lists them, changing the row count to match.
     !!
-    !! Since stage 4 of `feature_join.md` this is `gather_build` -- the one implementation of the
-    !! copy, the bitmap rebuild and the row split that `gather_from` also runs -- applied to the
-    !! column's own rows into a fresh column, which `move_from` then hands back over the original
-    !! in O(1). What stays here is what differs between the two entry points: the range check,
-    !! whose message names this binding, and the container kinds, which rebuild themselves in
-    !! place and cannot be copied from outside -- nor null-filled by a mask, since their row
-    !! nullness lives inside the container, which is why `parquet_table%join` refuses the two
-    !! `how=` values that could ask for it before anything reaches here (`feature_risks.md`
-    !! Risk-188: a container column is carried across a join by exactly this route).
+    !! Since stage 4 this is `gather_build` -- the one implementation of the copy, the bitmap
+    !! rebuild and the row split that `gather_from` also runs -- applied to the column's own rows
+    !! into a fresh column, which `move_from` then hands back over the original in O(1). What
+    !! stays here is what differs between the two entry points: the range check, whose message names
+    !! this binding, and the container kinds, which rebuild themselves in place and cannot be copied
+    !! from outside -- nor null-filled by a mask, since their row nullness lives inside the
+    !! container, which is why `parquet_table%join` refuses the two `how=` values that could ask for
+    !! it before anything reaches here (`feature_risks.md` Risk-188: a container column is carried
+    !! across a join by exactly this route).
     !!
     !! **Repeats are permitted** -- see the interface's doc-comment for why the duplicate scan is
     !! deliberately absent rather than merely omitted.

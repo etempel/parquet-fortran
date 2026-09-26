@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Where a READ-TIME sort spends its time, phase by phase -- the measurement step of
-# feature_sort.md's P13.
+# Where a READ-TIME sort spends its time, phase by phase.
 #
 # Drives bench/benchmark_sort_readtime.f90, which opens a reader with `sort_by=` and reads the C++
 # phase counters (parquet_debug_get_sort_*_nanos) around each stage of the install. It exists
@@ -74,7 +73,7 @@
 # bind, the copy-out to Fortran, the `arrow::Int64Array` build and the `arrow::compute::Take` loop
 # -- so the shares are measured rather than inferred. It exists because those shares had previously
 # been derived from a measurement taken before the sort was routed to the Fortran engine, and a
-# derived share is not a measurement; see `feature_sort.md`'s P13 for what it found.
+# derived share is not a measurement.
 #
 # Two things about reading its output. `engine+open` is DERIVED, being the wall clock minus the five
 # C++ phases, so it holds `pf_argsort`, the reader open itself and the allocation between them --

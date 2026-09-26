@@ -45,7 +45,7 @@
 !! detaching sees to that -- so a caller who wants it must `%prefetch` it BEFORE mutating, and the
 !! detach guard is what says so if they did not. On the SOURCE side of `%append` the same rule
 !! reads: a column the appended table has but has not read is absent, and this table's column is
-!! null-filled for those rows -- on both forms of the append (feature_pandas_S2.md, question 14).
+!! null-filled for those rows -- on both forms of the append.
 !! A source `parquet_row_index` this table lacks is dropped rather than refused (question 17):
 !! it is this library's own provenance column, and nothing would ever write it.
 !!
@@ -544,9 +544,9 @@ contains
             if (i == 0) then
                 ! This library's own provenance column is dropped rather than refused when the
                 ! destination lacks it: a source read from a file may carry it resident, and
-                ! nothing would ever write it (feature_pandas_S2.md, question 17). The sink's flag
-                ! widens the same skip to every column its explicit schema does not name
-                ! (question 18); the plain %append keeps refusing.
+                ! nothing would ever write it. The sink's flag widens the same skip to every
+                ! column its explicit schema does not name (question 18); the plain %append
+                ! keeps refusing.
                 if (src%cols(j)%name == PARQUET_ROW_INDEX) cycle
                 if (ignore_unknown) cycle
                 call append_unknown_column(self, src%cols(j)%name)
@@ -577,7 +577,7 @@ contains
             ! A source column that exists but has not been read is treated as ABSENT, exactly as
             ! the validation above already treats it and as the row path does -- so this table's
             ! column is null-filled rather than handed a column with no values, which used to
-            ! abort with a message about kinds (feature_pandas_S2.md, question 14).
+            ! abort with a message about kinds.
             if (j > 0) then
                 if (.not. cache_column_usable(other%cache, j)) j = 0
             end if

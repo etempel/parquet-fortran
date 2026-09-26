@@ -44,7 +44,7 @@ contains
         ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
         ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
         ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
-        ! not always less time. See feature_sort_report.md.
+        ! not always less time.
         !
         ! **`threads=` is honoured here, and the absent case falls back to the automatic
         ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
@@ -62,7 +62,7 @@ contains
         ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
         ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
         ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
-        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
@@ -95,7 +95,7 @@ contains
         ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
         ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
         ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
-        ! not always less time. See feature_sort_report.md.
+        ! not always less time.
         !
         ! **`threads=` is honoured here, and the absent case falls back to the automatic
         ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
@@ -113,7 +113,7 @@ contains
         ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
         ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
         ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
-        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
@@ -146,7 +146,7 @@ contains
         ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
         ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
         ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
-        ! not always less time. See feature_sort_report.md.
+        ! not always less time.
         !
         ! **`threads=` is honoured here, and the absent case falls back to the automatic
         ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
@@ -164,7 +164,7 @@ contains
         ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
         ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
         ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
-        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
@@ -197,7 +197,7 @@ contains
         ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
         ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
         ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
-        ! not always less time. See feature_sort_report.md.
+        ! not always less time.
         !
         ! **`threads=` is honoured here, and the absent case falls back to the automatic
         ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
@@ -215,7 +215,7 @@ contains
         ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
         ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
         ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
-        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
@@ -248,7 +248,7 @@ contains
         ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
         ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
         ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
-        ! not always less time. See feature_sort_report.md.
+        ! not always less time.
         !
         ! **`threads=` is honoured here, and the absent case falls back to the automatic
         ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
@@ -266,7 +266,7 @@ contains
         ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
         ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
         ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
-        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
@@ -693,7 +693,7 @@ contains
         ! and `omp_get_place_num_procs()` were measured on a process whose initial thread was
         ! pre-bound to 2 CPUs: they report 2 places totalling 2 processors, not the machine's 384,
         ! and a team of 64 then lands on 2 distinct CPUs. The true machine size is not recoverable
-        ! from inside the process. See feature_sort_report.md sections 5 and 11.
+        ! from inside the process.
         !
         ! **The clamp and its warning both live in `parquet_clamp_to_affinity`**
         ! (src/parquet_settings_base.f90), which is the one place four resolvers share -- this one,

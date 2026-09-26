@@ -8,10 +8,10 @@
 !! regress -- and it regresses at BUILD time, not as a failed assertion, which is the same way
 !! `test_facade_covers_every_layer` (test/test_examples.f90) earns its keep.
 !!
-!! The rule being asserted, from feature_modules.md's section 4: *a module re-exports, get and set,
-!! every knob its own code reads, including the output pair when it can emit.* A user who imports
-!! one module to get one capability must be able to configure that capability without also
-!! importing `parquet_settings`, which would drag in `parquet_bindings` and with it Arrow.
+!! The rule being asserted: *a module re-exports, get and set, every knob its own code reads,
+!! including the output pair when it can emit.* A user who imports one module to get one
+!! capability must be able to configure that capability without also importing `parquet_settings`,
+!! which would drag in `parquet_bindings` and with it Arrow.
 !!
 !! **Do not add a second library import to any module in this file.** A `use parquet` anywhere here
 !! silently restores everything and the suite stops testing what it exists for. One module per entry
@@ -940,8 +940,8 @@ end module test_module_surface_columns
 !! a type carries its bindings, and `%gather(..., threads=)` resolves its team through
 !! `parquet_clamp_to_affinity`. So the output pair is asserted here beside the capability, and
 !! naming the four setters and getters is what keeps them re-exported. What stays deliberate is
-!! that no VALIDATION knob appears: see the `found=`-not-`warn=` decision in
-!! feature_container_phase1.md, which turns on exactly this dependency.
+!! that no VALIDATION knob appears: the `found=`-not-`warn=` decision turns on exactly this
+!! dependency.
 module test_module_surface_list
     use parquet_list                   ! THE ONLY library import.
     use iso_fortran_env, only : int32, int64

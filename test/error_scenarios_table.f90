@@ -1882,11 +1882,11 @@ contains
         print '(a)', "unexpectedly opened a reader with an unknown qc: sub-key"
     end subroutine scenario_qc_maml_unknown_subkey
 
-    !> Regression scenario for feature_doc.md point 7's F1 finding: a MAML source line longer
-    !! than parquet_metadata's maml_max_line_len (1024 characters) used to be silently truncated
-    !! by a fixed-length `read(unit,'(A)')` (iostat still 0), producing incomplete metadata with
-    !! no diagnostic. parquet_metadata_maml.f90's parquet_read_maml_source_lines now detects this
-    !! via a non-advancing read + size= and aborts naming the offending line number, instead.
+    !> Regression scenario: a MAML source line longer than parquet_metadata's maml_max_line_len
+    !! (1024 characters) used to be silently truncated by a fixed-length `read(unit,'(A)')` (iostat
+    !! still 0), producing incomplete metadata with no diagnostic. parquet_metadata_maml.f90's
+    !! parquet_read_maml_source_lines now detects this via a non-advancing read + size= and aborts
+    !! naming the offending line number, instead.
     subroutine scenario_maml_line_too_long()
         type(parquet_schema) :: schema
         character(len=1100) :: long_info
@@ -4770,9 +4770,9 @@ contains
     end subroutine scenario_string_view_slice_size_mismatch
 
     !> parquet_string_column%build_from: a handle that aliases the destination column aborts
-    !! before self is cleared -- the exact scenario feature_stringcolumn.md's design flags as
-    !! forbidden (build_from clearing self would otherwise silently destroy the handles' own
-    !! source data before they could be read).
+    !! before self is cleared -- the exact scenario the design flags as forbidden (build_from
+    !! clearing self would otherwise silently destroy the handles' own source data before they could
+    !! be read).
     subroutine scenario_string_build_from_self_alias()
         type(parquet_string_column), target :: global_string
         type(parquet_string) :: my_string_array(2)
@@ -5577,7 +5577,7 @@ contains
     end subroutine scenario_schema_add_field_date_with_unit
 
     !> parquet_validate_maml rejects qc: min:/max: on a date/time/timestamp field -- qc is not
-    !> supported for temporal columns yet (deferred scope, see feature_temporal.md).
+    !> supported for temporal columns yet (deferred scope).
     subroutine scenario_validate_qc_on_temporal_column()
         type(parquet_maml_file) :: maml
 
@@ -6060,7 +6060,6 @@ contains
 
     ! ==================================================================================
     ! Row-filtering ("mask") scenarios -- parquet_write_row_mask/parquet_write_chunk_row_mask.
-    ! See feature_write_mask.md for the full design this implements.
     ! ==================================================================================
 
     !> parquet_write_row_mask must be called before the writer's first write/row group.
@@ -6736,8 +6735,8 @@ contains
     end subroutine scenario_columns_clear_null_elem_temporal
 
     !> append requires identical kinds: silently widening an int32 source into a float64 target
-    !! would change the target column's storage kind, which section E of feature_table.md rules
-    !! out (use %copy_column instead).
+    !! would change the target column's storage kind, which the design rules out (use %copy_column
+    !! instead).
     subroutine scenario_columns_append_kind_mismatch()
         type(parquet_column) :: a, b
         call a%init(PK_FLOAT64, 2_int64)
@@ -6920,8 +6919,8 @@ contains
     end subroutine scenario_columns_clear_null_temporal
 
     !> The container kinds are declared so the type's layout is final, but their internals are
-    !! deferred to feature_map_list_struct.md -- asking for one now must say so plainly rather
-    !! than produce a column with no storage.
+    !! deferred -- asking for one now must say so plainly rather than produce a column with no
+    !! storage.
     subroutine scenario_columns_init_container_kind()
         type(parquet_column) :: col
         call col%init(PK_LIST, 2_int64)   ! reserved kind -> aborts
@@ -10637,11 +10636,11 @@ contains
     !> A row-structural mutation SKIPS a column that is not resident -- container or not -- and the
     !! detach guard is the only thing that reports it afterwards.
     !!
-    !! This is feature_container_phase6.md's Q2, resolved to "skip, and let the detach guard catch
-    !! the read". The column is left RES_EMPTY, so it holds no storage that could be misaligned;
-    !! what makes that safe is that every value accessor routes through table_resolve, which runs
-    !! table_check_not_detached. An accessor written any other way would read the skipped column
-    !! instead of aborting, and this scenario is what would notice.
+    !! This was resolved to "skip, and let the detach guard catch the read". The column is left
+    !! RES_EMPTY, so it holds no storage that could be misaligned; what makes that safe is that
+    !! every value accessor routes through table_resolve, which runs table_check_not_detached.
+    !! An accessor written any other way would read the skipped column instead of aborting, and this
+    !! scenario is what would notice.
     !!
     !! Its negative control is test/test_table_container.f90's test_container_row_alignment, where
     !! the same mutations run on a MATERIALIZED container column and every row stays aligned.

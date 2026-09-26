@@ -17,8 +17,8 @@
 !!   every depth, and a test asserts that too -- otherwise "it recurses" and "it recurses in the
 !!   right place" are indistinguishable.
 !! * `%init` must still REFUSE a container payload while `%adopt_*` accepts one. That asymmetry is
-!!   the whole of feature_container_phase7.md's D1, and it needs both halves asserted: a refusal
-!!   test alone passes just as happily against a gate that refuses everything.
+!!   the whole of the phase-7 decision, and it needs both halves asserted: a refusal test alone
+!!   passes just as happily against a gate that refuses everything.
 !!
 !! Everything here is built in memory and needs no reader, which is deliberate: these are the tests
 !! that can go green before any C++ exists, and they are what the file-reading tests in
@@ -38,8 +38,7 @@ module test_container_nested
     !!
     !! Every expected value below was cross-checked against `pyarrow` rather than against this
     !! library's own reader -- which is the only independent oracle Phase 7 has, since nesting is
-    !! read-only and there is nothing to round-trip through. See feature_container_phase7.md's
-    !! Verification section.
+    !! read-only and there is nothing to round-trip through.
     character(len=*), parameter :: NEST = "test/fixtures/map_list_types.parquet"
 
 contains

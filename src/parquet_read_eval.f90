@@ -5,10 +5,10 @@
 !> `parquet_column` storage a caller already holds rather than against a file.
 !>
 !> This is what `parquet_table`'s `%row_mask` and `%filter_rows(expr)`/`%filter_rows(filter)` are
-!> built on. The reader's engine and this one are two implementations, deliberately -- decision 6
-!> of feature_pandas_S7.md accepted a second evaluator so that one grammar serves both -- but they
-!> are two implementations of ONE specification, and everything that could make them disagree is
-!> shared rather than reimplemented:
+!> built on. The reader's engine and this one are two implementations, deliberately -- the design
+!> accepted a second evaluator so that one grammar serves both -- but they are two implementations
+!> of ONE specification, and everything that could make them disagree is shared rather than
+!> reimplemented:
 !>
 !>  * the PARSER is the same. `parquet_parse_filter_rules` produces the postfix node list and the
 !>    packed leaves for both, so precedence, the AND-fold between `%add` calls, the keyword set and
@@ -51,7 +51,7 @@ submodule (parquet_core:parquet_read) parquet_read_eval
     ! The two string accessors are the TYPED generics rather than `sc%is_null(i)`/`sc%get(i, v)`
     ! on the pointer: a type(parquet_string_column) actual passed to a `class` passed-object dummy
     ! makes ifx build a runtime type descriptor in the caller's prologue on EVERY call, and this
-    ! is a per-row path (CLAUDE.md's typed-accessor tier, feature_ifx.md).
+    ! is a per-row path (CLAUDE.md's typed-accessor tier).
     use parquet_strings, only: parquet_string_column_is_null, parquet_string_column_get
     use ieee_arithmetic, only: ieee_is_finite
     implicit none

@@ -171,8 +171,7 @@ module parquet_bindings
     integer(c_int32_t), parameter :: PF_ELEM_TIMESTAMP = 9 !! timestamp.
     ! The three CONTAINER families, reported where a nested payload is possible. They come from
     ! arrow_nested_family rather than arrow_leaf_family on the C++ side, because
-    ! parquet_get_column_type must keep answering "unknown" for a container at every depth --
-    ! see feature_container_phase7.md's D12.1.
+    ! parquet_get_column_type must keep answering "unknown" for a container at every depth.
     integer(c_int32_t), parameter :: PF_ELEM_LIST = 10     !! list/large_list.
     integer(c_int32_t), parameter :: PF_ELEM_MAP = 11      !! map.
     integer(c_int32_t), parameter :: PF_ELEM_STRUCT = 12   !! struct.
@@ -2214,8 +2213,7 @@ module parquet_bindings
 
         !> Fills an int32-payload list column's offsets, row validity, values and element validity.
         !> Offsets and per-ROW validity only, for a list whose payload is itself a container.
-        !! The payload is read separately through the descent path `<name>[]`; see
-        !! feature_container_phase7.md's D4 (7b).
+        !! The payload is read separately through the descent path `<name>[]`.
         subroutine parquet_read_list_offsets_fill(reader, name, row_group, nrows, nelems, offsets, &
                 row_valid) bind(C, name="parquet_read_list_offsets_fill")
             import

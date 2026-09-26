@@ -365,8 +365,7 @@ contains
 
     ! ---- What LINCOA and COBYLA add: the QR updates and the factorisation update ---------------
     !
-    ! Everything above is what BOBYQA reaches (`feature_optimizer.md` 12.1 allows a phase to extend
-    ! what an earlier one built).
+    ! Everything above is what BOBYQA reaches (a later phase may extend what an earlier one built).
 
     !> Column `k` of `OMEGA`, upstream's `omega_col`.
     !!

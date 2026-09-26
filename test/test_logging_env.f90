@@ -9,9 +9,9 @@
 !! environment to read, Fortran cannot set one, and the POSIX `setenv`/`unsetenv` shims below are
 !! `bind(C)` calls like any other. A test file declaring one cannot feed an undef-safe runner --
 !! nagfor's `-C=undefined` corrupts every argument after the first of a call into C, and the rule
-!! is file-level because a per-test rule is not statically decidable (feature_tests.md §5). So
-!! this file joins `run_tester_cpp` even though it reaches no C++ of this library's own, and the
-!! other 43 logging tests stay in the undef-safe `run_tester_pf`.
+!! is file-level because a per-test rule is not statically decidable. So this file joins
+!! `run_tester_cpp` even though it reaches no C++ of this library's own, and the other 43 logging
+!! tests stay in the undef-safe `run_tester_pf`.
 !!
 !! Registered as the suite `logging_env`; the Arrow-free remainder stays as `logging`. Both are
 !! excluded from test-drive's per-test parallelism, since they share one process-global logger.
@@ -125,8 +125,7 @@ contains
     !> `sink=` applies to every sink that exists WHEN IT RUNS, so a `COLOR` read before `FILE`
     !> cannot reach the file sink `FILE` is about to add. That is exactly what
     !> `pf_log_configure_from_env` did until 2026-09-02: `PF_LOG_COLOR=always` with
-    !> `PF_LOG_FILE=run.log` left `run.log` with no colour at all, silently. See
-    !> `feature_logging_env_order.md`.
+    !> `PF_LOG_FILE=run.log` left `run.log` with no colour at all, silently.
     !>
     !> **The negative control is the second half**, and without it this test passes against a
     !> library that colours every file sink unconditionally: the same fixture with `COLOR` unset

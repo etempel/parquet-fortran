@@ -227,8 +227,8 @@ contains
     !! explicit `max_neval = 0` passed to `pf_minimize_simplex` is refused -- "max_neval must be
     !! positive" -- so the solver object cannot simply forward its zero; it omits the argument
     !! instead, and the engine's own default applies. The sibling `pf_bobyqa_solver` has read `0`
-    !! as `500*n` since it was written, and V5 of `feature_solver_vocabulary.md` makes one
-    !! component name mean one thing in both.
+    !! as `500*n` since it was written, and a later revision makes one component name mean one
+    !! thing in both.
     !!
     !! `counted_hash` is an objective no simplex can converge on while every value stays finite
     !! (see its own note), so the run can only end on its budget and `info%nlimit` counts it. The

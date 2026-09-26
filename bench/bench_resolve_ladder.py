@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply the stage-0b COMPILE-OUT LADDER to `table_resolve`, for measurement branches only.
 
-Stage 0 of the F1 campaign (`feature_colindex.md`) found that `table_resolve`'s prologue is
+Stage 0 of the F1 campaign found that `table_resolve`'s prologue is
 **82-96% of what a per-cell `%get_element` costs**, and that the figure varies by 3-6x between
 gfortran, ifx and flang while the column layer underneath it varies by ~1.5x. Nothing in that
 campaign says WHICH part of the prologue it is. This script makes that measurable.
@@ -110,8 +110,7 @@ EDITS = [
     #     from the instrument that found the problem. Anything materially above zero there means
     #     the comparison has found its way back onto the hot path.
     #
-    # A rung's figure is therefore only comparable with one taken at the same stage. See
-    # feature_colindex.md §0 and §7's stage 0c / 0d blocks for the measured values.
+    # A rung's figure is therefore only comparable with one taken at the same stage.
     #
     # NO_LOOKUP replaces the FIRST `table_find` -- the one every accessor runs. The second, inside
     # the miss path, is unreachable in this harness (no column is named `parquet_row_index`) and is

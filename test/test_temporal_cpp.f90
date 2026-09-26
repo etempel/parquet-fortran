@@ -5,10 +5,10 @@
 !> The one `parquet_temporal` test that reaches the C++ layer, split out of `test_temporal.f90`.
 !!
 !! **It lives in its own file for a mechanical reason, not a thematic one.** A test file may feed
-!! an undef-safe runner only if it declares no `bind(C)` interface at all (feature_tests.md §5),
-!! and that rule is file-level because a per-test rule is not statically decidable. This test
-!! calls two `parquet_debug_*` hooks in `src/parquet_wrapper.cpp`, so keeping it beside its 22
-!! siblings would disqualify the whole of `test_temporal.f90` from `run_tester`.
+!! an undef-safe runner only if it declares no `bind(C)` interface at all, and that rule is
+!! file-level because a per-test rule is not statically decidable. This test calls two
+!! `parquet_debug_*` hooks in `src/parquet_wrapper.cpp`, so keeping it beside its 22 siblings
+!! would disqualify the whole of `test_temporal.f90` from `run_tester`.
 !!
 !! What it asserts is unchanged: this module's pure-Fortran civil<->days calendar math against
 !! Arrow's vendored copy of the same (Hinnant) algorithm. Registered as the suite `temporal_cpp`

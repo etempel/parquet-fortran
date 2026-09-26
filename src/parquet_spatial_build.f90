@@ -292,7 +292,7 @@ contains
         ! whole reason this backend exists: a sphere occupies a zero-thickness shell of the grid's
         ! bounding cube, so most of the cube's cells can never hold a point; every HEALPix pixel
         ! is on the sphere. On a catalogue covering a part of the sky the same cap counts the
-        ! empty pixels too (`feature_spatial_phase0.md`, question 11).
+        ! empty pixels too.
         maxc = spatial_cells_ceiling(self)
         ! Written as a loop with the test INSIDE, because `.and.` does not short-circuit in
         ! Fortran: with the ceiling test as a second operand, `12*(2*nside)**2` would still be

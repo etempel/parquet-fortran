@@ -741,7 +741,7 @@ contains
         ! Pass ONE is deliberately left serial. Its compaction is a prefix-dependent scatter -- the
         ! slot an element lands in depends on how many earlier ones were excluded -- so threading it
         ! needs a count-then-scatter restructure rather than a directive. It is roughly half the
-        ! call and the restructure is not free; see feature_pandas_S4.md's P5 section.
+        ! call and the restructure is not free.
         !
         ! **The four block arrays are all allocated whatever `nm` is, and that is deliberate.**
         ! `nb` is the population over `STATS_BLOCK`, so the four together are `m/4` bytes -- 2.5 MB

@@ -4,8 +4,7 @@
 !! **Why these live apart from the tests they are about.** Every test here drives
 !! `test/error_scenarios.f90` through `run_error_scenario`/`check_scenario_*`, i.e. it spawns a
 !! subprocess and asserts on its exit status and stderr. That is the one thing `run_tester_cpp`
-!! must not do -- see `feature_tests.md` section 5 -- so they gather in `run_tester_errors`
-!! beside the 913 tests already there.
+!! must not do, so they gather in `run_tester_errors` beside the 913 tests already there.
 !!
 !! **The cost is locality and it is real**: a test asserting that a bad writing call aborts is a
 !! test *about writing*, and it no longer sits beside the writing tests. Run

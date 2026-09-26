@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Drives bench/benchmark_sort_engine.f90 -- the Stage 0 baseline for the pure-Fortran sort engine.
 #
-# See feature_sort.md for the design this measures and feature_benchmark_sort.md for the run sheet
-# (which machine runs which mode, what the acceptance bar is, and where the report goes). This
-# script only builds and runs; bench/benchmark_sort_engine.f90 decides what each mode times.
+# This script only builds and runs; bench/benchmark_sort_engine.f90 decides what each mode times.
 #
 # Usage:
 #   bench/benchmark_sort_engine.sh                        # every mode, default sweep
@@ -79,10 +77,10 @@
 #                    will use, rather than the value asked for.
 #   RADIX_MIN_ROWS=-1
 #                    Overrides the Fortran engine's radix row floor (SORT_RADIX_MIN_ROWS).
-#                    Negative leaves the shipped value in force. This is how the small-n ladder in
-#                    feature_sort_radix.md section 6.4 is run without editing source: set it to 2 to
-#                    force the radix path at every size, or to a huge value to decline it entirely
-#                    and measure the introsort. Ignored by ENGINE=cpp, which has no such path.
+#                    Negative leaves the shipped value in force. This is how the small-n ladder
+#                    is run without editing source: set it to 2 to force the radix path at every
+#                    size, or to a huge value to decline it entirely and measure the introsort.
+#                    Ignored by ENGINE=cpp, which has no such path.
 #   TAG=            Extra build-tree suffix, when you need two trees for one compiler.
 #
 # Output goes to stdout; redirect it per the run sheet. Build trees go under test_run/, which is

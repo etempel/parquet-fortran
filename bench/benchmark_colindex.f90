@@ -3,8 +3,7 @@
 !===========================================
 !
 !> Measures where `parquet_table%get_element`'s per-cell cost actually goes, for the F1
-!! index/handle accessor decision (`feature_colindex.md`; run sheet
-!! `feature_benchmark_colindex.md`).
+!! index/handle accessor decision.
 !!
 !! **This is the SCREENING harness, and what it measures are BOUNDS.** It deliberately needs no
 !! change to the library at all, which is what makes it runnable before anything is prototyped —
@@ -67,7 +66,7 @@ program benchmark_colindex
     call parse_arguments(mode, nrows, ncols, rounds, naccess, width)
 
     write(output_unit, '(a)') "=================================================================="
-    write(output_unit, '(a)') "benchmark_colindex -- F1 screening (see feature_benchmark_colindex.md)"
+    write(output_unit, '(a)') "benchmark_colindex -- F1 screening"
     write(output_unit, '(a,a)') "guard variant compiled in: ", guard_variant()
     write(output_unit, '(a,a)') "stage-0b ladder rung:      ", ladder_rung()
     write(output_unit, '(a)') "=================================================================="
@@ -1007,8 +1006,8 @@ contains
     !!
     !! **Every gate figure this feature was approved on came from a PROTOTYPE** -- criterion (1)'s
     !! 1.52x-3.99x, criterion (2)'s 7.9x and criterion (3)'s +2.16% were all measured before the
-    !! handle existed. This mode is stage 1 of `feature_colindex.md` section 9, and it is the first
-    !! direct measurement of the thing users actually call.
+    !! handle existed. This mode is stage 1 of the campaign, and it is the first direct measurement
+    !! of the thing users actually call.
     !!
     !! Two arms are load-bearing beyond the headline ratio:
     !!

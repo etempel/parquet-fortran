@@ -3,8 +3,7 @@
 !===========================================
 !
 !> **What each `parquet_string_column` bulk operation costs**, on one synthetic column, so that an
-!! optimisation to this type is measured rather than argued. Driven by `bench/benchmark_strings.sh`;
-!! see `feature_string_parallel.md` for the plan these numbers gate.
+!! optimisation to this type is measured rather than argued. Driven by `bench/benchmark_strings.sh`.
 !!
 !! Every operation is timed **best of `--rounds`**, each round starting from a fresh `%clone()` of
 !! the same source column so no round inherits another's page state or another's allocation. The
@@ -283,7 +282,7 @@ contains
         write (output_unit, '(a,i0,a)') "(checksum ", sink, ")"
     end subroutine run_all
 
-    !> **A cost model for `reindex`'s permutation validation (feature_string_parallel.md S7).**
+    !> **A cost model for `reindex`'s permutation validation.**
     !!
     !! `reindex` = `reindex_trusted` + a validation scan, and the difference between those two rows
     !! above is what that scan costs end to end. This section takes it apart, because "make the scan

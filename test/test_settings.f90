@@ -752,7 +752,7 @@ contains
     end subroutine test_sort_threads_affinity_clamp
 
     !> Mirrors `doc/pages/operating/settings.md`'s `configure_at_startup` example, the page's one
-    !> complete runnable program. Both sides move together or neither does (feature_doc.md §6.6).
+    !> complete runnable program. Both sides move together or neither does.
     !>
     !> **It lives here rather than in `test/test_examples.f90`, where every other mirrored example
     !> sits, and the reason is concurrency.** The example's whole subject is process-global state --

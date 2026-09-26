@@ -23,10 +23,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 # Every runner, not just one. `test/run_tester.f90` is now group (b) alone -- the suites are
-# partitioned across five programs (see feature_tests.md section 6), so reading one by name would
-# silently report a fifth of the suite as the whole of it. Globbing keeps a sixth runner counted
-# with no edit here; `check_test_runner_partition` is what proves nothing is registered twice or
-# nowhere at all.
+# partitioned across five programs, so reading one by name would silently report a fifth of the
+# suite as the whole of it. Globbing keeps a sixth runner counted with no edit here;
+# `check_test_runner_partition` is what proves nothing is registered twice or nowhere at all.
 RUN_TESTERS=()
 while IFS= read -r f; do RUN_TESTERS+=("$f"); done < <(ls test/run_tester*.f90 2>/dev/null | sort)
 

@@ -163,9 +163,8 @@ contains
     !> inside the zone and between the zones, `%quantile` inside the zone, and `%sample`. Under
     !> `"linear"` a query inside the zone integrates each nearby point's corrected kernel, so its
     !> cost follows the WINDOW, and `%fit` pays one such integral per point that reaches the zone:
-    !> the columns are what feature_kde_boundary.md's cost model predicted, measured. The zone
-    !> queries are taken at a few points only, since one of them can cost a tenth of a second at
-    !> `1e5` points.
+    !> the columns are what the cost model predicted, measured. The zone queries are taken at a few
+    !> points only, since one of them can cost a tenth of a second at `1e5` points.
     subroutine run_boundary(rounds, n)
         integer, intent(in)        :: rounds !! timed laps per figure
         integer(int64), intent(in) :: n      !! the largest sample
@@ -307,12 +306,12 @@ contains
 
     !> Where the boundary scan's time goes, over the sample size, and what the bandwidth spread is.
     !>
-    !> The workload is `feature_kde_speedup.md`'s: the quantiles of the linear density
-    !> `f(x) = x/2` on `[0, 2]` with `lower = 0`, `upper = 2` and the B-spline kernel. That density
-    !> VANISHES at its lower bound, so the adaptive rule's bandwidth `h*(p/g)**(-alpha)` rises
-    !> without bound there, the widest kernel reaches across most of the support, and the corrected
-    !> zone the `"linear"` correction scans is the whole domain rather than a boundary -- scanned at
-    !> the resolution of the NARROWEST kernel. That is the combination this mode exists to watch:
+    !> The workload is the quantiles of the linear density `f(x) = x/2` on `[0, 2]` with `lower =
+    !> 0`, `upper = 2` and the B-spline kernel. That density VANISHES at its lower bound, so the
+    !> adaptive rule's bandwidth `h*(p/g)**(-alpha)` rises without bound there, the widest kernel
+    !> reaches across most of the support, and the corrected zone the `"linear"` correction scans is
+    !> the whole domain rather than a boundary -- scanned at the resolution of the NARROWEST
+    !> kernel. That is the combination this mode exists to watch:
     !> `adaptive = .true.` with `boundary = "linear"` is the row whose `lookup` grows faster than
     !> the sample, and the other rows are its controls.
     !>
@@ -324,9 +323,9 @@ contains
     !> the step is `h_min/KDE_LINEAR_SCAN_PER_H`, so the steps number at most
     !> `KDE_LINEAR_SCAN_PER_H*R*(h_max/h_min)` however large the sample is.
     !>
-    !> The last block reports the target `feature_kde_speedup.md` sets for the adaptive linear fit
-    !> at the largest size. It is a TARGET and not a gate: the mode never exits nonzero on it,
-    !> because a timing on a machine with other work on it is not a pass/fail property of the code.
+    !> The last block reports the target set for the adaptive linear fit at the largest size. It is
+    !> a TARGET and not a gate: the mode never exits nonzero on it, because a timing on a machine
+    !> with other work on it is not a pass/fail property of the code.
     subroutine run_scan(rounds, n)
         integer, intent(in)        :: rounds !! timed laps per figure
         integer(int64), intent(in) :: n      !! the largest sample
@@ -407,7 +406,7 @@ contains
         end do
 
         print '(a,i0,a)', "=== the target: the adaptive linear fit at ", sizes(3), " points ==="
-        print '(a)', "feature_kde_speedup.md's acceptance criterion for the grid-assisted scan, " // &
+        print '(a)', "The acceptance criterion for the grid-assisted scan, " // &
             "which it states at 100 000 points. A target, not a gate:"
         print '(a)', "this mode never exits nonzero on it, since a timing on a shared machine is " // &
             "not a property of the code."
@@ -1067,7 +1066,7 @@ contains
         !> The rules scored, and `"lscv"` twice: once as the library resolves it, by one transform
         !! over the binned sample, and once with that route turned off so the criterion is summed
         !! over every pair. The pair is what says whether the transform ranks bandwidths as the
-        !! exact criterion does -- the comparison feature_kde_speedup.md's Q6 gates S8 on.
+        !! exact criterion does -- the comparison that gates S8.
         integer, parameter :: NRULE = 5
         character(len=9), parameter :: RULES(NRULE) = [character(len=9) :: "isj", "silverman", &
             "scott", "lscv", "lscv-pairs"]

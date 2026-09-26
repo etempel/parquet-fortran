@@ -9,7 +9,7 @@
 !! `parquet_debug_*` thread and comparison counters), drives the C++ sort engine through
 !! `parquet_sorting_oracle`, or round-trips a file through a reader or writer. A test file
 !! declaring any `bind(C)` interface cannot feed an undef-safe runner, and the rule is file-level
-!! because a per-test rule is not statically decidable -- see feature_tests.md §5.
+!! because a per-test rule is not statically decidable.
 !!
 !! The split was computed from the call graph rather than by eye: a test moved here if it, or
 !! anything it calls, reaches one of those. It came out at 55 tests here against 93 that stay,
@@ -257,12 +257,12 @@ contains
     !! The oracle is the usual one: every comparator ends in a row-index tiebreaker, so exactly one
     !! permutation is correct and a disagreement is a defect rather than a variation.
     !!
-    !! **Since the Fortran tie pass threads (feature_join.md stage 5), this A/B is the one the two
-    !! engines' structural identity was replaced by.** The C++ engine still walks its flags
-    !! serially after its threaded build; the Fortran engine flags its runs on the team. The tail
-    !! floor is lowered here so a 2000-element fixture reaches that team, and the Fortran tie
-    !! record is asserted as a third precondition -- without it a tie pass that quietly declined
-    !! would leave this comparing two serial walks again, exactly the vacuous shape above.
+    !! **Since the Fortran tie pass threads, this A/B is the one the two engines' structural
+    !! identity was replaced by.** The C++ engine still walks its flags serially after its
+    !! threaded build; the Fortran engine flags its runs on the team. The tail floor is lowered
+    !! here so a 2000-element fixture reaches that team, and the Fortran tie record is asserted as
+    !! a third precondition -- without it a tie pass that quietly declined would leave this
+    !! comparing two serial walks again, exactly the vacuous shape above.
     subroutine test_runs_threaded_conformance(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         real(real64) :: v(2000)                             !! ties are dense; runs are the point.
@@ -1038,7 +1038,7 @@ contains
 
     !
     ! ============================================================================================
-    ! Stage 1 conformance oracle -- feature_sort.md section 6 Stage 1
+    ! Stage 1 conformance oracle
     ! ============================================================================================
     !
     ! The Fortran comparator core must answer EXACTLY as the C++ one does, because after the Stage 6
@@ -1049,8 +1049,8 @@ contains
     !
     ! So these tests compare ANSWERS, not orderings, over every ordered pair of a small tie-rich
     ! fixture. Every fixture is deliberately duplicate-heavy: a random real64 column of any size
-    ! contains essentially no ties at all, which is exactly why the motivating benchmark in
-    ! feature_sort.md section 2 could not have caught a tie-order defect.
+    ! contains essentially no ties at all, which is exactly why the motivating benchmark
+    ! could not have caught a tie-order defect.
     !
     ! Both engines are fed from ONE source in each test -- the same Fortran arrays go into a
     ! `pf_sort_keys` and into a C++ builder -- so a disagreement is a comparator disagreement and
@@ -1288,7 +1288,7 @@ contains
         qnan = ieee_value(1.0_real64, ieee_quiet_nan)
         ! Two NaNs and two nulls, plus repeated values: this is the only fixture that can catch a
         ! comparator putting NaNs on the wrong side of the null block, which no ascending,
-        ! null-free test can see (feature_sort.md section 5.1).
+        ! null-free test can see.
         vals = [2.0_real64, qnan, -1.0_real64, 2.0_real64, qnan, 0.0_real64, 3.0_real64, -1.0_real64]
         fvalid = [.true., .true., .true., .false., .true., .false., .true., .true.]
         cvalid = merge(1_c_int8_t, 0_c_int8_t, fvalid)
@@ -1476,7 +1476,7 @@ contains
 
     !
     ! ============================================================================================
-    ! Stage 2 conformance -- feature_sort.md section 6 Stage 2
+    ! Stage 2 conformance
     ! ============================================================================================
     !
     ! Stage 1 proved the two comparators agree pair by pair. These prove the two SORTS agree
@@ -2319,7 +2319,7 @@ contains
     !! `""`/`char(0)` and `"a"`/`"a"//char(0)`/`"a"//char(0)//char(0)` are distinct strings sharing
     !! one zero-padded image, so a run of them is ordered by LENGTH and the radix leaves them in file
     !! order. The NUL at case 5 does not reach this — it sits past the window, where the refine pass
-    !! runs anyway. See `feature_sort_radix.md` §12.2 and `feature_risks.md` Risk-89.
+    !! runs anyway. See `feature_risks.md` Risk-89.
     subroutine test_radix_path_string_shapes(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
         integer(int64), parameter :: n = 4096_int64

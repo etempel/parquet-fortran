@@ -133,7 +133,7 @@ contains
             ! filled into. It is read instead as a column in its own right at the DESCENT path
             ! `<name>[]` -- which the ordinary reader for that container type already handles, so a
             ! nested payload costs no new crossing and inherits every guard and null rule that
-            ! path already makes. See feature_container_phase7.md's D4 (7b) and D6.
+            ! path already makes.
             call parquet_read_list_offsets_fill(reader%handle, trim(name)//char(0), rg, nrows, &
                 nelems, offsets, row_valid)
             call read_nested_payload(reader, trim(name)//"[]", rg, kind, payload, context)

@@ -235,7 +235,7 @@ contains
         ! `pf_random32_at` reads its OWN word space, so KAT 1's block -- which is block 0 of the
         ! real64 space -- is not what it returns. Assert the separation rather than deleting the
         ! check: a build that dropped the real32 domain tag would put these four values back, and
-        ! nothing else here would notice. See feature_random_domains.md.
+        ! nothing else here would notice.
         do k = 1, 4
             want32 = real(ishft(kat_out(k), -8), real32) * 2.0_real32**(-24)
             call check(error, pf_random32_at(0_int64, 0_int64, int(k, int64)) /= want32, &
@@ -861,10 +861,10 @@ contains
     !> A freshly seeded stream hands out exactly the tier-0 values, for every producer.
     !!
     !! **No new golden vectors, and that is a property of the design rather than an omission.**
-    !! `feature_random_phase2.md` §8 anticipated tier 1 needing its own vectors "because `%uniform`
-    !! is a new mapping from position to value". It is not: a block-cached stream reads the same
-    !! words at the same positions as the tier-0 grid, which the existing vectors already freeze. So
-    !! the thing to assert is the identity -- and the identity is also the only thing that can break,
+    !! An earlier phase anticipated tier 1 needing its own vectors "because `%uniform` is a new
+    !! mapping from position to value". It is not: a block-cached stream reads the same words at the
+    !! same positions as the tier-0 grid, which the existing vectors already freeze. So the thing to
+    !! assert is the identity -- and the identity is also the only thing that can break,
     !! since a wrong cache, a wrong word order or a wrong advance all show up as a disagreement here.
     !!
     !! The mixed-producer case at the end is the sharp one: `%uniform32` leaves the position odd, so
@@ -1050,9 +1050,9 @@ contains
         if (allocated(error)) return
 
         ! Seeking forward by a word count equals discarding that many words' worth of draws.
-        ! This used to be written with %jump, which was removed as the relative twin of %rewind
-        ! (see feature_random_phase3.md section 3.5); the property it tested is unchanged, and
-        ! `%rewind(%position() + n)` is what a caller writes now.
+        ! This used to be written with %jump, which was removed as the relative twin of %rewind;
+        ! the property it tested is unchanged, and `%rewind(%position() + n)` is what a caller
+        ! writes now.
         call rng%seed(5_int64, 2_int64)
         call rng%rewind(rng%position() + 6_int64)    ! six words == three real64 draws
         call rng%uniform(x)
@@ -1906,10 +1906,10 @@ contains
     !!
     !! The gate is **5.0**, between the two live arms with 2.7x of margin below and 1.7x above.
     !! The 3-round row is not merely "detected": its signal lands on `r->l` and above the control,
-    !! which is the direction and the relation `feature_random_feistel.md` §19 predicted from four
-    !! independent key sets (0.03194-0.03339 there, 0.03197 here). **A real structural leak repeats
-    !! in one place; noise moves** -- so a future failure should be read by looking at *which*
-    !! relation carries it before concluding anything.
+    !! which is the direction and the relation predicted from four independent key sets
+    !! (0.03194-0.03339 there, 0.03197 here). **A real structural leak repeats in one place; noise
+    !! moves** -- so a future failure should be read by looking at *which* relation carries it
+    !! before concluding anything.
     subroutine test_perm_structural(error)
         type(error_type), allocatable, intent(out) :: error   !! set on the first failed assertion
         integer(int64), parameter :: MS = 1024_int64          ! 32*32 exactly -- see the note above
@@ -2587,8 +2587,7 @@ contains
     !> The four structural relations, over all pairs sharing an input component. `y` is 0-based.
     !!
     !! Exhaustive rather than sampled: `b*C(a,2) + a*C(b,2)` pairs, which at `a = b = 32` is 31744
-    !! and costs nothing. Sampling here would reintroduce the quantisation artefact
-    !! `feature_random_feistel.md` §5.2 records.
+    !! and costs nothing. Sampling here would reintroduce the quantisation artefact.
     pure subroutine struct_relations(y, a, b, f)
         integer(int64), intent(in) :: y(0:)         !! the permutation, 0-based in and out
         integer(int64), intent(in) :: a             !! left factor
@@ -2747,9 +2746,9 @@ contains
 
     !> Each generic reads its OWN word space, and `DOM_REAL64` is unmoved.
     !!
-    !! The domain tags are spelled out here from the specification in `feature_random_domains.md`
-    !! rather than imported from `parquet_random`: a test that borrowed the library's own constants
-    !! could not tell a wrong constant from a wrong reader.
+    !! The domain tags are spelled out here from the specification rather than imported from
+    !! `parquet_random`: a test that borrowed the library's own constants could not tell a wrong
+    !! constant from a wrong reader.
     !!
     !! **The real64 half is the control that matters and it is easy to leave out.** Asserting only
     !! that the moved generics moved would pass just as happily against a build that tagged

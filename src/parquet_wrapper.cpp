@@ -1246,7 +1246,7 @@ extern "C"
 	// top-level field match (child_path empty), or a walk through nested STRUCT fields down to a
 	// leaf. Schema-only -- never reads any column data, so this is cheap enough to call from
 	// existence checks (parquet_reader_has_column) as well as before an actual read.
-	// ---- The descent path grammar (feature_container_phase7.md's D6) ----------------------
+	// ---- The descent path grammar ---------------------------------------------------------
 	//
 	// A column path is dot-separated field names, each optionally followed by DESCENT suffixes:
 	//
@@ -1378,8 +1378,8 @@ extern "C"
 	//
 	// A DOTTED path may not: this library's long-standing rule is that a path names a leaf, and
 	// naming an intermediate struct would change what a column-iterating caller can address --
-	// deliberately out of scope (feature_container_phase7.md's Q5). A DESCENT path may, because
-	// that is exactly how `list<struct<...>>` is read: `list_of_struct[]` IS a struct column.
+	// deliberately out of scope. A DESCENT path may, because that is exactly how `list<struct<...>>`
+	// is read: `list_of_struct[]` IS a struct column.
 	static bool struct_leaf_allowed(const std::vector<PathSegment> &segments)
 	{
 		if (segments.empty()) return true; // a top-level struct has always been readable
@@ -1458,7 +1458,7 @@ extern "C"
 		// refusal was a defect rather than a limitation -- collect_column_leaf_paths LISTS such a
 		// path, so `struct_of_map.attrs` was advertised by parquet_get_column_names and then failed
 		// to resolve. That is the same "listing that lies" T6 had Phase 2 fix for lists; this closes
-		// the half it left open for maps. See feature_container_phase7.md's D5 and M4.
+		// the half it left open for maps.
 		//
 		// STRUCT is accepted only at the end of a DESCENT path -- see struct_leaf_allowed.
 		if (field->type()->id() == arrow::Type::STRUCT && !struct_leaf_allowed(parsed.segments))
@@ -1513,7 +1513,7 @@ extern "C"
 		//
 		// MAP joined them in Phase 7, for exactly that reason one level along: a map under a
 		// struct reads into a parquet_map_column, and while it was refused here the same three
-		// wrong answers were live for `struct_of_map.attrs`. See feature_container_phase7.md's D5.
+		// wrong answers were live for `struct_of_map.attrs`.
 		//
 		// THIS FUNCTION AND resolve_struct_path MUST AGREE. They are deliberately independent
 		// walks (see this function's own header for why a try/catch around the other one is not
@@ -4680,7 +4680,7 @@ extern "C"
 	int64_t parquet_debug_get_filter_mask_nanos(void) { return g_debug_filter_mask_nanos; }
 
 	// The same idea for the READ-TIME SORT -- parquet_open_reader(..., sort_by=) and
-	// parquet_reader_set_sort. Added for feature_sort.md's P13, whose whole first step is that the
+	// parquet_reader_set_sort. Added for the read-time sort work, whose whole first step is that the
 	// post-R1 phase shares had been DERIVED from a pre-R1 measurement rather than measured.
 	//
 	// The phases, in the order one sort walks them, and why each is separate:
@@ -4755,8 +4755,8 @@ extern "C"
 	// (stable to +-0.02 ms over four runs) -- so the indirect call is only 1.8 ms of it, i.e.
 	// **4.2% of the read**, and the other 11.5 ms is copy_string_with_padding's memcpy and blank
 	// fill, which no accessor change touches. That is below this project's ~5% keep-or-drop line,
-	// so A.4's second half was dropped rather than implemented. See feature_optimise_A7.md's S7-7
-	// outcome. Re-measure before reopening it; do not re-open it on the strength of the 31%.
+	// so A.4's second half was dropped rather than implemented.
+	// Re-measure before reopening it; do not re-open it on the strength of the 31%.
 	static int64_t g_debug_string_read_decode_nanos = 0;
 	static int64_t g_debug_string_read_copy_nanos = 0;
 
@@ -4829,8 +4829,7 @@ extern "C"
 	// benchmark can afford sits orders of magnitude above the work floor, so no sweep over rows or
 	// columns ever visits its break-even; the only way to find it is to move the constant instead of
 	// the input. That is the mirror image of parquet_debug_set_sort_merge_min_segment's problem (a
-	// constant no test-sized input can cross) and takes the same shape for the same reason. See
-	// feature_table_parallel.md section 14.8 and section 17.1.
+	// constant no test-sized input can cross) and takes the same shape for the same reason.
 	//
 	// Kept here rather than as public Fortran procedures for the reason CLAUDE.md gives: a
 	// Fortran-side hook would have to be public, and visible to every `use parquet`.
@@ -7923,8 +7922,7 @@ extern "C"
 				std::snprintf(err_out, static_cast<size_t>(err_cap), "unknown column in filter: %s", name.c_str());
 				return 1;
 			}
-			// parquet_filter is scalar-leaf-only PERMANENTLY (feature_map_list_struct.md's
-			// "qc: / parquet_filter integration"), so the descent grammar Phase 7 added must not
+			// parquet_filter is scalar-leaf-only PERMANENTLY, so the descent grammar Phase 7 added must not
 			// leak into it. Refused explicitly rather than left to fail further down: a descent
 			// path resolves perfectly well, so without this it would reach the clause evaluator
 			// and filter on a container's flattened child -- one row of the filter's answer per
@@ -8502,7 +8500,7 @@ extern "C"
 		}
 		// A read-time sort orders ROWS, and a descent path has one entry per ELEMENT -- there is
 		// no row for its values to order. Same permanent scalar-leaf restriction as qc: and
-		// parquet_filter; see feature_container_phase7.md's D6.
+		// parquet_filter.
 		if (path_has_descent(parse_column_path(name).segments))
 		{
 			std::snprintf(err_out, static_cast<size_t>(err_cap),
@@ -8762,8 +8760,8 @@ extern "C"
 		// predate the permutation; it is not what upholds the invariant.
 		//
 		// **Default: RELEASE, because the key columns are ones the caller never asked for.**
-		// Sorting by a column does not mean reading it, and reordering data nobody looks at is the
-		// whole of feature_sort.md's P13. Measured on machine C at n = 2e7 with a string key: the
+		// Sorting by a column does not mean reading it, and reordering data nobody looks at is
+		// exactly what this default avoids. Measured on machine C at n = 2e7 with a string key: the
 		// Take is 3115 ms, 49% of a sort-then-read workflow that never touches the key. A caller
 		// that DOES read the key pays one extra decode instead -- under 564 ms, and only that,
 		// since the Take has to happen either way once the column is read.
@@ -8923,28 +8921,27 @@ extern "C"
 
 	// ---- Conformance hooks for the Fortran comparator core (TEST-ONLY) -------------------------
 	//
-	// feature_sort.md Stage 1 replaces sort_tier_of/sort_compare_key/SortRowLess/sort_keys_compare
-	// with Fortran equivalents, and requires them proved equal to THESE, comparator answer for
-	// comparator answer, before any sorting code is written. That cannot be done through any of the
-	// 24 entry points above: every one of them answers at whole-permutation level, and at Stage 1
-	// the Fortran side does not sort yet, so there is no permutation to compare. The four
-	// comparators are `static`, i.e. unreachable from outside this translation unit. Hence these.
+	// Stage 1 replaces sort_tier_of/sort_compare_key/SortRowLess/sort_keys_compare with Fortran
+	// equivalents, and requires them proved equal to THESE, comparator answer for comparator
+	// answer, before any sorting code is written. That cannot be done through any of the 24 entry
+	// points above: every one of them answers at whole-permutation level, and at Stage 1 the Fortran
+	// side does not sort yet, so there is no permutation to compare. The four comparators are
+	// `static`, i.e. unreachable from outside this translation unit. Hence these.
 	//
 	// Rows are 0-BASED, matching every other internal index in this file -- the entry points add
 	// the +1 on the way out. The Fortran test declares its own local bind(C) interfaces (the
 	// convention every parquet_debug_* hook follows) and passes i-1. Deliberately NOT declared in
 	// src/parquet_bindings.f90, so none of this reaches the library's own interface.
 	//
-	// Being C++-side is the point: the six hooks of feature_sort.md section 7.4 have to become
-	// PUBLIC Fortran procedures because their state is Fortran-side, and these do not, because the
-	// state they read is here.
+	// Being C++-side is the point: the six Fortran-side debug hooks have to become PUBLIC Fortran
+	// procedures because their state is Fortran-side, and these do not, because the state they read is
+	// here.
 	//
 	// NOTE for anyone writing a test that also counts comparisons: parquet_debug_sort_row_less
 	// invokes SortRowLess, so it increments g_debug_sort_comparison_count when counting is armed.
 	//
 	// Lifetime: under Endpoint B they are deleted with the rest of the engine at Stage 9; under
-	// Endpoint A they stop being scaffolding and become the permanent conformance harness of
-	// feature_sort.md section 8.1.
+	// Endpoint A they stop being scaffolding and become the permanent conformance harness.
 
 	// 1 when row `a` sorts before row `b` under the full sort comparator, 0 when it does not,
 	// -1 when no key has been added (which no correct caller does).
@@ -9425,8 +9422,8 @@ extern "C"
 	// The three CONTAINER families, reported by arrow_nested_family rather than by
 	// arrow_leaf_family. They are deliberately NOT added to arrow_leaf_family, which feeds
 	// parquet_reader_get_column_type_name: parquet_get_column_type must keep answering "unknown"
-	// for a container at every depth (feature_container_phase7.md's D12.1, frozen by Phase 6's
-	// D15.1), and widening the leaf helper would change that query's answer as a side effect.
+	// for a container at every depth (frozen by Phase 6's D15.1), and widening the leaf helper
+	// would change that query's answer as a side effect.
 	static constexpr int32_t kElemFamilyList = 10;
 	static constexpr int32_t kElemFamilyMap = 11;
 	static constexpr int32_t kElemFamilyStruct = 12;
@@ -9529,7 +9526,7 @@ extern "C"
 	// The data-type token for a CONTAINER family, kept apart from elem_family_token for the same
 	// reason arrow_nested_family is kept apart from arrow_leaf_family: elem_family_token feeds
 	// parquet_get_column_type, whose answer for a container is frozen at "unknown"
-	// (feature_container_phase7.md's D12.1). Only the map value-type query asks for these.
+	// Only the map value-type query asks for these.
 	static const char *nested_family_token(int32_t family)
 	{
 		switch (family)
@@ -10763,7 +10760,7 @@ extern "C"
 extern "C"
 {
 	// The number of entries the array at `name` holds -- which is the file's row count for an
-	// ordinary column and is NOT for a DESCENT path (feature_container_phase7.md's D6).
+	// ordinary column and is NOT for a DESCENT path.
 	//
 	// `list_of_struct[]` names the flattened element array of a 3-row list holding 0+1+2 elements,
 	// so it has FOUR entries, not three. Every read of such a path is sized from this rather than
@@ -12495,7 +12492,7 @@ extern "C"
 		// Apply this row group's own slice of the mask, so a chunked read on a filtered/sampled
 		// reader yields exactly the surviving rows -- the same count parquet_get_chunk_size
 		// reports for it. Done before qc, so qc validates only the rows the caller actually
-		// receives (feature_table.md D9: QC applies after filtering).
+		// receives (QC applies after filtering).
 		auto segment = row_group_mask_segment(reader_handle, row_group);
 		if (segment)
 		{
@@ -13271,8 +13268,8 @@ extern "C"
 	// identity. For a NULL struct row Parquet has already forced every child null on write: its
 	// definition levels cannot encode "the struct is absent but its field is present". Measured
 	// against Arrow 25.0.0 -- a struct array built in memory with row 4 null and its `id` child
-	// VALID at row 4 reads back with that child INVALID (feature_container_phase4.md's F5). So
-	// `combined` is exactly what the file stores for the field, at every row.
+	// VALID at row 4 reads back with that child INVALID. So `combined` is exactly what the file
+	// stores for the field, at every row.
 
 	// The FIRST of the two crossings for the field set: reports the counts Fortran needs in order
 	// to allocate, and writes no data.
@@ -13321,7 +13318,7 @@ extern "C"
 	// field's own dotted path. Before that it reported kElemFamilyNone and the Fortran side aborted
 	// naming the field; that abort is still there, in struct_field_kind's `case default`, for a
 	// family neither helper claims -- so a genuinely unreadable field type still fails cleanly with
-	// the field named. See feature_container_phase7.md's D4 (7a).
+	// the field named.
 	void parquet_read_struct_column_fields(void *handle, const char *name, int32_t nfields,
 		int32_t name_width, char *names_out, int32_t *families_out, int32_t *units_out, int8_t *utc_out)
 	{
@@ -14440,16 +14437,16 @@ static void append_list_column_chunk_common(void *handle, const char *name, int6
 // THERE IS NO REPETITION-LEVEL CEILING HERE, and that was measured rather than assumed: a written
 // struct<id:int32, nm:string> has leaf paths `s.id`/`s.nm` with max_repetition_level 0 and
 // max_definition_level 2, so apache/arrow#33188 -- which cost the list write three guards and a
-// debug hook -- cannot bite for a non-nested struct. See feature_container_phase4.md's F7 and D9.
+// debug hook -- cannot bite for a non-nested struct.
 //
 // **AND IT STAYS THAT WAY, because a nested struct write is REFUSED.** A struct field that is a
 // list would make maxrep 1 and put that ceiling back in play, reached through the struct -- which
 // is why Phase 4 addressed the question to Phase 7. Phase 7 answered it by making nesting
-// READ-ONLY (feature_container_phase7.md's Q2/D10): write_struct_common
-// (src/parquet_write_struct.f90) refuses a container field by kind, naming the field, before any
-// of this is reached. So the guard was never built, and the reason it was not is this refusal --
-// not an oversight. If a later phase ships a nested write, the ceiling comes back with it and the
-// list write's existing guard and debug hook are what it needs.
+// READ-ONLY: write_struct_common (src/parquet_write_struct.f90) refuses a container field by
+// kind, naming the field, before any of this is reached. So the guard was never built, and the
+// reason it was not is this refusal -- not an oversight. If a later phase ships a nested write,
+// the ceiling comes back with it and the list write's existing guard and debug hook are what it
+// needs.
 
 // The field a struct column is written with. Deliberately NOT build_field: see this section's
 // banner for why a struct needs 1 + M independent nullability flags where every other column here

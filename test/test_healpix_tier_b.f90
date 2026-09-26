@@ -1041,7 +1041,7 @@ contains
         ! in it passed when run individually by name, because a named run goes through
         ! `run_selected` on the MAIN thread and never enters a parallel region. `OMP_STACKSIZE=16M`
         ! also cures it, which is how it was diagnosed; moving the arrays to the heap fixes the
-        ! fragility itself and costs one allocation per test. See feature_tests.md §16.
+        ! fragility itself and costs one allocation per test.
         real(real64), allocatable :: theta(:), phi(:)
         real(real64), allocatable :: s_vec(:, :), s_pvec(:, :), s_th(:), s_ph(:), s_vth(:), s_vph(:)
         integer(int64), allocatable :: s_ring(:), s_nest(:), s_vring(:), s_vnest(:)

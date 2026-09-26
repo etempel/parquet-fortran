@@ -43,9 +43,9 @@
 #
 #   tune    The ACCEPTANCE measurement. Sweeps the cell size, times a fixed query workload at each,
 #           and reports how far the cell the tuner picked lands from the swept optimum.
-#           feature_pandas_S3_cubesort.md predicts a ~1.2% mean penalty and ~7.8% worst case, where
-#           the cost model ALONE reaches +42.9%. Run this on every fixture: the clustered one is
-#           where the model fails, so it is the one that matters.
+#           The cost model predicts a ~1.2% mean penalty and ~7.8% worst case, where the cost model
+#           ALONE reaches +42.9%. Run this on every fixture: the clustered one is where the model
+#           fails, so it is the one that matters.
 #   ab      Re-fits the probe's A/B constant. The probe ranks a candidate cell by
 #           A*cells_visited + B*points_tested; A/B = 2 was fitted on arm64/NEON and is a ratio of a
 #           cache-miss-ish cost to an arithmetic-ish one -- exactly what differs on AVX2 and

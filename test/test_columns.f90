@@ -4345,7 +4345,7 @@ contains
         if (allocated(error)) return
         !
         ! The element form: a container column's width is 1, so element 1 is the only element
-        ! there is and its answer must equal the row's (feature_container_phase6.md, Q3).
+        ! there is and its answer must equal the row's.
         ok = .true.
         do i = 1_int64, 3_int64
             if (col%is_null(i, 1_int64) .neqv. col%is_null(i)) ok = .false.

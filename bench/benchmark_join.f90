@@ -559,8 +559,8 @@ contains
 
     !> An inner join carrying 1, 2, 4 and 8 columns: the slope is the per-column rewrite cost, and
     !! each width is timed three times -- the library's own level, then across the columns, then
-    !! within each column -- which is the A/B feature_join.md's stage 4 fixed the rule from. Every
-    !! row is tagged with the level and team the rewrite actually used, read back after the join.
+    !! within each column -- which is the A/B stage 4 fixed the rule from. Every row is tagged
+    !! with the level and team the rewrite actually used, read back after the join.
     subroutine mode_payload()
         type(parquet_table) :: a, b
         integer(int64), allocatable :: lk(:), rk(:)

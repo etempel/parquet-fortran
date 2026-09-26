@@ -14,7 +14,6 @@
 !! That is why `run_tester_args` is separate from `run_tester_main`: a program parses the command
 !! line first, decides whether to prime or warm up, and only then hands the suites over.
 !!
-!! See feature_tests.md for the runner split this exists to serve.
 module test_runner_support
     use, intrinsic :: iso_fortran_env, only: error_unit
     use testdrive, only: run_testsuite, testsuite_type, unittest_type, select_suite, run_selected, &
@@ -246,9 +245,8 @@ contains
     !> bulk operation resolves to ONE thread inside an existing parallel region, deliberately, so
     !> every test in it would compare the serial path against itself and pass while testing nothing.
     !> That is not hypothetical here: two mutations survived exactly this way while these tests were
-    !> still in the parallelized suite (feature_string_parallel.md S4). Its tests also write
-    !> parquet_set_string_threads and the payload-floor override, both process-global, which is the
-    !> second and independent reason.
+    !> still in the parallelized suite. Its tests also write parquet_set_string_threads and the
+    !> payload-floor override, both process-global, which is the second and independent reason.
     !>
     !> "index_strings" is excluded because one of its tests sets
     !> parquet_debug_set_index_string_hash_bits, the process-global hook that narrows every

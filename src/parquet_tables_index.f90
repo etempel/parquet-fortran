@@ -11,14 +11,14 @@
 !! and a body change is not.
 !!
 !! **One lookup engine in this library, and it is `parquet_index`.** The maintainer's rule for
-!! this file (feature_pandas_S7.md, section H): the table layer adds nothing that answers a lookup
-!! itself. `%build_index` turns a column into the integer keys the engines take and fills one --
-!! a `pf_index_map` under `unique=.true.`, a `pf_index_multimap` under `unique=.false.` -- with the
-!! table's row numbers as the stored values; every query is one kind check, one generation check
-!! and one call into that engine. What the wrapper adds, and the one job it exists for (answer
-!! F7), is the STALENESS CHECK: a `parquet_index` object cannot know a table's `%generation()`
-!! without importing `parquet_tables`, which is the wrong direction for the tier, so the stamp
-!! and the comparison live here.
+!! this file: the table layer adds nothing that answers a lookup itself. `%build_index` turns a
+!! column into the integer keys the engines take and fills one -- a `pf_index_map` under
+!! `unique=.true.`, a `pf_index_multimap` under `unique=.false.` -- with the table's row numbers
+!! as the stored values; every query is one kind check, one generation check and one call into
+!! that engine. What the wrapper adds, and the one job it exists for (answer F7), is the
+!! STALENESS CHECK: a `parquet_index` object cannot know a table's `%generation()` without
+!! importing `parquet_tables`, which is the wrong direction for the tier, so the stamp and the
+!! comparison live here.
 !!
 !! **The generation is compared on EVERY query, never cached** (feature_risks.md Risk-210). A
 !! stale index answers in-range row numbers that name the wrong rows, which is exactly the

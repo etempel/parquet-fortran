@@ -215,9 +215,9 @@ module parquet
     private :: parquet_validity_block_bits
     ! parquet_columns' typed per-cell accessor tier, hidden for the same reason again. These are
     ! how parquet_tables reaches a column's storage without a type-bound call -- which is what
-    ! keeps ifx from building a runtime type descriptor in the caller's prologue on every access
-    ! (feature_ifx.md). They duplicate no user-facing capability: the identical operations are
-    ! already on parquet_column as %get_at/%set_at/%get_elem/%set_elem/%is_null/%set_null/
+    ! keeps ifx from building a runtime type descriptor in the caller's prologue on every
+    ! access. They duplicate no user-facing capability: the identical operations are already on
+    ! parquet_column as %get_at/%set_at/%get_elem/%set_elem/%is_null/%set_null/
     ! %clear_null/%data_ptr/%string_column, which is what a user calls. Adding a typed accessor
     ! means adding a line here too.
     private :: parquet_column_get_at, parquet_column_set_at

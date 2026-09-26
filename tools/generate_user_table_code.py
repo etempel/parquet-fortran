@@ -77,9 +77,8 @@ TYPES = {
 
 # The three container data_types the LIBRARY accepts but a GENERATED table type declines, so the
 # rejection can say which of the two drew the line. Deliberately NOT in TYPES: a field reaching
-# that map would get five array-shaped accessors emitted for it. See feature_map_list_struct.md
-# T12 -- this refusal is a decision, not a gap, and lifting it means a new emission path rather
-# than another row above.
+# that map would get five array-shaped accessors emitted for it. This refusal is a decision, not
+# a gap, and lifting it means a new emission path rather than another row above.
 CONTAINER_TYPES = {"list", "map", "struct"}
 
 # Every type-bound procedure name `parquet_table` already occupies, INCLUDING the private

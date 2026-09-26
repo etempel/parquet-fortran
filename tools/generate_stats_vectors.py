@@ -669,9 +669,9 @@ CASES = [
 #: **The unweighted rows are cross-checked against numpy** by `--self-test`, at five probabilities
 #: rather than at the median alone -- which is exactly where an earlier draft of the weighted rule
 #: hid its error. The weighted rows cannot be: no reference library interpolates a weighted
-#: quantile, so they come from the derivation in `feature_pandas_S4.md` at 50 digits, and what
-#: pins THEM is the equal-weight reduction, which `Q_W3_LINEAR` asserts by being required to equal
-#: `Q_U32_LINEAR` exactly.
+#: quantile, so they come from the derivation at 50 digits, and what : pins THEM is the
+# equal-weight reduction, which `Q_W3_LINEAR` asserts by being required to equal : `Q_U32_LINEAR`
+# exactly.
 QPROBS = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
 
 QCASES = [

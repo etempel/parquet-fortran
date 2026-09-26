@@ -474,7 +474,7 @@ contains
     !! A `select type` rather than a twelfth deferred binding on the abstract base: a row length is
     !! a display feature, and the base's bindings are the ones every structural operation needs.
     !! Adding one there would oblige every future container type to implement it for a `%print_stat`
-    !! column -- see feature_container_phase6.md's Q4.
+    !! column.
     subroutine container_row_length(c, k, n)
         class(parquet_container_column), intent(in) :: c !! the container.
         integer(int64), intent(in) :: k                  !! 1-based row.

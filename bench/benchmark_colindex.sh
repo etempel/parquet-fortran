@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Drives bench/benchmark_colindex.f90 -- the F1 index/handle accessor screening campaign.
 #
-# See feature_colindex.md for the design this measures and feature_benchmark_colindex.md for the
-# run sheet (which machine runs which mode, what the thresholds are, and where the report goes).
 # This script only builds and runs; bench/benchmark_colindex.f90 decides what each mode times.
 #
 # The two figures every other number is read against are printed by --mode=baseline: a `%col`
@@ -42,8 +40,7 @@
 # Answers one question: where does `parquet_table%get_element`'s per-
 # cell cost actually go, and is an index- or handle-based accessor worth building? It drives
 # `bench/benchmark_colindex.f90` over seven modes (`baseline`, `decompose`, `getat`, `vector`, `loop`,
-# `rowfinal`, `handle`) and is the screening half of the campaign described in
-# `feature_benchmark_colindex.md`.
+# `rowfinal`, `handle`) and is the screening half of the campaign.
 #
 # `--mode=handle` is the one that measures the SHIPPED feature rather than screening for it: it
 # times `parquet_table_col` against `%get_element` on the same column, including the regression

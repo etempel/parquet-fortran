@@ -176,7 +176,7 @@ def rows_of(t, name):
 #: about a parquet column, a packed string store or a temporal element. The other five
 #: (`date`, `time`, `ts`, `strcol`, `col`) stay in `parquet_sorting`, which sits above
 #: `parquet_columns`, `parquet_strings` and `parquet_temporal` and extends `pf_argsort` with their
-#: specifics -- see feature_modules.md section 4.
+#: specifics.
 #:
 #: **The split is a DEPENDENCY boundary, not a filing decision.** A consumer whose only import is
 #: `use parquet_sampling` needs exactly `pf_argsort(real64 array, int64 perm)`; making it compile
@@ -707,8 +707,8 @@ module parquet_sorting
     !
     ! `pf_argsort` is EXTENDED rather than merely re-exported: the generic below adds this module's
     ! own specifics to the ones the tier declares, and a program with a single `use parquet_sorting`
-    ! resolves both sets. That mechanism is what the two-tier design rests on; feature_modules.md
-    ! section 10.2 carries the standalone reproducer, verified on gfortran, flang and nagfor.
+    ! resolves both sets. That mechanism is what the two-tier design rests on, and is verified on
+    ! gfortran, flang and nagfor.
     public :: pf_argsort
     public :: pf_sort_threads
     !
@@ -738,7 +738,7 @@ module parquet_sorting
     ! to be PUBLIC, so prefer a C++ one" states the rule and the accepted precedents; the C++ route
     ! is unavailable here precisely because Stage 1 exists to move this decision OUT of C++.
     ! No library code calls either, neither appears in README.md's API overview, and neither is
-    ! mentioned in any doc/pages/ guide -- see feature_sort.md section 7.4.
+    ! mentioned in any doc/pages/ guide.
     ! NOTE `parquet_debug_use_fortran_sort_engine` -- the SETTER -- is NOT here: it lives in
     ! parquet_sorting_oracle, which is the only module that can honour it, and registering the
     ! oracle's entry points is a side effect of calling it. That is what makes registration
@@ -791,9 +791,9 @@ module parquet_sorting
     ! setting must NOT be retired.** `parquet_reader_set_sort` and `parquet_open_reader(...,
     ! sort_by=)` reach `sort_build_permutation_threaded` (src/parquet_wrapper.cpp) directly, with
     ! no selector anywhere in that path, and it reads `g_sort_parallel_min_rows` -- mirrored from
-    ! that setting -- to decide whether a read-time sort threads. feature_sort_report.md section
-    ! 14.6's "retire it at the cutover" note assumed the flip removed the C++ engine from the
-    ! library; it removes it only from `pf_sort`/`pf_argsort`.
+    ! that setting -- to decide whether a read-time sort threads. A "retire it at the cutover"
+    ! note would assume the flip removed the C++ engine from the library; it removes it only from
+    ! `pf_sort`/`pf_argsort`.
     !
     ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
     ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
@@ -833,9 +833,8 @@ module parquet_sorting
     !! Needed in BOTH directions, which is unusual for a threshold hook. Raising it (to `huge`)
     !! declines the radix path, which is how the introsort's own negative controls stay non-vacuous
     !! once the floor drops below their fixture sizes; lowering it (to 2) drives every engine fixture
-    !! in the suite through the radix path, which is the sweep `feature_sort_radix.md` section 7.4
-    !! describes. Both are the `feature_risks.md` Risk-49 shape -- a size threshold hiding a code
-    !! path from the tests written for everything else.
+    !! in the suite through the radix path. Both are the `feature_risks.md` Risk-49 shape -- a
+    !! size threshold hiding a code path from the tests written for everything else.
     integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
     !> Overrides the row floor above which a SELECTION orders instead; NEGATIVE restores
     !! `SORT_NTH_ORDER_MIN`.
@@ -876,7 +875,7 @@ module parquet_sorting
     !! well as the value range -- and the grid that first set this rule stepped 1, 4, 16, 64 threads
     !! and so never measured the one team size where the answer had changed. This hook exists so the
     !! ceiling can be A/B'd inside one binary rather than across two builds, which for a crossover is
-    !! the only resolution that works (see `feature_sort_report.md` section 12.1).
+    !! the only resolution that works.
     integer(int64), save :: dbg_sort_counting_max_threads = -1_int64
     !> Parallel refine dispatches the last string sort made; 0 means the refine ran entirely serially.
     !!
@@ -949,8 +948,8 @@ module parquet_sorting
     !! `bind(C)` boundary by whichever engine ran, and Stage 6 exists to remove that boundary.
     !!
     !! So the tests reading the C++ twin are exactly the ones the Stage 6 cutover has to repoint at
-    !! this one, and that repointing is the whole of Group 2 in `feature_sort.md` §6 Stage 6, 6a --
-    !! the three failures that reversed the stage ordering. Repoint them; do not delete them.
+    !! this one, and that repointing is the whole of the cutover's Group 2 -- the three failures
+    !! that reversed the stage ordering. Repoint them; do not delete them.
     integer(int64), save :: dbg_sort_threads_used = 1_int64
     !> Threads the last tie pass (`sort_build_runs_permutation`) ran on; 1 = serial. Written on
     !! every run detection, so a test reads the pass it just asked for. The same reasoning as
@@ -2723,7 +2722,7 @@ def emit_m3_interfaces(w):
 
 
 def emit_engine_interfaces(w):
-    """The comparator core's interfaces (feature_sort.md Stage 1).
+    """The comparator core's interfaces (Stage 1).
 
     These four are implemented in src/parquet_argsort_engine.f90, which -- ALONE among the
     src/parquet_sorting*.f90 files -- is HAND-WRITTEN and not emitted by this script. Only the
@@ -2789,9 +2788,9 @@ def emit_engine_interfaces(w):
     w("        end function sort_keys_compare")
     w("        !> Fills `perm` with the 1-based permutation that puts rows `1..n` in key order.")
     w("        !!")
-    w("        !! The serial half of the pure-Fortran engine (feature_sort.md Stage 2): an INTROSORT")
-    w("        !! -- quicksort with median-of-three pivoting, a depth-limited heapsort fallback and a")
-    w("        !! final insertion pass -- ordering by `sort_row_less` and nothing else.")
+    w("        !! The serial half of the pure-Fortran engine: an INTROSORT -- quicksort with")
+    w("        !! median-of-three pivoting, a depth-limited heapsort fallback and a final insertion")
+    w("        !! pass -- ordering by `sort_row_less` and nothing else.")
     w("        !!")
     w("        !! **It is unstable, and that is why it is correct.** `sort_row_less` ends with a row")
     w("        !! index tiebreaker, so no two distinct rows compare equal and every correct sorting")
@@ -3197,7 +3196,7 @@ def emit_extract_par(w, t):
     Deliberately not written inline in `extract_<tag>`: an `!$omp parallel do` sitting in that
     procedure perturbs gfortran's codegen for the SERIAL branch badly enough to cost 2.4x on a
     statement-for-statement unchanged body. The measurement is in the comment this generator
-    emits into each caller, and in feature_sort.md 4k/4l.
+    emits into each caller.
 
     The extraction loop body is DERIVED from `EXTRACT_LOOP` rather than written a second time,
     so the threaded and serial arms cannot drift apart.
@@ -3335,7 +3334,7 @@ def emit_extract(w, t):
         w("        ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three")
         w("        ! earlier runs: the fill is a pure sequential sweep and faults pages far faster")
         w("        ! than the extraction loop, which interleaves a read of `values`. Cheaper work is")
-        w("        ! not always less time. See feature_sort_report.md.")
+        w("        ! not always less time.")
         w("        !")
         w("        ! **`threads=` is honoured here, and the absent case falls back to the automatic")
         w("        ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an")
@@ -3353,7 +3352,7 @@ def emit_extract(w, t):
         w("        ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,")
         w("        ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller")
         w("        ! passing `threads=1`, by a single-core machine, and by every sort inside an existing")
-        w("        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.")
+        w("        ! OpenMP region, since `pf_sort_threads()` answers 1 there.")
         w("        call resolve_thread_count(threads, n, nth)")
         w("        team = tail_team(nth, n)")
         w("        if (team > 1) then")
@@ -3512,7 +3511,7 @@ KEYS_HEAD = BANNER + '''
 !! canonical key form the engine takes, and implements `pf_sort_keys`.
 !!
 !! The six intrinsic types are handled one tier down, in `src/parquet_argsort_kernel.f90`; this file
-!! is what `parquet_sorting` adds on top of them. See feature_modules.md section 4.
+!! is what `parquet_sorting` adds on top of them.
 !!
 !! **This file decides nothing about order.** It extracts values, says which rows are null, and
 !! passes the caller's `descending`/`nulls_first` flags through -- every ordering decision is made
@@ -4358,7 +4357,7 @@ contains
         ! and `omp_get_place_num_procs()` were measured on a process whose initial thread was
         ! pre-bound to 2 CPUs: they report 2 places totalling 2 processors, not the machine's 384,
         ! and a team of 64 then lands on 2 distinct CPUs. The true machine size is not recoverable
-        ! from inside the process. See feature_sort_report.md sections 5 and 11.
+        ! from inside the process.
         !
         ! **The clamp and its warning both live in `parquet_clamp_to_affinity`**
         ! (src/parquet_settings_base.f90), which is the one place four resolvers share -- this one,

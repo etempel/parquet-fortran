@@ -157,10 +157,10 @@ contains
         character(len=:), allocatable :: nested_kname !! scratch for the nested-write refusal.
 
         ! WRITING A NESTED CONTAINER IS REFUSED, and this guard is why D2 could open the in-memory
-        ! gate without opening a write path nobody built. Phase 7 made nesting READABLE only
-        ! (feature_container_phase7.md's Q2), while D2 widened `%adopt_*` so a caller can now BUILD
-        ! a list whose payload is a container -- from a file, or by hand. Without an explicit
-        ! refusal here that column reaches the Arrow builders, which have no shape for it.
+        ! gate without opening a write path nobody built. Phase 7 made nesting READABLE only, while
+        ! D2 widened `%adopt_*` so a caller can now BUILD a list whose payload is a container --
+        ! from a file, or by hand. Without an explicit refusal here that column reaches the Arrow
+        ! builders, which have no shape for it.
         !
         ! Refused by KIND rather than by schema token: there is deliberately no nested MAML token
         ! (D8), so the type-mismatch guard further down would fire anyway -- but with a message

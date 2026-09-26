@@ -5,8 +5,8 @@
 !! **Provenance.** Derived from PRIMA (Zaikun Zhang, `https://github.com/libprima/prima`),
 !! BSD-3-Clause, at commit `43863c69`: `fortran/lincoa/lincob.f90`, `geometry.f90`, `getact.f90`,
 !! `initialize.f90`, `trustregion.f90` and `update.f90`, which are one module each upstream and one
-!! module here (`feature_optimizer.md` 4.1's ten-file layout). The licence text and the deviations
-!! shared by every file of this tier are in `parquet_prima_linalg`.
+!! module here (the ten-file layout). The licence text and the deviations shared by every file of
+!! this tier are in `parquet_prima_linalg`.
 !!
 !! The algorithm is M. J. D. Powell's; there is no LINCOA paper, and the comments citing equation
 !! numbers of "the NEWUOA paper" and "the BOBYQA paper" are upstream's and refer to *The NEWUOA
@@ -34,7 +34,7 @@
 !! 2. `iprint` and every `fmsg`/`rhomsg`/`retmsg` call are gone: this tier prints nothing.
 !! 3. `xhist`/`fhist`/`chist` and the `savehist`/`rangehist` calls are gone with them; the record
 !!    is the optional `pf_optimize_history`, appended in `evaluate`.
-!! 4. `callback_fcn` and `CALLBACK_TERMINATE` are not carried (`feature_optimizer.md` Q22).
+!! 4. `callback_fcn` and `CALLBACK_TERMINATE` are not carried.
 !! 5. Upstream's driver `lincoa.f90` is NOT vendored: its argument defaults, its `get_lincon` and
 !!    its `preproc` adjustments become the validation and the driver in `parquet_prima_lincoa`,
 !!    where an adjustment upstream makes with a warning is either refused or reported.

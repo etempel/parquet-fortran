@@ -2,14 +2,13 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Baseline and regression harness for the pure-Fortran sort engine campaign
-!! (`feature_sort.md`; run sheet `feature_benchmark_sort.md`).
+!> Baseline and regression harness for the pure-Fortran sort engine campaign.
 !!
-!! **What this is for.** `feature_sort.md` proposes replacing the C++ sort engine that
-!! `parquet_sorting` calls with a Fortran one. Its Stage 0 requires a committed baseline taken on
-!! the *current* engine, across every key family and input shape the engine was built for — because
-!! without one, every later figure is a number with nothing to compare against, and the campaign
-!! can only answer "is the new one fast?" rather than "did we lose anything?".
+!! **What this is for.** The campaign proposes replacing the C++ sort engine that `parquet_sorting`
+!! calls with a Fortran one. Its Stage 0 requires a committed baseline taken on the *current*
+!! engine, across every key family and input shape the engine was built for — because without one,
+!! every later figure is a number with nothing to compare against, and the campaign can only answer
+!! "is the new one fast?" rather than "did we lose anything?".
 !!
 !! **The baseline arm is the shipped `pf_argsort`, not any external sort.** An earlier one-off
 !! comparison used qfeet's `qsort_index`; that is retired. qfeet is unstable, NaN-intolerant and
@@ -43,17 +42,17 @@
 !!
 !! **What each arm measures.** Single-key arms call the public array API, so they are end-to-end:
 !! key extraction, the `bind(C)` crossing, the sort, and the permutation copy-back. That is what a
-!! user pays and what the acceptance bar in `feature_sort.md` is set on. **Multi-key arms build
-!! their `pf_sort_keys` OUTSIDE the timer** and time only `pf_argsort(keys, perm)`, because
-!! extraction is identical before and after the refactor and including it would only dilute the
-!! signal the campaign is looking for. Both choices are stated in the printed header so a figure
-!! cannot be read as the other kind.
+!! user pays and what the campaign's acceptance bar is set on. **Multi-key arms build their
+!! `pf_sort_keys` OUTSIDE the timer** and time only `pf_argsort(keys, perm)`, because extraction
+!! is identical before and after the refactor and including it would only dilute the signal the
+!! campaign is looking for. Both choices are stated in the printed header so a figure cannot be
+!! read as the other kind.
 !!
 !! **`--perm=64` is not a formality.** The int32 permutation specifics allocate an `int64`
 !! permutation and then narrow it into a second array (`narrow_perm`), so the int32 and int64 paths
-!! differ by one full O(n) allocation and conversion pass. `feature_sort.md` §2.5 identifies that
-!! as one of the buffers a Fortran engine deletes outright, so measuring both is how the campaign
-!! finds out how much of the gap is marshalling rather than sorting.
+!! differ by one full O(n) allocation and conversion pass. That is one of the buffers a Fortran
+!! engine deletes outright, so measuring both is how the campaign finds out how much of the gap is
+!! marshalling rather than sorting.
 !!
 !! Maintainer tool, never run by `fpm test`. Drive it with bench/benchmark_sort_engine.sh.
 program benchmark_sort_engine
@@ -154,7 +153,7 @@ program benchmark_sort_engine
     write(output_unit,'(a)') ""
     write(output_unit,'(a,i0,a,i0)') "# figures: ", nfig, "   checksum: ", checksum
     write(output_unit,'(a)') "# checksum is data-dependent and MUST be identical between two builds"
-    write(output_unit,'(a)') "# that claim to compute the same answer -- see feature_benchmark_sort.md."
+    write(output_unit,'(a)') "# that claim to compute the same answer."
 
 contains
 
@@ -287,8 +286,8 @@ contains
         ! `parquet_debug_sort_threads_used` for whether a team was opened, never the timings.
         !
         ! It bites hardest exactly where it is least visible: a FAST arm at a LARGE n, i.e. the
-        ! counting fast path, which is the one arm feature_sort.md's Stage 6 bar requires not to
-        ! regress at all. A slow arm at the same size (f64 at ~414 ns/elem) hides it inside 2% noise.
+        ! counting fast path, which is the one arm the Stage 6 bar requires not to regress at all. A
+        ! slow arm at the same size (f64 at ~414 ns/elem) hides it inside 2% noise.
         !
         ! The checksum is saved and restored across the warm-up so that adding this changed no run's
         ! printed checksum -- earlier reports are compared against those values.
@@ -391,7 +390,7 @@ contains
         call row(fam, "rand", "rank", n, 1, nrep, best)
         !
         ! is_sorted: O(n), and the one operation whose cost should NOT move with the engine.
-        ! Carried as this campaign's control arm -- see feature_benchmark_sort.md §3c.
+        ! Carried as this campaign's control arm.
         best = huge(1.0_real64)
         do r = 1_int64, nrep
             t0 = wtime()
@@ -897,14 +896,14 @@ contains
     !! log pasted into a report carries its own provenance.
     subroutine print_header()
         write(output_unit,'(a)') "=============================================================================="
-        write(output_unit,'(a)') "benchmark_sort_engine -- baseline harness for feature_sort.md"
+        write(output_unit,'(a)') "benchmark_sort_engine -- baseline harness for the sort engine campaign"
         write(output_unit,'(a)') "=============================================================================="
         write(output_unit,'(a,a)')    "  mode        : ", mode
         ! Printed, and printed from the LIBRARY rather than from `engine`, so the line reports what
         ! the library will actually do rather than what was asked for -- CLAUDE.md's "a build-flag-
         ! selected benchmark must PRINT which variant it is", applied to a runtime switch.
         if (parquet_debug_using_fortran_sort_engine()) then
-            write(output_unit,'(a)')  "  sort engine : FORTRAN (feature_sort.md Stage 2)"
+            write(output_unit,'(a)')  "  sort engine : FORTRAN"
         else
             write(output_unit,'(a)')  "  sort engine : C++ (the shipped one)"
         end if
@@ -1270,7 +1269,7 @@ contains
 
     !> Usage text.
     subroutine usage()
-        write(output_unit,'(a)') "benchmark_sort_engine -- baseline harness for feature_sort.md"
+        write(output_unit,'(a)') "benchmark_sort_engine -- baseline harness for the sort engine campaign"
         write(output_unit,'(a)') ""
         write(output_unit,'(a)') "  --mode=argsort|dist|ops|threads|all   (default all)"
         write(output_unit,'(a)') "  --families=i32,i64,i64lo,f32,f64,str,multi2,multi3"

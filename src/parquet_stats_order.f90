@@ -30,7 +30,7 @@
 !! the property it was chosen for: a script that adds uniform weights must not see its numbers
 !! move. No reference library interpolates a weighted quantile, so that invariant -- rather than a
 !! cross-check -- is what pins the rule, and `method="inverted_cdf"` is the numpy-comparable
-!! escape hatch. See `feature_pandas_S4.md`'s "Weights" section for the derivation.
+!! escape hatch.
 !!
 !! **A one-shot single probe SELECTS rather than sorts.** `pf_median(v, m)` over an unweighted
 !! population is O(n) through `pf_nth_element`, not O(n log n); weights force the sort, because the
@@ -92,7 +92,7 @@ submodule (parquet_stats) parquet_stats_order
     !! still correct, `should_select` is still where the decision is written down, and the
     !! `parquet_debug_set_stats_quantile_sort_min` override still drives both arms -- which is what
     !! lets `bench/benchmark_stats.sh --mode=iqr` re-ask this question on a machine with a different
-    !! core count without a rebuild. See feature_pandas_S4.md, "X-2 is FIXED".
+    !! core count without a rebuild.
     integer(int64), parameter :: QUANTILE_SORT_MIN = 1_int64
 
     !> Test-only override for `QUANTILE_SORT_MIN`; negative means the shipped value applies.

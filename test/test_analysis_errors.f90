@@ -1089,7 +1089,7 @@ contains
     !!
     !! It was an abort test until then. The scenario checks the row LENGTHS rather than the row
     !! count, because the likeliest assembly defect -- using the outer offsets for the inner
-    !! container -- leaves the count right. See feature_container_phase7.md's D4.
+    !! container -- leaves the count right.
     subroutine test_list_read_nested_payload_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status(error, "list_read_nested_payload", expect_abort=.false., &
@@ -1312,7 +1312,7 @@ contains
             required_stderr="not a supported map value kind")
     end subroutine test_map_init_bad_kind_aborts
 
-    !> Nesting is READ-ONLY (feature_container_phase7.md's Q2), and these pin the write half.
+    !> Nesting is READ-ONLY, and these pin the write half.
     !!
     !! **Each refusal has a NEGATIVE CONTROL beside it**, which is the whole reason there are six
     !! tests here rather than three: D2 deliberately widened the in-memory gate so a nested column
@@ -1411,7 +1411,7 @@ contains
     !> from `map_init_bad_kind` above: since Phase 7 the same gate refuses a `*_VEC` kind and a
     !> CONTAINER kind with different messages, because only one of them has a route that works.
     !> Asserting the message -- not merely the abort -- is what pins that the caller is told about
-    !> `%adopt_*` rather than simply told no. See feature_container_phase7.md's D1.
+    !> `%adopt_*` rather than simply told no.
     subroutine test_map_init_nested_value_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status_and_stderr(error, "map_init_nested_value", expect_abort=.true., &
@@ -2005,7 +2005,7 @@ contains
     !! It was an abort test until then, and inverting it rather than deleting it is deliberate: it
     !! is the negative control for `struct_read_nested_struct_field`, which still aborts. The two
     !! differ only in the field's type, so the pair shows what the surviving refusal is actually
-    !! about. See feature_container_phase7.md's D4.
+    !! about.
     subroutine test_struct_read_nested_field_aborts(error)
         type(error_type), allocatable, intent(out) :: error
         call check_scenario_exit_status(error, "struct_read_nested_field", expect_abort=.false., &

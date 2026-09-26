@@ -1659,9 +1659,9 @@ contains
         b = ibset(b, 3)
     end function ibits_byte
     !
-    !> append_buffers' validity_offset_bits argument (feature_doc.md point 4's "Rebase validity"
-    !! fix): when a source array is a genuinely sliced child (e.g. a struct-nested leaf resolved
-    !! through a non-zero-offset StructArray::field(), see parquet_wrapper.cpp's
+    !> append_buffers' validity_offset_bits argument (the "Rebase validity" fix): when a source
+    !! array is a genuinely sliced child (e.g. a struct-nested leaf resolved through a
+    !! non-zero-offset StructArray::field(), see parquet_wrapper.cpp's
     !! extract_string_buffers/unwrap_struct_path comments), Arrow's validity bitmap is not
     !! pre-rebased the way offsets/data are -- element 1 of the logical slice starts at bit
     !! `validity_offset_bits`, not bit 0. This test constructs one validity byte where the first 3
@@ -2486,10 +2486,10 @@ contains
     !!
     !! Each binding is now a one-line forwarder onto the typed form, which is what keeps ifx from
     !! building a runtime type descriptor in a caller's prologue when `parquet_columns` reaches a
-    !! column's `str` component (feature_ifx.md; `check_no_type_bound_string_column_access` is the
-    !! static half of the guard). A forwarder is exactly the shape that can be miswired without
-    !! failing anything: swap two arguments of the same type, drop an `optional`, or forward to the
-    !! wrong kind specific, and the code still compiles.
+    !! column's `str` component (`check_no_type_bound_string_column_access` is the static half of
+    !! the guard). A forwarder is exactly the shape that can be miswired without failing anything:
+    !! swap two arguments of the same type, drop an `optional`, or forward to the wrong kind
+    !! specific, and the code still compiles.
     !!
     !! **What makes this a test rather than a restatement of the forwarder** is that it drives both
     !! halves on ONE column and compares them, on a fixture built to the project's own rule --

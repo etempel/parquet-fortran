@@ -48,7 +48,7 @@
 !! * an **undefined answer is a quiet NaN**, never an abort. This module aborts on misuse and never
 !!   on a data condition, because a per-group loop meets an empty group on real data.
 !!
-!! Design and staging: feature_pandas_S4.md. User guide: doc/pages/utilities/statistics.md.
+!! User guide: doc/pages/utilities/statistics.md.
 module parquet_stats
     ! The tier edge. Unrestricted rather than `only:` -- this module's default accessibility is
     ! `private`, so nothing is re-exported, and the later phases reach `pf_argsort`,

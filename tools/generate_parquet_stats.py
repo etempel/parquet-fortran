@@ -19,7 +19,7 @@ the single place a supported column kind is declared -- rather than copied. `--s
 cross-checks the imported set, so a change over there fails here rather than silently changing
 what this module summarises.
 
-SCOPE, and why it is this small: this is phase P1 of feature_pandas_S4.md, whose whole job is the
+SCOPE, and why it is this small: this is phase P1, whose whole job is the
 module, its tier and its wiring -- deliberately with no statistics in it. `pf_count_valid` is the
 one procedure, chosen because it exercises every convention the later phases inherit (the
 canonical optional-argument order, the null/NaN/weight exclusion ordering, the abort-on-misuse
@@ -66,8 +66,7 @@ EXPECTED_NUMERIC_TAGS = ["i32", "i64", "f32", "f64", "bool"]
 #   what   human-readable name, used in doc-comments
 #   real   .true. when the kind can hold a NaN -- which is what decides whether the specific
 #          carries `skipnan`/`n_nan` at all. An integer or logical array has no NaN to skip, and
-#          an argument that can never do anything is worse than an absent one
-#          (feature_pandas_S4.md, F5).
+#          an argument that can never do anything is worse than an absent one.
 # --------------------------------------------------------------------------------------
 TYPES = [
     ("i32",  "integer(int32)", "32-bit integer", False),
@@ -129,7 +128,7 @@ SPEC_HEAD = BANNER + """!> Array statistics over plain Fortran arrays -- the `pf
 !! * an **undefined answer is a quiet NaN**, never an abort. This module aborts on misuse and never
 !!   on a data condition, because a per-group loop meets an empty group on real data.
 !!
-!! Design and staging: feature_pandas_S4.md. User guide: doc/pages/utilities/statistics.md.
+!! User guide: doc/pages/utilities/statistics.md.
 module parquet_stats
     ! The tier edge. Unrestricted rather than `only:` -- this module's default accessibility is
     ! `private`, so nothing is re-exported, and the later phases reach `pf_argsort`,
@@ -2452,11 +2451,11 @@ _DESCRIBE_COMMON = """    !>
 #: is the earliest and cheapest place to say so. `pf_bucketize`/`pf_histogram` (P9) are the answer
 #: to the question a caller reaching for it is actually asking.
 #:
-#: `type(parquet_column)` is absent too, and for a different reason -- see feature_pandas_S4.md's
-#: P7 open questions. A column's kind is not known until run time, so a `parquet_column` specific
-#: could only be disambiguated by the type of the RESULT argument, which turns a kind mismatch
-#: from a compile error into a runtime abort. Every other family in this module resolves on
-#: `values` alone, and one that did not would be the odd one out for the sake of one call shape.
+#: `type(parquet_column)` is absent too, and for a different reason. A column's kind is not known
+#: until run time, so a `parquet_column` specific : could only be disambiguated by the type of the
+# RESULT argument, which turns a kind mismatch : from a compile error into a runtime abort. Every
+# other family in this module resolves on : `values` alone, and one that did not would be the odd
+# one out for the sake of one call shape.
 MODE_KINDS = [
     ("i32", "integer(int32), intent(in) :: values(:) !! the population.",
      "integer(int32), intent(out) :: m", "the modal value; unchanged when the population is empty.",
@@ -3516,8 +3515,7 @@ def body(tag, decl, what, is_real):
 #: in the kind of an optional `n_null` are rejected at the DECLARATION ("Ambiguous interfaces in
 #: generic interface"), not at the call. `pf_count_valid` is the one procedure in this module whose
 #: reporting integer is required, so `n`'s kind resolves the call and `n_null`/`n_nan` follow it.
-#: Every other generic here has nothing but optional integers and therefore cannot have this pair --
-#: see feature_stats_int32.md for the census and the two compiler probes.
+#: Every other generic here has nothing but optional integers and therefore cannot have this pair.
 #:
 #: **Mixed kinds are a COMPILE error, which is the point.** `n` int32 with `n_null` int64 matches
 #: neither specific, so the "no mixed arguments" rule is enforced by the language rather than by a

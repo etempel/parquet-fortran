@@ -15,20 +15,20 @@
 !!
 !! **Why the validation lives here.** `refuse_bad_call` is not PRIMA's: it replaces
 !! `preproc.f90`, which adjusts an invalid argument and warns where this refuses it
-!! (`feature_optimizer.md` 5.6). It sits in this module rather than in a driver submodule because
-!! all three entry points share it -- one set of abort sites, so the error scenarios of 9.4 cover
-!! `pf_minimize_lincoa` and `pf_minimize_cobyla` through the same code they cover
-!! `pf_minimize_bobyqa` through, and a message cannot drift between the three.
+!! It sits in this module rather than in a driver submodule because all three entry points share
+!! it -- one set of abort sites, so the error scenarios of 9.4 cover `pf_minimize_lincoa` and
+!! `pf_minimize_cobyla` through the same code they cover `pf_minimize_bobyqa` through, and a message
+!! cannot drift between the three.
 !!
 !! **What is not vendored here.** `moderatex`, `moderatef` and `moderatec`: upstream replaces a
 !! NaN coordinate by zero and a NaN or huge value by a large finite one and carries on, which is
-!! its "moderated extreme barrier". This library refuses instead (`feature_optimizer.md` Q7), so a
-!! non-finite value never reaches the model and PRIMA's `NAN_INF_F` cannot arise. `history.f90`:
-!! upstream's `xhist`/`fhist` ring buffer with its `PRIMA_MAX_HIST_MEM_MB` cap is replaced by the
-!! optional `pf_optimize_history` record, appended at the single point every evaluation passes
-!! through -- `evaluate` and `evaluate_fc` -- and bounded by the evaluation budget instead.
-!! `shiftbase_qint` is UOBYQA's and is not here (Q15). Upstream's `evaluatefc` is replaced by
-!! `evaluate_fc`, which screens rather than moderates.
+!! its "moderated extreme barrier". This library refuses instead, so a non-finite value never
+!! reaches the model and PRIMA's `NAN_INF_F` cannot arise. `history.f90`: upstream's `xhist`/`fhist`
+!! ring buffer with its `PRIMA_MAX_HIST_MEM_MB` cap is replaced by the optional
+!! `pf_optimize_history` record, appended at the single point every evaluation passes through --
+!! `evaluate` and `evaluate_fc` -- and bounded by the evaluation budget instead. `shiftbase_qint`
+!! is UOBYQA's and is not here (Q15). Upstream's `evaluatefc` is replaced by `evaluate_fc`, which
+!! screens rather than moderates.
 module parquet_prima_common
 
     use, intrinsic :: iso_fortran_env, only : real64, int64
@@ -62,8 +62,8 @@ module parquet_prima_common
     !!
     !! One object travels beside the objective through every engine procedure that can evaluate
     !! or abort, in place of upstream's `procedure(OBJ) :: calfun` dummy. It carries the four
-    !! things upstream had no room for: the caller's scaling (`feature_optimizer.md` Q26), the
-    !! wording an abort must carry, the optional evaluation record, and the running count.
+    !! things upstream had no room for: the caller's scaling, the wording an abort must carry,
+    !! the optional evaluation record, and the running count.
     type :: prima_state
         !> Characteristic magnitude per coordinate. The engines work in `y` and the objective is
         !! evaluated at `scale*y`, so `rhobeg`, `rhoend` and the returned `rho` are in `y` units
@@ -103,9 +103,9 @@ contains
     !! **This procedure is this library's, not upstream's.** PRIMA's `evaluatef` calls a
     !! `procedure(OBJ)` and then applies the moderated extreme barrier: a NaN coordinate becomes
     !! zero, a NaN or huge value becomes `FUNCMAX`, and the search carries on against a value the
-    !! objective never returned. This library refuses instead (`feature_optimizer.md` Q7), for the
-    !! reason the guide gives: a moderated value is indistinguishable from a real one in the
-    !! answer, so a bug in the objective is reported as a minimum.
+    !! objective never returned. This library refuses instead, for the reason the guide gives: a
+    !! moderated value is indistinguishable from a real one in the answer, so a bug in the
+    !! objective is reported as a minimum.
     !!
     !! The engines work in scaled coordinates `y`; the objective is always evaluated at
     !! `scale*y`, and that is what the record keeps, so a caller reading `history` back never
@@ -141,10 +141,10 @@ contains
     !!
     !! **This procedure is this library's, not upstream's**, and it is `evaluate`'s sibling:
     !! upstream's `evaluatefc` moderates a NaN or huge value and a NaN coordinate and carries on,
-    !! and this refuses (`feature_optimizer.md` Q7). The refusal covers the constraint values as
-    !! well as the objective, which is the abort 5.6 words `a constraint returned a non-finite
-    !! value` -- without it a NaN constraint would enter COBYLA's filter, where it is compared,
-    !! and decide which point is returned.
+    !! and this refuses. The refusal covers the constraint values as well as the objective, which
+    !! is the abort 5.6 words `a constraint returned a non-finite value` -- without it a NaN
+    !! constraint would enter COBYLA's filter, where it is compared, and decide which point is
+    !! returned.
     !!
     !! `c` is sized by the caller, always `f%n_constraints()` values, and is left untouched when
     !! that count is zero. Only the objective value goes into the record: `pf_optimize_history`
@@ -482,8 +482,7 @@ contains
 
     ! ---- What LINCOA and COBYLA add: the constrained exit test and Powell's filter -------------
     !
-    ! Everything above is what BOBYQA reaches (`feature_optimizer.md` 12.1 allows a phase to extend
-    ! what an earlier one built).
+    ! Everything above is what BOBYQA reaches (a later phase may extend what an earlier one built).
 
     !> Whether the solver should stop, and why; upstream's `checkexit` for a constrained problem.
     !!
@@ -876,7 +875,7 @@ contains
 
     ! ---- the validation that replaces PRIMA's preproc.f90 --------------------------------------
 
-    !> Refuses every call `feature_optimizer.md` 5.6 says is refused, before anything is allocated.
+    !> Refuses every call that must be refused, before anything is allocated.
     !!
     !! **This procedure is this library's, not upstream's.** It stands in for `preproc.f90`, which
     !! reads an invalid argument, substitutes a default and warns: `rhobeg` and `rhoend` swapped if
@@ -1080,8 +1079,8 @@ contains
     !! comparable with the numbers the caller wrote. The engines work in `y = x/scale` and measure
     !! violation there, against constraints folded and normalised for their own use -- LINCOA
     !! divides every row by its gradient length, which rescales the violation with it. Recomputing
-    !! here is what `feature_optimizer.md` 6.5 item 12 asks for, and it is also what PRIMA's own
-    !! MATLAB post-processing does after its `scale` option.
+    !! here is what the design asks for, and it is also what PRIMA's own MATLAB post-processing
+    !! does after its `scale` option.
     !!
     !! PRIMA's L-infinity form: the largest of zero, the bound violations, the inequality
     !! violations, the absolute equality residuals and the nonlinear constraint values. `maximum`
@@ -1132,9 +1131,8 @@ contains
     !! beside a `cstrv` read from the other, would contradict itself. What stays scaled is the
     !! FILTER inside the engine, which can keep a slightly infeasible point it would otherwise
     !! discard when a bound is active and `scale` is extreme; that is why the verdict is taken
-    !! here rather than there (`feature_optimizer.md` 8, last entry). The test
-    !! `a bound-active scaled problem comes back feasible in the caller's units`
-    !! (`test/test_prima.f90`) is what holds it.
+    !! here rather than there. The test `a bound-active scaled problem comes back feasible in the
+    !! caller's units` (`test/test_prima.f90`) is what holds it.
     subroutine finish_run(prima_info, st, n, converged, info, history, cstrv, ctol)
         integer, intent(in)              :: prima_info !! PRIMA's exit code
         type(prima_state), intent(in)    :: st         !! the run's radius, count and record

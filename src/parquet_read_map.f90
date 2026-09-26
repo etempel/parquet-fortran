@@ -87,7 +87,7 @@ contains
             ! A NESTED value, read as a column in its own right at the DESCENT path
             ! `<name>{value}`. The keys, the offsets and the row validity all came from
             ! fill_map_keys above and are unaffected -- only the VALUES have no typed buffer a
-            ! container could be filled into. See feature_container_phase7.md's D4 (7b) and D6.
+            ! container could be filled into.
             call read_nested_payload(reader, trim(name)//"{value}", rg, kind, vals, context)
         else
             call fill_map_values(reader, name, rg, nrows, nentries, nvalchars, unit_sel, kind, &

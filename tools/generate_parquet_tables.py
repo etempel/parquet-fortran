@@ -760,8 +760,8 @@ module parquet_tables
     # submodule is enough, so every parquet_tables_* file failed to compile. Keeping the target
     # module-contained is the documented ingredient that avoids it. table_destroy_lock stays a
     # separate module procedure (module -> submodule is the legal direction and it has an
-    # interface). See feature_nag_ice_scope_id.md. Do not move this back into a submodule, and
-    # give any FUTURE finalizer on this type the same treatment.
+    # interface). Do not move this back into a submodule, and give any FUTURE finalizer on this type
+    # the same treatment.
     w("contains")
     w("    !")
     w("    !> FINAL procedure: frees the column store and abandons the reader. Runs at scope exit")
@@ -1649,8 +1649,8 @@ def gen_index_type():
 
 
 def gen_group_callbacks():
-    """The reducer base type and the callback interfaces of `parquet_grouping%apply`
-    (feature_pandas_S5.md, sections D and H). The abstract type comes first because the
+    """The reducer base type and the callback interfaces of `parquet_grouping%apply`.
+    The abstract type comes first because the
     interface that imports it must follow it (F2018 C8xx: an imported host entity is declared
     before the interface body), and a deferred binding may name its interface ahead of it."""
     o = []
@@ -1738,7 +1738,7 @@ def gen_group_callbacks():
 
 
 def gen_grouping_type():
-    """The `parquet_grouping` type: `%group_by`'s partition kept as an object (feature_pandas_S5.md)."""
+    """The `parquet_grouping` type: `%group_by`'s partition kept as an object."""
     o = []
     w = o.append
     w("""    !> A partition of a table's rows by the values of one or more KEY columns -- "which rows
@@ -6103,7 +6103,7 @@ def gen_spec_interfaces():
         !> `%append(table)` for `parquet_table_writer`'s buffer: the same lock, checks and worker,
         !! with one rule the sink decides -- `ignore_unknown=.true.` skips a resident source
         !! column this table lacks instead of refusing it, which is what an explicit `schema=`
-        !! means (feature_pandas_S2.md, question 18). Private to the module.
+        !! means. Private to the module.
         module subroutine table_append_table_ext(self, other, ignore_unknown)
             class(parquet_table), intent(inout) :: self !! the table to grow.
             class(parquet_table), intent(in) :: other   !! the table whose rows are appended.
@@ -7527,7 +7527,6 @@ def container_impls():
     in front of the access. A row-structural mutation SKIPS a column that is not resident, leaving
     it unreadable for good, and the detach guard is the only thing that reports it -- so a specific
     written any other way would silently read a skipped container column instead of aborting.
-    See feature_container_phase6.md's D6.
     """
     o = []
     for tag, pk, ctype in CONTAINERS:
@@ -8921,7 +8920,7 @@ def stat_dispatch():
     !! A `select type` rather than a twelfth deferred binding on the abstract base: a row length is
     !! a display feature, and the base's bindings are the ones every structural operation needs.
     !! Adding one there would oblige every future container type to implement it for a `%print_stat`
-    !! column -- see feature_container_phase6.md's Q4.
+    !! column.
     subroutine container_row_length(c, k, n)
         class(parquet_container_column), intent(in) :: c !! the container.
         integer(int64), intent(in) :: k                  !! 1-based row.
@@ -9141,8 +9140,8 @@ def getelem_impl(k):
     The int32 specific forwards to the int64 one; the int64 one resolves the name, checks the
     row, and hands the resolved pieces to `col_fetch_<tag>`. Every rule about this operation --
     the widening set, the kind error, the null convention -- lives in that body and nowhere else,
-    which is what stops the two spellings of one operation from answering differently
-    (feature_colindex.md 6.3). It is the FIVE-ARGUMENT variant, not the handle-delegating sketch:
+    which is what stops the two spellings of one operation from answering differently.
+    It is the FIVE-ARGUMENT variant, not the handle-delegating sketch:
     building a `parquet_table_col` here purely to delegate through it measured +16.3% on this
     accessor, three times criterion (3)'s bar, against +2.16% for this shape.
     """
@@ -9261,7 +9260,7 @@ def set_str_impl():
 # Kinds whose element can be reached one at a time WITHIN a row: the 9 rank-2 kinds. This is new
 # capability rather than a faster spelling -- the table has no `%get_element(name, i, e, v)` to
 # wrap, because reading one element of a vector row has never been expressible without
-# materialising the whole row (feature_colindex.md 4.1).
+# materialising the whole row.
 VEC_KINDS = [k for k in KINDS if k[4] == 2]
 
 # Table-level `%get_element`/`%set_element` name the two string kinds `chr`/`chrv`, while the
@@ -9308,7 +9307,7 @@ def col_fetch_impl(k):
 
     Takes the resolved pieces rather than a handle: building a `parquet_table_col` purely to
     delegate through it measured +16.3% on `%get_element`, against criterion (3)'s 5% bar, while
-    this shape measured +2.16% (feature_colindex.md 2-ii). `proc` is the CALLER's name so each
+    this shape measured +2.16%. `proc` is the CALLER's name so each
     entry point keeps the messages it always produced.
     """
     tag, pk, decl, comp, rank, cat = k
@@ -9436,7 +9435,7 @@ def col_getelem_impl(k):
 
     New capability rather than a faster spelling: the table has no name-taking counterpart,
     because reading a single element of a vector row has never been expressible without
-    materialising the whole row (feature_colindex.md 4.1).
+    materialising the whole row.
 
     It runs `parquet_column%get_elem`, which was added for this and is where the bounds check and
     the storage layout live. Reaching around it through `%data_ptr` would have put a second copy

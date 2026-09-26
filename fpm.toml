@@ -154,11 +154,9 @@ nagfor.flags = "-f2018 -nan -colour -w=unused -Warn=unkind_real_literal -Warn=do
 #                    under every other profile without the variable, which is what makes the
 #                    failure look like a defect in the suite. So: `OMP_STACKSIZE=2M fpm test ...`,
 #                    or just use the wrapper, which is there for exactly this.
-#                    Standalone report, with the generated C and the compiler matrix:
-#                    feature_nag_bindc_undefined.md; the runner split: feature_tests.md.
 #                Note -C=all does NOT imply -C=undefined, so the nagdeb set below is unaffected.
 #
-# Both are written up in feature_nag_runtime_checks.md. Full suite under the set below:
+# Full suite under the set below:
 # 1783 passed, 0 failed, zero crashes, zero hangs.
 #
 # -C=dangling and -C=calls are BOTH in, and both are here only because src/parquet_write_numeric.f90

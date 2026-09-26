@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the per-kind blocks of the `parquet_columns` foundation module.
 
-`parquet_column` (see feature_table.md D2/§2) is a type-erased column-value container
+`parquet_column` is a type-erased column-value container
 discriminated by a `PK_*` kind constant. Its value access, value mutation and storage
 bookkeeping are the same handful of statements repeated over 18 kinds, which is what this
 script emits -- by hand that is several hundred near-identical procedures, each needing its
@@ -115,7 +115,7 @@ UNDEF_FILL = {
 VEC_KINDS = [k for k in KINDS if k[4] == 2]
 
 # --------------------------------------------------------------------------------------
-# The TYPED per-cell accessor tier (feature_ifx.md).
+# The TYPED per-cell accessor tier.
 #
 # Every per-cell accessor's body lives behind a `type(parquet_column)` dummy, and the type-bound
 # binding is a one-line forwarder onto it. These are the only names `parquet_tables` may use to
@@ -164,7 +164,7 @@ def cell_guards(pk, proc, indent=8, obj="col", pfx=TYPED_PREFIX):
     `obj`/`pfx` select which tier the guards are emitted for: the typed implementations pass the
     defaults (`col`, and the typed guards), while a class-dummy body would pass `self` and no
     prefix. A typed body MUST call the typed guards -- the class ones take `class(parquet_column)`,
-    so calling one from a typed body reintroduces the whole descriptor block (feature_ifx.md §7.2).
+    so calling one from a typed body reintroduces the whole descriptor block.
 
     Normally two plain calls into `parquet_columns_util`, which is exactly what ships. Under
     `--bench-guards` the same two guards are emitted three ways behind cpp `#ifdef`s, so one
@@ -175,8 +175,7 @@ def cell_guards(pk, proc, indent=8, obj="col", pfx=TYPED_PREFIX):
       -DPF_BENCH_NO_GUARDS       neither
 
     The middle arm is the interesting one: every check still happens, so it is free of any safety
-    cost, and the gap to the default is purely what the two cross-submodule calls cost. See
-    `feature_colindex.md` Q9 and the run sheet `feature_benchmark_colindex.md`.
+    cost, and the gap to the default is purely what the two cross-submodule calls cost.
 
     This exists because that measurement CANNOT be replicated inside a benchmark program: the
     question is what a call across a program-unit boundary costs, and a local copy in one file
@@ -251,7 +250,7 @@ def gen_typed_interfaces():
     """
     o = []
     w = o.append
-    w("""    ! ---- Typed per-cell access: the NON-POLYMORPHIC implementation tier (feature_ifx.md) ----
+    w("""    ! ---- Typed per-cell access: the NON-POLYMORPHIC implementation tier ---------------------
     !
     ! Every per-cell accessor's body lives here, behind a `type(parquet_column)` dummy. The
     ! type-bound bindings declared above are one-line forwarders onto these, and `parquet_tables`
@@ -451,7 +450,7 @@ def gen_typed_interfaces():
         end subroutine {TYPED_PREFIX}check_width
     end interface
     !""")
-    w("    ! ---- The typed tier's generics: the ONLY names parquet_tables uses (feature_ifx.md) ----")
+    w("    ! ---- The typed tier's generics: the ONLY names parquet_tables uses ---------------------")
     for base, tags in TYPED_FAMILIES:
         w(f"    interface {TYPED_PREFIX}{base}")
         for tag in tags:
@@ -498,10 +497,10 @@ def gen_spec():
 !! it symmetrically without a circular dependency.
 module parquet_columns
     use, intrinsic :: iso_fortran_env, only : int8, int32, int64, real32, real64
-    ! The TYPED tier of parquet_string_column (feature_ifx.md): every `str` access below goes
-    ! through these, never through a binding -- a `type` actual passed to a `class` dummy makes
-    ! ifx build a runtime type descriptor in STATIC storage in the caller's prologue, on every
-    ! call, which turns a per-element scan into cross-thread cache-line contention.
+    ! The TYPED tier of parquet_string_column: every `str` access below goes through these,
+    ! never through a binding -- a `type` actual passed to a `class` dummy makes ifx build a
+    ! runtime type descriptor in STATIC storage in the caller's prologue, on every call, which
+    ! turns a per-element scan into cross-thread cache-line contention.
     use parquet_strings, only : parquet_string_column, &
         parquet_string_column_append_column, parquet_string_column_append_from, parquet_string_column_append_nulls, &
         parquet_string_column_append_values, parquet_string_column_capacity, &
@@ -537,12 +536,12 @@ module parquet_columns
     for name, _, _ in PK_VALUES:
         w(f"    public :: {name}")
     w("""    !
-    ! The typed per-cell accessor tier (feature_ifx.md). INTERNAL API: public only because
-    ! `parquet_tables` is a different module and this type's components are private, so there is
-    ! no other way for it to reach storage without a type-bound call -- which is the thing being
-    ! avoided. `src/parquet.f90` privatises every one of these again, so none reaches a
-    ! `use parquet` program, and none is covered by the library's semantic-versioning promise or
-    ! listed in README's API overview. Only the generics are public; every specific is private.""")
+    ! The typed per-cell accessor tier. INTERNAL API: public only because `parquet_tables` is a
+    ! different module and this type's components are private, so there is no other way for it to
+    ! reach storage without a type-bound call -- which is the thing being avoided.
+    ! `src/parquet.f90` privatises every one of these again, so none reaches a `use parquet`
+    ! program, and none is covered by the library's semantic-versioning promise or listed in
+    ! README's API overview. Only the generics are public; every specific is private.""")
     for name in TYPED_PUBLIC_NAMES:
         w(f"    public :: {name}")
     w("""    !
@@ -1142,10 +1141,10 @@ module parquet_columns
         !! when present, has one entry per DESTINATION row and marks every element of a `.false.`
         !! row null on top of whatever the source row carried -- `set_validity`'s add-only rule,
         !! applied in the same pass rather than afterwards. `threads` above 1 splits the rows
-        !! across a team. Both are `gather_from`'s, which does the work: since stage 4 of
-        !! `feature_join.md` this is a `gather_from` of the column's own rows into a fresh column,
-        !! handed back over the original in O(1). A container column keeps its own route (the
-        !! container rebuilds itself) and takes no mask.
+        !! across a team. Both are `gather_from`'s, which does the work: since stage 4 this is a
+        !! `gather_from` of the column's own rows into a fresh column, handed back over the
+        !! original in O(1). A container column keeps its own route (the container rebuilds
+        !! itself) and takes no mask.
         module subroutine gather_i64(self, idx, valid, threads)
             class(parquet_column), intent(inout) :: self !! the column.
             integer(int64), intent(in) :: idx(:)         !! 1-based source row per destination row.
@@ -1815,9 +1814,9 @@ module parquet_columns
         !!
         !! Takes a NON-polymorphic dummy, unlike its neighbours here: the typed `set_null` forms
         !! call it, and a typed body handing a `type(parquet_column)` to a `class` dummy rebuilds
-        !! the whole descriptor block the typed tier exists to remove (feature_ifx.md). It is
-        !! private plumbing and never a binding, so it needs no polymorphic form at all -- every
-        !! existing caller passes a `class` actual, which a `type` dummy accepts for free.
+        !! the whole descriptor block the typed tier exists to remove. It is private plumbing and
+        !! never a binding, so it needs no polymorphic form at all -- every existing caller
+        !! passes a `class` actual, which a `type` dummy accepts for free.
         module subroutine ensure_bitmap(col)
             type(parquet_column), intent(inout) :: col !! the column.
         end subroutine ensure_bitmap
@@ -2653,8 +2652,7 @@ def main():
     ap.add_argument("--bench-guards", action="store_true",
                     help="MEASUREMENT BRANCH ONLY: emit get_at/set_at's guards inside cpp "
                          "#ifdefs so a build can select shipped / PF_BENCH_INLINE_GUARDS / "
-                         "PF_BENCH_NO_GUARDS. Never commit this to main -- see "
-                         "feature_benchmark_colindex.md")
+                         "PF_BENCH_NO_GUARDS. Never commit this to main.")
     args = ap.parse_args()
     BENCH_GUARDS = args.bench_guards
     if BENCH_GUARDS and args.check:

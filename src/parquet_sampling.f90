@@ -62,7 +62,7 @@ module parquet_sampling
     ! int64 perm)` is the entire dependency. Taking it from `parquet_sorting` dragged in
     ! `parquet_columns`, `parquet_strings`, `parquet_temporal` and -- before the C++ engine moved
     ! behind a procedure pointer -- `parquet_bindings` and with it Arrow, none of which a weighted
-    ! draw has any use for. See feature_modules.md section 4.
+    ! draw has any use for.
     use parquet_argsort, only: pf_argsort
     ! The frozen `-log(u)` transform, in its own leaf module so the standalone fingerprint check
     ! can compile it without dragging this one in.

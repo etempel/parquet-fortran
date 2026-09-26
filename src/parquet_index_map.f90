@@ -13,9 +13,9 @@
 !! allocation-free at every team size. The hash mixer and the two probes are contained in THIS
 !! file, below the lookup workers, so that the compiler inlines them into those loops: a probe
 !! that calls across a submodule boundary pays about three nanoseconds per key, a third of a
-!! small-map probe (feature_pf_index.md, section 4.6). `parquet_index_hash.f90`, the backend's
-!! mutation side, descends from this submodule and reaches the same functions by host
-!! association, so both sides hash identically by construction.
+!! small-map probe. `parquet_index_hash.f90`, the backend's mutation side, descends from this
+!! submodule and reaches the same functions by host association, so both sides hash identically by
+!! construction.
 !!
 !! **Every mutation takes one process-wide named critical, `pf_index_map_guard`**, in the same
 !! wrapper-plus-worker shape the pool uses: the public body is the guard and one call, and no
@@ -38,7 +38,7 @@
 !! keys up lock-free on the team and inserts the ones not found the same way, numbered partition
 !! by partition. The plan of that insert -- the partition size, the histogram and the write
 !! cursors -- is `ix_part_shift`/`ix_partition_plan` below, contained here so that the string
-!! submodule reaches them too; `feature_pf_index.md` section 6 item 3 is the design.
+!! submodule reaches them too.
 !!
 !! **The typed tier, from the first line rather than as a later optimisation.** Every binding is a
 !! thin forwarder onto a worker taking a `type(pf_index_map)` dummy. A `class` actual passed to a
@@ -1724,10 +1724,9 @@ contains
     ! The hash mixer and the lookup probes. Here, beside `%get` and the chunk loops of
     ! `%get_many`, so that the compiler inlines them into the lookup loops -- a probe that calls
     ! across a submodule boundary pays about three nanoseconds per key, a third of a small-map
-    ! probe (feature_pf_index.md, section 4.6). `parquet_index_hash.f90`, the mutation side,
-    ! descends from this submodule and reaches the same functions by host association, so both
-    ! sides hash identically by construction; `parquet_index_str.f90` reaches `ix_hash_str` and
-    ! the tuple probe the same way.
+    ! probe. `parquet_index_hash.f90`, the mutation side, descends from this submodule and reaches
+    ! the same functions by host association, so both sides hash identically by construction;
+    ! `parquet_index_str.f90` reaches `ix_hash_str` and the tuple probe the same way.
     !
     ! THE MIXER IS OVERFLOW-FREE BY CONSTRUCTION, and that is a design constraint rather than an
     ! accident of the constants. A conventional 64-bit multiplicative mixer wraps a signed
@@ -2415,11 +2414,11 @@ contains
     !! the direct arm is the range test and one load with the bounds in locals; anything else --
     !! the sorted backend, an unbuilt map -- takes the general `ix_get_scalar`/`ix_get_tuple`
     !! per key, which is where the dispatch used to happen for every key of every backend
-    !! (feature_pf_index.md, section 6 item 2). `indexes` is `intent(inout)` rather than
-    !! `intent(out)` because each chunk of a threaded call writes only its own slice of the
-    !! caller's array, and an `intent(out)` dummy would let the compiler treat the whole array as
-    !! undefined on entry. `hv` is `present(valid)` hoisted by the driver, so the masked branch
-    !! costs one well-predicted test per row and `valid` is never touched when it is absent.
+    !! per backend. `indexes` is `intent(inout)` rather than `intent(out)` because each chunk of a
+    !! threaded call writes only its own slice of the caller's array, and an `intent(out)` dummy
+    !! would let the compiler treat the whole array as undefined on entry. `hv` is `present(valid)`
+    !! hoisted by the driver, so the masked branch costs one well-predicted test per row and
+    !! `valid` is never touched when it is absent.
     subroutine ix_many_1_k32_i32(self, keys, indexes, valid, hv, lo, hi)
         type(pf_index_map), intent(in) :: self       !! the map.
         integer(int32), intent(in) :: keys(:)       !! the caller's keys.

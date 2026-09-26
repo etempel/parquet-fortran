@@ -32,8 +32,7 @@
 !! **There is no upstream sync path: this is a fork, pinned at that commit.** The header of every
 !! file of this tier records it, as `parquet_integrate_engine.f90` records QUADPACK's, because
 !! nothing automated will ever tell you that upstream has moved. Re-vendoring is a deliberate act:
-!! re-run `feature_optimizer.md` 3.4's audit at the new commit first, since every count in it is
-!! commit-specific.
+!! re-run the audit at the new commit first, since every count in it is commit-specific.
 !!
 !! **A bug found here is checked against upstream before it is fixed here.** The arithmetic is a
 !! transcription: the Givens rotation's branch structure, the scaled p-norm, the rank-one and
@@ -878,8 +877,8 @@ contains
     ! ---- What LINCOA and COBYLA add: the factorisations and the two constrained tests ----------
     !
     ! Everything above is what BOBYQA reaches. The rest of PRIMA's `linalg_mod` that this tier
-    ! needs arrives here, with the two solvers that call it (`feature_optimizer.md` 12.1 allows a
-    ! phase to extend what an earlier one built).
+    ! needs arrives here, with the two solvers that call it (a later phase may extend phase to
+    ! extend what an earlier one built).
 
     !> `sqrt(x1**2 + x2**2)` without overflowing or underflowing, upstream's `hypotenuse`.
     !!

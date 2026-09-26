@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Times every parquet_string_column bulk operation on one synthetic column, so that an
-# optimisation to that type is measured rather than argued. See bench/benchmark_strings.f90 for what
-# each row means, and feature_string_parallel.md for the plan these numbers gate.
+# optimisation to that type is measured rather than argued. See bench/benchmark_strings.f90 for
+# what each row means.
 #
 # Runs twice by default: once on a null-free column and once on a null-containing one, since
 # several operations have a separate validity pass whose cost only appears in the second.

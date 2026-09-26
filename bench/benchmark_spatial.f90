@@ -13,8 +13,8 @@
 !>
 !> * `--mode=tune` -- **the acceptance measurement.** Sweeps the cell size, times a fixed query
 !>   workload at each, and reports how far the cell the tuner picked lands from the swept optimum.
-!>   `feature_pandas_S3_cubesort.md` predicts a mean penalty of ~1.2% and a worst case of ~7.8%
-!>   against the model alone reaching +42.9%; this either reproduces that or reopens the question.
+!>   The cost model predicts a mean penalty of ~1.2% and a worst case of ~7.8% against the model
+!>   alone reaching +42.9%; this either reproduces that or reopens the question.
 !> * `--mode=ab` -- **re-fits the probe's `A/B` constant on this machine.** The probe ranks a
 !>   candidate cell by `A*cells_visited + B*points_tested`; `A/B = 2` was fitted on arm64/NEON and
 !>   is a ratio of a cache-miss-ish cost to an arithmetic-ish one, which is exactly what differs on
@@ -39,10 +39,10 @@
 !> measured. Report the noise floor with any result: rebuilding the same source moves untouched
 !> arms by more than re-running one binary does.
 !>
-!> Fixtures match the engine gate's (`feature_pandas_S3.md`) so figures are comparable: `uniform`,
-!> `clustered`, `wedge` (a sparse survey cone), `fluxlim` (the wedge thinned with distance by
-!> `--ts`, the shape of a magnitude-limited survey), `sphere` (a zero-thickness shell -- the worst
-!> case for a dense cell array) and `flat` (2D).
+!> Fixtures match the engine gate's so figures are comparable: `uniform`, `clustered`, `wedge` (a
+!> sparse survey cone), `fluxlim` (the wedge thinned with distance by `--ts`, the shape of a
+!> magnitude-limited survey), `sphere` (a zero-thickness shell -- the worst case for a dense cell
+!> array) and `flat` (2D).
 program benchmark_spatial
     use parquet_spatial
     use parquet_random, only : pf_random_at
@@ -809,13 +809,13 @@ contains
     !> The line-of-sight cylinder against the ball-plus-filter work-around it replaces, and the
     !> cylinder walk against the covering-ball walk it replaces.
     !>
-    !> **The measurement Stage 3 of `feature_fof_S2.md` is judged by.** The fixture's distances
-    !> become a redshift-like parallel coordinate through the Einstein-de Sitter relation inverted,
-    !> `z = (1 - D / (2 c/H0))**(-2) - 1`, so `los=` is a genuine second radial coordinate whose
-    !> slope `L = dD/dz` the library measures at build. The transverse lengths are drawn from
-    !> `RLO..RHI`; the parallel ones are set so that `L * b_par = RATIO * b_perp`, which is the
-    !> aspect ratio each cylinder has in distance at the survey's near edge. Two arms over the same
-    !> points and lengths, under `PF_LINK_MEAN`:
+    !> **The measurement Stage 3 is judged by.** The fixture's distances become a redshift-like
+    !> parallel coordinate through the Einstein-de Sitter relation inverted, `z = (1 - D / (2
+    !> c/H0))**(-2) - 1`, so `los=` is a genuine second radial coordinate whose slope `L = dD/dz`
+    !> the library measures at build. The transverse lengths are drawn from `RLO..RHI`; the
+    !> parallel ones are set so that `L * b_par = RATIO * b_perp`, which is the aspect ratio each
+    !> cylinder has in distance at the survey's near edge. Two arms over the same points and
+    !> lengths, under `PF_LINK_MEAN`:
     !>
     !> * `library` -- `%pairs_within_los`, left to choose its walk per point (`--walk=auto`, the
     !>   shipped route: the cylinder unless the covering ball is no wider than a cell or shorter

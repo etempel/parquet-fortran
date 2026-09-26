@@ -711,7 +711,7 @@ contains
         ! (adopt_container fixes it there and says why), so the mask this builds is `(1, nrows)`
         ! and is the row answer in the element shape -- which is what `element_validity`'s own
         ! container arm already computes, and is consistent with `%width` reporting 1 and with
-        ! `%is_null(name, i, 1)` answering about the row. See feature_doc_tables.md's S1/S2.
+        ! `%is_null(name, i, 1)` answering about the row.
         call fill_elem_mask(self%cache, idx, mask)
     end procedure table_get_valid_mask_elem
     !

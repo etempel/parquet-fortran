@@ -13,10 +13,10 @@
 !! bound, which a real regression moves by tens or hundreds.
 !!
 !! **The engine is a transcription of PRIMA at commit `43863c69`**, and the strongest check on it
-!! is not in this file: it is the differential run recorded in `feature_optimizer.md` step 23's
-!! `Outcome:` paragraph, where 120 minimisations against upstream's own `bobyqa` agreed on every
-!! evaluation count and every bit of every answer. What is here is the behaviour this library
-!! adds on top -- the refusals, the scaling, the record, the status mapping and the solver object.
+!! is not in this file: it is the differential run recorded at step 23, where 120 minimisations
+!! against upstream's own `bobyqa` agreed on every evaluation count and every bit of every answer.
+!! What is here is the behaviour this library adds on top -- the refusals, the scaling, the
+!! record, the status mapping and the solver object.
 !!
 !! The abort paths are not here: an `error stop` kills the runner, so each is an out-of-process
 !! scenario in `test/error_scenarios.f90` with its wrapper in `test/test_errors.f90`.
@@ -1111,8 +1111,7 @@ contains
     !! answer would be the origin with value `0`.
     !!
     !! WHAT THIS FORBIDS: changing the sign convention without renaming the binding
-    !! (`feature_optimizer.md` 8). The two answers are `1` and `0`, so a flipped sign cannot pass
-    !! this by a tolerance.
+    !!. The two answers are `1` and `0`, so a flipped sign cannot pass this by a tolerance.
     subroutine test_cobyla_sign_of_the_constraint(error)
         type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
 
@@ -1220,10 +1219,10 @@ contains
     !! `info%cstrv` equal it.
     !!
     !! WHAT THIS FORBIDS: taking `info%cstrv` or the `PF_OPT_INFEASIBLE` verdict from the engine's
-    !! own violation rather than recomputing it (`feature_optimizer.md` 8, last entry). The two
-    !! differ by `scale` on every bound row, and by each row's gradient length in LINCOA, which
-    !! normalises them. The vacuity guard is the third assertion: the bound's violation must be
-    !! the largest one, since it is the only one `scale=` rescales.
+    !! own violation rather than recomputing it. The two differ by `scale` on every bound row, and
+    !! by each row's gradient length in LINCOA, which normalises them. The vacuity guard is the
+    !! third assertion: the bound's violation must be the largest one, since it is the only one
+    !! `scale=` rescales.
     subroutine test_cstrv_is_in_the_callers_units(error)
         type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
 
@@ -1278,7 +1277,7 @@ contains
 
     end subroutine test_cstrv_is_in_the_callers_units
 
-    !> The six worked calls of `feature_optimizer.md` 5.9, of which `prima.md` prints one.
+    !> The six worked calls, of which `prima.md` prints one.
     !!
     !! Structural figures, not measurements (Q13): every answer below is analytic, so it is a
     !! reference rather than a recorded output.

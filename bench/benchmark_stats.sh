@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Drives bench/benchmark_stats.f90 -- the P5 "measure, then thread" campaign for parquet_stats.
 #
-# The phase this belongs to (feature_pandas_S4.md, P5) is deliberately "measure, THEN thread": a
-# single O(n) reduction over a resident array may well be memory-bandwidth-bound, and if it is,
-# `threads=` should enter no signature at all. This wrapper only builds and runs; the program
-# decides what each mode times.
+# The phase this belongs to (P5) is deliberately "measure, THEN thread": a single O(n) reduction
+# over a resident array may well be memory-bandwidth-bound, and if it is, `threads=` should enter no
+# signature at all. This wrapper only builds and runs; the program decides what each mode times.
 #
 # Usage:
 #   bench/benchmark_stats.sh                       # every mode
@@ -37,11 +36,11 @@
 #   thread  The `speedup` column, but ONLY after both bit-exactness gates report yes. The program
 #           exits nonzero if either fails, because a threaded arm that does not reproduce the serial
 #           answer makes every speedup beside it worthless.
-#   iqr     The `sort/select` column, which answers feature_pandas_S4.md's P6-1. Above 1 means
-#           selecting the two order statistics beats sorting once, i.e. the shipped default is
-#           right. Both arms are the shipped `pf_iqr` with the sort threshold moved either side of
-#           2 by the debug override, so neither is a replica, and the two answers are compared bit
-#           for bit before any timing is believed.
+#   iqr     The `sort/select` column, which answers P6-1. Above 1 means selecting the two order
+#           statistics beats sorting once, i.e. the shipped default is right. Both arms are the
+#           shipped `pf_iqr` with the sort threshold moved either side of 2 by the debug override,
+#           so neither is a replica, and the two answers are compared bit for bit before any timing
+#           is believed.
 #   probit  Three tables, and each answers a different half of "what does the normal kernel cost?".
 #           The first is the `x floor` column over a bare accumulation loop: `pf_probit` pays for
 #           its refinement steps and the three forward functions pay for one erfc or one exp, so

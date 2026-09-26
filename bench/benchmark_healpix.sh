@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Drives bench/benchmark_healpix.f90 -- the native HEALPix benchmark (TA-5).
 #
-# This is the in-repository half of feature_healpix_tier_a.md section 8.8 and the whole
-# measurement instrument for feature_healpix_tier_b.md section 7.8. It links NO libhealpix, so it
-# travels with the repository and any machine can reproduce the native side; the GPL-linking
-# comparison lives out of tree in test_run/healpix_bench/ (decision D16).
+# This is the in-repository half of the tier-A work and the whole measurement instrument for
+# tier B. It links NO libhealpix, so it travels with the repository and any machine can reproduce
+# the native side; the GPL-linking comparison lives out of tree in test_run/healpix_bench/ (decision
+# D16).
 #
 # Usage:
 #   bench/benchmark_healpix.sh --mode=disc
@@ -37,7 +37,7 @@
 #          hpx_parallel_min_elements in src/parquet_healpix_bulk.f90. Read the LARGEST team size's
 #          column: it is the worst case, and the constant has to hold G3 there too.
 #   disc   Microseconds per disc, in the two call shapes the libhealpix baseline was measured in.
-#          Compare against feature_healpix_tier_a.md section 1.2's production columns.
+#          Compare against the recorded production columns.
 #
 # The host should be IDLE and the report should say so: section 1.2's own figures were taken at
 # load 65/384 and carry that caveat, and re-taking a comparison against them under load repeats it.

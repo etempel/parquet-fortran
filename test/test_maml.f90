@@ -7,7 +7,7 @@
 !> aborts the whole test process, so they run as subprocess scenarios
 !> (test/error_scenarios.f90) instead -- the ones specific to MAML in `test_maml_errors.f90`,
 !> the rest in `test_errors.f90`. This file therefore spawns nothing and imports no scenario
-!> helper; see `feature_tests.md` section 8.3 for why the two halves live apart.
+!> helper; the two halves live apart deliberately.
 !>
 !> NB: always pass the failure message directly to `check(error, cond, message)`.
 !> Do NOT follow a failed `check` with a separate `test_failed` call on the same
@@ -651,14 +651,14 @@ contains
         close(unit)
     end subroutine write_text_file_crlf
 
-    !> Regression test for feature_doc.md point 7's F2 finding: a `.maml` file authored/edited on
-    !! Windows retains a trailing `\r` on every line after a Unix `read(unit,'(A)')`, and `trim()`
-    !! does not strip it (`char(13)` is not a blank) -- so `data_type: int32\r` failed to match
-    !! `valid_maml_data_types` and the reader printed a misleading "invalid data_type" error naming
-    !! what looked like a perfectly correct value. Fixed in
-    !! parquet_metadata_maml.f90's parquet_read_maml_source_lines, which now strips a trailing
-    !! char(13) from every line read. This constructs a CRLF-terminated fixture at runtime (see
-    !! write_text_file_crlf) and confirms it now parses successfully with the correct field type.
+    !> Regression test: a `.maml` file authored/edited on Windows retains a trailing `\r` on every
+    !! line after a Unix `read(unit,'(A)')`, and `trim()` does not strip it (`char(13)` is not a
+    !! blank) -- so `data_type: int32\r` failed to match `valid_maml_data_types` and the reader
+    !! printed a misleading "invalid data_type" error naming what looked like a perfectly correct
+    !! value. Fixed in parquet_metadata_maml.f90's parquet_read_maml_source_lines, which now strips
+    !! a trailing char(13) from every line read. This constructs a CRLF-terminated fixture at
+    !! runtime (see write_text_file_crlf) and confirms it now parses successfully with the correct
+    !! field type.
     subroutine test_load_maml_file_crlf(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_schema) :: schema

@@ -10,7 +10,7 @@
 !! canonical key form the engine takes, and implements `pf_sort_keys`.
 !!
 !! The six intrinsic types are handled one tier down, in `src/parquet_argsort_kernel.f90`; this file
-!! is what `parquet_sorting` adds on top of them. See feature_modules.md section 4.
+!! is what `parquet_sorting` adds on top of them.
 !!
 !! **This file decides nothing about order.** It extracts values, says which rows are null, and
 !! passes the caller's `descending`/`nulls_first` flags through -- every ordering decision is made
@@ -100,7 +100,7 @@ contains
         ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
         ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
         ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
-        ! not always less time. See feature_sort_report.md.
+        ! not always less time.
         !
         ! **`threads=` is honoured here, and the absent case falls back to the automatic
         ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
@@ -118,7 +118,7 @@ contains
         ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
         ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
         ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
-        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then
@@ -158,7 +158,7 @@ contains
         ! (6.46 against 5.26 ns/element, f64, n = 5e6, ifx), reproduced against three
         ! earlier runs: the fill is a pure sequential sweep and faults pages far faster
         ! than the extraction loop, which interleaves a read of `values`. Cheaper work is
-        ! not always less time. See feature_sort_report.md.
+        ! not always less time.
         !
         ! **`threads=` is honoured here, and the absent case falls back to the automatic
         ! policy.** `resolve_thread_count` is the same procedure the engine uses, so an
@@ -176,7 +176,7 @@ contains
         ! ns/element on `i64` and 0.250 -> 0.356 on `f64` (machine A, gfortran 15.2, n = 5e6,
         ! `--serial`, against a 0.004 ns cross-build floor). That arm is taken by every caller
         ! passing `threads=1`, by a single-core machine, and by every sort inside an existing
-        ! OpenMP region, since `pf_sort_threads()` answers 1 there. See feature_sort.md 4k/4l.
+        ! OpenMP region, since `pf_sort_threads()` answers 1 there.
         call resolve_thread_count(threads, n, nth)
         team = tail_team(nth, n)
         if (team > 1) then

@@ -2,9 +2,8 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Unit tests for writing a `parquet_table` out one row group at a time (`feature_pandas_S2.md`):
-!> `parquet_derive_schema`, `parquet_open_writer_like`, `parquet_write_table_chunk` and the
-!> `parquet_table_writer` sink.
+!> Unit tests for writing a `parquet_table` out one row group at a time: `parquet_derive_schema`,
+!> `parquet_open_writer_like`, `parquet_write_table_chunk` and the `parquet_table_writer` sink.
 !>
 !> Every test writes its own fixtures under `test_run/` -- the tests of one suite run
 !> concurrently. Abort paths live in test/error_scenarios.f90, driven from test_errors.f90.

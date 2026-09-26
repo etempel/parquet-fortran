@@ -7,9 +7,9 @@
 !! `parquet_index_map.f90`, in the same translation unit as `%get` and the chunk loops of
 !! `%get_many`, so that the compiler inlines them into the lookup loops: a probe that has to call
 !! across a submodule boundary pays about three nanoseconds per key, a third of a small-map probe
-!! (feature_pf_index.md, section 4.6). This file is a DESCENDANT of that submodule and reaches the
-!! same functions by host association, so the two sides hash identically by construction -- there
-!! is one mixer, not a copy of it on each side.
+!! This file is a DESCENDANT of that submodule and reaches the same functions by host association,
+!! so the two sides hash identically by construction -- there is one mixer, not a copy of it on each
+!! side.
 !!
 !! Open addressing with linear probing, a power-of-two capacity and a maximum load factor of 0.6.
 !! Three properties of the layout are worth stating because each one removes something a hash
@@ -29,9 +29,9 @@
 !! `ix_slot` in `slots(cap)`; a composite map keeps `(key_1 .. key_ncomp, val)` as one column of
 !! `hrec(ncomp + 1, cap)`, so that a probe touches one cache line for `ncomp <= 7` rather than one
 !! line of keys and a second of values -- which cost 2.3x at ten million keys when the two were
-!! separate arrays (feature_pf_index.md, section 4.3). A 1-tuple never reaches the composite
-!! layout: every entry below routes `ncomp <= 1` to the scalar table, which is what makes a scalar
-!! key and a 1-tuple the same key without the two hashes having to agree.
+!! separate arrays. A 1-tuple never reaches the composite layout: every entry below routes `ncomp
+!! <= 1` to the scalar table, which is what makes a scalar key and a 1-tuple the same key without
+!! the two hashes having to agree.
 !!
 !! **Slot numbers are 0-based inside this file** and converted at the point of array access
 !! (`slots(s + 1)`, `hrec(:, s + 1)`). That is what makes the cyclic arithmetic ordinary: `iand(h,
@@ -42,8 +42,7 @@
 !! threaded arm of the hash build and of `%get_or_add_many`: the keys are scattered into the
 !! order of their home slots' partitions and each thread fills its own slot ranges, a chain that
 !! reaches a range boundary being deferred to a serial spill pass rather than followed across
-!! it. The section below says why that is correct; `feature_pf_index.md` section 6 item 3 is the
-!! design and its measurements.
+!! it. The section below says why that is correct.
 !!
 !! **Every abort goes through `ix_abort`**, the module's serialised reporter, because a build runs
 !! OUTSIDE `pf_index_map_guard` now (`ix_adopt` in `parquet_index_map.f90`) and two builds may

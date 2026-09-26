@@ -69,10 +69,10 @@ module parquet_index
         parquet_set_sort_radix_path, parquet_get_sort_radix_path, &
         parquet_set_sort_counting_path, parquet_get_sort_counting_path, &
         parquet_set_sort_counting_bucket_limit, parquet_get_sort_counting_bucket_limit
-    ! String keys (answer F3 of feature_pandas_S7.md): the string forms of both types take and
-    ! return a parquet_string_column. parquet_strings is a leaf beneath this tier that reaches no
-    ! C++, so `use parquet_index` still compiles no Arrow, and this module's row in
-    ! tools/module_footprints.txt grows by exactly parquet_strings.f90 (and parquet_index_str.f90).
+    ! String keys: the string forms of both types take and return a parquet_string_column.
+    ! parquet_strings is a leaf beneath this tier that reaches no C++, so `use parquet_index` still
+    ! compiles no Arrow, and this module's row in tools/module_footprints.txt grows by exactly
+    ! parquet_strings.f90 (and parquet_index_str.f90).
     use parquet_strings, only: parquet_string_column
     implicit none
     private

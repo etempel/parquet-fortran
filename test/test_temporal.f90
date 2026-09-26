@@ -9,7 +9,7 @@
 !> The one test that DID reach C++, the Arrow cross-validation of the civil<->days math, now
 !> lives in test_temporal_cpp.f90 as the suite `temporal_cpp`. It was moved because a file
 !> declaring any bind(C) interface disqualifies itself from an undef-safe runner, whether or not
-!> the tests beside it use it -- see feature_tests.md §5 for why that rule is file-level.
+!> the tests beside it use it.
 module test_temporal
     use parquet_temporal
     use iso_fortran_env, only : int32, int64, real64

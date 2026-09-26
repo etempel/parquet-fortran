@@ -95,8 +95,8 @@ module parquet_sorting
     !
     ! `pf_argsort` is EXTENDED rather than merely re-exported: the generic below adds this module's
     ! own specifics to the ones the tier declares, and a program with a single `use parquet_sorting`
-    ! resolves both sets. That mechanism is what the two-tier design rests on; feature_modules.md
-    ! section 10.2 carries the standalone reproducer, verified on gfortran, flang and nagfor.
+    ! resolves both sets. That mechanism is what the two-tier design rests on, and is verified on
+    ! gfortran, flang and nagfor.
     public :: pf_argsort
     public :: pf_sort_threads
     !

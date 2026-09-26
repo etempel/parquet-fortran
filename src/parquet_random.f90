@@ -4522,9 +4522,9 @@ contains
     ! procedure contained directly in a module ... fails at LINK time" note describes. The documented
     ! fix is to give each such helper an interface in the module and a body in a submodule, which
     ! for these eight would mean moving the cipher and its route (e) fork out of this file. That is
-    ! exactly what `feature_random_phase2.md` §6 says must not happen: `random_block`, `mulhilo64`,
-    ! `mul64_lo_strict` and `width_of` are what the whole correctness story rests on and belong
-    ! together. So the split was dropped, not the helpers.
+    ! exactly what must not happen: `random_block`, `mulhilo64`, `mul64_lo_strict` and `width_of`
+    ! are what the whole correctness story rests on and belong together. So the split was dropped,
+    ! not the helpers.
     !
     ! Two things below are load-bearing and easy to undo by accident.
     !
@@ -5004,9 +5004,9 @@ contains
     !> `%gamma`: the next `Gamma(shape, 1)` draw, by Marsaglia-Tsang rejection.
     !!
     !! **Tier 1 only, deliberately** -- there is no `pf_random_gamma_at` and no bulk fill. The
-    !! sub-stream construction §3.4 of `feature_random_phase3.md` describes would make them
-    !! possible, and the surface is already wide; if they are ever wanted, the construction and its
-    !! independence obligations are the same as the normal's.
+    !! sub-stream construction sketched for a later phase would make them possible, and the surface
+    !! is already wide; if they are ever wanted, the construction and its independence obligations
+    !! are the same as the normal's.
     !!
     !! `shape` is the Gamma shape parameter `a`, strictly positive; the scale is 1, so a caller
     !! wanting `Gamma(a, theta)` multiplies by `theta`. The mean is `shape` and the variance is

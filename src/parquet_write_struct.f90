@@ -295,10 +295,10 @@ contains
         character(len=:), allocatable :: nested_kname, nested_fname !! scratch for the nested-write refusal.
 
         ! WRITING A NESTED CONTAINER IS REFUSED, and this guard is why D2 could open the in-memory
-        ! gate without opening a write path nobody built. Phase 7 made nesting READABLE only
-        ! (feature_container_phase7.md's Q2), while D2 widened `%adopt_fields` so a caller can now
-        ! BUILD a struct one of whose fields is a container -- from a file, or by hand. Without an
-        ! explicit refusal here that column reaches the Arrow builders, which have no shape for it.
+        ! gate without opening a write path nobody built. Phase 7 made nesting READABLE only, while
+        ! D2 widened `%adopt_fields` so a caller can now BUILD a struct one of whose fields is a
+        ! container -- from a file, or by hand. Without an explicit refusal here that column
+        ! reaches the Arrow builders, which have no shape for it.
         !
         ! Names the FIELD as well as the column, which the list and map twins have no equivalent
         ! of: a struct can carry one offending field among several, and "this struct is nested" is
@@ -429,8 +429,7 @@ contains
     !! again with the context-free message the guard exists to replace. The
     !! `struct_timestamp_precision` scenario pins that for MICROSECONDS, which is the only unit a
     !! struct write ever uses -- a struct field's unit cannot be declared. The other units are
-    !! reachable only through a map write's schema and are not pinned; see
-    !! feature_doc_struct_columns.md.
+    !! reachable only through a map write's schema and are not pinned.
     pure function ns_per_unit_of(unit) result(res)
         integer, intent(in) :: unit !! one of the parquet_unit_* constants.
         integer(int64) :: res       !! nanoseconds in one value of that unit.

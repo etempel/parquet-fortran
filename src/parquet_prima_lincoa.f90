@@ -5,8 +5,8 @@
 !! **This file replaces PRIMA's own driver** `fortran/lincoa/lincoa.f90` -- its `get_lincon`
 !! included -- and the part of `fortran/common/preproc.f90` that it calls. Upstream reads an
 !! absent or invalid argument, substitutes a default, and warns. Here an absent argument gets
-!! upstream's default and an INVALID one is refused with the message of `feature_optimizer.md`
-!! 5.6, through the shared `refuse_bad_call`, because this library has no channel for a warning.
+!! upstream's default and an INVALID one is refused with the shared message, through
+!! `refuse_bad_call`, because this library has no channel for a warning.
 !!
 !! **Where this driver's defaults differ from upstream's**, beyond those refusals:
 !!

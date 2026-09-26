@@ -393,7 +393,7 @@ echo
 # them. The merge is done in log2(T) rounds with T/2, T/4, ..., 1 threads, so its LAST round is a
 # single-threaded pass over the whole array whose share does not shrink as threads are added. That
 # share is what a co-ranked parallel merge would remove, and reading it off is why this sweep
-# exists (feature_sort_merge.md step 0). Also file-free: it sorts an array it generates itself.
+# exists (step 0). Also file-free: it sorts an array it generates itself.
 # A parallel row-structural mutation holds one transient column copy per thread instead of one in
 # total, and the library's answer to that is documentation plus the parquet_set_table_threads cap
 # rather than a memory-derived limit -- so the "at most doubles the table's peak" claim needs

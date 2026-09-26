@@ -2410,7 +2410,6 @@ contains
         ! compare two different quantities and reject a correct read, so the length is asked for
         ! at the path itself. An ordinary name answers identically either way; the branch exists
         ! only to keep the common case free of a C++ crossing it never needed.
-        ! See feature_container_phase7.md's D6.
         if (index(name, "[]") > 0 .or. index(name, "{value}") > 0 .or. index(name, "{key}") > 0) then
             file_nrows = parquet_reader_path_nrows(reader%handle, trim(name)//char(0), 0_c_long_long)
         else

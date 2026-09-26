@@ -66,7 +66,7 @@
 !! `verbosity = "silent"` and written where `message_stream` says; that is why this module
 !! re-exports the verbosity and message-stream pair.
 !!
-!! User guide: doc/pages/utilities/kernel-density.md. Design: feature_kde.md.
+!! User guide: doc/pages/utilities/kernel-density.md.
 module parquet_kde
 
     ! The tier edge. `pf_stddev` and `pf_iqr` are the rules' scale; `pf_bin_linear` bins the sample

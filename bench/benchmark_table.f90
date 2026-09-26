@@ -5,8 +5,8 @@
 !> Measures what the `parquet_table` layer costs relative to reading straight into user arrays.
 !!
 !! `parquet_table` accepts one extra full Fortran-side copy of every column, and frees the Arrow
-!! buffers once that copy exists (feature_table.md D3). Both halves of that trade are asserted
-!! rather than measured everywhere else in this repository, so this program measures them:
+!! buffers once that copy exists. Both halves of that trade are asserted rather than measured
+!! everywhere else in this repository, so this program measures them:
 !!
 !!   * **table vs. raw**  -- open+materialize a whole file as a table, against opening a reader
 !!                           and reading the same columns into plain arrays -- one array per
@@ -1482,8 +1482,7 @@ contains
     !! figure looks as though it can.** That mode builds a *second*, standalone set of columns in
     !! order to time the reindex phase in isolation, so the process high-water mark is set by those
     !! rather than by the mutation — three separate machines reported an RSS figure from it and all
-    !! three had to discard it (feature_table_parallel.md section 17.2). Nothing here allocates
-    !! anything the sort does not need.
+    !! three had to discard it. Nothing here allocates anything the sort does not need.
     !!
     !! **The answer is a DIFFERENCE between two runs, not this run's number.** Run it twice at the
     !! same `--size`/`--ncols`, once with `--threads=1` and once with `--threads=0` (automatic), each
@@ -1757,9 +1756,8 @@ contains
     end subroutine bench_sort
 
     !> **How `pf_argsort` divides its time between sorting chunks and merging them**, at one thread
-    !! count -- the measurement that decides whether a co-ranked parallel merge is worth building
-    !! (`feature_sort_merge.md` step 0). Driven one data point at a time by
-    !! `bench/benchmark_table.sh`'s argsort sweep.
+    !! count -- the measurement that decides whether a co-ranked parallel merge is worth
+    !! building. Driven one data point at a time by `bench/benchmark_table.sh`'s argsort sweep.
     !!
     !! The engine sorts `T` contiguous chunks concurrently and then merges them **pairwise** in
     !! `log2(T)` rounds with `T/2, T/4, ..., 1` threads, so the last round merges two runs on ONE

@@ -524,7 +524,7 @@ contains
                 ! A container payload is nesting, and %init cannot express it: it is handed one
                 ! PK_* discriminator, while a nested payload is a kind PLUS an inner schema. Build
                 ! the inner container, hand it to a parquet_column with %adopt_container, and pass
-                ! that column to %adopt_rows. See feature_container_phase7.md's D1.
+                ! that column to %adopt_rows.
                 error stop EP//"init: "//kname//" is a nested payload and cannot be declared here; "// &
                     "build the inner container, hand it to a parquet_column with %adopt_container, "// &
                     "and pass that column to %adopt_rows"
@@ -1730,7 +1730,7 @@ contains
     !! kind plus a whole inner schema, and `%init(PK_STRUCT)` would produce a list whose payload is a
     !! struct column with no fields -- an unusable state with no route out of it. So nesting is
     !! reachable only by building the inner container first and handing it over with
-    !! `%adopt_container` + `%adopt_rows`. See feature_container_phase7.md's D1 and D2.
+    !! `%adopt_container` + `%adopt_rows`.
     !!
     !! The `*_VEC` kinds stay refused on BOTH paths: a fixed-width vector inside a variable-length
     !! list is `list<fixed_size_list<...>>`, which is a different question from a container payload
@@ -1776,7 +1776,7 @@ contains
     !! message needs. A NESTED payload's spelling additionally needs the inner container to describe
     !! itself -- so it cannot be pure, and it cannot be derived from the kind at all. Keeping the two
     !! apart is what lets every error message stay pure while `%kind_text` reports `list<struct>` and
-    !! `list<list<int32>>`. See feature_container_phase7.md's D3.
+    !! `list<list<int32>>`.
     !!
     !! `%kind_text` is the ONLY name in this library that recurses: `%kindof()` stays `PK_LIST` at
     !! every depth and `parquet_kind_name` stays `"PK_LIST"`. A caller that needs the inner shape

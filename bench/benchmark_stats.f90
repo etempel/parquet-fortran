@@ -2,8 +2,8 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> Answers one question, and the phase plan (`feature_pandas_S4.md`, P5) will not let it be
-!! answered by argument: **is `parquet_stats`' moment engine worth threading?**
+!> Answers one question, and the phase plan (P5) will not let it be answered by argument: **is
+!! `parquet_stats`' moment engine worth threading?**
 !!
 !! A single O(n) reduction over a resident array may be memory-bandwidth-bound, in which case
 !! threading buys nothing and `threads=` would enter nine public signatures for a null result. So

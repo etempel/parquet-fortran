@@ -102,10 +102,10 @@ contains
     !! convention this replaced. That is the narrow, deliberate price of the correctness: a row
     !! whose third element was null used to answer `.false.` here. The bulk paths do not pay it --
     !! `row_validity` walks the bitmap by machine word instead of calling this per row.
-    !! **This is the implementation; the `is_null_row` binding below forwards to it.** See
-    !! feature_ifx.md and the typed-tier banner in `parquet_columns.f90` for why the body lives
-    !! at the `type` end -- and note that a typed body must call the TYPED guards, or the whole
-    !! descriptor block it exists to remove comes straight back.
+    !! **This is the implementation; the `is_null_row` binding below forwards to it.** See the
+    !! typed-tier banner in `parquet_columns.f90` for why the body lives at the `type` end -- and
+    !! note that a typed body must call the TYPED guards, or the whole descriptor block it exists
+    !! to remove comes straight back.
     module procedure parquet_column_is_null_row
         integer(int64) :: e, base, w
         call parquet_column_check_index(col, i, "is_null")
@@ -220,7 +220,7 @@ contains
             ! INSIDE the list. It no longer does: `width` is 1, so `e` can only be 1 and there is
             ! nothing to guess at, and the refusal disagreed with the column HANDLE's own
             ! `c%is_null(i, e)`, which always forwarded here. All five element spellings now mean
-            ! the row form. See feature_doc_tables.md's S1/S2.
+            ! the row form.
             res = col%container%is_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in is_null_row above.
@@ -822,7 +822,7 @@ contains
             ! is_null_row, is_null_elem and parquet_column_any_null all answer from
             ! `col%container` instead. The call reported success and changed nothing. That is the
             ! failure `set_null_row`'s own container arm was added to prevent, and this procedure
-            ! was left behind; see feature_doc_tables.md's S1.
+            ! was left behind.
             call col%container%set_null_row(i)
         case (PK_NONE)
             ! Unreachable through the public API, exactly as in set_null_row above.

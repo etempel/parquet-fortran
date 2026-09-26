@@ -892,10 +892,10 @@ contains
     !> This table's own columns, gathered by `lidx` and null-filled where the row had no left
     !! counterpart, in the one pass `table_colwork`'s gather makes: `lvalid` rides beside `lidx`
     !! into `%gather(rows, valid=)`, so the mask is folded into each column's rebuild rather than
-    !! applied in a second pass afterwards (until stage 4 of `feature_join.md` it was a serial
-    !! `%set_validity` per column after the threaded gather). It only ever ADDS nulls, which is
-    !! what leaves this table's own nulls exactly where the gather put them (`feature_risks.md`
-    !! Risk-182). The mask exists only under `how="right"`/`"outer"` with an unmatched right row.
+    !! applied in a second pass afterwards (until stage 4 it was a serial `%set_validity` per
+    !! column after the threaded gather). It only ever ADDS nulls, which is what leaves this
+    !! table's own nulls exactly where the gather put them (`feature_risks.md` Risk-182). The
+    !! mask exists only under `how="right"`/`"outer"` with an unmatched right row.
     subroutine join_rewrite_left(self, lslots, lidx, lvalid, n_out, nl)
         class(parquet_table), intent(inout) :: self   !! the left table.
         integer, intent(in) :: lslots(:)              !! its rewritable slots.
@@ -1037,10 +1037,10 @@ contains
     !! is a function of the key kinds and `order=` alone (`join_hash_eligible`) -- never of the
     !! data's values, and not of the row counts either -- so the same call takes the same engine
     !! on every run, on every input and at every thread count (feature_risks.md Risk-218). There
-    !! is deliberately no size clause: the sweep recorded in feature_join.md's stage 3 found the
-    !! hash engine ahead of the sort engine on both compilers at every size down to a thousand
-    !! rows against ten, so no shape exists at which a build plus a probe loses to the sort's
-    !! counting path, and a clause for one would be a second rule with nothing to select.
+    !! is deliberately no size clause: the sweep at stage 3 found the hash engine ahead of the
+    !! sort engine on both compilers at every size down to a thousand rows against ten, so no
+    !! shape exists at which a build plus a probe loses to the sort's counting path, and a clause
+    !! for one would be a second rule with nothing to select.
     !!
     !! The test-only hook is read ONCE, here, and outranks nothing it should not: forcing the
     !! sort engine takes it whatever the call; forcing the hash engine takes it only where
@@ -1064,11 +1064,11 @@ contains
     !! kind `index_extract_keys` converts -- or a single string key, which the multimap keys in
     !! place.
     !!
-    !! The three exclusions are decisions rather than gaps (feature_join.md, section 11
-    !! questions 3 and 4): `order="key"` has no hash-side equivalent short of a second sort; a
-    !! `PK_LOGICAL` key is two groups, where the sort's counting path is already O(n); and a
-    !! string key beside another key would need a string-and-integer tuple the multimap does not
-    !! have. The kinds are already checked equal across the two sides, so the left ones decide.
+    !! The three exclusions are decisions rather than gaps:
+    !! `order="key"` has no hash-side equivalent short of a second sort; a `PK_LOGICAL` key is
+    !! two groups, where the sort's counting path is already O(n); and a string key beside
+    !! another key would need a string-and-integer tuple the multimap does not have. The kinds
+    !! are already checked equal across the two sides, so the left ones decide.
     logical function join_hash_eligible(self, lslots, ord_id) result(ok)
         class(parquet_table), intent(in) :: self !! the left table.
         integer, intent(in) :: lslots(:)         !! this table's key slots.

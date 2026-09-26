@@ -106,7 +106,7 @@ module parquet_argsort
     ! to be PUBLIC, so prefer a C++ one" states the rule and the accepted precedents; the C++ route
     ! is unavailable here precisely because Stage 1 exists to move this decision OUT of C++.
     ! No library code calls either, neither appears in README.md's API overview, and neither is
-    ! mentioned in any doc/pages/ guide -- see feature_sort.md section 7.4.
+    ! mentioned in any doc/pages/ guide.
     ! NOTE `parquet_debug_use_fortran_sort_engine` -- the SETTER -- is NOT here: it lives in
     ! parquet_sorting_oracle, which is the only module that can honour it, and registering the
     ! oracle's entry points is a side effect of calling it. That is what makes registration
@@ -158,9 +158,9 @@ module parquet_argsort
     ! setting must NOT be retired.** `parquet_reader_set_sort` and `parquet_open_reader(...,
     ! sort_by=)` reach `sort_build_permutation_threaded` (src/parquet_wrapper.cpp) directly, with
     ! no selector anywhere in that path, and it reads `g_sort_parallel_min_rows` -- mirrored from
-    ! that setting -- to decide whether a read-time sort threads. feature_sort_report.md section
-    ! 14.6's "retire it at the cutover" note assumed the flip removed the C++ engine from the
-    ! library; it removes it only from `pf_sort`/`pf_argsort`.
+    ! that setting -- to decide whether a read-time sort threads. A "retire it at the cutover"
+    ! note would assume the flip removed the C++ engine from the library; it removes it only from
+    ! `pf_sort`/`pf_argsort`.
     !
     ! Both are process-global saved state, which is why the `sorting` and `sort` suites must stay
     ! excluded from test-drive's per-test parallelism (test/run_tester.f90) -- they already are.
@@ -200,9 +200,8 @@ module parquet_argsort
     !! Needed in BOTH directions, which is unusual for a threshold hook. Raising it (to `huge`)
     !! declines the radix path, which is how the introsort's own negative controls stay non-vacuous
     !! once the floor drops below their fixture sizes; lowering it (to 2) drives every engine fixture
-    !! in the suite through the radix path, which is the sweep `feature_sort_radix.md` section 7.4
-    !! describes. Both are the `feature_risks.md` Risk-49 shape -- a size threshold hiding a code
-    !! path from the tests written for everything else.
+    !! in the suite through the radix path. Both are the `feature_risks.md` Risk-49 shape -- a
+    !! size threshold hiding a code path from the tests written for everything else.
     integer(int64), save :: dbg_sort_radix_min_rows = -1_int64
     !> Overrides the row floor above which a SELECTION orders instead; NEGATIVE restores
     !! `SORT_NTH_ORDER_MIN`.
@@ -243,7 +242,7 @@ module parquet_argsort
     !! well as the value range -- and the grid that first set this rule stepped 1, 4, 16, 64 threads
     !! and so never measured the one team size where the answer had changed. This hook exists so the
     !! ceiling can be A/B'd inside one binary rather than across two builds, which for a crossover is
-    !! the only resolution that works (see `feature_sort_report.md` section 12.1).
+    !! the only resolution that works.
     integer(int64), save :: dbg_sort_counting_max_threads = -1_int64
     !> Parallel refine dispatches the last string sort made; 0 means the refine ran entirely serially.
     !!
@@ -316,8 +315,8 @@ module parquet_argsort
     !! `bind(C)` boundary by whichever engine ran, and Stage 6 exists to remove that boundary.
     !!
     !! So the tests reading the C++ twin are exactly the ones the Stage 6 cutover has to repoint at
-    !! this one, and that repointing is the whole of Group 2 in `feature_sort.md` §6 Stage 6, 6a --
-    !! the three failures that reversed the stage ordering. Repoint them; do not delete them.
+    !! this one, and that repointing is the whole of the cutover's Group 2 -- the three failures
+    !! that reversed the stage ordering. Repoint them; do not delete them.
     integer(int64), save :: dbg_sort_threads_used = 1_int64
     !> Threads the last tie pass (`sort_build_runs_permutation`) ran on; 1 = serial. Written on
     !! every run detection, so a test reads the pass it just asked for. The same reasoning as
@@ -1010,9 +1009,9 @@ module parquet_argsort
         end function sort_keys_compare
         !> Fills `perm` with the 1-based permutation that puts rows `1..n` in key order.
         !!
-        !! The serial half of the pure-Fortran engine (feature_sort.md Stage 2): an INTROSORT
-        !! -- quicksort with median-of-three pivoting, a depth-limited heapsort fallback and a
-        !! final insertion pass -- ordering by `sort_row_less` and nothing else.
+        !! The serial half of the pure-Fortran engine: an INTROSORT -- quicksort with
+        !! median-of-three pivoting, a depth-limited heapsort fallback and a final insertion
+        !! pass -- ordering by `sort_row_less` and nothing else.
         !!
         !! **It is unstable, and that is why it is correct.** `sort_row_less` ends with a row
         !! index tiebreaker, so no two distinct rows compare equal and every correct sorting

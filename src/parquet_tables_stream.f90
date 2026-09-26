@@ -2,7 +2,7 @@
 ! Author: Elmo Tempel (elmo.tempel@ut.ee)
 !===========================================
 !
-!> The output file that stays open: `parquet_table_writer` (`feature_pandas_S2.md`, section D).
+!> The output file that stays open: `parquet_table_writer`.
 !!
 !! A thin object over two things this library already has: a `parquet_table` used as a row
 !! buffer, grown by `%append`'s own rules, and `parquet_write_table_chunk`, which writes that
@@ -30,11 +30,11 @@ contains
     !! The order of the steps is the point: the column set is decided and checked against the
     !! template, the vector widths are resolved into the schema and the buffer is built BEFORE
     !! the writer is opened, so a template the schema does not fit is refused with no output
-    !! file created, and the writer's own chunk-size estimate sees every width (contract 4 of
-    !! `feature_pandas_S2.md`: without it a vector column counts as width 1 and the estimate
-    !! skips its own clamp). The open itself is `parquet_open_writer_like` with the resolved
-    !! schema, which forwards every writer option still absent when the caller omitted it
-    !! (`feature_risks.md` Risk-8).
+    !! file created, and the writer's own chunk-size estimate sees every width (contract 4:
+    !! without it a vector column counts as width 1 and the estimate skips its own clamp). The
+    !! open itself is `parquet_open_writer_like` with the resolved schema, which forwards
+    !! every writer option still absent when the caller omitted it (`feature_risks.md`
+    !! Risk-8).
     module procedure parquet_open_table_writer
         type(parquet_schema) :: own
         character(len=:), allocatable :: stem, fname, sfx, names(:)

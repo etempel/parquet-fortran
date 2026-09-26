@@ -15,11 +15,11 @@
 !!
 !! **This program executes no `bind(C)` call at all**, which is the property the split exists to
 !! create: it can therefore be built and run under `nagfor -C=undefined`, where an executed
-!! `bind(C)` call is miscompiled (see `feature_tests.md` section 2). It neither warms Arrow's
-!! memory pool nor primes the error scenarios, because it reaches neither.
+!! `bind(C)` call is miscompiled. It neither warms Arrow's memory pool nor primes the error
+!! scenarios, because it reaches neither.
 !!
-!! Membership is a rule, not a preference — `feature_tests.md` section 5 — and
-!! `check_test_runner_partition` (`tools/check_source_conventions.py`) enforces it.
+!! Membership is a rule, not a preference, and `check_test_runner_partition`
+!! (`tools/check_source_conventions.py`) enforces it.
 program run_tester_pf
     use testdrive, only : new_testsuite, testsuite_type
     use test_runner_support, only : run_tester_args, run_tester_main

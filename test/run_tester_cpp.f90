@@ -12,13 +12,13 @@
 !> Test driver (c): every suite that reaches the C++/Arrow layer.
 !!
 !! **Not undef-safe, by construction**: an executed `bind(C)` call is miscompiled under
-!! `nagfor -C=undefined` (`feature_tests.md` section 2), and reaching that layer is exactly what
-!! these suites are for. It warms Arrow's memory pool for the reason `parquet_warmup_memory_pool`
-!! gives — test-drive runs a suite's tests concurrently, and Arrow's `default_memory_pool()`
-!! singleton is not safely reentrant on first call.
+!! `nagfor -C=undefined`, and reaching that layer is exactly what these suites are for. It warms
+!! Arrow's memory pool for the reason `parquet_warmup_memory_pool` gives — test-drive runs a
+!! suite's tests concurrently, and Arrow's `default_memory_pool()` singleton is not safely
+!! reentrant on first call.
 !!
 !! **It forks nothing.** The abort-path tests that used to live in `writing`, `reading`, `maml` and
-!! `metadata` are in `run_tester_errors`; see `feature_tests.md` section 8.3 for what that costs.
+!! `metadata` are in `run_tester_errors`.
 program run_tester_cpp
     use testdrive, only : new_testsuite, testsuite_type
     use test_runner_support, only : run_tester_args, run_tester_main

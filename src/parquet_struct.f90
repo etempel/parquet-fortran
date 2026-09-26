@@ -40,8 +40,7 @@
 !! values are unreachable from that moment on: `%get` on a null row reports `is_valid = .false.`
 !! and yields the type's default. **They also do not survive a file round trip** -- Parquet's
 !! definition levels cannot encode "the struct is absent but its field is present", so a written
-!! and re-read column has every field of every null row null. Measured against Arrow 25.0.0; see
-!! feature_container_phase4.md's F5.
+!! and re-read column has every field of every null row null. Measured against Arrow 25.0.0.
 !!
 !! Depends only on `iso_fortran_env` plus `parquet_columns` (which brings the two element-domain
 !! modules) and `parquet_settings_base` for the one warning it can emit. It reaches no `bind(C)`
@@ -637,8 +636,7 @@ contains
                     ! A container field is nesting, and %init cannot express it: `kinds(:)` carries
                     ! one PK_* discriminator per field, while a nested field is a kind PLUS an inner
                     ! schema. Build the inner container, hand it to a parquet_column with
-                    ! %adopt_container, and pass that column to %adopt_fields. See
-                    ! feature_container_phase7.md's D1.
+                    ! %adopt_container, and pass that column to %adopt_fields.
                     error stop EP//"init: field '"//trim(names(j))//"' is a nested "//kname// &
                         " field and cannot be declared here; build the inner container, hand it "// &
                         "to a parquet_column with %adopt_container, and pass that column to %adopt_fields"
@@ -1171,8 +1169,8 @@ contains
     ! The 36 `set_field` specifics are four families of nine: {name, index} x {int32, int64}
     ! row index. Only the (index, int64) family does any work -- the other 27 are one-line
     ! forwarders onto it, so there is exactly one place a rule about setting a field lives.
-    ! Q3 of feature_container_phase4.md decided the index form is the primitive: a name costs a
-    ! string comparison per call, and filling a column is nrows x nfields calls.
+    ! The index form is the primitive: a name costs a string comparison per call, and filling a
+    ! column is nrows x nfields calls.
     !
     !> `set_field` specific writing a int32 value into field `k` of row `i`.
     subroutine sf_k64_i32(self, i, k, value)
@@ -1853,8 +1851,8 @@ contains
     ! procedure-designator a `data-ref % binding-name`, and a function reference is not a
     ! data-ref -- so a type-bound call cannot be chained onto a function result. Confirmed on
     ! gfortran 15.2 ("Junk after CALL") and nagfor 7.2 ("Component of function reference").
-    ! feature_map_list_struct.md claimed the chaining was ordinary legal Fortran; it is not, and
-    ! that claim is corrected there. Without these nine, every read would be two statements.
+    ! An earlier design claimed the chaining was ordinary legal Fortran; it is not, and that claim
+    ! is corrected there. Without these nine, every read would be two statements.
     !
     ! Each delegates to the narrowed specific through a local handle, so there is exactly one
     ! place a rule about reading a field lives and the two forms' messages cannot diverge.
@@ -2232,7 +2230,7 @@ contains
     !! field's KIND; a nested field is a kind plus a whole inner schema, which `%init`'s
     !! `kinds(:)` array has no way to carry -- so nesting is reachable only by building the inner
     !! container and handing it over with `%adopt_container` + `%adopt_fields`. The `*_VEC` kinds
-    !! stay refused on both paths. See feature_container_phase7.md's D1 and D2.
+    !! stay refused on both paths.
     pure function is_adoptable_field(kind) result(res)
         integer, intent(in) :: kind !! a PK_* discriminator.
         logical :: res              !! whether it may be adopted as a struct field.
@@ -2271,7 +2269,6 @@ contains
     !! message needs. A NESTED field's spelling additionally needs the inner container to describe
     !! itself -- so it cannot be pure, and it cannot be derived from the kind at all. Keeping the two
     !! apart is what lets every error message stay pure while `%kind_text` reports the nested form.
-    !! See feature_container_phase7.md's D3.
     !!
     !! `%kind_text` is the ONLY name in this library that recurses: `%kindof()` stays `PK_STRUCT` at
     !! every depth and `parquet_kind_name` stays `"PK_STRUCT"`. A caller that needs the inner shape

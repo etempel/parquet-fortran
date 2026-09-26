@@ -331,10 +331,9 @@ target = "src/parquet_wrapper.cpp"
 EXCLUDE_LINE_PATTERNS = [re.compile(r"\s*report_fatal_error\(")]
 
 # Exclusions added specifically because GitLab CI's real GCC/gcovr toolchain attributes coverage
-# differently from this script's own gcov backend (see feature_coverage.md's "CI's reported
-# percentage historically didn't match the local baseline" for the full story) carry this exact
-# phrase on the same physical line as their GCOVR_EXCL_LINE/START marker -- by convention, not
-# automatically enforced, so keep it verbatim on the marker line when adding a new one of these.
+# differently from this script's own gcov backend carry this exact phrase on the same physical
+# line as their GCOVR_EXCL_LINE/START marker -- by convention, not automatically enforced, so
+# keep it verbatim on the marker line when adding a new one of these.
 # Everything else (Finding-1/3/4 dead-via-abort code, older Finding-5 closing-brace flakiness,
 # genuinely-unreachable backstops, the report_fatal_error pattern above) is an "other" exclusion.
 GITLAB_GCC_ATTRIBUTION_TEXT = "gcov attribution artifact under GCC"

@@ -13,10 +13,10 @@
 !! the query: equal means found, unequal means a genuine collision and the probe moves on to
 !! `(hash, 1)`, and so on until a miss. One probe and one compare in the overwhelming case; no
 !! lookup ever answers on a hash match alone, and no legitimate key set is ever refused, however
-!! the hashes fall. That is answer F3 of feature_pandas_S7.md as written, and the reason the
-!! debug hook `parquet_debug_set_index_string_hash_bits` exists: two keys found in real data share
-!! a 64-bit hash about once in 2**64 pairs, so the chain is exercised by narrowing the hash in a
-!! test. Keys BUILT to collide are another matter -- the hash is unkeyed, so they can be solved for
+!! the hashes fall. That is the designed behaviour, and the reason the debug hook
+!! `parquet_debug_set_index_string_hash_bits` exists: two keys found in real data share a 64-bit
+!! hash about once in 2**64 pairs, so the chain is exercised by narrowing the hash in a test. Keys
+!! BUILT to collide are another matter -- the hash is unkeyed, so they can be solved for
 !! (`ix_hash_str`) -- and cost a lookup one compare per key of their run: correct, but slow,
 !! which is why a run reaching `IX_STR_CHAIN_WARN` is reported and `%probe_stats` measures it.
 !!

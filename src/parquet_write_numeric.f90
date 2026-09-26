@@ -949,7 +949,7 @@ contains
     ! trigger this one, and the TARGET attribute is the only ingredient that matters. The price is
     ! that the unmasked path copies the mask (`valid_c = valid(1:nelem)`) instead of pointing at
     ! it, which is why both branches now route the mask through `valid_c`. gfortran, ifx and flang
-    ! are unaffected either way. See feature_nag_runtime_checks.md, Report 1.
+    ! are unaffected either way.
     !
     ! A caller that supplied no `is_valid` leaves `vmask` disassociated, which makes it ABSENT at
     ! every `optional` dummy it is passed on to (F2018 15.5.2.12) -- so the qc checker and

@@ -998,9 +998,8 @@ contains
     !> Reads one environment variable, reporting whether there is a value to apply.
     !>
     !> `got` is `.false.` for an unset variable AND for one set to an empty or all-blank string --
-    !> the deliberate choice recorded in feature_settings_s5.md, and the single place it lives. The
-    !> two ARE distinguishable (`status` is 1 for unset and 0 for empty), so this is a decision
-    !> rather than a limitation.
+    !> the deliberate choice, and the single place it lives. The two ARE distinguishable (`status`
+    !> is 1 for unset and 0 for empty), so this is a decision rather than a limitation.
     !>
     !> A value longer than `env_max_len` aborts instead of arriving truncated: silently shortening a
     !> codec name or a token would produce an error that looks like a typo the user never made.

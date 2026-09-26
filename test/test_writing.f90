@@ -5106,7 +5106,7 @@ contains
     !
     ! ==================================================================================
     ! Row-filtering ("mask") tests -- parquet_write_row_mask/parquet_write_chunk_row_mask.
-    ! See feature_write_mask.md for the full design; doc/pages/io/writing.md for the user guide.
+    ! See doc/pages/io/writing.md for the user guide.
     ! ==================================================================================
 
     !> parquet_write_row_mask applied to two whole-column writes: dropped rows leave no trace

@@ -177,8 +177,7 @@ contains
         ! north pole, is `z0 >= cos r`, and `theta0 + r >= pi` is `z0 <= -cos r`. One `sin` where
         ! the direct form took an `acos` and two `cos`, and no worse: the band is widened by a ring
         ! on each side below, so a last-ulp difference from `cos(acos(z0) - r)` cannot change which
-        ! pixels come back (verified identical on 16 000 discs at four resolutions,
-        ! `feature_spatial_phase0.md`).
+        ! pixels come back (verified identical on 16 000 discs at four resolutions).
         sinr = sin(r)
         if (z0 >= cosr) then
             zmax = 1.0_real64

@@ -527,7 +527,7 @@ def check_pointers_go_through_cache():
 #: `src/parquet_strings.f90` -- the module that owns `parquet_string_column` and its typed tier.
 STRINGS_FILE = SRC / "parquet_strings.f90"
 
-#: Prefix of `parquet_string_column`'s typed (non-polymorphic) tier -- see feature_ifx.md.
+#: Prefix of `parquet_string_column`'s typed (non-polymorphic) tier.
 STRING_TYPED_PREFIX = "parquet_string_column_"
 
 
@@ -544,7 +544,7 @@ CONTAINER_FILES = sorted(
     | set(SRC.glob("parquet_struct*.f90"))
 )
 
-#: Prefix of the typed (non-polymorphic) accessor tier -- see feature_ifx.md.
+#: Prefix of the typed (non-polymorphic) accessor tier.
 TYPED_PREFIX = "parquet_column_"
 
 #: The bindings whose typed twin exists, i.e. the ones a per-cell path must NOT reach through a
@@ -617,7 +617,7 @@ def _column_bindings():
 def check_container_accessors_resolve():
     """Every container-column accessor must route through `table_resolve` / `col_resolve`.
 
-    feature_container_phase6.md's D6. A row-structural mutation SKIPS a column that is not
+    A row-structural mutation SKIPS a column that is not
     resident, leaving it RES_EMPTY and the table detached from its file; the detach guard inside
     `table_resolve` is the ONLY thing that then reports a read of it. An accessor written any other
     way -- reaching `self%cache%cols(idx)` from a name it looked up itself -- would hand back the
@@ -672,14 +672,14 @@ def check_container_accessors_resolve():
             "src/parquet_tables_container.f90: `%s` reaches `%%cache%%cols(...)` without going "
             "through table_resolve/col_resolve. That is what puts table_check_not_detached in "
             "front of the access -- without it, a container column a row mutation SKIPPED is read "
-            "rather than reported (feature_container_phase6.md D6). Nothing fails if this "
+            "rather than reported. Nothing fails if this "
             "regresses: the row count is still right." % name
         )
     return problems
 
 
 def check_no_type_bound_column_access():
-    """feature_ifx.md -- no per-cell path may reach a `type(parquet_column)` through a binding.
+    """No per-cell path may reach a `type(parquet_column)` through a binding.
 
     Two halves, because the cost comes back through either one and NOTHING fails when it does:
     every answer stays correct, every test stays green, and only an ifx `objdump` store count
@@ -699,7 +699,7 @@ def check_no_type_bound_column_access():
         if TYPED_PREFIX + name not in generics:
             problems.append(
                 "src/parquet_columns.f90: no public `%s%s` -- this check's binding list has gone "
-                "stale, or the typed tier lost a family (feature_ifx.md)" % (TYPED_PREFIX, name)
+                "stale, or the typed tier lost a family" % (TYPED_PREFIX, name)
             )
     # An empty derivation means the source moved, not that the invariant holds -- fail rather than
     # report a vacuous [ok] (this file's own "a static check that enumerates names goes stale
@@ -734,7 +734,7 @@ def check_no_type_bound_column_access():
                     "%s:%d: reaches a `parquet_column` payload through the type-bound `%%%s(...)`. "
                     "Call `%s%s(<designator>, ...)` instead -- a `type(parquet_column)` actual "
                     "passed to a `class` dummy makes ifx build a runtime type descriptor in this "
-                    "procedure's prologue, unconditionally, on every call (~35 ns; feature_ifx.md). "
+                    "procedure's prologue, unconditionally, on every call (~35 ns). "
                     "Nothing fails if this regresses:\n    %s"
                     % (path.relative_to(REPO_ROOT), lineno, match.group(1), TYPED_PREFIX,
                        match.group(1), raw.strip())
@@ -750,8 +750,8 @@ def check_no_type_bound_column_access():
                     "%s:%d: reaches column storage through the type-bound `%%values%%%s(...)`. "
                     "Call `%s%s(<designator>%%values, ...)` instead -- a `type(parquet_column)` "
                     "actual passed to a `class` dummy makes ifx build a runtime type descriptor in "
-                    "this procedure's prologue, unconditionally, on every call (~35 ns; "
-                    "feature_ifx.md). Nothing fails if this regresses:\n    %s"
+                    "this procedure's prologue, unconditionally, on every call (~35 ns). "
+                    "Nothing fails if this regresses:\n    %s"
                     % (path.relative_to(REPO_ROOT), lineno, match.group(1), TYPED_PREFIX,
                        match.group(1), raw.strip())
                 )
@@ -789,7 +789,7 @@ def check_no_type_bound_column_access():
                     problems.append(
                         "%s:%d: typed procedure `%s` calls `%s`, which takes a "
                         "`class(parquet_column)` dummy -- that rebuilds the descriptor block this "
-                        "tier exists to remove. Call the `%s%s` form (feature_ifx.md §7.2):\n    %s"
+                        "tier exists to remove. Call the `%s%s` form:\n    %s"
                         % (path.relative_to(REPO_ROOT), lineno, current, called,
                            TYPED_PREFIX, called, raw.strip())
                     )
@@ -798,7 +798,7 @@ def check_no_type_bound_column_access():
                     problems.append(
                         "%s:%d: typed procedure `%s` makes the type-bound call `col%%%s(...)` on "
                         "its own non-polymorphic dummy, which is the conversion this tier exists "
-                        "to remove. Call the typed form instead (feature_ifx.md §8.2):\n    %s"
+                        "to remove. Call the typed form instead:\n    %s"
                         % (path.relative_to(REPO_ROOT), lineno, current, bound, raw.strip())
                     )
     return problems
@@ -825,7 +825,7 @@ def _string_column_bindings():
 
 
 def check_no_type_bound_string_column_access():
-    """feature_ifx.md -- `parquet_columns` must not reach `%str` through a binding.
+    """`parquet_columns` must not reach `%str` through a binding.
 
     The same defect as `check_no_type_bound_column_access` above, one type further down. A
     `parquet_column`'s string storage is a `type(parquet_string_column)` component, so
@@ -857,7 +857,7 @@ def check_no_type_bound_string_column_access():
         STRINGS_FILE.read_text(), re.M)}
     if not published:
         problems.append("src/parquet_strings.f90: no public `%s*` name -- the typed string tier "
-                        "is gone, or this check has gone stale (feature_ifx.md)"
+                        "is gone, or this check has gone stale"
                         % STRING_TYPED_PREFIX)
 
     # 1. Every consumer of a column's string storage.
@@ -872,7 +872,7 @@ def check_no_type_bound_string_column_access():
                 "`%s%s(%s, ...)` instead -- a `type(parquet_string_column)` actual passed to a "
                 "`class` dummy makes ifx build a runtime type descriptor in STATIC storage in "
                 "this procedure's prologue, on every call, and every thread then writes the same "
-                "cache lines (feature_ifx.md). Nothing fails if this regresses:\n    %s"
+                "cache lines. Nothing fails if this regresses:\n    %s"
                 % (path.relative_to(REPO_ROOT), lineno, match.group(2), STRING_TYPED_PREFIX,
                    match.group(2), match.group(1), raw.strip()))
 
@@ -899,7 +899,7 @@ def check_no_type_bound_string_column_access():
                 problems.append(
                     "src/parquet_strings.f90:%d: `%s` makes the type-bound call `%s%%%s(...)` on a "
                     "`type(parquet_string_column)` dummy, which is the conversion the typed tier "
-                    "exists to remove. Call `%s%s(%s, ...)` instead (feature_ifx.md):\n    %s"
+                    "exists to remove. Call `%s%s(%s, ...)` instead:\n    %s"
                     % (lineno, current, designator, bound, STRING_TYPED_PREFIX, bound,
                        designator, text[lineno - 1].strip()))
     return problems
@@ -1715,7 +1715,7 @@ def check_no_direct_printing():
             "tools/check_source_conventions.py: DIRECT_PRINT_ALLOWED names `%s`, which no longer "
             "matches a site this check would flag -- the procedure was renamed, removed, or has "
             "since been routed through a channel. Delete the entry: an allow-list nobody "
-            "re-derives is how this check went half blind before (feature_message_stream.md C6)."
+            "re-derives is how this check went half blind before."
             % stale)
     return problems
 
@@ -2094,7 +2094,7 @@ def _modules_that_can_print():
     """Entry module -> the files in its footprint that call an emit channel (empty means silent).
 
     The footprint is what fpm compiles for a single-module import, which is a COMPILE closure and
-    not a namespace -- U14's lesson, recorded in feature_doc_group_generators.md: a name can be
+    not a namespace -- U14's lesson: a name can be
     compiled into a build without being in scope. So this OVER-approximates, and a module it calls
     loud might in principle reach no emitter through its public surface. That is the safe
     direction for a check on a claim of total silence, and the one case anyone doubted was
@@ -2739,7 +2739,7 @@ def check_parquet_argsort_stays_arrow_free():
     weighted draws -- compiles this tier and stops, instead of the whole reader/writer stack. That
     is a property of the `use` graph and nothing in `fpm test` can see it: the library obviously has
     Arrow, so a stray import compiles and tests perfectly well here and fails in the consumer's
-    build, or silently inflates it. See feature_modules.md section 4.
+    build, or silently inflates it.
     """
     return _check_stays_arrow_free(
         "parquet_argsort",
@@ -3391,7 +3391,6 @@ def check_parquet_toml_takes_the_guard():
          pointer or scalar query such as `pf_toml_is_open`);
       2. no procedure that is not public contains the directive.
 
-    See feature_toml.md section 9.
     """
     path = SRC / "parquet_toml.f90"
     if not path.is_file():
@@ -3451,12 +3450,12 @@ def check_parquet_toml_takes_the_guard():
                 problems.append(
                     "src/parquet_toml.f90: public procedure `%s` does not take "
                     "`!$omp critical (parquet_toml_guard)` -- without it a concurrent call races on "
-                    "the accumulator and on toml-f's own state, silently (feature_toml.md 9)" % name)
+                    "the accumulator and on toml-f's own state, silently" % name)
         elif guarded:
             problems.append(
                 "src/parquet_toml.f90: private worker `%s` takes the module guard -- a named "
                 "critical section is not reentrant, so the first guarded entry that calls it "
-                "self-deadlocks, on one thread, with no diagnostic (feature_toml.md 9)" % name)
+                "self-deadlocks, on one thread, with no diagnostic" % name)
     return problems
 
 
@@ -3850,10 +3849,10 @@ STATS_OPTIONAL_ORDER = (
     + ["unit", "name"]
 )
 
-#: `parquet_kde`'s own canonical sequence (feature_kde.md, 5.2): the estimator's settings, then the
-#: queries' range and output arguments, then the `pf_*` family's population run from `is_valid` to
-#: `threads` in the family's own order, then `%print`'s `unit`. A later stage's argument is inserted
-#: where it belongs here, which is safe exactly when every existing procedure stays a subsequence.
+#: `parquet_kde`'s own canonical sequence: the estimator's settings, then the : queries' range and
+# output arguments, then the `pf_*` family's population run from `is_valid` to : `threads` in the
+# family's own order, then `%print`'s `unit`. A later stage's argument is inserted : where it
+# belongs here, which is safe exactly when every existing procedure stays a subsequence.
 KDE_OPTIONAL_ORDER = (
     ["bandwidth", "rule", "adjust", "kernel", "adaptive", "pilot", "alpha", "bandwidth_max",
      "spread_max", "hlo", "hhi", "lower", "upper", "boundary"]
@@ -4081,8 +4080,7 @@ def check_stats_optional_argument_order():
     # `kind` sits immediately after `method` because the two are the same kind of argument -- a
     # token naming a rule -- and no procedure takes both, so their relative order is never
     # observed. Inserting a name into this sequence is safe exactly when it leaves every existing
-    # procedure's list a subsequence of it, which appending inside an unused block does. See
-    # feature_pandas_S4.md's signature matrix.
+    # procedure's list a subsequence of it, which appending inside an unused block does.
     #
     # `corr` closes the tier-A OUTPUT prefix and `prob` closes the RULE run, and both positions
     # are load-bearing rather than alphabetical:
@@ -4103,9 +4101,9 @@ def check_stats_optional_argument_order():
     # `parquet_kde` keeps the same contract with a sequence of its own (KDE_OPTIONAL_ORDER), whose
     # population run is the family's; the same subsequence rule is applied to its spec file.
     for path, canonical, matrix in ((SRC / "parquet_stats.f90", STATS_OPTIONAL_ORDER,
-                                     "feature_pandas_S4.md's signature matrix"),
+                                     "the statistics signature matrix"),
                                     (SRC / "parquet_kde.f90", KDE_OPTIONAL_ORDER,
-                                     "feature_kde.md, section 5.2")):
+                                     "`parquet_kde`'s canonical option order")):
         bad += _optional_order_problems(path, canonical, matrix)
     return bad
 
@@ -4204,8 +4202,8 @@ def check_stats_optional_order_documented():
     **Why this is worth a check.** The page says why itself: "In Fortran the order of optional
     arguments is part of the public contract -- a caller may pass them positionally -- so this is a
     compatibility promise, not a style preference." A reader who orders a positional call by a
-    stale page writes a call that compiles and means something else. That is `feature_doc.md`
-    section 8's FALSE-making class rather than U3's merely-incomplete one.
+    stale page writes a call that compiles and means something else. That is the FALSE-making
+    class rather than U3's merely-incomplete one.
 
     **Order, not membership.** Unlike `check_agg_vocabulary_matches_its_documentation`, whose token
     vocabularies are sets, this list IS its order: it is compared block by block, element by
@@ -5512,7 +5510,7 @@ def check_no_per_element_shared_ptr():
     In a helper called once per row that is the dominant cost of the whole operation --
     `real_family_value_at` measured at **13.6 ns per row** to read one double this way, against
     **1.8 ns** once it took a raw pointer, and `evaluate_nodes` was 75-93% of the cost of installing
-    a row filter (feature_table_parallel.md section 17.10).
+    a row filter.
 
     **Nothing fails when this is undone.** Every answer stays identical and every test still passes;
     only the clock moves, and only under a benchmark nobody runs by default. That is exactly why it
@@ -5543,7 +5541,7 @@ def check_no_per_element_shared_ptr():
             "src/parquet_wrapper.cpp:%d: `%s` takes an Arrow array by const shared_ptr& alongside "
             "an element index, which makes it a per-element helper paying two atomic refcount "
             "operations per call -- take `const arrow::Array *` instead (measured 13.6 ns/row vs "
-            "1.8 ns/row; see feature_table_parallel.md section 17.10)" % (line, match.group(1))
+            "1.8 ns/row)" % (line, match.group(1))
         )
     return problems
 
@@ -5586,7 +5584,7 @@ def check_no_per_element_string_alloc():
     whole packed payload takes `%copy_buffers` instead. `parquet_check_qc_string_compact` was once
     judged a permanent hold-out on the grounds that it needs each element's VALUE; it does, and
     `%copy_to` into a scratch buffer sized once from the column's longest element supplies it, so the
-    judgement was wrong. See feature_string_parallel.md S10.
+    judgement was wrong.
     """
     # file -> instances still to be converted. Lower a number when you fix one; never raise one.
     KNOWN_REMAINING = {}
@@ -5939,7 +5937,7 @@ def check_doc_page_index_consistency():
     Under FORD's nested-subpage mechanism a page exists on the generated site only if the chain of
     `ordered_subpage:` entries reaches it, and a group directory whose index.md is missing is
     SKIPPED SILENTLY -- warning on stderr, exit 0, the whole group absent from the site (verified
-    against FORD 7.0.13; see feature_doc.md's "FORD nesting" experiments). Every index.md also
+    against FORD 7.0.13). Every index.md also
     duplicates its frontmatter order in a hand-written bullet list, and the top-level index carries
     a third hand-written list (every content page at a glance). None of that is visible to any
     compiler, test, or FORD itself. Everything here is derived from the filesystem, never from a
@@ -6160,8 +6158,8 @@ def check_page_titles_match_their_list_entries():
     numbers" while its list entry said "Random numbers and sampling with pf_random_at", for a page
     half about sampling. The fix was to lengthen the titles, not to shorten the entries. (Cite the
     page and the decision, never a row number in a git-ignored campaign document: this docstring
-    said "row 29 of feature_doc.md" for months, and by the time anyone read it that campaign was
-    over and a later one's row 29 was a different page entirely.)
+    cited such a row for months, and by the time anyone read it that campaign was over and a
+    later one's row 29 was a different page entirely.)
 
     **Backticks are ignored when comparing, and forbidden in a title.** A list entry legitimately
     carries them -- the flat list says "Compact string columns with `parquet_string_column`" for a
@@ -6885,7 +6883,7 @@ def check_documented_signatures_match_source():
     them with the source. A renamed or reordered argument leaves the page telling a reader to type
     a keyword that does not exist, or to expect one at a position it no longer occupies.
 
-    **Where this sits on the campaign's own rule** (`feature_doc.md` section 8): drift makes the
+    **Where this sits on the campaign's own rule**: drift makes the
     page affirmatively wrong rather than merely incomplete, which is the class worth checking --
     but the resulting failure is LOUD, since a wrong keyword will not compile. That makes it the
     weaker half of that class, and it was proposed and approved on that footing rather than on a
@@ -7001,7 +6999,7 @@ def check_agg_vocabulary_matches_its_documentation():
       a caller is told;
     * the statistics **weights cannot affect** -- the fifth refusal message in the same procedure.
 
-    **Why these three and not `%agg`'s 17-row token table.** `feature_doc.md` section 8 ("A check is
+    **Why these three and not `%agg`'s 17-row token table.** The campaign's rule ("A check is
     worth proposing when drift makes the page state something FALSE") splits this class in two, and
     only these three fall on the checkable side. The page's sentence says declaring `out` as
     `integer(int64)` "selects the statistics that are exact", and says `method=` "belongs to" three
@@ -7757,7 +7755,7 @@ def check_threads_are_forwarded():
     requested one -- so the sort still returns a bit-identical permutation and the whole suite
     stays green. What breaks is the documented contract that `threads=1` forces serial and that
     `threads=n` is a ceiling: both silently become "use the machine". Confirmed by mutation while
-    `pf_partial_argsort` was given its own `threads=` (feature_sort.md's P10): stripping the
+    `pf_partial_argsort` was given its own `threads=`: stripping the
     plumbing from all 24 generated bodies left every test in the `sorting` suite passing.
 
     Matched by SHAPE, in both directions, so it cannot go stale the way an enumerated list does:
@@ -8755,7 +8753,7 @@ def check_test_runner_partition():
     partition violation, which is the most expensive way to find it. This check runs in the lint
     stage, needs only python3, and fails at the moment the violation is introduced.
 
-    Five clauses, per `feature_tests.md` section 10:
+    Five clauses:
 
       1. every suite is registered in exactly one runner, and every `collect_tests_*` in `test/`
          is registered somewhere -- the failure mode with no symptom, since a suite that stops
@@ -9910,8 +9908,7 @@ def check_no_doc_block_opens_with_a_ford_metadata_key():
 #: a new operator cannot make the check pass by being left out of a list -- which is the whole
 #: reason this check can exist at all. What IS enumerated is these four entries, and CLAUDE.md's
 #: "A static check that enumerates names goes stale silently" applies to exactly them:
-#: `feature_filter.md` section 2.1 tabulates every site that knows the vocabulary and points back
-#: here, so a fifth consuming site is added in both places or in neither.
+#: a fifth consuming site is added to this tuple, or the check silently stops covering it.
 FILTER_OPERATOR_SITES = (
     ("the reader's per-row evaluation", "src/parquet_wrapper.cpp",
      ("eval_filter_clause", "cmp_op_of")),
@@ -10001,7 +9998,7 @@ def fortran_procedure_body(text, name):
 def check_filter_operators_are_handled_everywhere():
     """Every operator the filter grammar accepts must be handled at each site that consumes one.
 
-    The filter vocabulary is known in six places (`feature_filter.md` section 2.1). One of them --
+    The filter vocabulary is known in six places. One of them --
     `parquet_tokenize_filter_rule` -- DEFINES it: an operator exists exactly when that subroutine's
     `select case (trim(op))` has an arm for it. The other five consume it, and they fail very
     differently when one is missed. Four refuse what they do not know, loudly and at the right
@@ -10116,7 +10113,7 @@ def check_filter_operators_are_handled_everywhere():
         for op in sorted(wanted - present):
             problems.append(
                 "%s: the filter grammar accepts `%s`, but %s never names it%s. Every operator "
-                "%s accepts must be handled at all four sites in feature_filter.md section 2.1."
+                "%s accepts must be handled at all four sites in FILTER_OPERATOR_SITES."
                 % (relpath, op, label,
                    " (searched %s)" % ", ".join(spans) if spans else "",
                    "parquet_tokenize_filter_rule"))

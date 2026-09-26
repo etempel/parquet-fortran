@@ -32,7 +32,7 @@ module test_sorting
     ! NARROW imports, not `use parquet`. Every test in this file is Arrow-free by construction --
     ! the 55 that were not now live in test_sorting_cpp.f90 -- and naming the tiers is what keeps
     ! it that way: a future test reaching a reader or writer is a build error here rather than a
-    ! silent loss of this file's place in an undef-safe runner. See feature_tests.md §8.1.
+    ! silent loss of this file's place in an undef-safe runner.
     use parquet_sorting
     use parquet_columns
     use parquet_strings
@@ -5398,7 +5398,7 @@ contains
     ! (src/parquet_argsort.f90) calls it "the only way a test can see either" of the engine's two
     ! team decisions. Listing it here once read as though no Fortran-side threading assertion were
     ! possible, which is the opposite of the truth: `test_selection_ordering_threads` below relies
-    ! on exactly that. See feature_doc_sorting.md's S1.
+    ! on exactly that.
     !
     ! Pinning is the right fix rather than re-pointing them at Fortran observables, because the
     ! C++ engine still ships and is still user-reachable: `parquet_open_reader(..., sort_by=)`
@@ -5702,8 +5702,7 @@ contains
     !! moment a team existed a low-cardinality integer key fell counting -> radix -> Design B
     !! declines -> Design A, and landed slower than the serial sort it had just refused. Machine A
     !! measured 2.0x at two threads on gfortran; machine B reproduced 1.46x under ifx, which is what
-    !! established it as a real defect rather than an instance of the gfortran radix gap that
-    !! `feature_sort_report.md` section 11.3 tracks.
+    !! established it as a real defect rather than an instance of the gfortran radix gap.
     !!
     !! **The `nt = 4` arm is not decoration.** The ceiling is 2 because that is where the compilers
     !! stop agreeing -- from four threads ifx's radix wins and gfortran's does not -- so a test that
@@ -7103,8 +7102,8 @@ contains
         ! serial loop counts every digit — so serial and threaded pass counts differ legitimately and
         ! comparing them fails against correct code. A mutation that drops the per-thread range
         ! reduction in `sort_tier_split_par` therefore SURVIVES this test; it is recorded as an open
-        ! gap in `feature_sort.md` §6 Stage 4, 4e rather than papered over here. Closing it needs an
-        ! observable the designs share — the resolved `vmin`/`vmax` themselves.
+        ! gap rather than papered over here. Closing it needs an observable the designs share — the
+        ! resolved `vmin`/`vmax` themselves.
         call parquet_set_sort_counting_path(.false.)
         do k = 1, size(narrowv)
             narrowv(k) = 1000000000000_int64 + int(mod(k * 37, 5000), int64)
@@ -7939,7 +7938,7 @@ contains
     !! and `test_sorting_cpp`'s own helper drives that one too, because its tests run both engines.
     !! Nothing in THIS file switches engines, so every sort here runs on the shipped Fortran engine
     !! and the C++ floor would have no effect on it -- driving it anyway is what put 23 of these
-    !! tests in the C++ half in the first place. See feature_tests.md §8.2.
+    !! tests in the C++ half in the first place.
     !
     subroutine force_fortran_parallel_threshold(rows)
         integer(int64), intent(in) :: rows !! new threshold; <= 0 restores the built-in floors.

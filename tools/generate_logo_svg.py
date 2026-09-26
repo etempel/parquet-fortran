@@ -218,7 +218,7 @@ def rounded_polygon_d(points: list, radius: float) -> str:
     return " ".join(parts)
 
 
-# Step 4 of feature_logo.md's improvement plan (revised twice -- first cycled 4 distinct wood-
+# Step 4 of the logo improvement plan (revised twice -- first cycled 4 distinct wood-
 # tone families across the 8 tiles, which didn't match the designer reference's own grouping;
 # then a simpler 2-tone light/dark scheme, which was closer but still one shared tone per group).
 # This is the final per-tile version: each of the 8 tiles gets its own individually-measured
@@ -240,10 +240,10 @@ TILE_TONES_BY_INDEX = {
     8: "#A1571F",
 }
 
-# Step 5 of feature_logo.md's improvement plan: the badge gradient's own light/dark stops,
-# measured directly from test_run/Designer_logo.png's badge (sampled ~50px in from its
-# upper-left and lower-right corners, clear of the white outline and the "F" glyph) -- richer
-# and more saturated than the previous scale_color(--badge-color, ...)-derived stops.
+# Step 5 of the logo improvement plan: the badge gradient's own light/dark stops, measured
+# directly from test_run/Designer_logo.png's badge (sampled ~50px in from its upper-left and
+# lower-right corners, clear of the white outline and the "F" glyph) -- richer and more saturated
+# than the previous scale_color(--badge-color, ...)-derived stops.
 BADGE_GRAD_LIGHT = "#9C60C0"
 BADGE_GRAD_DARK = "#341168"
 
@@ -251,13 +251,13 @@ WOOD_GRAIN_SEED = 123
 
 
 def generate_wood_grain_paths(corners: list, seed_offset: int, flip_axis: bool = False) -> list:
-    """Step 3 of feature_logo.md's improvement plan: a handful of thin, low-opacity, jittered
+    """Step 3 of the logo improvement plan: a handful of thin, low-opacity, jittered
     polylines following a tile's own long axis, to be clipped to that tile's shape by the
     caller. The long/short axes are derived from the tile's own corners (its longest edge's
     direction is "along the grain"; the shortest edge's length is the tile's width) rather than
     a fixed rotation, so this works for any of the 8 tiles' own actual orientation. The
     line-generation math (jittered sine-wave polyline, dark-fiber/light-fiber opacity ranges) is
-    adapted from the reference package's make_wood_tile() grain loop (see feature_logo.md) --
+    adapted from the reference package's make_wood_tile() grain loop --
     only the math is reused, not that script's (wrong) tile positions/rotations. A fixed seed
     (WOOD_GRAIN_SEED, offset per tile index) keeps output deterministic across regenerations.
     `flip_axis` swaps which edge pair the grain follows (the shortest edge's direction becomes
@@ -325,7 +325,7 @@ def build_badge_and_tile_defs(tile_colors: list, badge_color: str) -> str:
             f'<stop offset="100%" stop-color="{dark}"/>'
             f'</linearGradient>'
         )
-    # Step 5 of feature_logo.md's improvement plan: a richer, more saturated badge gradient --
+    # Step 5 of the logo improvement plan: a richer, more saturated badge gradient --
     # light/dark stops measured directly from test_run/Designer_logo.png's own badge pixels
     # (sampled ~50px in from its upper-left/lower-right corners, well clear of both the white
     # outline and the "F" glyph) rather than derived from --badge-color via scale_color, which
@@ -343,10 +343,10 @@ def build_badge_and_tile_defs(tile_colors: list, badge_color: str) -> str:
         '<feDropShadow dx="11" dy="16" stdDeviation="13" flood-color="#000000" flood-opacity="0.50"/>'
         '</filter>'
     )
-    # Step 1 of feature_logo.md's improvement plan: a soft, warm-dark (not pure black),
-    # lower-right-offset drop shadow shared by all 8 tiles -- feDropShadow shadows the
-    # filtered element itself (source graphic composited over its own blurred/offset alpha),
-    # so no separate offset-duplicate shape is needed the way the badge/letter shadows use.
+    # Step 1 of the logo improvement plan: a soft, warm-dark (not pure black), lower-right-offset
+    # drop shadow shared by all 8 tiles -- feDropShadow shadows the filtered element itself
+    # (source graphic composited over its own blurred/offset alpha), so no separate
+    # offset-duplicate shape is needed the way the badge/letter shadows use.
     # Kept deliberately subtler than badgeShadow (lower opacity/blur/offset) so the badge --
     # the topmost element -- still reads as casting the strongest shadow of the composition.
     defs.append(
@@ -440,8 +440,8 @@ def rebuild_polygons(svg_text: str, all_corners: dict, tile_colors: list,
     # Tiles are painted first (background layer), the badge last -- on top of any tile it
     # overlaps -- so its own shadow/outline read cleanly instead of being covered by a tile.
     #
-    # Step 2 of feature_logo.md's improvement plan (revised approach -- the first attempt, a
-    # thin light/dark bevel stroke along each tile's edges, didn't read well and was reverted):
+    # Step 2 of the logo improvement plan (revised approach -- the first attempt, a thin
+    # light/dark bevel stroke along each tile's edges, didn't read well and was reverted):
     # each tile gets a solid dark-brown duplicate of its own exact shape, shifted down, painted
     # *before* (behind) the tile itself -- like the board has physical thickness and this is the
     # underside edge peeking out. Uses that tile's own fill color darkened (scale_color(...,
@@ -455,7 +455,7 @@ def rebuild_polygons(svg_text: str, all_corners: dict, tile_colors: list,
         tile_d = rounded_polygon_d(all_corners[i], tile_corner_radius)
         new_paths.append(f'<path d="{tile_d}" fill="url(#tileGrad{i - 1})" transform="translate(0,0)" '
                         f'filter="url(#tileShadow)"/>')
-        # Step 3 of feature_logo.md's improvement plan: wood-grain fiber lines, clipped to this
+        # Step 3 of the logo improvement plan: wood-grain fiber lines, clipped to this
         # tile's own shape so they never spill onto neighboring tiles or the white gaps.
         new_paths.append(f'<clipPath id="tileClip{i}"><path d="{tile_d}"/></clipPath>')
         grain_paths = generate_wood_grain_paths(all_corners[i], seed_offset=i, flip_axis=i in (5, 6))
@@ -695,7 +695,7 @@ def parse_args():
                          default=default_tile_colors,
                          help="comma-separated list of 8 hex colors assigned to the new tile polygons "
                               "(all_corners indices 1-8, in order), used only with --from-svg (default: Step 4 "
-                              "of feature_logo.md's improvement plan -- TILE_TONES_BY_INDEX's own individually-"
+                              "of the logo improvement plan -- TILE_TONES_BY_INDEX's own individually-"
                               "measured tone per tile, from test_run/Designer_logo.png)")
     parser.add_argument("--colormode", choices=["color", "binary"], default="color",
                          help="color trace vs. black/white only (default: color)")
@@ -734,7 +734,7 @@ def parse_args():
                               "(default: #613B93, this repo's original AI-generated logo's purple)")
     parser.add_argument("--badge-color", default="#63358F",
                          help="the badge gradient's 55%% stop, and the base tone its shadow/letter-shadow "
-                              "colors are darkened from (default: #63358F, Step 5 of feature_logo.md's "
+                              "colors are darkened from (default: #63358F, Step 5 of the logo "
                               "improvement plan -- linearly interpolated 55%% of the way between "
                               "BADGE_GRAD_LIGHT and BADGE_GRAD_DARK, both measured from "
                               "test_run/Designer_logo.png, so all three gradient stops are consistent with "

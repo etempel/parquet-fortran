@@ -49,10 +49,10 @@ module test_random_reference
 
     ! ---- Per-generic word spaces ----
     !
-    ! Written out here from the specification in `feature_random_domains.md` section 4 rather than
-    ! imported from `parquet_random`, which is the whole point of this file: a reference that
-    ! borrowed the library's own constants could only ever confirm that the library agrees with
-    ! itself. The tag sits in bits 62-63 of the block index, which no draw index can reach.
+    ! Written out here from the specification rather than imported from `parquet_random`, which
+    ! is the whole point of this file: a reference that borrowed the library's own constants
+    ! could only ever confirm that the library agrees with itself. The tag sits in bits 62-63 of the
+    ! block index, which no draw index can reach.
     !
     ! `REF_DOM_REAL64` is zero, so every value in that space is what it was before the split.
 

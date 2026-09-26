@@ -334,11 +334,11 @@ contains
         ! A CONTAINER column's own three rules, all refusals, and all for the same reason: a
         ! container's per-row extent comes from the DATA, so there is nothing for col_size to
         ! declare and nothing for it to be resolved from. qc: min:/max: is refused on the same
-        ! terms as a temporal column's above -- qc stays scalar-leaf-only by design (see
-        ! feature_map_list_struct.md), and refusing is what keeps the read and write sides
-        ! agreeing, since with no such declaration possible a reader can never be handed one.
-        ! qc: miss: IS supported and applies to ROW nullness (a null list, an absent map or
-        ! struct instance), which is the same concept at the same granularity.
+        ! terms as a temporal column's above -- qc stays scalar-leaf-only by design, and
+        ! refusing is what keeps the read and write sides agreeing, since with no such declaration
+        ! possible a reader can never be handed one. qc: miss: IS supported and applies to ROW
+        ! nullness (a null list, an absent map or struct instance), which is the same concept at the
+        ! same granularity.
         !
         ! One block for all three kinds rather than three near-identical ones, because
         ! parquet_container_col_size_rule is also what schema%set_col_size consults: that setter
@@ -1225,9 +1225,8 @@ contains
         ! The bare `struct` token. Deliberately NOT an entry in valid_maml_data_types: that array
         ! is also what parse_container_token validates a LIST's element and a MAP's value token
         ! against, so adding "struct" there would silently make `list[struct]` AND `map[struct]`
-        ! valid declarations -- and nesting is READ-ONLY (feature_container_phase7.md's Q2/D8), so a
-        ! token for a shape no writer can emit would invert the symmetry principle it appears to
-        ! serve. A struct declares no field
+        ! valid declarations -- and nesting is READ-ONLY, so a token for a shape no writer can emit
+        ! would invert the symmetry principle it appears to serve. A struct declares no field
         ! layout in MAML at all; its fields come entirely from the parquet_struct_column the caller
         ! passes at write time. Note there is deliberately no bare `map` token to match it: a map's
         ! value type IS expressible in MAML, so leaving it out would be an omission rather than a

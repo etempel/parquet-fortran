@@ -36,8 +36,8 @@ check that enumerates names goes stale silently". It was a hand-kept list of fiv
 What this does NOT check (see `.claude/rules/cpp-wrapper.md`'s "The `bind(C)` boundary" note): length/ownership
 contracts (does the C++ side write exactly as many elements as Fortran allocated?), array
 rank/assumed-size shape, or NUL-termination/sentinel conventions. Those need a buffer-contract
-audit, not a signature checker -- see `.claude/rules/columns-tables.md`'s "`parquet_strings`" notes and feature_doc.md's
-point 4 for the one confirmed instance of that class of bug found so far.
+audit, not a signature checker -- see `.claude/rules/columns-tables.md`'s "`parquet_strings`" notes
+for the one confirmed instance of that class of bug found so far.
 
 Usage:
     tools/check_bindc_boundary.py

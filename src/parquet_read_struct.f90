@@ -21,8 +21,7 @@
 !> struct's validity with the field's, and for a PRESENT row that combination is
 !> the identity; for a NULL struct row Parquet has already forced every child
 !> null on write, because its definition levels cannot encode "the struct is
-!> absent but its field is present". Measured against Arrow 25.0.0 --
-!> feature_container_phase4.md's F5.
+!> absent but its field is present". Measured against Arrow 25.0.0.
 !>
 !> The struct's OWN row validity is the one thing that is NOT derivable: a row
 !> where every field is null and a row where the struct instance is absent give
@@ -170,11 +169,11 @@ contains
         whole = (rg <= 0_c_long_long)
         ! A NESTED field is handled first and returns, BEFORE the %init below -- which refuses a
         ! container kind by design, because %init fixes a kind and a container is a kind plus a
-        ! whole inner schema (feature_container_phase7.md's D1). The field is read through its own
-        ! dotted path by the reader that already handles that container type, including a recursive
-        ! call for PK_STRUCT. That is the whole of Phase 7's 7a half, and it is this small because
-        ! the struct read path was already built on "every field of a struct is an ordinary column
-        ! at a dotted path": a container field is one too.
+        ! whole inner schema. The field is read through its own dotted path by the reader that
+        ! already handles that container type, including a recursive call for PK_STRUCT. That is
+        ! the whole of Phase 7's 7a half, and it is this small because the struct read path was
+        ! already built on "every field of a struct is an ordinary column at a dotted path": a
+        ! container field is one too.
         !
         ! No `ok` mask, for the same reason PK_STRING needs none: a container carries its own
         ! per-ROW validity inside itself, so there is no caller-side mask to apply and writing one

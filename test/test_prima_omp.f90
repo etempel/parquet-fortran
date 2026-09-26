@@ -4,10 +4,10 @@
 !! **Why this needs a suite of its own rather than a test in `prima`.** The multistart driver runs
 !! each start on its own thread through its own clone of the objective, so a BOBYQA run under it
 !! is the first place the vendored engine is asked to be reentrant. PRIMA's core holds no `save`
-!! variable, opens no parallel region and draws no random number -- `feature_optimizer.md` 3.4
-!! checked that at the pinned commit and this suite is what holds it -- but a `save` added to a
-!! vendored file later, or a clone that shares what it should copy, would change the answer only
-!! when the team size changes. No assertion inside a single run can see it.
+!! variable, opens no parallel region and draws no random number -- a check at the pinned commit
+!! confirmed that, and this suite is what holds it -- but a `save` added to a vendored file later,
+!! or a clone that shares what it should copy, would change the answer only when the team size
+!! changes. No assertion inside a single run can see it.
 !!
 !! The comparison is against the SERIAL run, so the serial arm is the reference and not another
 !! sample, and the assertion is BIT equality: the driver's starts depend on the seed, the box and

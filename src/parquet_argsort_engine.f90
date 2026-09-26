@@ -9,20 +9,18 @@
 !
 !> The serial core of the pure-Fortran sort engine: the ordering, and the introsort over it.
 !!
-!! Stages 1 and 2 of `feature_sort.md`. The comparators decide **what order rows go in**;
-!! `sort_comparison_permutation` is the serial sort that uses them. The shipped path still crosses
-!! `bind(C)` into the C++ engine — this side is reached only when
-!! `parquet_debug_use_fortran_sort_engine(.true.)` has selected it, which is Stage 2 scaffolding and
-!! goes away at the Stage 6 cutover. What proves this code correct is `test/test_sorting.f90`, which
-!! asks the C++ engine the same questions — pair by pair for the comparators, whole-permutation for
-!! the sort — and requires the same answers.
+!! The comparators decide **what order rows go in**; `sort_comparison_permutation` is the serial
+!! sort that uses them. The shipped path still crosses `bind(C)` into the C++ engine — this side is
+!! reached only when `parquet_debug_use_fortran_sort_engine(.true.)` has selected it, which is Stage
+!! 2 scaffolding and goes away at the Stage 6 cutover. What proves this code correct is
+!! `test/test_sorting.f90`, which asks the C++ engine the same questions — pair by pair for the
+!! comparators, whole-permutation for the sort — and requires the same answers.
 !!
 !! **Both halves live in one file on purpose.** A call from a sibling submodule into `sort_row_less`
 !! is a call to a global symbol in another translation unit, which no compiler can inline; keeping
 !! the sort beside the comparator is the only thing that leaves inlining possible at all. It is not
-!! sufficient — `feature_sort.md` §1e-B records that ELF semantic interposition under `-fPIC` blocks
-!! it anyway on machine B — but a split would remove the possibility on every platform. Do not
-!! separate them for tidiness.
+!! sufficient — ELF semantic interposition under `-fPIC` blocks it anyway on machine B — but a split
+!! would remove the possibility on every platform. Do not separate them for tidiness.
 !!
 !! **`sort_compare_key` and `sort_tier_of` must keep FITTING GCC's default inlining budget, and
 !! nothing fails when they stop.** Past the budget GCC splits `sort_compare_key` into a
@@ -61,10 +59,9 @@
 !!
 !! ## Two things that are easy to get wrong and invisible when you do
 !!
-!! **The tier rule is invisible to any ascending, null-free test.** `feature_sort.md` §5.1 calls it
-!! "the single most likely thing to get wrong here". A comparator that applies `descending` before
-!! the tier test passes every ordinary test and silently moves nulls to the other end of a descending
-!! sort.
+!! **The tier rule is invisible to any ascending, null-free test**, and is the single most likely
+!! thing to get wrong here. A comparator that applies `descending` before the tier test passes every
+!! ordinary test and silently moves nulls to the other end of a descending sort.
 !!
 !! **String keys compare like `memcmp`, not like Fortran.** Fortran's own `<` on `character` blank-pads
 !! the shorter operand, so `"ab" == "ab "`; `std::string_view::compare` — which this must reproduce
@@ -78,7 +75,7 @@
 !! **Risk-34** is about them never drifting apart. Both walk the keys in precedence order and both
 !! delegate every actual comparison to `sort_compare_key`. A change to one is a change to the other.
 !!
-!! ## Performance shape (feature_sort.md §6 Stage 1e)
+!! ## Performance shape
 !!
 !! Every dummy here is a plain `type(sort_key_buf)`, never `class`. Passing a `type(T)` actual to a
 !! `class(T)` dummy across compilation units makes ifx build a runtime class descriptor in the
@@ -144,15 +141,14 @@ submodule (parquet_argsort) parquet_argsort_engine
     !! **It does not explain why `i32` sits latest in the ladder above, and an earlier version of
     !! this note claimed it did.** `i64` runs all eight passes too and crosses over EARLIER, so pass
     !! count cannot separate the two arms. The residual gap between two eight-pass integer arms is
-    !! not established -- `feature_sort_radix.md` section 13.8 records the experiment that ruled out
-    !! the two obvious explanations (the pass count, and the int32-to-int64 widening itself, worth
-    !! 0.52 ns of a 4.1 ns gap) and the machines disagree on the sign of what remains. Do not guess
-    !! at a third explanation here; measure it, or leave the question open as it stands.
+    !! not established -- an experiment ruled out the two obvious explanations (the pass count, and
+    !! the int32-to-int64 widening itself, worth 0.52 ns of a 4.1 ns gap) and the machines disagree
+    !! on the sign of what remains. Do not guess at a third explanation here; measure it, or leave
+    !! the question open as it stands.
     !!
     !! Overridable in both directions by `parquet_debug_set_sort_radix_min_rows`, which is what
     !! keeps the introsort's and the counting path's own negative controls non-vacuous now that this
-    !! sits below their fixture sizes -- see `engine_only_introsort` (`test/test_sorting.f90`) and
-    !! `feature_sort_radix.md`.
+    !! sits below their fixture sizes -- see `engine_only_introsort` (`test/test_sorting.f90`).
     integer(int64), parameter :: SORT_RADIX_MIN_ROWS = 128_int64
     !> Rows at or above which a SELECTION answers by ORDERING rather than by quickselecting.
     !!
@@ -477,9 +473,9 @@ contains
         ! `resolve_thread_count` with the rest of the thread policy.
         !
         ! **One thread is the SERIAL path, not a team of one.** The bucket-decomposed engine costs
-        ! 0.85x of serial on one thread at n = 1e6 and only reaches 1.02x at n = 2e7
-        ! (`feature_sort_parallel.md` §2.7), so a team of one is a regression at every row count --
-        ! and at every row count a test can afford, by the wider of those two margins.
+        ! 0.85x of serial on one thread at n = 1e6 and only reaches 1.02x at n = 2e7, so a team
+        ! of one is a regression at every row count -- and at every row count a test can afford,
+        ! by the wider of those two margins.
         !
         ! **The row floor** is where a team stops paying for itself at all. It used to read the
         ! published `sort_parallel_min_rows` setting, on the reasoning that its right value is a
@@ -495,7 +491,7 @@ contains
         !
         ! **The published `sort_parallel_min_rows` setting has been RETIRED** -- this rule replaced
         ! it here, and the C++ engine now uses its own internal constant `kSortParallelMinRows`
-        ! (`src/parquet_wrapper.cpp`), overridable for tests only. See `feature_sort_report.md` §14.
+        ! (`src/parquet_wrapper.cpp`), overridable for tests only.
         nt = 1
         floor_rows = max(SORT_ENGINE_MIN_ROWS, SORT_ENGINE_ELEMS_PER_THREAD * nthreads)
         if (dbg_sort_engine_min_rows >= 0_int64) floor_rows = dbg_sort_engine_min_rows
@@ -505,13 +501,13 @@ contains
             ! at the point the region is opened -- rather than in the policy layer.
             nt = int(min(nthreads, int(huge(0), int64)))
 #ifdef _OPENMP
-            ! **Never more threads than the machine has processors** (`feature_sort_parallel.md` §11
-            ! step 6, §7.2). Measured on machine A, full-range int64, n = 5e6: without this clamp
-            ! `threads=64` on eight cores costs **19.59 ns/element against 6.48 at 32** -- i.e. an
-            ! already-parallel sort dragged back to its serial speed by oversubscription alone. The
-            ! clamp belongs HERE, where the region is opened, rather than in `resolve_thread_count`:
-            ! an explicit `threads=` is the caller saying what they want, and they are entitled to
-            ! name a silly number without the policy layer second-guessing it everywhere else.
+            ! **Never more threads than the machine has processors.** Measured on machine A,
+            ! full-range int64, n = 5e6: without this clamp `threads=64` on eight cores costs
+            ! **19.59 ns/element against 6.48 at 32** -- i.e. an already-parallel sort dragged back
+            ! to its serial speed by oversubscription alone. The clamp belongs HERE, where the
+            ! region is opened, rather than in `resolve_thread_count`: an explicit `threads=` is the
+            ! caller saying what they want, and they are entitled to name a silly number without the
+            ! policy layer second-guessing it everywhere else.
             if (nt > omp_get_num_procs()) nt = omp_get_num_procs()
             if (nt < 1) nt = 1
 #endif
@@ -524,10 +520,10 @@ contains
     !!
     !! **The counting path and the introsort stay serial, deliberately.** The counting path is
     !! already 1.5–1.85x faster than the C++ one at 3.4 ns/element, so a thread team could plausibly
-    !! cost more than the work it divides; `feature_sort_parallel.md` §11 step 7 sequences it last
-    !! and gates it on a measurement of a real table sort rather than on the argument that it looks
-    !! parallelisable. The introsort is the out-of-memory fallback and is reached only when the radix
-    !! could not allocate, which is not a path worth threading.
+    !! cost more than the work it divides; threading it is sequenced last and gated on a measurement
+    !! of a real table sort rather than on the argument that it looks parallelisable. The introsort
+    !! is the out-of-memory fallback and is reached only when the radix could not allocate, which is
+    !! not a path worth threading.
     subroutine sort_build_permutation_impl(keys, n, perm, nt)
         use parquet_settings_base, only : parquet_get_sort_counting_path
         type(sort_key_buf), intent(in) :: keys(:) !! the keys, in precedence order.
@@ -604,11 +600,11 @@ contains
                 !              14.11 4.63 2.24 3.43             30.65 17.36 9.89 10.08
                 !
                 ! ifx wants radix from 4 threads at EVERY range; gfortran wants counting almost
-                ! everywhere, because its radix carries a per-element constant about 5x ifx's (see
-                ! feature_sort_report.md section 11.3, which tracks that gap as an open defect). No
-                ! single threshold is optimal for both, so **the maintainer's decision is to weight
-                ! ifx** -- recorded here because a future reader looking only at gfortran numbers
-                ! would otherwise read this rule as simply wrong.
+                ! everywhere, because its radix carries a per-element constant about 5x ifx's (that
+                ! gap is tracked as an open defect). No single threshold is optimal for both, so
+                ! **the maintainer's decision is to weight ifx** -- recorded here because a future
+                ! reader looking only at gfortran numbers would otherwise read this rule as simply
+                ! wrong.
                 !
                 ! The rule below follows the physical fact that the counting sort IS a serial
                 ! algorithm: its admissible range narrows as the team grows, and past a small team it
@@ -881,7 +877,7 @@ contains
     !
     ! **Cost.** Up to four n-element int64 buffers, i.e. ~32 bytes per row, against nothing at all for
     ! the introsort. That is the one thing this path is worse at, and it is why a caller sorting at
-    ! the edge of memory needs a way to decline it -- see `feature_sort_radix.md`.
+    ! the edge of memory needs a way to decline it.
 
     !> Whether the single-key LSD radix path applies to this key list.
     !!
@@ -1041,7 +1037,7 @@ contains
         end select
     end subroutine sort_radix_images_range
 
-    !> The image build split across a team of `nt` — Stage 4, `feature_sort_parallel.md` §11 step 1.
+    !> The image build split across a team of `nt` — Stage 4.
     !!
     !! Embarrassingly parallel and the easiest phase in the engine to thread: every row's image
     !! depends on that row alone, chunks are contiguous and disjoint, and no chunk reads another's
@@ -1340,7 +1336,7 @@ contains
     end subroutine sort_radix_bucket
 
 #ifdef _OPENMP
-    !> The tier split, threaded — `feature_sort_parallel.md` §11 step 1's last whole-column phase.
+    !> The tier split, threaded — the last whole-column phase of the threaded build.
     !!
     !! Classifies every row as value / NaN / null, compacts the value rows into `ra(1:nv)` **in row
     !! order**, and reduces an integer key's value range along the way. The serial original does all
@@ -1457,10 +1453,9 @@ contains
     !!
     !! **Must be rebuilt after ANY reordering, and that is the trap this whole area carries.** Reusing
     !! one set of per-thread counts across two passes gives a silently wrong permutation from two
-    !! threads upward — `feature_sort_parallel.md` §6.1 — because a row's *chunk* changes when rows
-    !! move even though the column-wide multiset does not. The whole-column `hist` is the opposite
-    !! case and stays valid across passes, since a permutation cannot change how many rows carry a
-    !! given digit value.
+    !! threads upward, because a row's *chunk* changes when rows move even though the column-wide
+    !! multiset does not. The whole-column `hist` is the opposite case and stays valid across
+    !! passes, since a permutation cannot change how many rows carry a given digit value.
     subroutine sort_radix_count_par(sk, nv, p, cnt, nt)
         integer(int64), intent(in) :: sk(:)         !! the images to count.
         integer(int64), intent(in) :: nv            !! rows, occupying `1..nv`.
@@ -1635,9 +1630,9 @@ contains
 
     !> Design A — the LSD structure kept, with every digit's pass threaded and synchronised.
     !!
-    !! `feature_sort_parallel.md` §11 step 4. One count-prefix-scatter per digit, exactly the shape of
-    !! Design B's split but applied to all of them, so there is no bucket decomposition and no
-    !! dependence on the split digit's cardinality at all.
+    !! One count-prefix-scatter per digit, exactly the shape of Design B's split but applied
+    !! to all of them, so there is no bucket decomposition and no dependence on the split digit's
+    !! cardinality at all.
     !!
     !! **This is the fallback that machine B's report makes REQUIRED rather than optional.** On keys
     !! whose top varying digit has few distinct values, Design B reaches 1.39–1.85× where this reaches
@@ -1683,7 +1678,7 @@ contains
             if (hist(b, p) == nv) cycle
             dbg_sort_radix_passes = dbg_sort_radix_passes + 1_int64
             ! Rebuilt every pass, never reused: a row's CHUNK changes when rows move, which is
-            ! `feature_sort_parallel.md` §6.1's silently-wrong-permutation trap.
+            ! the silently-wrong-permutation trap.
             call sort_radix_count_par(ka, nv, p, cnt, nt)
             call sort_radix_cursors(cnt, nt)
             if (p == last_p) then
@@ -1710,8 +1705,8 @@ contains
 
     !> Design B — one synchronised MSD split, then every bucket sorted alone by one thread.
     !!
-    !! `feature_sort_parallel.md` §11 steps 2 and 3. Splits on `dsplit`, the most significant digit
-    !! that VARIES, so the buckets are already in order and each one only needs digits `0..dsplit-1`.
+    !! Splits on `dsplit`, the most significant digit that VARIES, so the buckets are already in
+    !! order and each one only needs digits `0..dsplit-1`.
     !!
     !! **Declines rather than aborts**, by returning `done = .false.` with `perm` untouched, on any of
     !! four conditions — a failed allocation, one bucket, no digit below the split, or a failed
@@ -2200,9 +2195,9 @@ contains
             ! **Design B, tried before the serial loop and falling straight through when it declines.**
             ! Excluded for a STRING key on the same grounds `last_p` excludes it: the refine below
             ! reads the sorted `ka`/`ra`, which the split's buffer swap and the per-bucket emit both
-            ! leave stale. `feature_sort_parallel.md` §11 step 5 is where strings get this properly,
-            ! and its argument -- rows in different buckets differ in the split byte, so no
-            ! shared-prefix run can straddle a boundary -- is why that is a real step and not a wish.
+            ! leave stale. Strings get this properly in a later step, whose argument -- rows in
+            ! different buckets differ in the split byte, so no shared-prefix run can straddle a
+            ! boundary -- is why that is a real step and not a wish.
             did_par = .false.
 #ifdef _OPENMP
             ! **A string key is kept out of Design B THREE times over, and all three are deliberate.**
@@ -2504,11 +2499,10 @@ contains
 #ifdef _OPENMP
             if (nt > 1 .and. allocated(cnt)) then
                 ! Rebuilt every pass, never reused: a row's CHUNK changes when rows move, which is
-                ! `feature_sort_parallel.md` section 6.1's silently-wrong-permutation trap. This is
-                ! the one cost the threaded arm carries that the serial one does not -- the serial
-                ! cursors come from the prebuilt `hist` for free, so a pass goes from one read and
-                ! one write to two reads and one write, divided by the team. Break-even is below two
-                ! threads.
+                ! the silently-wrong-permutation trap. This is the one cost the threaded arm carries
+                ! that the serial one does not -- the serial cursors come from the prebuilt `hist`
+                ! for free, so a pass goes from one read and one write to two reads and one write,
+                ! divided by the team. Break-even is below two threads.
                 call sort_radix_count_par(code, nv, p, cnt, nt)
                 call sort_radix_cursors(cnt, nt)
                 if (in_alt) then
@@ -2727,7 +2721,7 @@ contains
     !! zero-PADDED, so `"a"` and `"a"//char(0)` produce the same 8 bytes at lengths 1 and 2, and
     !! `compare_bytes` calls the shorter one less. Dropping the test leaves such a run in file order,
     !! which is a wrong permutation with no abort and nothing to notice it — `feature_risks.md`
-    !! Risk-89, and `feature_sort_radix.md` §12.2 for the reproduction.
+    !! Risk-89.
     !! **`ra` and `perm` must be DIFFERENT arrays.** This reads the row order from one while
     !! permuting the other, so passing the same actual for both would associate one array with a
     !! defined dummy and an `intent(in)` one at once -- which F2018 15.5.2.13 forbids and which
@@ -3452,7 +3446,7 @@ contains
         end do
     end subroutine sort_sift_down
 
-    ! ---- The operations that are not a full sort (feature_sort.md Stage 5) ---------------------
+    ! ---- The operations that are not a full sort -----------------------------------------------
     !
     ! Six operations that answer something other than "order every row". Not one of them writes a
     ! comparison out again: each routes through `sort_row_less` or `sort_keys_compare`, so the
@@ -3620,10 +3614,10 @@ contains
         ! statement-for-statement identical as they were while this loop stayed serial. The
         ! measurement the old "stays SERIAL, deliberately" note asked for came from the join:
         ! this loop was the largest single serial item in a join on an integer key -- 54% of a
-        ! 10M-row lookup join at one thread (feature_join.md section 5.2), scattered loads
-        ! through `perm` -- and it is what a `threads=` on `pf_unique`, `pf_rank`, `pf_match` or
-        ! a sort-engine `%join` was otherwise buying nothing on. `tail_team` applies the tail
-        ! floor; the team is recorded because no answer can show it (feature_risks.md Risk-189).
+        ! 10M-row lookup join at one thread, scattered loads through `perm` -- and it is what a
+        ! `threads=` on `pf_unique`, `pf_rank`, `pf_match` or a sort-engine `%join` was otherwise
+        ! buying nothing on. `tail_team` applies the tail floor; the team is recorded because no
+        ! answer can show it (feature_risks.md Risk-189).
         team = tail_team(nthreads, n)
         dbg_sort_tie_threads_used = int(team, int64)
         tie(1) = 0_c_int8_t
@@ -3727,9 +3721,9 @@ contains
     ! at a time, and compare that against what the C++ engine thinks. The test reaches the C++ side
     ! on its own, through locally declared bind(C) interfaces to `parquet_debug_sort_row_less` and
     ! `parquet_debug_sort_keys_compare` in src/parquet_wrapper.cpp -- which is why NOTHING here
-    ! crosses the bind(C) boundary and why feature_sort.md section 4's "the C++ boundary for
-    ! parquet_sorting is confined to ONE file" still holds with these in place. Keep it that way: a
-    ! crossing added here would have to be unpicked again at Stage 6.
+    ! crosses the bind(C) boundary and why "the C++ boundary for parquet_sorting is confined to
+    ! ONE file" still holds with these in place. Keep it that way: a crossing added here would have
+    ! to be unpicked again at Stage 6.
 
 
 

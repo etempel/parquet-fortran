@@ -256,7 +256,7 @@ contains
     end subroutine restore_suite_engine
     !
     !> The engine an ELIGIBLE join in the running suite must report: the suite's own, except
-    !! that `order="key"` always costs the sort engine (feature_join.md, section 11 question 3).
+    !! that `order="key"` always costs the sort engine.
     integer function engine_expected(order) result(want)
         character(len=*), intent(in), optional :: order !! the call's `order=`, if any.
         !
@@ -2576,8 +2576,8 @@ contains
             "and still emit the five inner pairs in key order")
     end subroutine test_join_order_key_is_the_sort_engines
     !
-    !> A `PK_LOGICAL` key takes the sort engine whatever the hook asks (feature_join.md, section
-    !! 11 question 4), and the answer is the brute-force one. The int64 control first.
+    !> A `PK_LOGICAL` key takes the sort engine whatever the hook asks, and the answer is the
+    !! brute-force one. The int64 control first.
     subroutine test_join_logical_key_is_the_sort_engines(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_table) :: a, b, w

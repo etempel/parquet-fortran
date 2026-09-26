@@ -10,8 +10,8 @@
 !! test-drive runs a suite's tests inside its own `!$omp parallel do`, so every test placed in a
 !! parallelized suite would compare the serial path against itself and **pass while testing
 !! nothing** — this project's worst failure mode, and one that already happened once here (see
-!! `feature_string_parallel.md` S4, where two mutations survived for exactly this reason). This
-!! suite is excluded from that parallelism in `run_tester.f90`.
+!! a sweep where two mutations survived for exactly this reason). This suite is excluded from that
+!! parallelism in `run_tester.f90`.
 !!
 !! The tests also write process-global state — `parquet_set_string_threads` and the payload-floor
 !! override — which is an independent reason for the exclusion.

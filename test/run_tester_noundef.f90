@@ -12,10 +12,10 @@
 !> Test driver: Arrow-free, yet NOT undef-safe.
 !!
 !! **Membership here cannot be derived from source — it is discovered by running the check**, which
-!! is the one way this runner differs from every other (`feature_tests.md` section 6.3). Each entry
-!! carries its reason at the registration below, and entries arrive and leave **by hand**: a tool
-!! that promoted a suite on one green run would be deciding, on one machine and one compiler,
-!! something that needs a person to look at why it changed.
+!! is the one way this runner differs from every other. Each entry carries its reason at the
+!! registration below, and entries arrive and leave **by hand**: a tool that promoted a suite on
+!! one green run would be deciding, on one machine and one compiler, something that needs a person
+!! to look at why it changed.
 !!
 !! The cost of a wrong entry is asymmetric and silent: a suite parked here that would have passed
 !! loses its undef coverage with nothing to report it. `tools/check_nag_undefined.sh` therefore

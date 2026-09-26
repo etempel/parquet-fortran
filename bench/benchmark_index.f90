@@ -346,9 +346,9 @@ contains
         if (nt < 1) nt = pf_index_threads(nkeys)
         write (output_unit, "(a,i0,a,i0)") "# serial arm threads=1, threaded arm threads=", nt, &
             "; pf_index_threads(nkeys)=", pf_index_threads(nkeys)
-        ! The hash backend's threaded arm is the partitioned insert (feature_pf_index.md section
-        ! 6 item 3): the serial arm beside it is the insert loop it replaces, and the spill
-        ! count printed after it is how many keys the pass deferred to its serial tail.
+        ! The hash backend's threaded arm is the partitioned insert: the serial arm beside it is
+        ! the insert loop it replaces, and the spill count printed after it is how many keys the
+        ! pass deferred to its serial tail.
         do b = 1, 3
             best = huge(1.0_real64)
             do r = 1, rounds

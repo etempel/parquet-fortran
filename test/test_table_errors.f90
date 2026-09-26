@@ -2833,9 +2833,9 @@ contains
             required_stderr="unknown sub-key")
     end subroutine test_qc_maml_unknown_subkey_aborts
 
-    !> feature_doc.md point 7's F1 finding: a MAML source line over 1024 characters used to be
-    !! silently truncated by a fixed-length read (iostat still 0, no diagnostic). Now aborts,
-    !! naming the offending line number, instead of producing incomplete metadata silently.
+    !> A MAML source line over 1024 characters used to be silently truncated by a fixed-length read
+    !! (iostat still 0, no diagnostic). Now aborts, naming the offending line number, instead of
+    !! producing incomplete metadata silently.
     subroutine test_maml_line_too_long_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
@@ -5365,11 +5365,11 @@ contains
             required_stderr="cast: this column's type is not supported by parquet_table")
     end subroutine test_table_cast_unsupported_column_aborts
 
-    !> **The one container refusal left.** feature_container_phase6.md's D7 had three; the other
-    !! two -- the element form of `%is_null` and the rank-2 `%get_valid_mask` -- now DELEGATE to
-    !! the row form instead of aborting, because a container column's `width` is 1 and the element
-    !! axis is degenerate rather than absent (feature_doc_tables.md's S1/S2). Their negative
-    !! controls became ordinary assertions in `test/test_table_container.f90`.
+    !> **The one container refusal left.** There were three; the other two -- the element form of
+    !! `%is_null` and the rank-2 `%get_valid_mask` -- now DELEGATE to the row form instead of
+    !! aborting, because a container column's `width` is 1 and the element axis is degenerate rather
+    !! than absent. Their negative controls became ordinary assertions in
+    !! `test/test_table_container.f90`.
     !!
     !! This one keeps its negative control there too, for the reason that applies to every
     !! refusal: what has to be shown is that the guard did NOT fire on the neighbouring permitted
@@ -5421,9 +5421,9 @@ contains
             failure_message="a NULL container row has no length and must be excluded from the extremes")
     end subroutine test_container_print_stat_lengths
 
-    !> **feature_container_phase6.md's Q2, as resolved.** A row-structural mutation skips a column
-    !! that is not resident and the detach guard catches the later read -- there is no separate
-    !! container guard, because a skipped column is RES_EMPTY and holds no storage to misalign.
+    !> **The resolved question.** A row-structural mutation skips a column that is not resident and
+    !! the detach guard catches the later read -- there is no separate container guard, because a
+    !! skipped column is RES_EMPTY and holds no storage to misalign.
     !!
     !! What this actually pins is that the container accessors route through `table_resolve`: one
     !! written any other way would hand back the skipped column instead of aborting, and nothing

@@ -27,8 +27,8 @@ contains
     !! (handles, searching, statistics) on a string column's values.
     !!
     !! **This is the implementation; the `string_column` binding below forwards to it.** Every
-    !! per-cell accessor in this file comes in that pair -- see feature_ifx.md, and the typed-tier
-    !! banner in `parquet_columns.f90`, for why the body has to live at the `type` end.
+    !! per-cell accessor in this file comes in that pair -- see the typed-tier banner in
+    !! `parquet_columns.f90` for why the body has to live at the `type` end.
     !!
     !! Note the residual this file cannot remove: `col%str` is a `parquet_string_column` and its
     !! own accessors are type-bound, so a string read still converts `type` to `class` on the way
@@ -242,9 +242,9 @@ contains
         ! same two passes this used to -- exact byte count, then fill -- but inside `parquet_strings`,
         ! where the payload copy is a section-to-section assignment between two `character(len=1)`
         ! arrays instead of a `transfer` with a temporary per element. Measured on 1M x
-        ! `character(len=24)`: `%set_all` 65.2 ms -> 9.5 ms (feature_optimise_A7.md, S7-5). The
-        ! trimming rule is unchanged and now lives in one place: `%build_from` trims, because an
-        ! array's elements share a declared length (see this procedure's own doc-comment above).
+        ! `character(len=24)`: `%set_all` 65.2 ms -> 9.5 ms. The trimming rule is unchanged and now
+        ! lives in one place: `%build_from` trims, because an array's elements share a declared
+        ! length (see this procedure's own doc-comment above).
         if (modify_nulls) then
             call str%build_from(values(1:n))
         else

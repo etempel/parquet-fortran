@@ -509,9 +509,10 @@ done | sort | uniq -c | sort -rn
   leave gradual underflow in force. It is a process-wide MXCSR setting made by the main program, so
   a library procedure receives a subnormal argument already collapsed to zero and cannot recover
   it — `pf_probit` of the smallest subnormal answers `-Infinity` rather than about `-38.47`. A test
-  over subnormal inputs therefore reports the BUILD, not the kernel: detect it with
-  `ieee_get_underflow_mode` and skip, naming the flag (`subnormals_are_flushed`,
-  `test/test_utils.f90`). `-no-ftz` or `-fp-model=precise` restores it.
+  over subnormal inputs therefore reports the BUILD, not the kernel: detect it by halving `tiny`
+  through a `volatile` and comparing with zero, never with `ieee_get_underflow_mode` (flang
+  section), and skip, naming the flag (`subnormals_are_flushed`, `test/test_utils.f90`).
+  `-no-ftz` or `-fp-model=precise` restores it.
 - **WHICH IEEE exception a site raises is not portable, so assert THAT one is raised, never which.**
   The same division by a subnormal raises overflow under gfortran and divide-by-zero under ifx,
   whose flush-to-zero turned the divisor into zero first (`BOBYQA runs the configuration whose
@@ -579,6 +580,21 @@ flang builds here are serial only and `--profile release` does not link (`build.
   takes its residual from `ieee_fma` there, which `test_text_golden` reaches only under flang;
   `tools/check_exp_key.f90` refuses `--accuracy` instead. Nothing enforces it beyond a flang build
   on a macOS machine.
+- **`ieee_get_underflow_mode` always answers `.false.` and `ieee_set_underflow_mode` does
+  nothing** (flang 22.1.8, arm64 macOS): underflow is gradual whatever is asked or set. A test
+  choosing its fixture or its skip by the inquiry picks the flush-to-zero arm under flang. Measure
+  the mode instead (`subnormals_are_flushed`, `test/test_utils.f90`; the
+  `kde_grid_cell_width_underflow` scenario).
+- **`x ** n` with a `real` base and an `integer` exponent raises `IEEE_DIVIDE_BY_ZERO` where the
+  power is zero and `IEEE_OVERFLOW` where it is subnormal**, a zero base or an underflowing power
+  alike, answering correctly (flang 22.1.8 on macOS, whose `**` calls libSystem's `__powidf2`;
+  gfortran links libgcc's, which is quiet). A literal exponent is expanded into multiplications
+  from `-O1`, a run-time one is a call at every level, and the default profile passes flang no
+  `-O`, so a plain `fpm test` shows it.
+  Write a square or a cube of a base that can be zero or tiny as a product, bit-identical to `**`
+  under gfortran, nagfor and flang (`vc_of_dm`, `src/parquet_cosmology_eval.f90`). A fourth power
+  has no such form: flang's `-O2` rounds `x**4` as `((x*x)*x)*x` and every other build here as
+  `(x*x)*(x*x)`. The no-flag sweeps of `test/test_cosmology.f90` are what see it.
 
 ## nagfor-specific gotchas
 

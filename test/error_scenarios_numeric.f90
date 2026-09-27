@@ -8534,15 +8534,18 @@ contains
     !! halves to zero, and a SUBNORMAL range would not survive the journey: denormals-are-zero
     !! collapses it on the comparison that reads it, so `%init` would see a range of zero and
     !! refuse it by the range rule above instead, leaving this rule untested and the control call
-    !! aborting. Choosing by the mode asks the same question of the library at either floor.
+    !! aborting. Choosing by the mode asks the same question of the library at either floor. The
+    !! mode is measured rather than asked, for the reason `subnormals_are_flushed` in
+    !! `test_utils.f90` gives.
     subroutine scenario_kde_grid_cell_width_underflow()
-        use, intrinsic :: ieee_arithmetic, only : ieee_support_underflow_control, ieee_get_underflow_mode
         type(pf_kde_grid) :: g
         real(real64) :: range
+        real(real64), volatile :: half
         logical :: gradual
 
-        gradual = .true.
-        if (ieee_support_underflow_control(1.0_real64)) call ieee_get_underflow_mode(gradual)
+        half = tiny(1.0_real64)
+        half = 0.5_real64 * half
+        gradual = half > 0.0_real64
         if (gradual) then
             range = tiny(1.0_real64)*epsilon(1.0_real64)
         else

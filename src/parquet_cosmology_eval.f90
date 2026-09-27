@@ -1005,14 +1005,17 @@ contains
             v = dm
             return
         end if
+        ! The cube is a product, never `dm ** 3`: flang's integer power raises IEEE_DIVIDE_BY_ZERO
+        ! where the cube is zero and IEEE_OVERFLOW where it is subnormal, at `z = 0` and near it
+        ! (`fortran-gotchas.md`, flang). The product rounds exactly as `dm ** 3` does.
         if (this%flat) then
-            v = 4.0_real64 * PFC_PI / 3.0_real64 * dm ** 3
+            v = 4.0_real64 * PFC_PI / 3.0_real64 * (dm * dm * dm)
             return
         end if
         q = dm / this%d%dh
         u = this%d%ok0 * q * q
         if (abs(u) < PFC_VOLUME_SERIES) then
-            v = 4.0_real64 * PFC_PI / 3.0_real64 * dm ** 3 &
+            v = 4.0_real64 * PFC_PI / 3.0_real64 * (dm * dm * dm) &
                 * (1.0_real64 + u * (PFC_VOL_C1 + u * (PFC_VOL_C2 + u * PFC_VOL_C3)))
             return
         end if

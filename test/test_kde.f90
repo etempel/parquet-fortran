@@ -60,7 +60,7 @@ module test_kde
     use iso_fortran_env, only : int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
         ieee_is_nan, ieee_is_finite, ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow, &
-        ieee_support_underflow_control, ieee_get_underflow_mode, ieee_usual
+        ieee_usual
 #ifndef __flang__
     ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
     ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
@@ -2133,15 +2133,15 @@ contains
     !! force. It is a process-wide MXCSR setting established by the main program, so a library
     !! procedure sees a subnormal argument already collapsed to zero and cannot recover it -- and
     !! building the value from its bit pattern rather than by arithmetic does not help, since
-    !! denormals-are-zero collapses it again on the comparison that reads it.
+    !! denormals-are-zero collapses it again on the comparison that reads it. Measured rather than
+    !! asked, for the reason `subnormals_are_flushed` in `test_utils.f90` gives.
     function subnormals_are_flushed() result(res)
         logical :: res !! `.true.` when underflow is abrupt, so subnormal inputs read as zero.
-        logical :: gradual
+        real(real64), volatile :: half
 
-        res = .false.
-        if (.not. ieee_support_underflow_control(1.0_real64)) return
-        call ieee_get_underflow_mode(gradual)
-        res = .not. gradual
+        half = tiny(1.0_real64)
+        half = 0.5_real64 * half
+        res = .not. (half > 0.0_real64)
     end function subnormals_are_flushed
 
     !> One admission rule for the bandwidth, applied by both forms: it must be positive, NORMAL and

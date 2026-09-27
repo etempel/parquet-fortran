@@ -17,7 +17,6 @@
 module test_numeric_errors
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
     use iso_fortran_env, only : real64
-    use, intrinsic :: ieee_arithmetic, only : ieee_support_underflow_control, ieee_get_underflow_mode
     use test_errors, only : check_scenario_exit_status, check_scenario_exit_status_and_no_output, &
         check_scenario_exit_status_and_stderr, check_scenario_streams, file_contains, run_error_scenario, &
         scenario_capture_contains
@@ -4659,15 +4658,15 @@ contains
     !! force. It is a process-wide MXCSR setting, and the scenario binary is built the same way as
     !! this one, so the answer here is the answer there. Building the value from its bit pattern
     !! rather than by arithmetic does not help: denormals-are-zero collapses it again on the
-    !! comparison that reads it.
+    !! comparison that reads it. Measured rather than asked, for the reason
+    !! `subnormals_are_flushed` in `test_utils.f90` gives.
     function subnormals_are_flushed() result(res)
         logical :: res !! `.true.` when underflow is abrupt, so subnormal inputs read as zero.
-        logical :: gradual
+        real(real64), volatile :: half
 
-        res = .false.
-        if (.not. ieee_support_underflow_control(1.0_real64)) return
-        call ieee_get_underflow_mode(gradual)
-        res = .not. gradual
+        half = tiny(1.0_real64)
+        half = 0.5_real64 * half
+        res = .not. (half > 0.0_real64)
     end function subnormals_are_flushed
     !
     !> Runs one `parquet_kde` scenario and asserts its whole shape from the one run: it aborted,

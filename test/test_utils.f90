@@ -38,8 +38,7 @@ module test_utils
     use, intrinsic :: ieee_arithmetic, only: ieee_support_flag, ieee_get_flag, &
         ieee_set_flag, ieee_underflow, ieee_divide_by_zero, ieee_invalid, &
         ieee_is_nan, ieee_is_finite, ieee_is_negative, ieee_value, ieee_quiet_nan, &
-        ieee_positive_inf, ieee_negative_inf, ieee_support_underflow_control, &
-        ieee_get_underflow_mode
+        ieee_positive_inf, ieee_negative_inf
     implicit none
     private
 
@@ -202,14 +201,19 @@ contains
     !! smallest subnormal answers `-Infinity` rather than about `-38.47`. A test over subnormal
     !! inputs therefore reports what the BUILD does, not what the kernel does, and says so by
     !! skipping (`fortran-gotchas.md`, ifx).
+    !!
+    !! **Measured, never asked**: flang 22 on arm64 macOS answers `ieee_get_underflow_mode` with
+    !! `.false.` while its underflow is gradual (`fortran-gotchas.md`, flang). Half of `tiny` is an
+    !! exact subnormal: flush-to-zero writes it as zero and denormals-are-zero reads it as zero, so
+    !! either mode shows as a half that is not above zero. `volatile` keeps the halving at run
+    !! time, where the mode applies, rather than in the compiler's constant folding.
     function subnormals_are_flushed() result(res)
         logical :: res !! `.true.` when underflow is abrupt, so subnormal inputs read as zero.
-        logical :: gradual
+        real(real64), volatile :: half
 
-        res = .false.
-        if (.not. ieee_support_underflow_control(1.0_real64)) return
-        call ieee_get_underflow_mode(gradual)
-        res = .not. gradual
+        half = tiny(1.0_real64)
+        half = 0.5_real64 * half
+        res = .not. (half > 0.0_real64)
     end function subnormals_are_flushed
 
     !> `pf_probit` against the 50-digit oracle at every grid point, both branches and the seam.

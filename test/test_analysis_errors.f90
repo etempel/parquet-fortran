@@ -14,7 +14,10 @@
 !! Each module's tests mirror one `error_scenarios_*` group, so a scenario and the test that
 !! drives it stay in files with the same name.
 module test_analysis_errors
-    use testdrive, only : new_unittest, unittest_type, error_type, check
+    use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
+#ifdef _OPENMP
+    use omp_lib, only : omp_get_num_procs
+#endif
     use iso_fortran_env, only : real64
     use test_errors, only : check_scenario_exit_status, check_scenario_exit_status_and_no_output, &
         check_scenario_exit_status_and_stderr, check_scenario_streams, file_contains, file_count_containing, &
@@ -4696,6 +4699,14 @@ contains
     subroutine test_join_require_m1_threaded_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: the scenario inherits this process's " // &
+                "affinity mask and its threads= is clamped to it, so the team of four asserted below " // &
+                "cannot open")
+            return
+        end if
+#endif
         call check_scenario_exit_status_and_stderr(error, "join_require_m1_threaded", expect_abort=.true., &
             failure_message="a duplicate right key under require='m:1' was expected to abort on a team", &
             required_stderr="asserts the right key is unique")
@@ -4711,6 +4722,14 @@ contains
     subroutine test_join_require_1m_threaded_aborts(error)
         type(error_type), allocatable, intent(out) :: error
 
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: the scenario inherits this process's " // &
+                "affinity mask and its threads= is clamped to it, so the team of four asserted below " // &
+                "cannot open")
+            return
+        end if
+#endif
         call check_scenario_exit_status_and_stderr(error, "join_require_1m_threaded", expect_abort=.true., &
             failure_message="a duplicate left key under require='1:m' was expected to abort on a team", &
             required_stderr="asserts the left key is unique")

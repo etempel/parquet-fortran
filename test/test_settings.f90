@@ -70,6 +70,19 @@ module test_settings
     private
     public :: collect_tests_parquet_settings
     !
+    !> Processor count the two string-resolver tests SIMULATE -- the OpenMP thread ceiling and the
+    !! affinity-mask override raised together, both restored -- so the threaded answer they need is
+    !! reachable on any runner (`test_affinity_clamp_other_resolvers`, `test_string_work_floor`).
+    !!
+    !! **At or above `parquet_strings`' private `STRING_MIN_THREADS`** (4 at the time of writing),
+    !! below which the string resolver declines to thread at all, so on a two- or three-processor
+    !! runner neither test could show a threaded answer. That constant is not visible from here, so
+    !! this one cannot be derived from it; a rise above this value fails both tests loudly. **And
+    !! below 8**, the validity bytes of their 64-row fixture: from 8 up the row rule rather than the
+    !! resolver decides the string answer, and the wider-mask control can no longer tell a clamp that
+    !! fired unconditionally from a correct one.
+    integer, parameter :: STRING_SIM_PROCS = 6
+    !
 contains
     !
     subroutine collect_tests_parquet_settings(testsuite)
@@ -840,20 +853,30 @@ contains
     !> said nothing, while `doc/pages/operating/settings.md` promised the affinity bound reaches
     !> an explicit `threads=` as well. A test covering one branch of a two-branch resolver is the
     !> same vacuity one caller of four was.
+    !>
+    !> **It runs on a SIMULATED machine `STRING_SIM_PROCS` wide, OpenMP and mask agreeing**, not on
+    !> the real one: the string resolver declines below its break-even, so on a two- or
+    !> three-processor runner its unclamped answer is 1 and the negative control cannot hold.
     subroutine test_affinity_clamp_other_resolvers(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
         integer :: unbound_str, unbound_rnd, clamped_str, clamped_rnd, avail
         integer(int64), parameter :: BIG_N = 1000000_int64
         integer :: i
+#ifdef _OPENMP
+        integer :: was_omp
+#endif
         !
         avail = 1
-#ifdef _OPENMP
-        avail = omp_get_max_threads()
-#endif
         call parquet_reset_settings()
         call parquet_set_verbosity("silent")     ! the clamp warns; this test is about the number
         call parquet_debug_set_affinity_procs(0)
+#ifdef _OPENMP
+        was_omp = omp_get_max_threads()
+        call omp_set_num_threads(STRING_SIM_PROCS)
+        call parquet_debug_set_affinity_procs(STRING_SIM_PROCS)
+        avail = STRING_SIM_PROCS
+#endif
         !
         ! A payload the string work floor cannot decline, so `bulk_threads` reaches the resolver.
         ! Lowering the floor is what the hook is for -- a genuinely 256 KiB column would make this
@@ -915,6 +938,9 @@ contains
         call parquet_debug_set_string_min_bytes(0_int64)
         call parquet_debug_reset_affinity_warning()
         call parquet_reset_settings()
+#ifdef _OPENMP
+        call omp_set_num_threads(was_omp)
+#endif
     end subroutine test_affinity_clamp_other_resolvers
 
     !> **T3: a table's per-column rewrite is bounded by the affinity mask like everything else.**
@@ -2603,8 +2629,12 @@ contains
         end if
         !
         ! An EXPLICIT threads= outranks the cap -- the cap is a default, not a ceiling on intent.
+        ! The mask is pinned wide around it: `random_threads` clamps an explicit request to the
+        ! affinity mask, so on a one-processor runner the answer would be the mask's, not the cap's.
+        call parquet_debug_set_affinity_procs(1024)   ! keep the mask out of this test's answer
         call check(error, parquet_debug_random_bulk_threads(BIG, threads=2) == 2, &
             "an explicit threads= is honoured above the configured cap")
+        call parquet_debug_set_affinity_procs(0)
         if (allocated(error)) return
         call parquet_reset_settings()
     end subroutine test_random_threads_effect
@@ -2901,13 +2931,19 @@ contains
         !
         ! The floor applies to an explicit threads= too -- it is a property of the work, not of
         ! the caller's intent, so `threads=8` on a tiny array is honoured by being declined.
+        ! The affinity mask is pinned wide for this half: `random_threads` clamps an explicit
+        ! request to the mask as well, so on a runner with fewer than eight processors the
+        ! control below would read the mask instead of the floor.
         call parquet_reset_settings()
+        call parquet_debug_set_affinity_procs(1024)   ! keep the mask out of this test's answer
         call check(error, parquet_debug_random_bulk_threads(500_int64, threads=8) == 1, &
             "the work floor must decline an explicit threads= on too little work")
-        if (allocated(error)) return
+        if (allocated(error)) goto 900
         call check(error, parquet_debug_random_bulk_threads(100000000_int64, threads=8) == 8, &
             "negative control: the same explicit threads= is honoured when the work is there")
-        if (allocated(error)) return
+        !
+900     continue
+        call parquet_debug_set_affinity_procs(0)
         call parquet_reset_settings()
     end subroutine test_random_parallel_min_effect
 
@@ -2997,33 +3033,52 @@ contains
     !> `parquet_string_threads()` correctly answers 1 for *every* arm -- leaving an A/B comparing one
     !> code path against itself, which passes while testing nothing. This suite is excluded from that
     !> parallelism (see run_tester.f90), which is what makes the observation real.
+    !>
+    !> **It runs on a SIMULATED machine `STRING_SIM_PROCS` wide**: below the string break-even the
+    !> resolver declines whatever the floor says, so a two- or three-processor runner could not show
+    !> the floor lowering anything.
     subroutine test_string_work_floor(error)
         type(error_type), allocatable, intent(out) :: error
         type(parquet_string_column) :: col
         integer :: i, avail, n_default, n_lowered
+#ifdef _OPENMP
+        integer :: was_omp
+#endif
         !
+#ifdef _OPENMP
+        was_omp = omp_get_max_threads()
+        call omp_set_num_threads(STRING_SIM_PROCS)
+        call parquet_debug_set_affinity_procs(STRING_SIM_PROCS)
+#endif
         avail = parquet_string_threads()
         do i = 1, 64
             call col%append_string("abcdefgh")
         end do
         call check(error, col%character_size() == 512, "the fixture is 512 bytes -- far below the real floor")
-        if (allocated(error)) return
+        if (allocated(error)) goto 900
         !
         call parquet_debug_set_string_min_bytes(0_int64)
         n_default = parquet_debug_string_bulk_threads(col)
         call check(error, n_default == 1, &
             "negative control: at the real floor this column is far too small to thread")
-        if (allocated(error)) return
+        if (allocated(error)) goto 900
         !
         call parquet_debug_set_string_min_bytes(64_int64)
         n_lowered = parquet_debug_string_bulk_threads(col)
         if (avail > 1) then
             call check(error, n_lowered > 1, "with the floor lowered the same column does thread")
-            if (allocated(error)) return
+            if (allocated(error)) goto 900
         end if
         call parquet_debug_set_string_min_bytes(0_int64)
         call check(error, parquet_debug_string_bulk_threads(col) == 1, &
             "restoring the floor restores the serial answer")
+        !
+900     continue
+        call parquet_debug_set_string_min_bytes(0_int64)
+#ifdef _OPENMP
+        call parquet_debug_set_affinity_procs(0)
+        call omp_set_num_threads(was_omp)
+#endif
     end subroutine test_string_work_floor
     !
 

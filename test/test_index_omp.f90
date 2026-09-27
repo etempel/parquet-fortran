@@ -1073,28 +1073,40 @@ contains
             "map's lock for its whole duration keeps the high-water mark at 1")
     end subroutine test_concurrent_builds_overlap
 
-    !> Two keys above `above` whose home slots are the last slot of their partition, for a hash
-    !! build of `ntot` keys on `nt` threads: what makes a deferral to the spill pass certain when
-    !! they are inserted last. Both come from the library's own hash and partition rule through
-    !! `parquet_debug_index_partition`, never from a copy of either. `a` and `k` are 0 when such
-    !! a build would not partition, and `k` stays 0 when no pair was found among 2**20 candidates.
+    !> Two keys above `above` sharing one home slot, the last slot of its partition, for a hash
+    !! build of `ntot` keys on `nt` threads: inserted last, the second finds that slot taken (by the
+    !! first, or by a fixture key, which then defers the first), so a deferral to the spill pass is
+    !! certain. **Sharing the slot is what makes it certain**: two last-slot keys in DIFFERENT
+    !! partitions defer only if fixture keys happen to hold those slots, which the strided fixture
+    !! at two threads does not. The first partition met twice supplies the pair -- by pigeonhole
+    !! within one more last-slot key than there are partitions, and on average after about the
+    !! square root of their number. Both keys come from the
+    !! library's own hash and partition rule through `parquet_debug_index_partition`, never from a
+    !! copy of either. `a` and `k` are 0 when such a build would not partition, and `k` stays 0
+    !! when no pair was found among 2**22 candidates.
     subroutine craft_boundary_pair(ntot, nt, above, a, k)
         integer(int64), intent(in) :: ntot   !! keys the build stores.
         integer, intent(in) :: nt            !! the build's `threads=`.
         integer(int64), intent(in) :: above  !! the largest key the fixture already holds.
         integer(int64), intent(out) :: a     !! the first crafted key.
-        integer(int64), intent(out) :: k     !! the second.
+        integer(int64), intent(out) :: k     !! the second, on the same slot as `a`.
         integer(int64) :: c, home, part, cap
+        integer(int64), allocatable :: first(:) !! per partition, the first last-slot key met; 0 if none.
 
         a = 0_int64
         k = 0_int64
-        do c = above + 1_int64, above + 1048576_int64
+        do c = above + 1_int64, above + 4194304_int64
             call parquet_debug_index_partition(c, ntot, home, part, cap, threads=nt)
             if (part == 0_int64) return
+            if (.not. allocated(first)) then
+                allocate(first(0_int64:cap/part - 1_int64))
+                first = 0_int64
+            end if
             if (mod(home, part) /= part - 1_int64) cycle
-            if (a == 0_int64) then
-                a = c
+            if (first(home/part) == 0_int64) then
+                first(home/part) = c
             else
+                a = first(home/part)
                 k = c
                 return
             end if

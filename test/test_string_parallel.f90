@@ -29,7 +29,9 @@ module test_string_parallel
     use iso_fortran_env, only : int64
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
 #ifdef _OPENMP
-    use omp_lib, only : omp_get_max_threads, omp_set_num_threads
+    use omp_lib, only : omp_get_max_threads, omp_set_num_threads, omp_get_num_procs
+    ! The mask override lives in the Arrow-free leaf below this tier, so the import stays narrow.
+    use parquet_settings_base, only : parquet_debug_set_affinity_procs
 #endif
     !
     implicit none
@@ -40,7 +42,7 @@ module test_string_parallel
     integer(int64), parameter :: TINY_FLOOR = 64_int64
     !
     !> OpenMP thread ceiling these tests raise the process to, so the threaded path is reachable
-    !! whatever `OMP_NUM_THREADS` says.
+    !! whatever `OMP_NUM_THREADS` or the affinity mask says (`borrow_threads`).
     !!
     !! **It must stay at or above `parquet_strings`' private `STRING_MIN_THREADS`** (4 at the time
     !! of writing), which is the break-even below which `bulk_threads` declines to thread at all.
@@ -133,24 +135,27 @@ contains
     !! `ever_threaded` must call this first.**
     !!
     !! **Why the tests must do this rather than take the environment as they find it.** A bulk
-    !! operation's thread count is `min(cap, omp_get_max_threads())`, further reduced to 1 below the
-    !! `STRING_MIN_THREADS` break-even — so on a machine or CI runner running with
-    !! `OMP_NUM_THREADS` below that break-even, *nothing the library exposes can reach the threaded
-    !! path*: neither `parquet_set_string_threads` nor the payload-floor override, because both are
-    !! bounded by that same ceiling. The eight A/B tests here would then compare the serial path
+    !! operation's thread count is `min(cap, omp_get_max_threads())`, clamped to the processors the
+    !! affinity mask allows, and further reduced to 1 below the `STRING_MIN_THREADS` break-even — so
+    !! on a machine or CI runner whose `OMP_NUM_THREADS` or processor count is below that
+    !! break-even, *nothing the library exposes can reach the threaded path*: neither
+    !! `parquet_set_string_threads` nor the payload-floor override, because both are bounded by
+    !! those same two limits. The eight A/B tests here would then compare the serial path
     !! with itself, their negative controls would fire, and the suite would report eight failures
     !! that mean "this machine could not run the test" while looking exactly like "the threaded
     !! rebuild is broken". Measured before this existed: 8 failures at `OMP_NUM_THREADS` of 1, 2 and
     !! 3, and none at 4.
     !!
-    !! `omp_set_num_threads` is the one lever that works, because it writes the `nthreads-var` ICV
-    !! that `omp_get_max_threads()` reads — `OMP_NUM_THREADS` only supplies that ICV's *initial*
-    !! value, so a test may raise it afterwards. This does not weaken any assertion: the arms still
+    !! `omp_set_num_threads` lifts the first limit, because it writes the `nthreads-var` ICV that
+    !! `omp_get_max_threads()` reads — `OMP_NUM_THREADS` only supplies that ICV's *initial* value,
+    !! so a test may raise it afterwards — and `parquet_debug_set_affinity_procs` lifts the second,
+    !! raised to that ceiling exactly so the clamp never bites and its one-shot warning is not
+    !! spent; a mask already that wide is left alone. This does not weaken any assertion: the arms still
     !! compare a genuinely threaded rebuild against a genuinely serial one, and `ever_threaded`
     !! still fails the test if the threaded arm silently declined. It removes a dependency on the
     !! ambient environment, which on a 4+-thread machine was being satisfied by luck.
     !!
-    !! Writing a process-global ICV is safe here for the same reason the suite may write
+    !! Writing a process-global ICV and mask override is safe here for the same reason the suite may write
     !! `parquet_set_string_threads` at all: `string_parallel` is excluded from test-drive's own
     !! `!$omp parallel do` in `run_tester.f90`. Do not copy this into a parallelized suite.
     !!
@@ -172,9 +177,10 @@ contains
     !! ceiling, which fixes a machine whose ICV sits below `STRING_MIN_THREADS`, but no ICV exists
     !! to raise when the directives are not compiled in.
     !!
-    !! Only `_OPENMP` is tested here, deliberately. `parquet_strings` resolves its team from
-    !! `omp_get_max_threads()` and never clamps to `omp_get_num_procs()`, so a low processor count
-    !! cannot defeat these tests the way it can the sort-engine ones in `test_sorting.f90`.
+    !! Only `_OPENMP` is tested here, deliberately. `parquet_strings` clamps its team to the
+    !! processors the affinity mask allows, as the sort engine does, but `borrow_threads` raises the
+    !! mask override with the thread ceiling, so a low processor count cannot defeat these tests the
+    !! way it would the sort-engine ones in `test_sorting.f90`, which skip below the team they assert.
     logical function threading_unavailable(error) result(skipped)
         type(error_type), allocatable, intent(out) :: error !! set to a skip when threading is absent.
         skipped = .false.
@@ -191,19 +197,23 @@ contains
 #ifdef _OPENMP
         saved = omp_get_max_threads()
         if (saved < THREADS_FOR_TEST) call omp_set_num_threads(THREADS_FOR_TEST)
+        if (omp_get_num_procs() < omp_get_max_threads()) &
+            call parquet_debug_set_affinity_procs(omp_get_max_threads())
 #endif
     end function borrow_threads
     !
-    !> Restores what `borrow_threads` replaced, so the ceiling does not leak into later suites.
+    !> Restores what `borrow_threads` replaced, so neither the ceiling nor the mask override leaks
+    !! into later suites.
     !!
     !! Called on each test's success path only. An assertion failure returns early and leaves the
-    !! ceiling raised, which is deliberate: the run is already red at that point, and adding a
+    !! ceiling and the mask raised, which is deliberate: the run is already red at that point, and adding a
     !! restore to every early return would put cleanup between an assertion and its `return` in
     !! twenty-odd places for no benefit a failing run can use.
     subroutine return_threads(saved)
         integer, intent(in) :: saved                     !! value `borrow_threads` reported.
 #ifdef _OPENMP
         if (saved < THREADS_FOR_TEST) call omp_set_num_threads(saved)
+        call parquet_debug_set_affinity_procs(0)
 #else
         associate (unused => saved); end associate
 #endif

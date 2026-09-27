@@ -35,7 +35,10 @@ module test_diagnostics
     use parquet_sorting_oracle, only : parquet_debug_use_fortran_sort_engine
     use iso_fortran_env, only : int32, int64, real64
     use iso_c_binding, only : c_int, c_long_long, c_int64_t
-    use testdrive, only : new_unittest, unittest_type, error_type, check
+    use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
+#ifdef _OPENMP
+    use omp_lib, only : omp_get_num_procs
+#endif
     !
     implicit none
     private
@@ -279,6 +282,14 @@ contains
         logical :: counting
         integer :: i
         !
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: an explicit threads= is clamped to " // &
+                "omp_get_num_procs(), and the two merge rounds asserted below need the four chunks " // &
+                "threads=4 asks for")
+            return
+        end if
+#endif
         ! An out-of-range phase answers 0 rather than reading past the array. Asserted BEFORE any
         ! sort runs, so a live phase 0 cannot make the guard look like it works.
         call check(error, parquet_debug_get_sort_phase_ns(-1_c_int) == 0_c_long_long, &

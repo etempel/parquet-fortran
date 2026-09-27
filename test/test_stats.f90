@@ -52,6 +52,9 @@ module test_stats
         ieee_set_flag, ieee_support_flag, ieee_divide_by_zero, ieee_invalid, ieee_is_nan, &
         ieee_underflow
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
+#ifdef _OPENMP
+    use omp_lib, only : omp_get_num_procs
+#endif
     implicit none
     private
 
@@ -2456,6 +2459,13 @@ contains
             "so both arms below would run the identical serial code and the equality would hold " // &
             "for the wrong reason")
         return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the team is clamped to " // &
+                "omp_get_num_procs(), so threads=8 resolves to 1 here and both arms would run the " // &
+                "serial pass")
+            return
+        end if
 #endif
         n = 5000_int64
         allocate(x(n), w(n))
@@ -2531,6 +2541,12 @@ contains
             "without OpenMP the answer is 1 whatever the floor says, so both arms would agree " // &
             "without the floor having decided anything")
         return
+#else
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the team is clamped to " // &
+                "omp_get_num_procs(), so threads=4 resolves to 1 here whatever the floor says")
+            return
+        end if
 #endif
         n = 5000_int64
         allocate(x(n))

@@ -149,9 +149,15 @@ void *malloc(size_t n) {
 ```
 
 - Place it after the declarations and before every executable statement.
-- Use the predicate the code keys on: the sort engine clamps `threads=` to `omp_get_num_procs()`,
-  so those tests also skip on `omp_get_num_procs() < 2`; `parquet_strings` resolves from
-  `omp_get_max_threads()` and needs only `_OPENMP`.
+- Use the predicate the code keys on: every resolver clamps `threads=` to `omp_get_num_procs()`
+  (`parquet_clamp_to_affinity`), so a test asserting a team of N also skips on
+  `omp_get_num_procs() < N` -- N, not 2: a lower guard fails on a narrow runner and nowhere else
+  (reproduce with `taskset -c 0-1`). A serial suite may fake the machine instead, thread count and
+  mask override together (`test_index_threads_ceiling`; `borrow_threads`,
+  `test/test_string_parallel.f90`).
+- A test whose assertions hold without OpenMP (the C++ sort engine threads through `std::thread`;
+  an unclamped resolver still reports the team it chose) takes the processor guard alone, inside
+  `#ifdef _OPENMP`.
 - Negative control: a normal build reports zero skips; invert the predicate once to see the expected
   tests skip.
 - A test that merely USES threads is not guarded.

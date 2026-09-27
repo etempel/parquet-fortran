@@ -5489,17 +5489,18 @@ contains
         integer :: i
         !
         ! Preconditions, declared rather than assumed: with the team preprocessed out, or on a
-        ! machine where an explicit threads= clamps back to 1, every arm below is the same serial
-        ! code and each assertion passes without testing anything.
+        ! machine with fewer processors than the four asked for -- an explicit threads= is clamped
+        ! to them -- no arm below opens the team its assertion names.
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: sort_build_permutation_threaded opens its team " // &
             "inside #ifdef _OPENMP, so every arm below would resolve to one thread and the " // &
             "assertions would hold for the wrong reason")
         return
 #else
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
-                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 cannot open the team of " // &
+                "four asserted below")
             return
         end if
 #endif
@@ -5576,7 +5577,7 @@ contains
         integer(int64) :: i, g
         ! **Preconditions, declared rather than assumed.** The floor under test is measured against the team size
         ! (`SORT_REFINE_ELEMS_PER_THREAD * nt`), and both arms below compare bucket counts that only a
-        ! team produces.
+        ! team produces -- of four, the team the fixture's arithmetic below is worked for.
         ! Where no team can be opened the assertions are not merely untestable but VACUOUS:
         ! they would pass just as happily against a library that had stopped threading
         ! altogether. Skipping says so out loud, which a silent pass would not. Same reasoning
@@ -5588,10 +5589,10 @@ contains
             "ever opened and every assertion below would be vacuous")
         return
 #else
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs at least two processors: the engine clamps an " // &
-                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
-                "threaded design is entered")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), and the floors asserted below are the " // &
+                "ones a team of four computes")
             return
         end if
 #endif
@@ -5664,6 +5665,16 @@ contains
         integer(int64), allocatable :: small(:), big(:), perm(:)
         integer(int64) :: used_small, used_big, used_forced, st, i
         !
+        ! No skip without OpenMP: nothing then clamps threads=, and the counter reports the team the
+        ! floor resolved, which is what this asserts.
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 2) then
+            call skip_test(error, "needs at least two processors: the engine clamps an explicit " // &
+                "threads= to omp_get_num_procs(), so threads=4 resolves to 1 here and no column " // &
+                "opens a team")
+            return
+        end if
+#endif
         allocate(small(20000), big(40000))
         st = 88172645463325252_int64
         do i = 1_int64, 40000_int64
@@ -5719,7 +5730,7 @@ contains
         integer(int64), allocatable :: ref(:), got2(:), got4(:), gotold(:)
         integer(int64) :: d2, d4, dold, i
         ! **Preconditions, declared rather than assumed.** The question here is which design a SMALL team reaches;
-        ! without a team, no design is entered at all.
+        ! without a team, no design is entered at all, and the arm that must DECLINE counting needs its four.
         ! Where no team can be opened the assertions are not merely untestable but VACUOUS:
         ! they would pass just as happily against a library that had stopped threading
         ! altogether. Skipping says so out loud, which a silent pass would not. Same reasoning
@@ -5731,10 +5742,10 @@ contains
             "ever opened and every assertion below would be vacuous")
         return
 #else
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs at least two processors: the engine clamps an " // &
-                "explicit threads= to omp_get_num_procs(), so it resolves to 1 here and no " // &
-                "threaded design is entered")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: the engine clamps an " // &
+                "explicit threads= to omp_get_num_procs(), so the four-thread arm below would " // &
+                "run on a smaller team, which may still take the counting path")
             return
         end if
 #endif
@@ -6121,18 +6132,18 @@ contains
         integer :: i
         !
         ! Preconditions, declared rather than assumed -- the same pair `test_selection_ordering_threads`
-        ! carries, and for the same reason: with the team preprocessed out, or on a one-processor
-        ! machine where an explicit threads= clamps back to 1, every arm below is the same serial
-        ! code and each assertion passes without testing anything.
+        ! carries, and for the same reason: with the team preprocessed out, or on a machine with
+        ! fewer processors than the four asked for, no arm below opens the team its assertion names.
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: sort_build_permutation_threaded opens its team " // &
             "inside #ifdef _OPENMP, so every arm below would resolve to one thread and the " // &
             "assertions would hold for the wrong reason")
         return
 #else
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs at least two processors: resolve_thread_count clamps " // &
-                "an explicit threads= to omp_get_num_procs(), so threads=4 resolves to 1 here")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: resolve_thread_count clamps " // &
+                "an explicit threads= to omp_get_num_procs(), so threads=4 cannot open the team of " // &
+                "four asserted below")
             return
         end if
 #endif

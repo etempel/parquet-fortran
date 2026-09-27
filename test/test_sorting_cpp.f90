@@ -184,9 +184,10 @@ contains
             "read 1 and the equalities would hold for the wrong reason")
         return
 #else
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs at least two processors: an explicit threads= is " // &
-                "clamped to omp_get_num_procs(), so both passes would run serially")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: an explicit threads= is " // &
+                "clamped to omp_get_num_procs(), so neither pass could run on the team of four " // &
+                "asserted below")
             return
         end if
 #endif
@@ -277,9 +278,10 @@ contains
             "run the same serial code and the equality would hold for the wrong reason")
         return
 #else
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs at least two processors: an explicit threads= is " // &
-                "clamped to omp_get_num_procs(), so neither engine would thread")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: an explicit threads= is " // &
+                "clamped to omp_get_num_procs(), so neither engine could open the team of four " // &
+                "asserted below")
             return
         end if
 #endif
@@ -381,7 +383,7 @@ contains
         d_serial = parquet_debug_sort_design()
         call pf_argsort(keys, got, threads=4)
         d_threaded = parquet_debug_sort_design()
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, d_threaded == 1_int64, &
             "a multi-key STRING radix must run on the team: design 1 comes only from the shared chain")
@@ -453,7 +455,7 @@ contains
         call check(error, all(got == ref), "threading the refine must not change the answer")
         if (allocated(error)) then
             call force_parallel_threshold(0_int64)
-            call parquet_debug_use_fortran_sort_engine(.false.)
+            call restore_engine_default()
             return
         end if
         call pf_argsort(one, ref, threads=1)
@@ -461,7 +463,7 @@ contains
         d_one = parquet_debug_sort_refine_runs()
         !
         call force_parallel_threshold(0_int64)
-        call parquet_debug_use_fortran_sort_engine(.false.)
+        call restore_engine_default()
         !
         call check(error, d_serial == 0_int64, &
             "at one thread the refine must dispatch nothing, or the checks below are vacuous")
@@ -855,6 +857,13 @@ contains
         real(real64) :: v(2000)
         integer(int32), allocatable :: perm(:)
 
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: an explicit threads= is clamped " // &
+                "to omp_get_num_procs(), so the four threads asserted below cannot all be put to work")
+            return
+        end if
+#endif
         call ties_fixture(v)
         call force_parallel_threshold(4_int64)
         call pf_argsort(v, perm, threads=4)
@@ -910,6 +919,14 @@ contains
         if (allocated(error)) return
 #ifdef _OPENMP
         if (active_inside) then
+            ! Honoured up to the processors the mask allows -- an explicit request is clamped to
+            ! them -- so the three asked for need three.
+            if (omp_get_num_procs() < 3) then
+                call skip_test(error, "needs at least three processors inside an active region: an " // &
+                    "explicit threads= is clamped to omp_get_num_procs(), so the threads=3 asked for " // &
+                    "cannot be honoured in full")
+                return
+            end if
             call check(error, explicit_inside == 3_int64, &
                 "an explicit threads= must still be honoured inside an ACTIVE parallel region")
         else
@@ -1001,6 +1018,13 @@ contains
         real(real64), allocatable :: v(:)
         integer(int32), allocatable :: perm(:)
 
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs at least four processors: an explicit threads= is clamped " // &
+                "to omp_get_num_procs(), so phase 1 cannot put the four threads asserted below to work")
+            return
+        end if
+#endif
         allocate(v(n))
         call ties_fixture(v)
         ! Segments have a minimum size, so the array has to be big enough for the final round to be

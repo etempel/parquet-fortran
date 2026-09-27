@@ -22,7 +22,7 @@
 !!
 !! **Every test carries the skip guard**: without OpenMP no team can open and every comparison
 !! below would hold for the wrong reason. The thread count is clamped to the processors available,
-!! so a process bound to one processor skips too.
+!! so a process bound to fewer processors than the team a test asserts skips too.
 !!
 !! Its only library import is `use parquet_kde`: it is registered in `run_tester_pf.f90`, the
 !! runner that executes no `bind(C)` call.
@@ -86,9 +86,9 @@ contains
         return
 #endif
 #ifdef _OPENMP
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
-                "processors available, so a process bound to one opens no team")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs four processors: the thread count is clamped to the " // &
+                "processors available, so threads=4 cannot open the team of four asserted below")
             return
         end if
 #endif
@@ -176,9 +176,9 @@ contains
         return
 #endif
 #ifdef _OPENMP
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
-                "processors available, so a process bound to one opens no team")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs four processors: the thread count is clamped to the " // &
+                "processors available, so threads=4 cannot open the team of four asserted below")
             return
         end if
 #endif
@@ -250,9 +250,9 @@ contains
         return
 #endif
 #ifdef _OPENMP
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
-                "processors available, so a process bound to one opens no team")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs four processors: the thread count is clamped to the " // &
+                "processors available, so threads=4 cannot open the team of four asserted below")
             return
         end if
 #endif
@@ -297,9 +297,9 @@ contains
         return
 #endif
 #ifdef _OPENMP
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
-                "processors available, so a process bound to one opens no team")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs four processors: the thread count is clamped to the " // &
+                "processors available, so threads=4 cannot open the team of four asserted below")
             return
         end if
 #endif
@@ -419,9 +419,9 @@ contains
         return
 #endif
 #ifdef _OPENMP
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
-                "processors available, so a process bound to one opens no team")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs four processors: the thread count is clamped to the " // &
+                "processors available, so threads=4 cannot open the team of four asserted below")
             return
         end if
 #endif
@@ -563,9 +563,9 @@ contains
         return
 #endif
 #ifdef _OPENMP
-        if (omp_get_num_procs() < 2) then
-            call skip_test(error, "needs two processors: the thread count is clamped to the " // &
-                "processors available, so a process bound to one opens no team")
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs four processors: the thread count is clamped to the " // &
+                "processors available, so threads=4 cannot open the team of four asserted below")
             return
         end if
 #endif

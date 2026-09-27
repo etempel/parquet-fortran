@@ -501,9 +501,10 @@ done | sort | uniq -c | sort -rn
   caller's tie-breaking simply stops working -- and `volatile`, this file's usual answer, is
   unavailable when the procedure is `pure`. Compute such a residual in `real128` instead (a double
   product needs 106 significant bits and `real128` holds 113, so one multiply and one subtract are
-  exact under any fp model, with no identity to fold); `two_product_residual`,
-  `src/parquet_skycoord_text.f90`. Verify any exactness claim of this kind by running it under ifx
-  with NO `--profile`, which is where `-fp-model=fast` applies.
+  exact under any fp model, with no identity to fold), with an `ieee_fma` arm for a processor that
+  has no `real128` (flang section); `two_product_residual`, `src/parquet_skycoord_text.f90`.
+  Verify any exactness claim of this kind by running it under ifx with NO `--profile`, which is
+  where `-fp-model=fast` applies.
 - **ifx turns flush-to-zero AND denormals-are-zero on at `-O1` and above**; gfortran and nagfor
   leave gradual underflow in force. It is a process-wide MXCSR setting made by the main program, so
   a library procedure receives a subnormal argument already collapsed to zero and cannot recover
@@ -571,6 +572,13 @@ flang builds here are serial only and `--profile release` does not link (`build.
   with its context in module variables, or a type-bound procedure of an object passed as a
   `class(...)` dummy with its context in components. Nothing enforces it beyond the serial flang
   `fpm test` on a macOS machine (`build.md`).
+- **flang 22.1.8 on arm64 macOS has no 128-bit real: `real128` is `-1`**, and a kind that does not
+  exist is a compile error, not a fallback, so one `real(x, real128)` anywhere stops the build.
+  Resolve the kind with `merge(real128, real64, real128 > 0)` and give the processor without one
+  an arm that is still right at `real64`: `two_product_residual` (`src/parquet_skycoord_text.f90`)
+  takes its residual from `ieee_fma` there, which `test_text_golden` reaches only under flang;
+  `tools/check_exp_key.f90` refuses `--accuracy` instead. Nothing enforces it beyond a flang build
+  on a macOS machine.
 
 ## nagfor-specific gotchas
 

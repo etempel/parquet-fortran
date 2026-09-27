@@ -21,7 +21,7 @@
 submodule (parquet_skycoord) parquet_skycoord_text
     use parquet_utils, only: pf_wrap_deg, pf_from_str, pf_to_str
     use, intrinsic :: iso_fortran_env, only: int64, real128
-    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_fma
     implicit none
 
     !> The writers' separator styles: colons, blanks, or the unit letters.
@@ -391,13 +391,28 @@ contains
     !! for an optimiser to fold. The conversion back to `real64` rounds it, which changes neither
     !! its sign nor whether it is zero -- all the caller reads. This is reached only on a tie,
     !! which is 0.03% of renderings.
+    !!
+    !! **Where the processor has no `real128`, by one fused multiply-add.** A kind that does not
+    !! exist is a compile error, not a fallback (flang 22 on arm64 macOS reports `real128 == -1`),
+    !! so the kind is resolved through `merge` and the `real128` arm compiles there, dead, at
+    !! `real64`. `ieee_fma(a, b, -p)` rounds `a*b - p` once, and that difference is representable
+    !! while the product is far from underflow, as a tie's `p >= 0.5` is, so it is exact as well.
+    !! Every processor with a `real128`, ifx included, takes the `real128` arm, so
+    !! `test_text_golden` reaches the FMA arm only under a processor without one, and never under
+    !! ifx's `-fp-model=fast`.
     pure function two_product_residual(a, b, p) result(e)
         real(real64), intent(in) :: a !! the first factor.
         real(real64), intent(in) :: b !! the second factor.
         real(real64), intent(in) :: p !! their product as a double, `a*b` rounded once.
         real(real64) :: e !! `a*b - p`: zero only where the tie is a true one.
+        logical, parameter :: HAVE_QUAD = real128 > 0 !! whether the processor has a `real128` kind.
+        integer, parameter :: QUAD = merge(real128, real64, real128 > 0) !! `real128`; `real64` only for the dead arm.
 
-        e = real(real(a, real128) * real(b, real128) - real(p, real128), real64)
+        if (HAVE_QUAD) then
+            e = real(real(a, QUAD) * real(b, QUAD) - real(p, QUAD), real64)
+        else
+            e = ieee_fma(a, b, -p)
+        end if
     end function two_product_residual
 
     !> Appends `s` to `buf` after `pos`, and advances `pos`.

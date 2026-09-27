@@ -295,6 +295,15 @@ done | sort | uniq -c | sort -rn
   `src/parquet_optimize_support.f90`; `test_de_nan_region`). To name the line: append
   `-g -ffpe-trap=invalid` to `FPM_FFLAGS` in its own `FPM_BUILD_DIR`, then run the one test under
   `lldb -b -o "process handle SIGFPE --stop true --pass false" -o run -o bt`.
+- **A product assigned to a local is still fused into the add that reads it**: gfortran's default
+  `-ffp-contract=fast` contracts across statements from `-O1`, so `pv = f*k(i)` then
+  `acc = acc + pv` is one FMA at `--profile release` on arm64. nagfor's default build, whose C is
+  contracted only within one expression, rounds it, so a green nagfor run proves nothing here.
+  Where a sum must add each product rounded (a `%merge` that reproduces the single pass), round it
+  through memory the compiler has to re-read: a `volatile` scalar where the loop has nothing to
+  vectorise, or the products stored by one loop and read back by a second, which keeps both
+  vectorised (`deposit_one`, `src/parquet_kde_grid.f90`; `test_adaptive_grid`).
+  `-ffp-contract=off` is the diagnosis.
 - **`-finit-*` does not reach an `allocate` payload**, so a clean `-finit-*` run does not rule out
   uninitialised memory (`-finit-real=zero`, not `=0`).
 - **`intent(out)`'s implicit reset has one confirmed counterexample** on a scalar `logical`

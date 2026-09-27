@@ -15,14 +15,14 @@
 module test_optimize_support
 
     use parquet_optimize, only : pf_objective, pf_constrained_objective, pf_local_solver, &
-                                 pf_optimize_info
+                                 pf_optimize_info, pf_objective_func
     use iso_fortran_env, only : real64, int64
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf
 
     implicit none
     private
 
-    public :: shifted_quadratic, line_fit, unit_disc, table_sphere
+    public :: shifted_quadratic, line_fit, unit_disc, table_sphere, function_objective
     public :: rosenbrock, rosenbrock_1e300, brown_almost_linear, sphere_1e13
     public :: sphere, origin_sphere, quad1d, quad1d_min, one_dim, one_dim_min
     public :: constant_one, shifted_norm, quartic, quartic_derivative
@@ -44,6 +44,22 @@ module test_optimize_support
     contains
         procedure :: eval => shifted_quadratic_eval !! Evaluates the shifted quadratic.
     end type shifted_quadratic
+
+    !> A plain function behind the object interface, for the tests asserting that an engine's
+    !! object form and plain-function form walk one path, evaluation for evaluation.
+    !!
+    !! **The object calls the SAME function the plain form is given**, through a pointer the
+    !! compiler cannot resolve, as the engines' own adapter for the plain form does. An object
+    !! writing that function's arithmetic out again does not round alike under an optimiser
+    !! (`fortran-gotchas.md`, "Two loops written to mirror each other do not round alike"):
+    !! gfortran at `--profile release` on arm64 fuses `sphere` and a `sum((x - centre)**2)` into
+    !! different multiply-adds, and the two searches part at the first last-bit difference.
+    type, extends(pf_objective) :: function_objective
+        procedure(pf_objective_func), nopass, pointer :: fn => null() !! the plain function it calls
+        integer :: ncall = 0 !! evaluations, written by `eval` and read by the caller
+    contains
+        procedure :: eval => function_objective_eval !! Calls `fn` and counts the call.
+    end type function_objective
 
     !> An objective whose value depends on WHEN it is called, not where: a hash of its own call
     !! count, in `[0, 1000)`.
@@ -222,6 +238,17 @@ contains
         self%ncall = self%ncall + 1
 
     end function shifted_quadratic_eval
+
+    !> Calls the plain function the object holds, and counts the call.
+    function function_objective_eval(self, x) result(f)
+        class(function_objective), intent(inout) :: self !! the objective, its function and counter
+        real(real64), intent(in)                 :: x(:) !! the point
+        real(real64)                             :: f    !! `fn(x)`
+
+        f = self%fn(x)
+        self%ncall = self%ncall + 1
+
+    end function function_objective_eval
 
     !> Sum of squared residuals about a straight line, and counts the call.
     function line_fit_eval(self, x) result(f)
@@ -667,11 +694,20 @@ contains
     !! (y(2)-1)**2`, because the test that uses it asserts BIT equality between a `scale=` run of
     !! `bad_scaling` and a plain run of this: a hand-simplified form would differ in the last bits
     !! and the test would then be measuring the simplification instead of the scaling.
+    !!
+    !! **The scaled point is `volatile`, so that it is rounded before `bad_scaling` reads it**, as
+    !! the library's own `scale*y` is. Otherwise an optimiser inlines `bad_scaling` here and fuses
+    !! the product into its `x - BAD_SCALING_MIN` -- gfortran does at `--profile release` on arm64
+    !! -- and the two runs part in the last bit (`fortran-gotchas.md`, "Calling one procedure from
+    !! another does not pin its last bit").
     function bad_scaling_unit(y) result(f)
         real(real64), intent(in) :: y(:) !! the point, in scaled units
         real(real64)             :: f    !! `bad_scaling` at `BAD_SCALING_SCALE*y`
 
-        f = bad_scaling(BAD_SCALING_SCALE*y)
+        real(real64), volatile :: x(size(y))
+
+        x = BAD_SCALING_SCALE*y
+        f = bad_scaling(x)
 
     end function bad_scaling_unit
 

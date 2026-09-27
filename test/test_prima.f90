@@ -493,11 +493,12 @@ contains
     !! **The tolerances are loose on purpose.** A run whose model arithmetic overflows ends on
     !! `PF_OPT_ROUNDOFF` wherever rounding first blocks it, and that point moves with the last bit of
     !! every value the model forms -- by `1.5e-2` in `x` between arm64 and x86-64 under nagfor 7.2,
-    !! which contract `a*b + c` differently; see
-    !! `fortran-gotchas.md`, "One target contracts to an FMA and another cannot".
+    !! which contract `a*b + c` differently, and from `4e-4` to `0.18` away from `(1, 1)` between
+    !! gfortran's unoptimised and `--profile release` builds on arm64, the second fusing far more
+    !! of it; see `fortran-gotchas.md`, "One target contracts to an FMA and another cannot".
     !! What survives that is the DIRECTION of the answer and the SIZE of the improvement, not their
-    !! digits, so `x` is asserted against `(1, 1)` at a tenth -- against a start `2.2` away -- and
-    !! `fmin` against the value at the start.
+    !! digits, so `x` is asserted to end at least five times nearer `(1, 1)` than the start, `2.2`
+    !! away, and `fmin` against the value at the start.
     subroutine test_bobyqa_huge_objective_values(error)
         type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
 
@@ -530,8 +531,9 @@ contains
         call check(error, any(raised), &
             "an objective near 1e300 no longer trips the model's arithmetic: re-aim the reproducer")
         if (allocated(error)) return
-        call check(error, maxval(abs(x - 1.0_real64)) < 1.0e-1_real64, &
-            "the answer is still Rosenbrock's minimiser, which scaling the values does not move")
+        call check(error, maxval(abs(x - 1.0_real64)) < 0.2_real64*maxval(abs(START - 1.0_real64)), &
+            "the answer must end five times nearer Rosenbrock's minimiser than the start, and " // &
+            "scaling the values does not move the minimiser")
         if (allocated(error)) return
         ! Against the value at the START rather than an absolute ceiling: both are figures about
         ! where the run stopped, and only the ratio is a claim about the ENGINE.
@@ -844,14 +846,14 @@ contains
     subroutine test_bobyqa_forms_agree(error)
         type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
 
-        type(table_sphere) :: obj
+        type(function_objective) :: obj
         real(real64) :: xa(3), xb(3), fa, fb, lo(3), hi(3)
         type(pf_optimize_history) :: ra, rb
         integer :: k
 
-        ! `sphere` is the sum of squares about 1, so this centre makes the two the
-        ! same function -- and the same arithmetic, which is what bit equality needs.
-        obj%centre = [1.0_real64, 1.0_real64, 1.0_real64]
+        ! The object CALLS `sphere`, so the two forms evaluate one compiled function -- the same
+        ! arithmetic, which is what bit equality needs (`function_objective`).
+        obj%fn => sphere
         lo = -4.0_real64
         hi = 4.0_real64
         xa = [1.0_real64, -2.0_real64, 0.5_real64]
@@ -863,6 +865,8 @@ contains
                                 rhoend=1.0e-9_real64, history=rb)
 
         call check(error, ra%n == rb%n .and. ra%n > 5, "the two forms evaluated different counts")
+        if (allocated(error)) return
+        call check(error, obj%ncall == ra%n, "the object form did not evaluate through the object")
         if (allocated(error)) return
         do k = 1, ra%n
             call check(error, ra%f(k) == rb%f(k) .and. all(ra%x(:, k) == rb%x(:, k)), &
@@ -1076,11 +1080,13 @@ contains
 
         real(real64) :: xf(2), xo(2), fminf, fmino, a_ineq(1, 2), b_ineq(1)
         type(pf_optimize_info) :: infof, infoo
-        type(shifted_quadratic) :: obj
+        type(function_objective) :: obj
 
         a_ineq(1, :) = [1.0_real64, 1.0_real64]
         b_ineq = 1.0_real64
-        ! `sphere` and `shifted_quadratic` are the same function: the sum of squares about 1.
+        ! The object CALLS `sphere`, the sum of squares about 1, so the two forms evaluate one
+        ! compiled function (`function_objective`).
+        obj%fn => sphere
         xf = 0.0_real64
         call pf_minimize_lincoa(sphere, xf, fminf, a_ineq=a_ineq, b_ineq=b_ineq, &
                                 rhobeg=0.3_real64, rhoend=1.0e-9_real64, info=infof)

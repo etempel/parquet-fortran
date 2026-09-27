@@ -634,13 +634,12 @@ contains
         type(error_type), allocatable, intent(out) :: error !! set on the first failed assertion
         real(real64) :: x_fun(2), x_obj(2), f_fun, f_obj
         type(pf_optimize_history) :: h_fun, h_obj
-        type(shifted_quadratic) :: obj
+        type(function_objective) :: obj
         logical :: same
 
-        ! `sphere` and a zero-shift `shifted_quadratic` compute the same expression, so the two
-        ! specifics must walk the same path, evaluation for evaluation.
-        obj%shift = 0.0_real64
-        obj%ncall = 0
+        ! The object CALLS `sphere`, so the two specifics evaluate one compiled function and must
+        ! walk the same path, evaluation for evaluation (`function_objective`).
+        obj%fn => sphere
 
         x_fun = [5.0_real64, -3.0_real64]
         call pf_minimize_simplex(sphere, x_fun, f_fun, step=[0.5_real64, 0.5_real64], &

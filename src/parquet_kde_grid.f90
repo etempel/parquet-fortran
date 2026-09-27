@@ -2050,7 +2050,10 @@ contains
         real(real64), intent(inout)    :: below  !! the weight below `xmin`
         real(real64), intent(inout)    :: above  !! the weight above `xmax`
 
-        real(real64) :: reach, tl, th, mass, s_below, s_above, inside, sumk, f, img, pv
+        real(real64) :: reach, tl, th, mass, s_below, s_above, inside, sumk, f, img
+        ! `volatile` so that a share's product is rounded before a counter reads it, for the reason
+        ! the deposit below gives; once per point, where the cost does not show.
+        real(real64), volatile :: pv
         integer :: ilo, ihi, n, i, ic
         logical :: need_mass
 
@@ -2114,8 +2117,14 @@ contains
                 s_above = images_cdf(self, xj, hj, upper_end(self)) - images_cdf(self, xj, hj, self%x1)
         end if
         inside = mass - s_below - s_above
-        if (s_below > 0.0_real64) below = below + wj*(s_below/mass)
-        if (s_above > 0.0_real64) above = above + wj*(s_above/mass)
+        if (s_below > 0.0_real64) then
+            pv = wj*(s_below/mass)
+            below = below + pv
+        end if
+        if (s_above > 0.0_real64) then
+            pv = wj*(s_above/mass)
+            above = above + pv
+        end if
         if (.not. (inside > 0.0_real64)) return
 
         ! ---- the cells it reaches, and the kernel (with its images) at each centre ----
@@ -2155,7 +2164,7 @@ contains
         ! ---- the deposit: the in-range share, spread over the centres in proportion ----
         if (sumk > 0.0_real64) then
             f = wj*(inside/mass)/(self%dx*sumk)
-            ! **The product is rounded into `pv` before the cell reads it, and that is what makes
+            ! **The products are rounded before any cell reads them, and that is what makes
             ! `%merge` exact.** Written `acc(...) = acc(...) + f*k(i)` the multiply and the add
             ! contract into one FMA on a target that has one (arm64 does; `fortran-gotchas.md`,
             ! "One target contracts to an FMA and another cannot"), so the product reaches the sum
@@ -2163,10 +2172,16 @@ contains
             ! a grid built for the merge holds `round(f*k)` and is added afterwards -- two roundings
             ! against one, and the two routes part company in the last bit. `%merge` exists so that
             ! per-thread grids add up to the single-pass grid, and `test_adaptive_grid` asserts
-            ! exactly that, so the rounding has to happen before the cell either way. Keep the local.
+            ! exactly that. **A plain local does not round the product under gfortran**, which
+            ! contracts across statements (`-ffp-contract=fast`, its default) once optimising: the
+            ! products go into the work row in a loop of their own and the second loop reads them
+            ! back, which keeps both loops vectorised where a `volatile` product slowed the deposit
+            ! by up to a sixth. Keep the two loops apart.
             do i = 1, n
-                pv = f*k(i)
-                acc(ilo + i - 1) = acc(ilo + i - 1) + pv
+                k(i) = f*k(i)
+            end do
+            do i = 1, n
+                acc(ilo + i - 1) = acc(ilo + i - 1) + k(i)
             end do
         else
             ! Narrower than a cell and between two centres: whole into the cell holding it.
@@ -2219,7 +2234,10 @@ contains
 
         type(kde_corr_kernel) :: cf
         type(kde_point_fn) :: fn
-        real(real64) :: tl, th, s_below, s_above, rj, c, v, a, b, pv
+        real(real64) :: tl, th, s_below, s_above, rj, c, v, a, b
+        ! `volatile` so that every product is rounded before a cell or a counter reads it: see the
+        ! plain deposit. The cell loop below branches and calls per cell, so it has no vectors to lose.
+        real(real64), volatile :: pv
         integer :: ilo, ihi, n, i, ic
 
         rj = 1.0_real64/hj
@@ -2252,8 +2270,14 @@ contains
             if (.not. self%has_upper .or. self%hi > self%x1) &
                 s_above = kde_term_integral(fn, self%x1, b, 0.0_real64, .false.)
         end if
-        if (s_below > 0.0_real64) below = below + wj*s_below
-        if (s_above > 0.0_real64) above = above + wj*s_above
+        if (s_below > 0.0_real64) then
+            pv = wj*s_below
+            below = below + pv
+        end if
+        if (s_above > 0.0_real64) then
+            pv = wj*s_above
+            above = above + pv
+        end if
 
         ! The cells it reaches, and the corrected kernel at each centre: the moments are the
         ! centre's own, so a cell inside a zone gets the weight the exact form gives it there.
@@ -2281,8 +2305,8 @@ contains
                         self%lo, self%has_upper, self%hi, c, rj)
                     v = kde_corr_value(cf, z(i), k(i))
                 end if
-                ! Rounded into `pv` first, for the reason the plain deposit gives: an FMA here
-                ! would make a merged grid and a single-pass grid differ in the last bit.
+                ! Rounded into the `volatile` `pv` first, for the reason the plain deposit gives:
+                ! an FMA here would make a merged grid and a single-pass grid differ in the last bit.
                 pv = wj*v*rj
                 acc(ilo + i - 1) = acc(ilo + i - 1) + pv
             end do

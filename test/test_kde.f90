@@ -61,6 +61,12 @@ module test_kde
     use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, &
         ieee_is_nan, ieee_is_finite, ieee_get_flag, ieee_set_flag, ieee_support_flag, ieee_underflow, &
         ieee_support_underflow_control, ieee_get_underflow_mode, ieee_usual
+#ifndef __flang__
+    ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
+    ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
+    use, intrinsic :: ieee_arithmetic, only : ieee_support_halting, ieee_get_halting_mode, &
+        ieee_set_halting_mode, ieee_overflow, ieee_invalid, ieee_divide_by_zero
+#endif
 
     implicit none
     private
@@ -264,7 +270,6 @@ contains
             new_unittest("the binned grid carries the boundary correction at both bounds", &
                 test_binned_boundaries), &
             new_unittest("the binned grid finishes once, clears and merges", test_binned_lifecycle), &
-            new_unittest("a binned grid's cells do not depend on the thread count", test_binned_threads), &
             new_unittest('%curve(method="binned") reproduces the exact curve at matched points', &
                 test_binned_curve), &
             new_unittest('binned boundary="linear" matches the exact grid at both bounds', &
@@ -302,6 +307,8 @@ contains
                 test_an_overflowing_adaptive_rule_leaves_the_fit_undefined), &
             new_unittest("an overflowing adaptive rule poisons the grid", &
                 test_an_overflowing_adaptive_rule_poisons_the_grid), &
+            new_unittest("a spread cap too large to represent binds nothing and raises nothing", &
+                test_an_unrepresentable_spread_cap_binds_nothing), &
             new_unittest("a sample beyond half the largest number has no range to build over", &
                 test_a_sample_beyond_half_the_largest_number), &
             new_unittest("a weighted binned fit matches the exact one", &
@@ -6316,33 +6323,6 @@ contains
 
     end subroutine test_binned_lifecycle
 
-    !> `%add(threads=)` at one, two and eight threads gives bit-identical cells: each thread gets a
-    !> static share of the points and a private bin array, and the partials are summed in thread
-    !> order.
-    subroutine test_binned_threads(error)
-        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
-        type(pf_kde_grid) :: g
-        real(real64), allocatable :: x(:), f1(:), f(:)
-        integer, parameter :: TEAMS(3) = [1, 2, 8]
-        integer :: t
-
-        call kde_fixture(4000_int64, x)
-        allocate(f1(128), f(128))
-        do t = 1, 3
-            call g%init(128, -400.0_real64, 400.0_real64, 40.0_real64, method="binned")
-            call g%add(x, threads=TEAMS(t), finish=.true.)
-            if (t == 1) then
-                call g%density(f1)
-            else
-                call g%density(f)
-                call check(error, all(f == f1), &
-                    "a binned grid's cells must not depend on the thread count")
-                if (allocated(error)) return
-            end if
-        end do
-
-    end subroutine test_binned_threads
-
     !> The binned adaptive kernel: one transform per bandwidth class, each point's weight split
     !> between the two classes around its own bandwidth, linearly in `log h`.
     !>
@@ -7069,6 +7049,11 @@ contains
     !> use, and the fit is then undefined -- quietly, as every other data condition is. The pilot
     !> here spans eight decades of density at a bandwidth near the largest number, so the cap the
     !> rule would apply is itself infinite and nothing brings the bandwidth back.
+    !!
+    !! **Quietly includes the IEEE flags**: the infinite cap and the infinite bandwidths are
+    !! formed without an overflow, which would stop a program under nagfor. Halting is held off,
+    !! and the flags read and restored, in this body (`traps_can_be_held`), so a regression is a
+    !! failed assertion rather than the runner stopping.
     subroutine test_an_overflowing_adaptive_rule_leaves_the_fit_undefined(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k
@@ -7076,6 +7061,7 @@ contains
         real(real64) :: x(600), h(600), f
         integer :: i
         logical :: ok
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
         character(len=160) :: msg
 
         do i = 1, 600
@@ -7088,8 +7074,23 @@ contains
         call p%init(4096, 0.0_real64, 1.1e300_real64, 1.0e296_real64)
         call p%add(x)
         call p%finish()
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
         call k%fit(x, bandwidth=1.0e306_real64, adaptive=.true., pilot=p, alpha=1.0_real64, &
             spread_max=1.0e5_real64, ok=ok)
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
         call k%pdf(0.0_real64, f)
         call k%bandwidths(h)
         write(msg, '(a,l1,a,es12.4)') "the fit reports ok = ", ok, " with a bandwidth of ", k%bandwidth()
@@ -7097,16 +7098,21 @@ contains
         if (allocated(error)) return
         call check(error, ieee_is_nan(k%bandwidth()) .and. ieee_is_nan(f) .and. all(ieee_is_nan(h)), &
             "an undefined fit answers NaN for its bandwidth, its density and every point's bandwidth")
+        if (allocated(error)) return
+        call check(error, .not. any(raised), &
+            "the fit raised overflow, divide-by-zero or invalid forming a bandwidth it cannot use")
 
     end subroutine test_an_overflowing_adaptive_rule_leaves_the_fit_undefined
 
     !> The same rule on a GRID poisons it instead: the grid keeps its geometry and answers NaN at
-    !> every cell, which is what a kept NaN does to one.
+    !> every cell, which is what a kept NaN does to one. As quietly as the fit, IEEE flags
+    !> included, and read the same way.
     subroutine test_an_overflowing_adaptive_rule_poisons_the_grid(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde_grid) :: p, g
         real(real64) :: x(600), d(64)
         integer :: i
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
 
         do i = 1, 600
             if (mod(i, 6) == 0) then
@@ -7118,18 +7124,104 @@ contains
         call p%init(4096, 0.0_real64, 1.1e300_real64, 1.0e296_real64)
         call p%add(x)
         call p%finish()
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
         call g%init(64, 0.0_real64, 1.1e300_real64, 1.0e306_real64, pilot=p, alpha=1.0_real64, &
             spread_max=1.0e5_real64)
         call g%add(x)
         call g%finish()
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
         call g%density(d)
         call check(error, g%is_finished() .and. g%ncells() == 64, &
             "the grid must keep its geometry")
         if (allocated(error)) return
         call check(error, all(ieee_is_nan(d)), &
             "a grid whose rule can only overflow must answer NaN at every cell")
+        if (allocated(error)) return
+        call check(error, .not. any(raised), &
+            "the grid raised overflow, divide-by-zero or invalid forming a bandwidth it cannot use")
 
     end subroutine test_an_overflowing_adaptive_rule_poisons_the_grid
+
+    !> A spread cap too large to represent is `+Infinity`, formed without an overflow, and binds
+    !! no bandwidth, so a fit whose rule gives only usable bandwidths is defined. Each route that
+    !! forms the cap is taken here: the fit's rule and its count of capped points, under an
+    !! explicit `spread_max` and the default, and the binned method's bandwidth classes at `%init`.
+    !!
+    !! **`alpha` is small on purpose.** The pilot spans eight decades of density, and at
+    !! `alpha = 0.05` the rule spreads the bandwidths by less than a factor of two about `h`, so
+    !! each is usable at an `h` near `1e306` while the cap, `h` times up to `spread_max`, is past
+    !! the largest number. Halting is held off, and the flags read and restored, in this body
+    !! (`traps_can_be_held`).
+    subroutine test_an_unrepresentable_spread_cap_binds_nothing(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde) :: k(2)
+        type(pf_kde_grid) :: p, g
+        real(real64) :: x(600), h(600, 2)
+        integer :: i
+        logical :: ok(2)
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+        character(len=200) :: msg
+
+        do i = 1, 600
+            if (mod(i, 6) == 0) then
+                x(i) = 1.0e300_real64*real(i, real64)/600.0_real64
+            else
+                x(i) = 1.0e296_real64*(real(i, real64) - 0.5_real64)/600.0_real64
+            end if
+        end do
+        call p%init(4096, 0.0_real64, 1.1e300_real64, 1.0e296_real64)
+        call p%add(x)
+        call p%finish()
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        call k(1)%fit(x, bandwidth=1.0e306_real64, adaptive=.true., pilot=p, alpha=0.05_real64, &
+            spread_max=1.0e5_real64, ok=ok(1))
+        call k(2)%fit(x, bandwidth=1.0e307_real64, adaptive=.true., pilot=p, alpha=0.05_real64, ok=ok(2))
+        call g%init(4096, 0.0_real64, 1.0e306_real64, 1.0e304_real64, pilot=p, alpha=0.05_real64, &
+            spread_max=1.0e5_real64, method="binned")
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call k(1)%bandwidths(h(:, 1))
+        call k(2)%bandwidths(h(:, 2))
+        write(msg, '(a,2l2,a,4es12.4)') "the fits report ok =", ok, " with bandwidths from ", &
+            minval(h(:, 1)), maxval(h(:, 1)), minval(h(:, 2)), maxval(h(:, 2))
+        call check(error, all(ok) .and. all(ieee_is_finite(h)), trim(msg))
+        if (allocated(error)) return
+        ! Uncapped, the rule gives the densest points a bandwidth below `h` and the sparsest one
+        ! above it; a cap that bound would have cut the widest back.
+        call check(error, minval(h(:, 1)) < 1.0e306_real64 .and. maxval(h(:, 1)) > 1.0e306_real64 &
+            .and. minval(h(:, 2)) < 1.0e307_real64 .and. maxval(h(:, 2)) > 1.0e307_real64, trim(msg))
+        if (allocated(error)) return
+        call check(error, g%ncells() == 4096, "the binned grid must be laid")
+        if (allocated(error)) return
+        call check(error, .not. any(raised), &
+            "forming a spread cap past the largest number raised overflow, divide-by-zero or invalid")
+
+    end subroutine test_an_unrepresentable_spread_cap_binds_nothing
 
     !> A sample beyond half the largest number leaves no range to build a pilot over, and none to
     !> lay a binned grid over either: both arms answer with an undefined estimate rather than
@@ -7138,27 +7230,43 @@ contains
     !! **The IEEE flags are saved and restored here rather than asserted.** Reaching either arm
     !! needs every value above half the largest number, so the population's own SUM exceeds it, and
     !! `stats_compact`'s first pass -- which runs before `pf_kde` forms anything -- overflows to
-    !! `+Infinity` there and leaves `IEEE_OVERFLOW` raised. When that is fixed, this test gains
+    !! `+Infinity` there and raises `IEEE_OVERFLOW`. That pass is outside `stats_engine`'s own
+    !! hold-off, so under nagfor's default `-ieee=stop` the overflow ends the program inside the
+    !! library, as `stats_engine` records at its non-finite-mean branch: halting is held off around
+    !! every fit here, in this body (`traps_can_be_held`). When that is fixed, this test gains
     !! `call check(error, .not. any(raised), "neither arm may raise an IEEE flag")`, which is the
     !! assertion the two arms were written to earn.
     subroutine test_a_sample_beyond_half_the_largest_number(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde) :: k
         real(real64) :: x(4)
-        logical :: ok
-        logical :: raised(size(ieee_usual)), before(size(ieee_usual))
+        logical :: ok, ok_binned
+        integer(int64) :: n_valid
+        logical :: halting(size(ieee_usual)), raised(size(ieee_usual)), before(size(ieee_usual))
 
         x = 1.0e308_real64
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
         call ieee_get_flag(ieee_usual, before)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
         call ieee_set_flag(ieee_usual, .false.)
         call k%fit(x, bandwidth=1.0_real64, adaptive=.true., ok=ok)
-        call k%fit(x, bandwidth=1.0_real64, method="binned", ok=ok)
+        call k%fit(x, bandwidth=1.0_real64, method="binned", ok=ok_binned)
+        call k%fit(x, bandwidth=1.0_real64, adaptive=.true., ok=ok)
+        n_valid = k%n_valid()
         call ieee_get_flag(ieee_usual, raised)
         call ieee_set_flag(ieee_usual, before)
-        call check(error, .not. ok, "the binned fit must stay undefined")
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        call check(error, .not. ok_binned, "the binned fit must stay undefined")
         if (allocated(error)) return
-        call k%fit(x, bandwidth=1.0_real64, adaptive=.true., ok=ok)
-        call check(error, (.not. ok) .and. k%n_valid() == 4_int64, &
+        call check(error, (.not. ok) .and. n_valid == 4_int64, &
             "the adaptive fit must keep the population and stay undefined")
 
     end subroutine test_a_sample_beyond_half_the_largest_number
@@ -7704,24 +7812,28 @@ contains
     !> than as an overflow -- which would end the process under a compiler that halts on one. The
     !> ladder of binned classes then stops there: this grid's widest class is the cap, not a NaN.
     !!
-    !! **The flags are saved and restored rather than asserted.** `class_ladder` forms the spread
-    !! cap as `h * capf` before it compares it with `bandwidth_max`, and at this bandwidth that
-    !! product overflows on its way to a right answer. When that is formed without overflowing,
-    !! this test gains `call check(error, .not. any(raised), "building the ladder raises no flag")`.
+    !! **Building the ladder raises no flag.** `class_ladder` takes the spread cap from
+    !! `kde_adapt_cap`, which answers `+Infinity` for a product past the largest number rather than
+    !! forming it; at this bandwidth the spread cap is one, and `bandwidth_max` is the cap that
+    !! binds. Halting is held off, and the flags read and restored, in this body
+    !! (`traps_can_be_held`), so a regression is a failed assertion rather than the runner stopping.
     subroutine test_the_class_ladder_stops_at_the_widest_bandwidth(error)
         type(error_type), allocatable, intent(out) :: error !! set on the first failed check
         type(pf_kde_grid) :: p, g
         real(real64) :: x(600), d(256)
         integer :: i
-        logical :: raised(size(ieee_usual)), before(size(ieee_usual))
+        logical :: halting(size(ieee_usual)), raised(size(ieee_usual)), before(size(ieee_usual))
         character(len=200) :: msg
 
         ! One point in six far out, the rest in a tight cluster a few decades below: the pilot's
         ! smallest density is far enough under its geometric mean that the rule's own exponent
-        ! passes what `h` can be multiplied by.
+        ! passes what `h` can be multiplied by. A far point is a FRACTION of `1e306`, so neither
+        ! the product forming it nor the sample's sum passes the largest number: `%add`'s summary
+        ! pass overflows on a sum that does, which nagfor halts on
+        ! (`test_a_sample_beyond_half_the_largest_number`).
         do i = 1, 600
             if (mod(i, 6) == 0) then
-                x(i) = 5.0e306_real64*real(i, real64)/600.0_real64
+                x(i) = 1.0e306_real64*(real(i, real64)/600.0_real64)
             else
                 x(i) = 1.0e303_real64*(real(i, real64) - 0.5_real64)/600.0_real64
             end if
@@ -7729,7 +7841,15 @@ contains
         call p%init(4096, 0.0_real64, 5.1e306_real64, 1.0e303_real64)
         call p%add(x)
         call p%finish()
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
         call ieee_get_flag(ieee_usual, before)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
         call ieee_set_flag(ieee_usual, .false.)
         call g%init(256, 0.0_real64, 5.0e306_real64, 1.0e307_real64, pilot=p, alpha=1.0_real64, &
             bandwidth_max=1.5e307_real64, method="binned")
@@ -7737,12 +7857,17 @@ contains
         call g%finish()
         call g%density(d)
         call ieee_get_flag(ieee_usual, raised)
-        call ieee_set_flag(ieee_usual, before)
+        call ieee_set_flag(ieee_usual, before .or. raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
         write(msg, '(a,es12.4,a,es12.4)') "the grid's densities run from ", minval(d), " to ", maxval(d)
         call check(error, g%is_adaptive() .and. g%is_finished(), &
             "the grid must be a finished adaptive one")
         if (allocated(error)) return
         call check(error, count(ieee_is_nan(d)) == 0 .and. maxval(d) > 0.0_real64, trim(msg))
+        if (allocated(error)) return
+        call check(error, .not. any(raised), "building the ladder raises no flag")
 
     end subroutine test_the_class_ladder_stops_at_the_widest_bandwidth
 
@@ -7802,5 +7927,24 @@ contains
         call check(error, abs((c_hi - c_edge) - want) <= 1.0e-8_real64, trim(msg))
 
     end subroutine test_an_adaptive_upper_zone_reads_its_window_three_ways
+
+#ifndef __flang__
+    !> Can overflow, invalid and divide-by-zero all be held off around a call?
+    !!
+    !! nagfor halts on the three by default, so a regression that raised one would take the whole
+    !! runner down before the test could assert anything. **The hold-off bracket is written out in
+    !! each test's own body, and this inquiry is the only part a helper may carry**: F2018 17.3
+    !! restores the halting modes on return from any procedure other than `ieee_set_halting_mode`,
+    !! and quietens a flag signalling on entry until the procedure returns, so a helper that set
+    !! the modes or read the flags would change and see nothing (`fortran-gotchas.md`).
+    !! `ieee_set_halting_mode` does not link under flang on macOS, which the guard is for.
+    function traps_can_be_held() result(can)
+        logical :: can !! `ieee_support_halting` holds for overflow, invalid and divide-by-zero
+
+        can = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid) &
+            .and. ieee_support_halting(ieee_divide_by_zero)
+
+    end function traps_can_be_held
+#endif
 
 end module test_kde

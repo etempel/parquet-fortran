@@ -30,7 +30,13 @@ module test_integrate
     use test_integrate_support
     use iso_fortran_env, only : real64
     use, intrinsic :: ieee_arithmetic, only : ieee_get_flag, ieee_set_flag, ieee_support_flag, &
-        ieee_invalid, ieee_underflow
+        ieee_invalid, ieee_underflow, ieee_usual
+#ifndef __flang__
+    ! The halting-mode pair lowers to `feenableexcept`/`fedisableexcept`, which Apple's libc
+    ! lacks, so flang on macOS cannot LINK a reference to either (`fortran-gotchas.md`).
+    use, intrinsic :: ieee_arithmetic, only : ieee_support_halting, ieee_get_halting_mode, &
+        ieee_set_halting_mode, ieee_overflow, ieee_divide_by_zero
+#endif
 
     implicit none
     private
@@ -91,6 +97,8 @@ contains
                          test_extrapolation_earns_its_keep), &
             new_unittest("the epsilon table raises no underflow on an ordinary integral", &
                          test_extrapolation_raises_no_underflow), &
+            new_unittest("the epsilon table forms no infinite reciprocal on an integral near 1e-300", &
+                         test_extrapolation_on_tiny_values), &
             new_unittest("every infinite tail reproduces its closed form, negated ones included", &
                          test_infinite_tails), &
             new_unittest("a feature far along an infinite range is found, not stepped over", &
@@ -1252,6 +1260,60 @@ contains
 
     end subroutine test_extrapolation_raises_no_underflow
 
+    !> Asserts that the Wynn-epsilon table raises no overflow on an integral near the bottom of the
+    !! exponent range, and still extrapolates it.
+    !!
+    !! The table divides by the differences between its elements once its closeness test finds
+    !! them distinct, and upstream's tolerance for that test is `max(|a|, |b|)*epsilon`. For
+    !! elements below about `1e-292` that tolerance is subnormal, so a subnormal difference passes
+    !! as distinct and its reciprocal overflows: nagfor's default `-ieee=stop` ends the program,
+    !! and elsewhere the infinity moves the extrapolated answer. The engine floors the tolerance at
+    !! `tiny` (deviation 15 in `parquet_integrate_engine.f90`). `tiny_log_sqrt` keeps every element
+    !! normal and makes the late differences subnormal, and its own arithmetic overflows nowhere.
+    subroutine test_extrapolation_on_tiny_values(error)
+        type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
+
+        type(pf_integrate_info) :: info
+        real(real64)            :: r
+        logical :: halting(size(ieee_usual)), saved(size(ieee_usual)), raised(size(ieee_usual))
+        logical :: uf_ok, uf_was
+
+        ! The fixture's products underflow near `x = 1`; that flag is put back rather than left
+        ! for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
+        ! Held off, read and restored in this body, never in a helper: see `traps_can_be_held`.
+        halting = .false.
+        call ieee_get_flag(ieee_usual, saved)
+#ifndef __flang__
+        if (traps_can_be_held()) then
+            call ieee_get_halting_mode(ieee_usual, halting)
+            call ieee_set_halting_mode(ieee_usual, .false.)
+        end if
+#endif
+        call ieee_set_flag(ieee_usual, .false.)
+        r = pf_integrate(tiny_log_sqrt, 0.0_real64, 1.0_real64, 1.0e-10_real64, info=info)
+        call ieee_get_flag(ieee_usual, raised)
+        call ieee_set_flag(ieee_usual, saved .or. raised)
+#ifndef __flang__
+        if (traps_can_be_held()) call ieee_set_halting_mode(ieee_usual, halting)
+#endif
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
+
+        call check(error, .not. any(raised), &
+                   "the epsilon table raised overflow, divide-by-zero or invalid on an integral " // &
+                   "near 1e-300: a subnormal difference passed its closeness test")
+        if (allocated(error)) return
+        call check(error, info%converged .and. info%extrapolated, &
+                   "the call must converge through the epsilon table, or the flags prove nothing")
+        if (allocated(error)) return
+        ! As a ratio: `1e-9` times the closed form is subnormal, and forming it would raise the
+        ! underflow put back above.
+        call check(error, abs(r/tiny_log_sqrt_exact() - 1.0_real64) <= 1.0e-9_real64, &
+                   "the extrapolated result must reach the scaled closed form")
+
+    end subroutine test_extrapolation_on_tiny_values
+
     !> Asserts that the extrapolation costs the same at every tolerance, where the bisection does
     !! not.
     !!
@@ -1930,8 +1992,19 @@ contains
         type(pf_integrate_info) :: tight, loose
         real(real64)            :: r
         character(len=200)      :: msg
+        logical                 :: uf_ok, uf_was
 
+        ! `inv_square` underflows at every abscissa beyond `1e300`; the flag is put back rather
+        ! than left for nagfor to report at exit, unattributed (`.claude/rules/fortran-gotchas.md`).
+        uf_ok = ieee_support_flag(ieee_underflow, 0.0_real64)
+        if (uf_ok) call ieee_get_flag(ieee_underflow, uf_was)
         r = pf_integrate(inv_square, 1.0e300_real64, pf_infinity(), 1.0e-10_real64, info=tight)
+        ! The control: raising both caps must change nothing at all, because neither is what
+        ! stopped the walk.
+        r = pf_integrate(inv_square, 1.0e300_real64, pf_infinity(), 1.0e-10_real64, &
+                         max_neval=100*DEFAULT_BUDGET, max_panels=100*DEFAULT_PANELS, info=loose)
+        if (uf_ok) call ieee_set_flag(ieee_underflow, uf_was)
+
         call check(error, tight%status == PF_INT_LIMIT .and. .not. tight%converged, &
                    "a walk that runs out of representable abscissae must report PF_INT_LIMIT")
         if (allocated(error)) return
@@ -1942,10 +2015,6 @@ contains
                    trim(msg))
         if (allocated(error)) return
 
-        ! The control: raising both caps must change nothing at all, because neither is what
-        ! stopped the walk.
-        r = pf_integrate(inv_square, 1.0e300_real64, pf_infinity(), 1.0e-10_real64, &
-                         max_neval=100*DEFAULT_BUDGET, max_panels=100*DEFAULT_PANELS, info=loose)
         write(msg, '(a, i0, a, i0, a, i0, a, i0)') "raising both caps must change nothing: " // &
             "neval ", tight%neval, " -> ", loose%neval, ", npanels ", tight%npanels, " -> ", &
             loose%npanels
@@ -2094,5 +2163,24 @@ contains
         call check(error, abs(r - want) <= TOL_BUMP*want, trim(msg))
 
     end subroutine test_start_search_retries_below_zero
+
+#ifndef __flang__
+    !> Can overflow, invalid and divide-by-zero all be held off around a call?
+    !!
+    !! nagfor halts on the three by default, so a regression that raised one would take the whole
+    !! runner down before the test could assert anything. **The hold-off bracket is written out in
+    !! each test's own body, and this inquiry is the only part a helper may carry**: F2018 17.3
+    !! restores the halting modes on return from any procedure other than `ieee_set_halting_mode`,
+    !! and quietens a flag signalling on entry until the procedure returns, so a helper that set
+    !! the modes or read the flags would change and see nothing (`fortran-gotchas.md`).
+    !! `ieee_set_halting_mode` does not link under flang on macOS, which the guard is for.
+    function traps_can_be_held() result(can)
+        logical :: can !! `ieee_support_halting` holds for overflow, invalid and divide-by-zero
+
+        can = ieee_support_halting(ieee_overflow) .and. ieee_support_halting(ieee_invalid) &
+            .and. ieee_support_halting(ieee_divide_by_zero)
+
+    end function traps_can_be_held
+#endif
 
 end module test_integrate

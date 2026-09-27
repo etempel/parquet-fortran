@@ -24,7 +24,7 @@ module test_integrate_support
 
     public :: runge, runge_exact
     public :: osc_a, osc_a_exact
-    public :: log_sqrt, log_sqrt_exact
+    public :: log_sqrt, log_sqrt_exact, tiny_log_sqrt, tiny_log_sqrt_exact
     public :: peak_c, peak_c_exact
     public :: heavy_f, heavy_f_exact
     public :: inv_pow15, inv_pow15_exact
@@ -70,6 +70,10 @@ module test_integrate_support
     real(real64), parameter, public :: SLIVER_AT = 1.001_real64
     !> Width of one tooth of `saw_sqrt`; four of them span `[0, 1]`.
     real(real64), parameter, public :: SAW_WIDTH = 0.25_real64
+    !> The power of two `tiny_log_sqrt` scales `log_sqrt` by: its integral, and every element of
+    !! the epsilon table on it, stays normal, while the differences between late elements are
+    !! subnormal.
+    real(real64), parameter, public :: TINY_SCALE = scale(1.0_real64, -1000)
 
     !> Exponent of `divergent_pow`: above one, so the integral over `[0, 1]` does not exist.
     real(real64), parameter, public :: DIVERGENT_EXPONENT = 1.1_real64
@@ -155,6 +159,28 @@ contains
         v = -4.0_real64
 
     end function log_sqrt_exact
+
+    !> `log_sqrt` times `TINY_SCALE`: the same endpoint singularity, so the same call needs the
+    !! epsilon table, with an integral near `-4e-301`.
+    !!
+    !! The scale is a power of two, so a value is `log_sqrt`'s own, scaled exactly, wherever it
+    !! stays normal; near `x = 1` the products are subnormal, and raise IEEE_UNDERFLOW.
+    function tiny_log_sqrt(x) result(f)
+        real(real64), intent(in) :: x !! point at which to evaluate
+        real(real64)             :: f !! the integrand value
+
+        f = 0.0_real64
+        if (x > 0.0_real64) f = (log(x)/sqrt(x))*TINY_SCALE
+
+    end function tiny_log_sqrt
+
+    !> Exact integral of `tiny_log_sqrt` over `[0, 1]`: `log_sqrt`'s, scaled, which is exact.
+    pure function tiny_log_sqrt_exact() result(v)
+        real(real64) :: v !! the exact value
+
+        v = log_sqrt_exact()*TINY_SCALE
+
+    end function tiny_log_sqrt_exact
 
     !> Case C, `1/((x - 0.3)^2 + 1e-6)`: an interior peak of width about `1e-3`.
     function peak_c(x) result(f)
@@ -745,12 +771,14 @@ contains
     !> `1/x**2`, whose integral over `[a, +infinity)` is `1/a`.
     !!
     !! Used at a lower bound of `1e300`, where the walk runs out of REPRESENTABLE abscissae long
-    !! before either cap is reached.
+    !! before either cap is reached. **Two quotients, never `1/(x*x)`**: every abscissa there has
+    !! a square past the largest number, and the overflow ends the program under nagfor's default
+    !! `-ieee=stop`; `(1/x)/x` only underflows, to the zero `1/x**2` is at working precision.
     function inv_square(x) result(f)
         real(real64), intent(in) :: x !! point at which to evaluate
         real(real64)             :: f !! the integrand value
 
-        f = 1.0_real64/(x*x)
+        f = (1.0_real64/x)/x
 
     end function inv_square
 

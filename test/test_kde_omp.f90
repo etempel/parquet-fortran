@@ -1,12 +1,12 @@
-!> Threading tests for `parquet_kde`: that `pf_kde_grid%add(threads=)` opens the team it resolves,
-!> answers the same bits every time at one team size and within rounding of the serial deposit at
-!> another, and that its two limits -- a floor of survivors per thread, and a cap from the partial
-!> grids' own cost -- keep a team shut where one would not pay; that the pilot an adaptive
-!> `pf_kde%fit` builds answers the same bits at every thread count, its deposit cut by the sample
-!> and not by the team; that the bulk queries and `%sample` of both forms answer the same bits at
-!> every thread count and open a team only where the work pays for it; and that objects fitted and
-!> queried inside a caller's own region, one per iteration or one shared by every thread, answer
-!> what they answer serially.
+!> Threading tests for `parquet_kde`: that `pf_kde_grid%add(threads=)`, exact or binned, opens the
+!> team it resolves, answers the same bits every time at one team size and within rounding of the
+!> serial deposit at another, and that its two limits -- a floor of survivors per thread, and a cap
+!> from the partial grids' own cost -- keep a team shut where one would not pay; that the pilot an
+!> adaptive `pf_kde%fit` builds answers the same bits at every thread count, its deposit cut by the
+!> sample and not by the team; that the bulk queries and `%sample` of both forms answer the same
+!> bits at every thread count and open a team only where the work pays for it; and that objects
+!> fitted and queried inside a caller's own region, one per iteration or one shared by every
+!> thread, answer what they answer serially.
 !!
 !! **Every threaded assertion reads `parquet_debug_kde_threads_used()` beside the answer**: two
 !! team sizes differ only by rounding, and not at all against a deposit that never opened its
@@ -49,6 +49,8 @@ contains
         testsuite = [ &
             new_unittest("%add(threads=) opens its team and changes the answer only by rounding", &
                 test_add_team_changes_only_rounding), &
+            new_unittest("a binned grid's %add(threads=) opens its team and changes the answer only by rounding", &
+                test_binned_add_team_changes_only_rounding), &
             new_unittest("%add's floor per thread and its grid cap keep a team shut", &
                 test_add_limits_decide_the_team), &
             new_unittest("an adaptive %fit answers the same bits at every thread count", &
@@ -230,6 +232,82 @@ contains
             "the serial grid must be the exact estimate at its centres")
 
     end subroutine test_add_team_changes_only_rounding
+
+    !> The same four assertions for `method="binned"`, whose `%add(threads=)` makes the exact
+    !> method's promise: each thread bins a static share of the points into a private bin array,
+    !> the arrays are added in thread order, so one team size gives the same bits every time and
+    !> two team sizes group the additions differently and agree to rounding -- not to the bit.
+    !!
+    !! The oracle is the exact estimate again, to the binning's own error rather than the exact
+    !! grid's -- about `1.4e-4` of the peak away from the ends at this cell width, asserted at
+    !! `1e-3` -- so that a defect both arms share, above the point where they divide, cannot pass as
+    !! agreement. A thread's share lost or binned twice is the agreement assertion's to catch.
+    subroutine test_binned_add_team_changes_only_rounding(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first failed check
+        type(pf_kde_grid) :: g1, g4, g4b
+        type(pf_kde) :: k
+        real(real64), allocatable :: x(:), w(:)
+        real(real64) :: r1(400), r4(400), r4b(400), c(400), f(400), fe(400), p1(2), p4(2)
+        integer :: team1, team4
+
+#ifndef _OPENMP
+        call skip_test(error, "needs OpenMP: without it no team can open at any thread count, so " // &
+            "the one-thread and four-thread binnings below would be the same serial code and agree " // &
+            "for the wrong reason")
+        return
+#endif
+#ifdef _OPENMP
+        if (omp_get_num_procs() < 4) then
+            call skip_test(error, "needs four processors: the thread count is clamped to the " // &
+                "processors available, so threads=4 cannot open the team of four asserted below")
+            return
+        end if
+#endif
+        call team_fixture(50000_int64, x, w)
+        call g1%init(400, -200.0_real64, 200.0_real64, 5.0_real64, method="binned")
+        call g1%add(x, weights=w, threads=1)
+        team1 = parquet_debug_kde_threads_used()
+        call g4%init(400, -200.0_real64, 200.0_real64, 5.0_real64, method="binned")
+        call g4%add(x, weights=w, threads=4)
+        team4 = parquet_debug_kde_threads_used()
+        call g4b%init(400, -200.0_real64, 200.0_real64, 5.0_real64, method="binned")
+        call g4b%add(x, weights=w, threads=4)
+
+        call check(error, team1 == 1, "threads=1 must bin serially; the team observable says it did not")
+        if (allocated(error)) return
+        call check(error, team4 == 4, &
+            "threads=4 must open a team of four, or every comparison below compares the serial " // &
+            "binning with itself")
+        if (allocated(error)) return
+
+        call g1%finish()
+        call g1%density(r1, normalise=.false.)
+        call g4%finish()
+        call g4%density(r4, normalise=.false.)
+        call g4b%finish()
+        call g4b%density(r4b, normalise=.false.)
+        call check(error, all(r4 == r4b), "one team size must give the same bits every time")
+        if (allocated(error)) return
+        call check(error, maxval(abs(r4 - r1)) <= 1.0e-13_real64*maxval(r1), &
+            "four threads and one must agree to rounding in every cell")
+        if (allocated(error)) return
+        call g1%cdf([-200.0_real64, 200.0_real64], p1)
+        call g4%cdf([-200.0_real64, 200.0_real64], p4)
+        call check(error, p1(1) > 0.1_real64 .and. p1(2) < 0.9_real64 .and. &
+            all(abs(p4 - p1) <= 1.0e-14_real64), &
+            "the weight counted beyond each end must be summed across the team")
+        if (allocated(error)) return
+        call check(error, g4%n() == g1%n() .and. g4%n_valid() == g1%n_valid() .and. &
+            g4%sum_weights() == g1%sum_weights(), "every count and the total weight must not depend on the team")
+        if (allocated(error)) return
+
+        call k%fit(x, bandwidth=5.0_real64, weights=w)
+        call g1%density(f, x=c)
+        call k%pdf(c, fe)
+        call check(error, maxval(abs(f - fe), mask=abs(c) <= 150.0_real64) <= 1.0e-3_real64*maxval(fe), &
+            "the serial binned grid must be the exact estimate at its centres, to the binning's error")
+
+    end subroutine test_binned_add_team_changes_only_rounding
 
     !> The two limits on `%add`'s team, each asserted against a control that does open one:
     !!

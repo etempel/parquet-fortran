@@ -2131,6 +2131,19 @@ module parquet_kde
             real(real64), intent(out)   :: hb(:) !! the bandwidth at each; `size(x)` elements
         end subroutine kde_adapt_bandwidths
 
+        !> The cap every bandwidth the adaptive rule `a` gives is held to under the global bandwidth
+        !! `h`: the spread cap `h*capf`, or `bandwidth_max` where one was given and it is tighter.
+        !! `+Infinity` where the spread cap is too large to represent, formed without the overflow,
+        !! which would stop a program under nagfor. The rule, the fit's count of capped points and
+        !! the binned method's bandwidth classes all take the cap from here, so a capped bandwidth
+        !! IS it, exactly. Impure: the operands are `volatile` locals.
+        module function kde_adapt_cap(a, h) result(cap)
+            implicit none
+            type(kde_adapt), intent(in) :: a   !! the rule
+            real(real64), intent(in)    :: h   !! the global bandwidth, positive
+            real(real64)                :: cap !! the tighter cap
+        end function kde_adapt_cap
+
     end interface
 
     ! ---- kernels, tokens, rules and the abort, implemented in parquet_kde_core.f90 ----------

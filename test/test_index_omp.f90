@@ -1867,9 +1867,13 @@ contains
     !! numbering partition by partition. This one puts the build in the regime where that
     !! difference is reachable.
     !!
-    !! The guard against a vacuous pass is explicit: the row count must really resolve to a team,
-    !! and the backend must really be direct. Either failing means the fixture stopped testing
-    !! what its name says rather than the library being right.
+    !! The guard against a vacuous pass is explicit, and both halves read what the build DID: the
+    !! team it resolved (`parquet_debug_index_threads_used`) and the backend it took. Either failing
+    !! means the fixture stopped testing what its name says rather than the library being right.
+    !! The team is read back rather than predicted from `pf_index_threads`, which answers for an
+    !! AUTOMATIC build: it follows `OMP_NUM_THREADS` and answers 1 in a one-thread run, while an
+    !! explicit `threads=` is honoured whatever the row count and clamped only to the processors
+    !! available, so this build opens its four there too.
     subroutine test_mm_direct_ids_above_the_floor(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error slot.
         integer(int64), parameter :: N = 40000_int64, NKEY = 500_int64
@@ -1893,15 +1897,15 @@ contains
         end do
         call check(error, seen == NKEY, "fixture: every one of the 500 keys must appear")
         if (allocated(error)) return
+        call mm%build(keys, method="direct", threads=4)
 #ifdef _OPENMP
         if (omp_get_num_procs() >= 2) then
-            call check(error, pf_index_threads(N) > 1, &
-                "fixture: 40000 rows must sit ABOVE the work floor on this machine, or a serial " // &
+            call check(error, parquet_debug_index_threads_used() > 1, &
+                "fixture: the threads=4 build must resolve a team on this machine, or a serial " // &
                 "direct grouping is all that could happen and the test asserts nothing")
             if (allocated(error)) return
         end if
 #endif
-        call mm%build(keys, method="direct", threads=4)
         call mm%get_method(tok)
         call check(error, tok == "direct", &
             "fixture: the build must really have taken the direct backend")

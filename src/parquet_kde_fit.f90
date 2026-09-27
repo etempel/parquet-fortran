@@ -353,16 +353,15 @@ contains
             ncap = 0_int64
             ! The narrowest bandwidth the rule can give, which is the unit `spread_max` counts in:
             ! `kde_adapt_set` forms `capf` as `smax` times it in units of `hh`, so dividing `smax`
-            ! back out names that unit. `smax` is at least one and `capf` at most `smax`, so this
-            ! is at most `hh` and cannot overflow. Read by the zone advice below, which turns a
+            ! back out names that unit. `smax` is at least one and `capf` at most `smax`, so the
+            ! quotient is at most one and the product at most `hh`; the quotient is taken first
+            ! because `hh*capf` can overflow. Read by the zone advice below, which turns a
             ! bandwidth the caller must stay under into the `spread_max` that means the same thing.
-            hmin = hh*self%adapt%capf/a_smax
-            ! The cap `rule_bandwidth` applied, re-formed here so that the fit can say whether it
-            ! bound: a capped bandwidth IS the cap, exactly, so counting them needs no tolerance.
-            hcap = hh*self%adapt%capf
-            if (self%adapt%has_bmax) then
-                if (self%adapt%bmax < hcap) hcap = self%adapt%bmax
-            end if
+            hmin = hh*(self%adapt%capf/a_smax)
+            ! The cap `rule_bandwidth` applied, from the one procedure that forms it, so that the
+            ! fit can say whether it bound: a capped bandwidth IS the cap, exactly, so counting
+            ! them needs no tolerance.
+            hcap = kde_adapt_cap(self%adapt, hh)
             do i = 1_int64, m
                 if (self%hb(i) > self%hmax) self%hmax = self%hb(i)
                 if (self%hb(i) == hcap) ncap = ncap + 1_int64

@@ -444,17 +444,47 @@ contains
 
     end procedure kde_adapt_set
 
+    module procedure kde_adapt_cap
+
+        real(real64), volatile :: c_div !! `max(capf, 1)`, stored before `huge` is divided by it
+        real(real64), volatile :: c_use !! `capf`, or one where `h*capf` would overflow
+        logical :: big
+
+        ! `kde_adapt_set` bounds `capf` by `smax`, but nothing bounds `h*capf`: at a global
+        ! bandwidth near the largest number the spread cap is past it. Nothing here can overflow
+        ! in any evaluation order, and nothing is guarded. The product overflows only where `capf`
+        ! is above one and `h` above `huge/capf`, a quotient that cannot overflow once its divisor
+        ! is at least one; the product's factor is `capf`, or one where the product would
+        ! overflow. Both are STORED before arithmetic reads them: an optimiser may split a
+        ! selection feeding arithmetic into the arithmetic on each arm and form both, and the arm
+        ! not taken is exactly the overflow the selection avoided (`fortran-gotchas.md`).
+        c_div = max(a%capf, 1.0_real64)
+        big = h > huge(h)/c_div
+        c_use = merge(1.0_real64, a%capf, big)
+        cap = h*c_use
+        if (big) cap = ieee_value(1.0_real64, ieee_positive_inf)
+        ! The tighter of the two caps. `capf` is the spread cap in units of `h`, formed once by
+        ! `kde_adapt_set`; `bmax` is the caller's absolute one. Both are statements about
+        ! different things -- the estimator's shape and the data's scale -- so neither overrides
+        ! the other and the smaller binds.
+        if (a%has_bmax) then
+            if (a%bmax < cap) cap = a%bmax
+        end if
+
+    end procedure kde_adapt_cap
+
     module procedure kde_adapt_bandwidths
 
         integer(int64) :: i
-        real(real64) :: elim
+        real(real64) :: elim, cap
 
         ! The exponent above which `h*exp(e)` would overflow: two logarithms of loop-invariant
-        ! values, so they are formed once here rather than per point. The same number, so the
-        ! same bandwidths.
+        ! values, so they are formed once here rather than per point, as is the cap. The same
+        ! numbers, so the same bandwidths.
         elim = log(huge(1.0_real64)) - log(h) - 1.0_real64
+        cap = kde_adapt_cap(a, h)
         do i = 1_int64, size(x, kind=int64)
-            hb(i) = rule_bandwidth(a, h, elim, x(i))
+            hb(i) = rule_bandwidth(a, h, elim, cap, x(i))
         end do
 
     end procedure kde_adapt_bandwidths
@@ -1545,13 +1575,10 @@ contains
             ! give a point of this grid.
             hlo = rule_h(self, self%adapt%pmax)
             hhi = rule_h(self, self%adapt%pmin)
-            ! Every bandwidth is capped, so the bracket is too, at whichever cap is tighter -- the
-            ! same `min` `rule_bandwidth` takes, and for the same reason. A point the pilot reads
-            ! zero density at takes that cap, which is inside the bracket.
-            cap = self%h*self%adapt%capf
-            if (self%adapt%has_bmax) then
-                if (self%adapt%bmax < cap) cap = self%adapt%bmax
-            end if
+            ! Every bandwidth is capped, so the bracket is too, at the cap `rule_bandwidth` applies.
+            ! A point the pilot reads zero density at takes that cap, which is inside the bracket.
+            ! One too large to represent is `+Infinity` and binds nothing; `lim` below still does.
+            cap = kde_adapt_cap(self%adapt, self%h)
             if (hlo > cap) hlo = cap
             if (hhi > cap) hhi = cap
         end if
@@ -2582,36 +2609,30 @@ contains
     !! `h * (p(t)/g)**(-alpha)`, formed as `h * exp(-alpha * (log p - log g))` with the exponent
     !! tested before it is raised, so that a bandwidth too large to represent is `+Infinity`
     !! without an overflow (which would stop a program under nagfor). Exactly `h` at `alpha = 0`,
-    !! then capped -- at `spread_max` times the narrowest bandwidth the rule can give, and at
-    !! `bandwidth_max` where the caller gave one, whichever is TIGHTER. Where the pilot reads
-    !! zero the cap is the answer; the pilot's smallest positive cell density no longer stands in
-    !! for `p` there, a cap being the better answer for "the pilot says nothing here" and a cap
-    !! being always present. NaN from a table with nothing to read, whatever `alpha`.
+    !! then capped at `cap` -- `spread_max` times the narrowest bandwidth the rule can give, or
+    !! `bandwidth_max` where the caller gave one and it is TIGHTER (`kde_adapt_cap`). Where the
+    !! pilot reads zero the cap is the answer; the pilot's smallest positive cell density no
+    !! longer stands in for `p` there, a cap being the better answer for "the pilot says nothing
+    !! here" and a cap being always present. NaN from a table with nothing to read, whatever
+    !! `alpha`.
     !!
     !! **The spread cap is always in force**, which is what bounds the corrected boundary scan:
     !! its zone is `KDE_RADIUS*h_max` wide and its step is `h_min/KDE_LINEAR_SCAN_PER_H`, so
     !! without a bound on `h_max/h_min` the scan's step count is unbounded. `KDE_SPREAD_MAX` says
     !! why the default is where it is.
-    function rule_bandwidth(a, h, elim, t) result(hj)
+    function rule_bandwidth(a, h, elim, cap, t) result(hj)
         type(kde_adapt), intent(in) :: a    !! the rule
         real(real64), intent(in)    :: h    !! the global bandwidth
         real(real64), intent(in)    :: elim !! the largest exponent `h*exp(e)` can be formed at
+        real(real64), intent(in)    :: cap  !! `kde_adapt_cap(a, h)`, the cap on every bandwidth
         real(real64), intent(in)    :: t    !! the point
         real(real64)                :: hj   !! its bandwidth
 
-        real(real64) :: p, e, cap
+        real(real64) :: p, e
 
         hj = ieee_value(1.0_real64, ieee_quiet_nan)
         if (a%unreadable) return
         if (t /= t) return
-        ! The tighter of the two caps. `capf` is the spread cap in units of `h`, formed once by
-        ! `kde_adapt_set`; `bmax` is the caller's absolute one. Both are statements about
-        ! different things -- the estimator's shape and the data's scale -- so neither overrides
-        ! the other and the smaller binds.
-        cap = h*a%capf
-        if (a%has_bmax) then
-            if (a%bmax < cap) cap = a%bmax
-        end if
         if (a%alpha == 0.0_real64) then
             hj = h
         else

@@ -81,6 +81,14 @@
 !!     call raised IEEE_UNDERFLOW for a term that cannot change the answer
 !!     (`test_extrapolation_raises_no_underflow`). A difference within the cap is divided into
 !!     unchanged, so the table's values are upstream's wherever no reciprocal was subnormal.
+!! 15. `qelg` floors the magnitude in each of its three closeness tolerances at `TOL_FLOOR`
+!!     (`tiny/epsilon`), so that no tolerance is below `tiny`. Upstream's `max(|a|, |b|)*epmach`
+!!     is subnormal once both elements are below about `1e-292`; a subnormal difference then
+!!     passes as distinct, and its reciprocal overflows, which moved the extrapolated answer and
+!!     ended the program under nagfor's default `-ieee=stop` (`test_extrapolation_on_tiny_values`).
+!!     Two elements closer than `tiny` are then treated as upstream treats any two within rounding
+!!     of each other, and a tolerance whose larger element is at least `TOL_FLOOR` is upstream's
+!!     exactly.
 !!
 !! **What is deliberately NOT vendored: `dqagie` and `dqk15i`.** QUADPACK answers an infinite
 !! range by the change of variable `x = a + (1 - t)/t`, bisecting in `t` over `(0, 1]` with a
@@ -121,6 +129,9 @@ submodule (parquet_integrate) parquet_integrate_engine
     !> The largest magnitude whose reciprocal is normal, `1/tiny` (exactly `2**1022`): `qelg` caps
     !> each difference at it before dividing (deviation 14).
     real(real64), parameter :: RECIP_CAP = 1.0_real64/UFLOW
+    !> The smallest magnitude whose product with `EPMACH` is normal, `tiny/epsilon` (exactly
+    !> `2**-970`): `qelg` floors each closeness tolerance's magnitude at it (deviation 15).
+    real(real64), parameter :: TOL_FLOOR = UFLOW/EPMACH
 
     ! The abscissae and weights are given for the interval (-1, 1). Because of symmetry only the
     ! positive abscissae and their corresponding weights are given.
@@ -424,23 +435,26 @@ contains
                 e1abs = abs(e1)
                 delta2 = e2 - e1
                 err2 = abs(delta2)
-                tol2 = max(abs(e2), e1abs)*EPMACH
+                ! Deviation 15: each tolerance's magnitude is floored at TOL_FLOOR, so that no
+                ! tolerance is below UFLOW and no difference passing one has a reciprocal that
+                ! overflows.
+                tol2 = max(abs(e2), e1abs, TOL_FLOOR)*EPMACH
                 delta3 = e1 - e0
                 err3 = abs(delta3)
-                tol3 = max(e1abs, abs(e0))*EPMACH
+                tol3 = max(e1abs, abs(e0), TOL_FLOOR)*EPMACH
                 if (err2 > tol2 .or. err3 > tol3) then
                     e3 = epstab(k1)
                     epstab(k1) = e1
                     delta1 = e1 - e3
                     err1 = abs(delta1)
-                    tol1 = max(e1abs, abs(e3))*EPMACH
+                    tol1 = max(e1abs, abs(e3), TOL_FLOOR)*EPMACH
                     ! If two elements are very close to each other, omit a part of the table by
                     ! adjusting the value of n.
                     if (err1 > tol1 .and. err2 > tol2 .and. err3 > tol3) then
                         ! Deviation 14: `delta1` is about `huge` on every step's first element, the
                         ! table holding `OFLOW` there, and its reciprocal would be subnormal. The
-                        ! three errors exceed their tolerances, so none is a NaN or a zero, and
-                        ! `sign` puts back each difference's own sign.
+                        ! three errors exceed their tolerances, so none is a NaN and each is above
+                        ! UFLOW (deviation 15), and `sign` puts back each difference's own sign.
                         cap1 = sign(min(err1, RECIP_CAP), delta1)
                         cap2 = sign(min(err2, RECIP_CAP), delta2)
                         cap3 = sign(min(err3, RECIP_CAP), delta3)

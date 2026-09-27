@@ -658,6 +658,16 @@ Running and triaging NAG builds: the `/nag-build` skill (`.claude/skills/nag-bui
   in an allocatable component of a local scalar (`sink_set`, `test/test_openmp.f90`). A dummy, a
   `save` or module array, a scalar, and an array of a type finalizable only by its own `final` or
   its parent's compile. `check_no_shape_nagfor_undefined_cannot_compile` enforces both.
+- **Under `-C=undefined`, a parallel region whose only shared variables are its REDUCTION
+  variables writes past its argument block on the caller's stack** (7.2 Build 7251; any operator,
+  type or thread count). The block gives a reduction variable one pointer slot, and the
+  instrumentation stores the variable's definedness-map pointer in the next, where a following
+  shared variable's own store overwrites it; with nothing following, the store overruns the block.
+  The canary ends the run at the caller's `end` as `__stack_chk_fail` (SIGABRT, no message); a
+  frame whose canary is not beside the block is corrupted silently. Combine through a shared array
+  instead, one slot per iteration or per thread, reduced after the region
+  (`test_the_team_is_really_opened`, `test/test_cosmology_omp.f90`). `nagfor -otype=c` shows the
+  block and its stores.
 - **A procedure-local array PARAMETER passed as an actual argument inside an OpenMP parallel region
   does not compile** (`-openmp`, every profile): the generated C names an undeclared
   `<module>_MP_<procedure>Param_<name>_`. An intrinsic reading it there (`sum(LIST)`) is fine.

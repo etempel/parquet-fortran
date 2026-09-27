@@ -138,10 +138,15 @@ contains
     end subroutine test_objects_built_on_different_threads_stay_independent
 
     !> The negative control for the two tests above: without a real team they prove nothing.
+    !!
+    !! Each iteration writes the team it sees into a slot of its own, and the widest is taken after
+    !! the region rather than through `reduction(max : widest)`: under nagfor's `-C=undefined` a
+    !! region whose only shared variable is a reduction variable writes past its argument block on
+    !! the caller's stack, which aborts the whole runner with no message (`fortran-gotchas.md`).
     subroutine test_the_team_is_really_opened(error)
         type(error_type), allocatable, intent(out) :: error !! test-drive's error handle.
 
-        integer :: widest, i
+        integer :: team(64), i
 
 #ifndef _OPENMP
         call skip_test(error, "needs OpenMP: there is no team to count")
@@ -152,13 +157,13 @@ contains
             call skip_test(error, "needs at least two threads: a team of one cannot show sharing")
             return
         end if
-        widest = 0
-        !$omp parallel do default(shared) private(i) reduction(max : widest)
-        do i = 1, 64
-            widest = max(widest, omp_get_num_threads())
+        team = 0
+        !$omp parallel do default(shared) private(i)
+        do i = 1, size(team)
+            team(i) = omp_get_num_threads()
         end do
         !$omp end parallel do
-        call check(error, widest > 1, "the tests above rely on a team wider than one")
+        call check(error, maxval(team) > 1, "the tests above rely on a team wider than one")
 #endif
 
     end subroutine test_the_team_is_really_opened

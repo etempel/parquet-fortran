@@ -27,35 +27,36 @@ program error_scenarios
     logical :: handled
 
     nargs = command_argument_count()
-    if (nargs < 1) then
-        ! No scenario requested: this happens when `fpm test` auto-runs every
-        ! test target with no arguments. Exit cleanly and silently rather than
-        ! failing, since this program is only meant to be driven (with an
-        ! explicit scenario) as a subprocess from test_errors.f90.
-        stop
-    end if
-    call get_command_argument(1, scenario)
+    ! No scenario requested: this happens when `fpm test` auto-runs every
+    ! test target with no arguments. Exit cleanly and silently rather than
+    ! failing, since this program is only meant to be driven (with an
+    ! explicit scenario) as a subprocess from test_errors.f90. Silently means
+    ! reaching `end program`, never a `stop`: flang writes "Fortran STOP" to
+    ! stderr for every STOP statement (`test_no_scenario_exits_silently`).
+    if (nargs >= 1) then
+        call get_command_argument(1, scenario)
 
-    select case (trim(scenario))
-    case ("ok")
-        ! The control scenario: reaches no library call at all, so a nonzero exit from
-        ! this one means the harness is broken rather than the library.
-        handled = .true.
-    case default
-        handled = .false.
-    end select
-    if (.not. handled) call dispatch_error_scenarios_io(scenario, handled)
-    if (.not. handled) call dispatch_error_scenarios_table(scenario, handled)
-    if (.not. handled) call dispatch_error_scenarios_analysis(scenario, handled)
-    if (.not. handled) call dispatch_error_scenarios_numeric(scenario, handled)
-    if (.not. handled) then
-        ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
-        ! not the plain 1 that `error stop "message"` produces) -- callers
-        ! checking exit status can tell "the scenario name doesn't exist
-        ! (typo?)" apart from "the scenario ran and genuinely aborted",
-        ! which a plain `stop 1` here could not be told apart from.
-        print '(a)', "unknown scenario: "//trim(scenario)
-        stop 97
+        select case (trim(scenario))
+        case ("ok")
+            ! The control scenario: reaches no library call at all, so a nonzero exit from
+            ! this one means the harness is broken rather than the library.
+            handled = .true.
+        case default
+            handled = .false.
+        end select
+        if (.not. handled) call dispatch_error_scenarios_io(scenario, handled)
+        if (.not. handled) call dispatch_error_scenarios_table(scenario, handled)
+        if (.not. handled) call dispatch_error_scenarios_analysis(scenario, handled)
+        if (.not. handled) call dispatch_error_scenarios_numeric(scenario, handled)
+        if (.not. handled) then
+            ! Deliberately a distinctive, otherwise-unused exit code (not 0, and
+            ! not the plain 1 that `error stop "message"` produces) -- callers
+            ! checking exit status can tell "the scenario name doesn't exist
+            ! (typo?)" apart from "the scenario ran and genuinely aborted",
+            ! which a plain `stop 1` here could not be told apart from.
+            print '(a)', "unknown scenario: "//trim(scenario)
+            stop 97
+        end if
     end if
 
 end program error_scenarios

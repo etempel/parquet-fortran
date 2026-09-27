@@ -25,7 +25,7 @@
 !> `check_scenario_*` helpers and `prime_error_scenarios` stay here and are used from all four.
 module test_errors
     use testdrive, only : new_unittest, unittest_type, error_type, check, skip_test
-    use iso_fortran_env, only : real64
+    use iso_fortran_env, only : real64, int64
     !
     implicit none
     private
@@ -136,6 +136,8 @@ contains
 
         p1 = [ &
             new_unittest("control scenario exits cleanly", test_ok_scenario_exits_cleanly), &
+            new_unittest("the helper named no scenario exits 0 and writes nothing", &
+                test_no_scenario_exits_silently), &
             new_unittest("write to undeclared column aborts", test_write_undeclared_column_aborts), &
             new_unittest("writing an undeclared int64 column aborts", &
                 test_write_undeclared_column_int64_aborts), &
@@ -1061,6 +1063,40 @@ contains
         call check_scenario_exit_status(error, "ok", expect_abort=.false., &
             failure_message="control scenario 'ok' was expected to exit cleanly")
     end subroutine test_ok_scenario_exits_cleanly
+
+    !> `fpm test` runs every test target without arguments, the error_scenarios helper included,
+    !> so the helper named no scenario exits with status 0 and writes nothing to either stream.
+    !> A `stop` there is not silent: flang writes "Fortran STOP" to stderr for every STOP
+    !> statement, a bare one included. The status is the shell's `$?`, for the reasons
+    !> `run_error_scenario` gives, and a stale status file is removed first so that a command
+    !> that never ran cannot pass.
+    subroutine test_no_scenario_exits_silently(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=*), parameter :: out_file = "test_run/no_scenario_o.txt"
+        character(len=*), parameter :: err_file = "test_run/no_scenario_e.txt"
+        character(len=*), parameter :: status_file = "test_run/.no_scenario_status.txt"
+        character(len=:), allocatable :: bin
+        integer :: unit, ios, ecl_exit, ecl_cmd, status_value
+        integer(int64) :: out_size, err_size
+        logical :: have_out, have_err
+        character(len=200) :: msg
+
+        call get_error_scenarios_bin(bin)
+        call check(error, len_trim(bin) > 0, "failed to locate the error_scenarios helper binary")
+        if (allocated(error)) return
+        open(newunit=unit, file=status_file, status="old", iostat=ios)
+        if (ios == 0) close(unit, status="delete")
+        call execute_command_line(trim(bin) // " > " // out_file // " 2> " // err_file // &
+            " ; echo $? > " // status_file, wait=.true., exitstat=ecl_exit, cmdstat=ecl_cmd)
+        call read_scenario_status(status_file, status_value)
+        call check(error, status_value == 0, "the helper named no scenario must exit with status 0")
+        if (allocated(error)) return
+        inquire(file=out_file, exist=have_out, size=out_size)
+        inquire(file=err_file, exist=have_err, size=err_size)
+        write(msg, '(a, i0, a, i0, a)') "the helper named no scenario must write nothing, but wrote ", &
+            out_size, " bytes to stdout and ", err_size, " to stderr (" // err_file // ")"
+        call check(error, have_out .and. have_err .and. out_size == 0 .and. err_size == 0, trim(msg))
+    end subroutine test_no_scenario_exits_silently
 
     !> Also checks the error names both the output file and the schema's
     !> maml -- see writer_context_suffix in src/parquet_write.f90.

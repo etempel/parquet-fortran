@@ -453,6 +453,10 @@ done | sort | uniq -c | sort -rn
   `volatile` removes the rewrite's premise rather than arguing with it: the value may change
   between references, so no reciprocal can be hoisted. Cost is an L1 load per candidate, below
   this harness's noise end to end.
+- **Parentheses do not hold an order written to avoid an OVERFLOW either.** `hh*(capf/smax)` came
+  out as `(capf*hh)/smax`, which overflows at `hh` near `huge` although the quotient is at most
+  one. Store the inner result in a `volatile` local and multiply that (`hmin` in
+  `kde_fit_core`, `src/parquet_kde_fit.f90`; `test_an_unrepresentable_spread_cap_binds_nothing`).
 - **The profile matters more than the optimisation level, and the DEFAULT profile is the
   dangerous one.** fpm passes ifx NO flags at all without `--profile` (`-fpp -fPIC -qopenmp
   -free`), so ifx's own defaults -- `-O2 -fp-model=fast` -- apply; `--profile debug` passes

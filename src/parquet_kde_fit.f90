@@ -84,6 +84,8 @@ contains
         integer(int64), allocatable :: perm(:)
         integer(int64) :: nv, nnull, nnan, nout, m, i, c0, c1, rate
         real(real64) :: v, hh, adj, a_alpha, a_bmax, a_smax, one(1), infl, h_start, hcap, hmin
+        ! `volatile` so that `hmin`'s quotient is stored before `hh` multiplies it: see `hmin` below.
+        real(real64), volatile :: hunit
         integer(int64) :: ncap
         logical :: saw_nan, freq, want_adaptive, built, found, usable
 
@@ -355,9 +357,13 @@ contains
             ! `kde_adapt_set` forms `capf` as `smax` times it in units of `hh`, so dividing `smax`
             ! back out names that unit. `smax` is at least one and `capf` at most `smax`, so the
             ! quotient is at most one and the product at most `hh`; the quotient is taken first
-            ! because `hh*capf` can overflow. Read by the zone advice below, which turns a
-            ! bandwidth the caller must stay under into the `spread_max` that means the same thing.
-            hmin = hh*(self%adapt%capf/a_smax)
+            ! because `hh*capf` can overflow, and STORED first because parentheses do not stop
+            ! ifx's default `-fp-model=fast` reassociating the product into `(capf*hh)/smax`,
+            ! which is that overflow (`fortran-gotchas.md`, ifx group).
+            ! Read by the zone advice below, which turns a bandwidth the caller must stay under into
+            ! the `spread_max` that means the same thing.
+            hunit = self%adapt%capf/a_smax
+            hmin = hh*hunit
             ! The cap `rule_bandwidth` applied, from the one procedure that forms it, so that the
             ! fit can say whether it bound: a capped bandwidth IS the cap, exactly, so counting
             ! them needs no tolerance.

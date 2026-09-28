@@ -48,15 +48,15 @@ so an invalid MAML is caught immediately rather than silently parsed.
 
 Four full worked examples are checked into the repository:
 
-- [schemas/maml_example.maml](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/schemas/maml_example.maml)
+- [schemas/maml_example.maml](https://github.com/etempel/parquet-fortran/blob/main/schemas/maml_example.maml)
   — the base example used throughout these docs.
-- [schemas/maml_example2.maml](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/schemas/maml_example2.maml)
+- [schemas/maml_example2.maml](https://github.com/etempel/parquet-fortran/blob/main/schemas/maml_example2.maml)
   — adds `string` fields and `qc: min:`/`max:` bounds (both the plain-number and the quoted-operator
   forms).
-- [schemas/maml_example3.maml](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/schemas/maml_example3.maml)
+- [schemas/maml_example3.maml](https://github.com/etempel/parquet-fortran/blob/main/schemas/maml_example3.maml)
   — adds `extra: col_map:` column renaming (e.g. `id` → `uberid`, `RA` → `ra_J2000`) alongside
   `qc:`.
-- [table_types/maml_example4.maml](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/table_types/maml_example4.maml)
+- [table_types/maml_example4.maml](https://github.com/etempel/parquet-fortran/blob/main/table_types/maml_example4.maml)
   — a **table-type** schema rather than a write schema: the input
   [`tools/generate_user_table_code.py`](../utilities/generated-tables.html) turns into a named
   `parquet_table` extension. It lives under `table_types/` rather than `schemas/` for that reason,
@@ -443,4 +443,4 @@ no type. If a keyword needs to arrive typed, add it in code.
 In short: validation is strict for the known schema (`fields`, `keyarray`, `DOIs`, etc.), permissive
 for `extra:`, and intentionally shallow beyond the explicitly registered nested blocks. (If you're
 contributing to `parquet-fortran` itself and want to extend its MAML structure, see
-[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#extending-the-maml-schema).)
+[CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md#extending-the-maml-schema).)

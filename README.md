@@ -4,12 +4,10 @@
 
 # parquet-fortran
 
-[![CI results](https://gitlab.4most.eu/etempel/parquet-fortran/badges/main/pipeline.svg)](https://gitlab.4most.eu/etempel/parquet-fortran)
-[![Test coverage](https://gitlab.4most.eu/etempel/parquet-fortran/badges/main/coverage.svg)](https://gitlab.4most.eu/etempel/parquet-fortran)
-[![API documentation](https://gitlab.4most.eu/ole/docserver/-/raw/master/API-documentation-blue.svg)](https://www.4most.eu/readthedocs/etempel/parquet-fortran/main)
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue.svg)](https://etempel.github.io/parquet-fortran/index.html)
 [![Language: Fortran](https://img.shields.io/badge/Language-Fortran-734f96.svg)](https://fortran-lang.org)
 [![fpm](https://img.shields.io/badge/fpm-package-729FCF.svg)](https://fpm.fortran-lang.org/)
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/LICENSE)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](https://github.com/etempel/parquet-fortran/blob/main/LICENSE)
 
 Read and write parquet files from Fortran, with the table's schema and metadata defined in the [MAML format](https://github.com/asgr/MAML-Format) and converted to VOTable-style metadata in the parquet header. Around that sit the pieces a program reading columnar data usually needs anyway: a whole-file table container, type-erased column storage, sorting and array statistics, kernel density estimation, numerical integration, interpolation of tabulated data, distances and times in an expanding universe, function minimisation including Powell's derivative-free solvers, root finding, the discrete cosine and sine transforms, reproducible random numbers and sampling, spatial and HEALPix indexing, sky geometry and celestial coordinates, key-to-index lookup, TOML configuration files, and logging, numeric and path helpers — each importable on its own, and most of them free of any Arrow dependency.
 
@@ -192,7 +190,7 @@ Note: the exact variable set can vary by operating system and compiler toolchain
 
 For genuine multi-threaded (OpenMP) use: `parquet-fortran`'s own `fpm.toml` already declares fpm's built-in `openmp` metapackage dependency, which supplies the right compiler-specific OpenMP flag automatically for the whole build — no manual `FPM_FFLAGS` addition needed. See [Thread safety](doc/pages/operating/thread-safety.md) for the exact rule and how to also cover your own `!$omp parallel` regions.
 
-To build/test this repository itself (as opposed to depending on it from your own project), see [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md).
+To build/test this repository itself (as opposed to depending on it from your own project), see [CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md).
 
 Only fpm is a supported way to consume this library (`[install] library = false` in `fpm.toml` means there's no installed `.mod`/library artifact for a non-fpm build system to link against directly).
 
@@ -211,13 +209,13 @@ Worth knowing up front before relying on this library:
 
 ## Contributing
 
-See [CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md) for building/testing this repository itself, its error-path testing infrastructure, and a list of features that have been considered but aren't yet implemented.
+See [CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md) for building/testing this repository itself, its error-path testing infrastructure, and a list of features that have been considered but aren't yet implemented.
 
 Generated API reference documentation ([FORD](https://forddocs.readthedocs.io/)) can be built locally with `ford docs.md`, producing HTML output in `ford-doc/`.
 
 ## License
 
-BSD 3-Clause License — see [LICENSE](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/LICENSE). See [CHANGELOG.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CHANGELOG.md) for release history.
+BSD 3-Clause License — see [LICENSE](https://github.com/etempel/parquet-fortran/blob/main/LICENSE). See [CHANGELOG.md](https://github.com/etempel/parquet-fortran/blob/main/CHANGELOG.md) for release history.
 
 The `src/parquet_prima_*.f90` files are derived from [PRIMA](https://github.com/libprima/prima) (Reference Implementation for Powell's methods with Modernization and Amelioration, Zaikun Zhang) under the BSD-3-Clause licence, at commit `43863c69`, and reworked for this library. The algorithms are M. J. D. Powell's, whose original Fortran 77 solvers carry their own BSD-3-Clause licence. The BSD-3-Clause text and the full list of changes are reproduced in `src/parquet_prima_linalg.f90`'s header, and each engine file names what it came from.
 

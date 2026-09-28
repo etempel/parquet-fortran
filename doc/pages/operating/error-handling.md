@@ -114,7 +114,7 @@ line to be sure: a deliberate one always begins `parquet-fortran: `.
 
 
 If you're contributing to this library and need to add or test one of these failure paths, see
-[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md) for
+[CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md) for
 how that's done out-of-process, and for this project's own conventions around C++-level error
 reporting.
 

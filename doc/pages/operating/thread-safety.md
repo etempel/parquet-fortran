@@ -539,7 +539,7 @@ certain OpenMP is active for your own sources too, you can add the same dependen
 openmp = "*"
 ```
 (If you're developing `parquet-fortran` itself, see
-[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#testing-genuine-openmp-concurrency)
+[CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md#testing-genuine-openmp-concurrency)
 for how this project's own tests exercise real concurrency.)
 
 ## The concurrency guard
@@ -621,7 +621,7 @@ moment. `n` must be `>= 1`; values below that fail immediately with `error stop`
 
 (If you're developing `parquet-fortran` itself and want to measure how these two knobs actually
 affect write/read throughput on your own hardware, see
-[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md#other-tools-helpers)'s
+[CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md#other-tools-helpers)'s
 `bench/benchmark_threads.sh` entry.)
 ## A note on functions returning `character(len=:), allocatable`
 

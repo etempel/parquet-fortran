@@ -178,7 +178,7 @@ type, never your project's own schemas; your generated `parquet_maml` is what ho
 module has a generator of its own, `tools/generate_parquet_maml_base.sh`, which is internal to the
 library and not the script described here. If you're contributing to `parquet-fortran` itself and
 need to regenerate its built-in schema module, see
-[CONTRIBUTING.md](https://gitlab.4most.eu/etempel/parquet-fortran/-/blob/main/CONTRIBUTING.md).)
+[CONTRIBUTING.md](https://github.com/etempel/parquet-fortran/blob/main/CONTRIBUTING.md).)
 
 ## A second generator, for table types
 

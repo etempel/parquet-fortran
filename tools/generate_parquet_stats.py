@@ -134,16 +134,17 @@ module parquet_stats
     ! `private`, so nothing is re-exported, and the later phases reach `pf_argsort`,
     ! `pf_nth_element` and `pf_sort_threads` through it.
     use parquet_sorting
-    ! **The second tier edge, and the only one that adds a file to the footprint.**
+    ! **The second tier edge, and the only one that adds files to the footprint.**
     ! `pf_normal_scores` maps a rank to a normal quantile, which is `Phi**(-1)`, and the only
     ! alternative to importing it is a second `Phi**(-1)` in this module. Two spellings of one
     ! number are costly when the number is a single CONSTANT; a duplicated kernel is that defect
     ! with far more surface.
     !
     ! **`parquet_utils` is a LEAF** -- it imports the intrinsic `iso_fortran_env` and
-    ! `ieee_arithmetic` and nothing else, no module of this library -- so the edge costs
-    ! `tools/module_footprints.txt` exactly one file and adds nothing beneath it, and
-    ! `check_parquet_stats_stays_arrow_free` is untouched because no Arrow is reachable from it.
+    ! `ieee_arithmetic` and, of this library, only the leaf of parameters `parquet_constants` --
+    ! so the edge costs `tools/module_footprints.txt` exactly two files, those two, and adds
+    ! nothing beneath them, and `check_parquet_stats_stays_arrow_free` is untouched because no
+    ! Arrow is reachable from it.
     ! `only:` rather than bare, unlike `parquet_sorting` above: three names are needed, and a
     ! consumer who wants the normal family itself should say `use parquet_utils` and get all four
     ! of them rather than the specifics this module happens to need.

@@ -4,8 +4,8 @@ title: Transforms: the discrete cosine and sine transforms
 
 `parquet_transform` computes the discrete cosine and sine transforms of a `real64` sequence whose
 length is a power of two, and their inverses, in the convention scipy uses. It reaches no reader, no
-writer and no setting: a program can `use parquet_transform` on its own, compiling two Fortran files
-and nothing of the Arrow stack. `use parquet` brings it in too, so nothing here needs a second
+writer and no setting: a program can `use parquet_transform` on its own, compiling three Fortran
+files and nothing of the Arrow stack. `use parquet` brings it in too, so nothing here needs a second
 import. See [Choosing a module](../operating/choosing-a-module.html) for what each entry module
 costs.
 

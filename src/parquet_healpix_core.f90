@@ -228,7 +228,7 @@ contains
         z = hpx_ring_z(nside, i)
         ! One expression for all three regions: a ring's centres are equally spaced in longitude,
         ! offset by half a step when the ring is shifted.
-        phi = (real(j, real64) + 0.5_real64 * real(shifted, real64)) * (hpx_twopi / real(nr, real64))
+        phi = (real(j, real64) + 0.5_real64 * real(shifted, real64)) * (PF_TWOPI / real(nr, real64))
     end procedure hpx_pix2zphi_ring
 
     module procedure hpx_ringij2nest
@@ -485,7 +485,7 @@ contains
         ds = -dz * (zv + zc) / (sv + sc)
         ! Chord, then 2*asin(chord/2). The half-angle sine keeps the longitude term accurate at
         ! large nside where dphi itself underflows toward zero.
-        sh = sin(0.5_real64 * hpx_pi / (4.0_real64 * rn))
+        sh = sin(0.5_real64 * PF_PI / (4.0_real64 * rn))
         chord2 = ds * ds + 4.0_real64 * sc * sv * sh * sh + dz * dz
         r = 2.0_real64 * asin(min(1.0_real64, sqrt(chord2) * 0.5_real64))
     end procedure hpx_max_pixrad
@@ -522,7 +522,7 @@ contains
         ! interval, and `modulo` still backs it up beyond that, so the result is unchanged for every
         ! input rather than for the ones expected here. Both steps are exact: `tt - 4` is exact by
         ! Sterbenz's lemma for `tt` in [4, 8), and `tt + 4` is the single rounding `modulo` performs.
-        tt = phi / hpx_halfpi
+        tt = phi / PF_HALFPI
         if (tt >= 4.0_real64) then
             tt = tt - 4.0_real64
             if (tt >= 4.0_real64) tt = modulo(tt, 4.0_real64)
@@ -662,7 +662,7 @@ contains
         ! interval, and `modulo` still backs it up beyond that, so the result is unchanged for every
         ! input rather than for the ones expected here. Both steps are exact: `tt - 4` is exact by
         ! Sterbenz's lemma for `tt` in [4, 8), and `tt + 4` is the single rounding `modulo` performs.
-        tt = phi / hpx_halfpi
+        tt = phi / PF_HALFPI
         if (tt >= 4.0_real64) then
             tt = tt - 4.0_real64
             if (tt >= 4.0_real64) tt = modulo(tt, 4.0_real64)
@@ -992,7 +992,7 @@ contains
         tmp = real(JPLL(face), real64) * nr + x - y
         if (tmp < 0.0_real64) tmp = tmp + 8.0_real64
         if (tmp >= 8.0_real64) tmp = tmp - 8.0_real64
-        phi = 0.5_real64 * hpx_halfpi * tmp / nr
+        phi = 0.5_real64 * PF_HALFPI * tmp / nr
         vec(1) = st * cos(phi)
         vec(2) = st * sin(phi)
         vec(3) = z

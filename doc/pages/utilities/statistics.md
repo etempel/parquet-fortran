@@ -1516,13 +1516,13 @@ with — but it is the one thing to check when moving a call between the two.
 
 ## What it costs to import
 
-`use parquet_stats` compiles this module, `parquet_sorting`'s files and the leaf `parquet_utils` —
-29 of this library's Fortran files — and its Fortran graph never reaches the Parquet C++ bindings.
+`use parquet_stats` compiles this module, `parquet_sorting`'s files and the leaf `parquet_utils`
+with the constants it reads — 30 of this library's Fortran files — and its Fortran graph never reaches the Parquet C++ bindings.
 That is narrower than "no C++": `link` is a package-level key in `fpm.toml`, so the C++ wrapper is
 still compiled and Arrow still linked whichever module you import. No `use` statement makes the
 *package* Arrow-free. The statistics that need an order take it from `pf_argsort` and
 `pf_nth_element` rather than carrying a second sorting implementation, and `pf_normal_scores` takes
 `Phi⁻¹` from `pf_probit` rather than carrying a second one of those. `parquet_utils` is a leaf — it
-imports only the intrinsic `iso_fortran_env` and `ieee_arithmetic` — so that edge adds one file and
-nothing beneath it. See [Choosing a module](../operating/choosing-a-module.html) for the measured
+imports only the intrinsic `iso_fortran_env` and `ieee_arithmetic` and the leaf of constants
+`parquet_constants` — so that edge adds two files and nothing beneath them. See [Choosing a module](../operating/choosing-a-module.html) for the measured
 figure and for what every other import costs.

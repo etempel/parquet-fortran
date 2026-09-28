@@ -461,7 +461,7 @@ contains
         end do
         call pf_dct(r, lam, context="the binned method's kernel filter")
         do j = 1, nl
-            lam(j) = lam(j)/(2.0_real64*cos(KDE_PI*real(j - 1, real64)/(2.0_real64*real(nl, real64))))
+            lam(j) = lam(j)/(2.0_real64*cos(PF_PI*real(j - 1, real64)/(2.0_real64*real(nl, real64))))
         end do
         ! One at zero frequency, whatever the sampled kernel's own mass is. A bandwidth far narrower
         ! than a cell has a mass far above one, and dividing by it leaves a filter that is a unit at
@@ -503,7 +503,7 @@ contains
         ! frequency `j`: the multiplier at cosine position `j` is the sine coefficient one below.
         lam(1) = 0.0_real64
         do j = 2, nl
-            lam(j) = sc(j - 1)/(2.0_real64*cos(KDE_PI*real(j - 1, real64)/(2.0_real64*real(nl, real64))))
+            lam(j) = sc(j - 1)/(2.0_real64*cos(PF_PI*real(j - 1, real64)/(2.0_real64*real(nl, real64))))
             lam(j) = lam(j)/d0
         end do
 

@@ -10,6 +10,7 @@ submodule (parquet_cosmology) parquet_cosmology_eval
 
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf
     use iso_fortran_env, only : int64
+    use parquet_constants, only : PF_RAD_PER_ARCMIN, PF_RAD_PER_ARCSEC
 
     implicit none
 
@@ -66,13 +67,6 @@ submodule (parquet_cosmology) parquet_cosmology_eval
         !! panels still span the whole interval when it binds -- they are laid as fractions of it
         !! -- so a capped rule is less accurate and never wrong. It first binds at about
         !! `Ogamma0 = 1e-200`, which no `Tcmb0` anyone writes reaches.
-
-    real(real64), parameter :: PFC_PI = 3.141592653589793_real64
-        !! pi, for the volume and the angular scales.
-    real(real64), parameter :: PFC_RAD_PER_ARCMIN = PFC_PI / 10800.0_real64
-        !! One arcminute in radians.
-    real(real64), parameter :: PFC_RAD_PER_ARCSEC = PFC_PI / 648000.0_real64
-        !! One arcsecond in radians.
 
     integer, parameter :: PFC_SOLVE_STEPS = 80
         !! The bracketed Newton's iteration cap. It converges in a handful; the cap only bounds a
@@ -145,7 +139,7 @@ contains
         total = real(d%n_massless, real64)
         do i = 1, d%n_nu
             if (p%m_nu(i) > 0.0_real64) then
-                y = p%m_nu(i) / (pfc_k_b_ev * d%tnu0)
+                y = p%m_nu(i) / (PF_K_B_EV_K * d%tnu0)
                 total = total + (1.0_real64 + (pfc_komatsu_c * y / x) ** pfc_komatsu_p) ** pfc_komatsu_invp
             end if
         end do
@@ -261,7 +255,7 @@ contains
         total = 0.0_real64
         do i = 1, d%n_nu
             if (p%m_nu(i) > 0.0_real64) then
-                y = p%m_nu(i) / (pfc_k_b_ev * d%tnu0)
+                y = p%m_nu(i) / (PF_K_B_EV_K * d%tnu0)
                 u = (pfc_komatsu_c * y / x) ** pfc_komatsu_p
                 total = total - u * (1.0_real64 + u) ** (pfc_komatsu_invp - 1.0_real64)
             end if
@@ -1020,24 +1014,24 @@ contains
         ! where the cube is zero and IEEE_OVERFLOW where it is subnormal, at `z = 0` and near it
         ! (`fortran-gotchas.md`, flang). The product rounds exactly as `dm ** 3` does.
         if (this%flat) then
-            v = 4.0_real64 * PFC_PI / 3.0_real64 * (dm * dm * dm)
+            v = 4.0_real64 * PF_PI / 3.0_real64 * (dm * dm * dm)
             return
         end if
         q = dm / this%d%dh
         u = this%d%ok0 * q * q
         if (abs(u) < PFC_VOLUME_SERIES) then
-            v = 4.0_real64 * PFC_PI / 3.0_real64 * (dm * dm * dm) &
+            v = 4.0_real64 * PF_PI / 3.0_real64 * (dm * dm * dm) &
                 * (1.0_real64 + u * (PFC_VOL_C1 + u * (PFC_VOL_C2 + u * PFC_VOL_C3)))
             return
         end if
         root = sqrt(max(1.0_real64 + u, 0.0_real64))
         if (this%d%ok0 > 0.0_real64) then
             s = sqrt(this%d%ok0)
-            v = 4.0_real64 * PFC_PI * this%d%dh ** 3 / (2.0_real64 * this%d%ok0) * (q * root - asinh(s * q) / s)
+            v = 4.0_real64 * PF_PI * this%d%dh ** 3 / (2.0_real64 * this%d%ok0) * (q * root - asinh(s * q) / s)
         else
             s = sqrt(-this%d%ok0)
             ! `s q` is a sine by construction, so the clamp only absorbs rounding at the antipode.
-            v = 4.0_real64 * PFC_PI * this%d%dh ** 3 / (2.0_real64 * this%d%ok0) &
+            v = 4.0_real64 * PF_PI * this%d%dh ** 3 / (2.0_real64 * this%d%ok0) &
                 * (q * root - asin(max(-1.0_real64, min(1.0_real64, s * q))) / s)
         end if
 
@@ -1405,7 +1399,7 @@ contains
         if (zeta /= zeta) then
             s = zeta
         else
-            s = 1000.0_real64 * (dm_of_dc(this, dc_at(this, zeta)) / exp(zeta)) * PFC_RAD_PER_ARCMIN
+            s = 1000.0_real64 * (dm_of_dc(this, dc_at(this, zeta)) / exp(zeta)) * PF_RAD_PER_ARCMIN
         end if
 
     end procedure cosmology_kpc_proper
@@ -1419,7 +1413,7 @@ contains
         if (zeta /= zeta) then
             s = zeta
         else
-            s = 1000.0_real64 * dm_of_dc(this, dc_at(this, zeta)) * PFC_RAD_PER_ARCMIN
+            s = 1000.0_real64 * dm_of_dc(this, dc_at(this, zeta)) * PF_RAD_PER_ARCMIN
         end if
 
     end procedure cosmology_kpc_comoving
@@ -1440,7 +1434,7 @@ contains
         else if (da == 0.0_real64) then
             s = ieee_value(s, ieee_positive_inf)
         else
-            s = 1.0_real64 / (1000.0_real64 * da * PFC_RAD_PER_ARCSEC)
+            s = 1.0_real64 / (1000.0_real64 * da * PF_RAD_PER_ARCSEC)
         end if
 
     end procedure cosmology_arcsec_proper
@@ -1461,7 +1455,7 @@ contains
         else if (dm == 0.0_real64) then
             s = ieee_value(s, ieee_positive_inf)
         else
-            s = 1.0_real64 / (1000.0_real64 * dm * PFC_RAD_PER_ARCSEC)
+            s = 1.0_real64 / (1000.0_real64 * dm * PF_RAD_PER_ARCSEC)
         end if
 
     end procedure cosmology_arcsec_comoving
@@ -1604,7 +1598,7 @@ contains
         lead = pfc_komatsu_a * (this%p%neff / real(this%d%n_nu, real64))
         do i = 1, this%d%n_nu
             if (this%p%m_nu(i) > 0.0_real64) then
-                y = this%p%m_nu(i) / (pfc_k_b_ev * this%d%tnu0)
+                y = this%p%m_nu(i) / (PF_K_B_EV_K * this%d%tnu0)
                 u = (pfc_komatsu_c * y / x) ** pfc_komatsu_p
                 v(i) = og * lead * (1.0_real64 + u) ** pfc_komatsu_invp
             else

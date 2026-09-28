@@ -157,17 +157,17 @@ contains
             phi0 = 0.0_real64
         else
             phi0 = atan2(v0(2), v0(1))
-            if (phi0 < 0.0_real64) phi0 = phi0 + hpx_twopi
+            if (phi0 < 0.0_real64) phi0 = phi0 + PF_TWOPI
         end if
 
-        r = min(radius, hpx_pi)
+        r = min(radius, PF_PI)
         ! Inclusive mode is the exact walk at an enlarged radius, and the contract follows by
         ! construction rather than by an argument about the enumeration: a pixel overlapping the
         ! disc holds a point within r of the centre, that point is within max_pixrad of its own
         ! pixel's centre, so that centre is within r + max_pixrad and the enlarged exact walk
         ! returns it. The published upper bound is the same quantity, so both halves of the
         ! contract are the one radius below.
-        if (inclusive) r = min(r + hpx_max_pixrad(nside), hpx_pi)
+        if (inclusive) r = min(r + hpx_max_pixrad(nside), PF_PI)
         cosr = cos(r)
 
         ! ---- The band of rings the disc can reach ----
@@ -242,7 +242,7 @@ contains
             ! different matter and stays an exact division, because the rule itself is written in
             ! terms of it.
             if (nr /= nr_prev) then
-                w = hpx_twopi / real(nr, real64)
+                w = PF_TWOPI / real(nr, real64)
                 winv = real(nr, real64) * hpx_inv_twopi
                 nr_prev = nr
             end if
@@ -328,11 +328,11 @@ contains
             ! suffices; the subtract is exact by Sterbenz's lemma and the add is the same single
             ! rounding `modulo` itself performs. The `modulo` fallbacks keep the equivalence
             ! unconditional rather than resting on that bound.
-            d = d + hpx_pi
+            d = d + PF_PI
             if (d < 0.0_real64) then
-                d = d + hpx_twopi
-                if (d < 0.0_real64) d = modulo(d, hpx_twopi)
-            else if (d >= hpx_twopi) then
+                d = d + PF_TWOPI
+                if (d < 0.0_real64) d = modulo(d, PF_TWOPI)
+            else if (d >= PF_TWOPI) then
                 ! UNREACHABLE, and kept so that the wrap is unconditional rather than resting on a
                 ! bound. `d` here is `(j + half)*w - phi0 + pi` for a `j` the trim tests, and the
                 ! largest such `j` is the arc's own `jhi = ceiling(B) + 1`, for
@@ -347,11 +347,11 @@ contains
                 ! evaluations over nside 1 .. 64, 61 latitudes, 41 longitudes and 400 radii in both
                 ! modes: the largest `d` reached was 6.2706 against `2*pi` = 6.2832.
                 ! GCOVR_EXCL_START
-                d = d - hpx_twopi
-                if (d >= hpx_twopi) d = modulo(d, hpx_twopi)
+                d = d - PF_TWOPI
+                if (d >= PF_TWOPI) d = modulo(d, PF_TWOPI)
                 ! GCOVR_EXCL_STOP
             end if
-            d = d - hpx_pi
+            d = d - PF_PI
             inside = abs(d) <= dphi
         end function in_disc
 
@@ -552,9 +552,9 @@ contains
         ! refused -- and would otherwise reach `sin(infinity)`: a NaN, and IEEE_INVALID raised,
         ! which ends a NAG process. The cap is the whole sphere either way, so the answer is
         ! exactly `npix` and no arithmetic is needed. (The negated spelling is belt-and-braces
-        ! against a NaN `t`; `t > hpx_pi` behaves identically for every input reachable today,
+        ! against a NaN `t`; `t > PF_PI` behaves identically for every input reachable today,
         ! confirmed by mutation.)
-        if (.not. (t < hpx_pi)) then
+        if (.not. (t < PF_PI)) then
             nmax = npix
             return
         end if

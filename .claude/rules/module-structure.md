@@ -25,8 +25,8 @@ parquet_version                 (module — LEAF: cversion and parquet_get_versi
 parquet_strings / parquet_temporal            (element domains; Arrow-free)
 parquet_columns                 (module — parquet_column + the abstract container base; GENERATED spec)
 parquet_list / parquet_struct / parquet_map   (container domains; Arrow-free)
-parquet_random                  (module — LEAF generator + distributions; reaches parquet_expkey and
-                                 parquet_ziggurat only)
+parquet_random                  (module — LEAF generator + distributions; reaches parquet_expkey,
+                                 parquet_ziggurat and parquet_constants only)
 parquet_argsort                 (module — ARGSORT TIER: pf_argsort over intrinsic types, pf_sort_threads,
                                  the sorting knobs; reaches settings_base only)
 ├─ parquet_argsort_engine       (HAND-WRITTEN comparators + radix/merge/counting)
@@ -35,10 +35,12 @@ parquet_sorting                 (module — FULL sorting tier over the argsort t
 parquet_sorting_oracle          (module — TEST-ONLY C++ sort engine behind procedure pointers)
 parquet_sampling                (module — permutations/subsets/resampling/weighted draws)
 parquet_sphere                  (module — sky polygons, pixel and mask samplers, RA/Dec geometry; reaches
-                                 parquet_random, parquet_healpix and parquet_utils only)
+                                 parquet_random, parquet_healpix, parquet_utils and parquet_constants only)
 ├─ parquet_sphere_geom          (conversions, offsets, the Fibonacci grid, the shared helpers)
 ├─ parquet_sphere_polygon       (pf_sky_polygon)
 └─ parquet_sphere_pixel         (the pixel and mask samplers)
+parquet_constants               (module — LEAF of parameters: pi, the angle factors and the physical
+                                 constants, each named with its unit; imports iso_fortran_env only)
 parquet_spatial / parquet_healpix / parquet_index / parquet_stats / parquet_utils / parquet_logging
                                 (Arrow-free utility tiers, each with submodules)
 parquet_toml                    (module — pf_toml; the only module reaching a third-party package)
@@ -137,8 +139,8 @@ parquet_wrapper.cpp             (the single C++ translation unit)
 
 ## `parquet_random` is a LEAF; `parquet_sampling` takes anything more
 
-- `src/parquet_random.f90` reaches `parquet_expkey`, `parquet_ziggurat` and compiler-supplied
-  modules (`iso_fortran_env`, `iso_c_binding`, `ieee_arithmetic`, `omp_lib`) only.
+- `src/parquet_random.f90` reaches `parquet_expkey`, `parquet_ziggurat`, `parquet_constants` and
+  compiler-supplied modules (`iso_fortran_env`, `iso_c_binding`, `ieee_arithmetic`, `omp_lib`) only.
   `check_parquet_random_stays_leaf` walks the closure and also requires every reached module to be
   in the `SRC` list of every `tools/*.sh` that compiles `parquet_random` (derived by glob).
   `tools/check_exp_key.sh` compiles `parquet_expkey.f90` ALONE and must never gain a
@@ -152,6 +154,17 @@ parquet_wrapper.cpp             (the single C++ translation unit)
 - `tools/check_random_kernels.sh` and `tools/check_exp_key.sh` verify the compile-time forks; run
   both under `FC=nagfor` as well — the only run covering the `PF_SAFE64` arm as a shipped build, and
   the only one where `-Wc,-march=native` reaches the FMA class.
+
+## `parquet_constants`
+
+- A mathematical or physical constant, a unit or an astronomical convention that a procedure uses
+  is a public `parameter` of `src/parquet_constants.f90`, never a private copy in the module using
+  it (`check_constants_have_one_home`); what may join, and what stays with its procedure, is the
+  module's doc-comment. A new one is pinned bit for bit in `test/test_constants.f90` and shares
+  its name with no other public name (`check_constants_are_pinned`,
+  `check_constants_names_are_unique`).
+- The module stays a leaf of parameters importing `iso_fortran_env` alone
+  (`check_parquet_constants_stays_leaf`), which is what lets the leaf tiers import it.
 
 ## `parquet_random` word spaces
 

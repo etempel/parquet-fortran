@@ -42,7 +42,6 @@ contains
 
     !> The cost model's cell size.
     module procedure spatial_model_cell
-        real(real64), parameter :: four_thirds_pi = 4.18879020478639098_real64
         real(real64) :: nr
 
         if (.not. (rho > 0.0_real64)) then
@@ -52,7 +51,7 @@ contains
         ! h^(1+ndim) = kappa^4 * r_eff / ((4/3) pi rho). The exponent carries the dimension --
         ! 1/4 in 3D, 1/3 in 2D, 1/2 in 1D -- and falls out of the SAME formula because `rho` is a
         ! density in the cloud's own dimension. There is no 2D branch anywhere for that reason.
-        nr = spatial_kappa ** 4 * r_eff / (four_thirds_pi * rho)
+        nr = spatial_kappa ** 4 * r_eff / (spatial_four_thirds_pi * rho)
         h = nr ** (1.0_real64 / real(1 + ndim, kind=real64))
         if (.not. (h > 0.0_real64)) h = r_eff
     end procedure spatial_model_cell

@@ -21,8 +21,9 @@ Usage:  tools/generate_cosmology_reference.py [--check] [--self-test] [--verify-
 
   --check          regenerate into memory and compare with the committed file; exit 1 on any
                    difference. Needs `mpmath` and nothing else, so CI's lint job can run it.
-  --self-test      re-derive the published anchors -- the constants and the named-cosmology table
-                   against src/parquet_cosmology.f90, the twenty Gauss-Legendre abscissae and
+  --self-test      re-derive the published anchors -- the physical constants against
+                   src/parquet_constants.f90, the model's coefficients and the named-cosmology
+                   table against src/parquet_cosmology.f90, the twenty Gauss-Legendre abscissae and
                    weights against src/parquet_cosmology_eval.f90, `Planck18`'s six derived values
                    including the `Ogamma0` that catches the SI-versus-km/s slip, the three analytic
                    universes against their closed forms, and every emitted literal's round trip --
@@ -105,6 +106,7 @@ except ImportError:  # pragma: no cover - reported, not raised
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUT_PATH = REPO_ROOT / "test" / "test_cosmology_vectors.f90"
 SPEC_PATH = REPO_ROOT / "src" / "parquet_cosmology.f90"
+CONSTANTS_PATH = REPO_ROOT / "src" / "parquet_constants.f90"
 EVAL_PATH = REPO_ROOT / "src" / "parquet_cosmology_eval.f90"
 
 #: Working precision. A double needs 17 digits; 30 leaves thirteen of margin, and the emitted
@@ -149,8 +151,9 @@ def bits64(x):
 
 
 # ---------------------------------------------------------------------------------------------
-# The constants. Each is the value the module carries, and
-# `--self-test` holds the module's literal to the double nearest the value here.
+# The constants. The physical ones are `parquet_constants`', the fit coefficients after them
+# `parquet_cosmology`'s own, and `--self-test` holds each module literal to the double nearest the
+# value here.
 # ---------------------------------------------------------------------------------------------
 
 C_KMS = mp.mpf("299792.458")                    # exact by definition
@@ -180,18 +183,23 @@ AUB_P_CB = mp.mpf("0.25351")                    # the exponent on Ocb h^2
 AUB_P_B = mp.mpf("0.12807")                     # the exponent on Ob h^2
 NU_MASS_EV = mp.mpf("93.14")                    # SUM m_nu / 93.14 eV is Onu h^2
 
-#: The named constants as the Fortran spec spells them, for `--self-test`.
+#: The physical constants the model uses, as `src/parquet_constants.f90` spells them, for
+#: `--self-test`.
+LIBRARY_CONSTANTS = {
+    "PF_C_KMS": C_KMS,
+    "PF_C_MS": C_MS,
+    "PF_G_SI": G_SI,
+    "PF_SIGMA_SB_SI": SIGMA_SB,
+    "PF_K_B_EV_K": K_B_EV,
+    "PF_MPC_KM": MPC_KM,
+    "PF_MPC_M": MPC_M,
+    "PF_GYR_S": GYR_S,
+    "PF_TNU_OVER_TGAMMA": NU_TEMP_RATIO,
+    "PF_GM_SUN_SI": GM_SUN,
+}
+
+#: The model's own coefficients as the Fortran spec spells them, for `--self-test`.
 SPEC_CONSTANTS = {
-    "pfc_c_kms": C_KMS,
-    "pfc_c_ms": C_MS,
-    "pfc_g_si": G_SI,
-    "pfc_sigma_sb": SIGMA_SB,
-    "pfc_k_b_ev": K_B_EV,
-    "pfc_mpc_km": MPC_KM,
-    "pfc_mpc_m": MPC_M,
-    "pfc_gyr_s": GYR_S,
-    "pfc_nu_temp_ratio": NU_TEMP_RATIO,
-    "pfc_gm_sun": GM_SUN,
     "pfc_komatsu_a": KOM_A,
     "pfc_komatsu_p": KOM_B,
     "pfc_komatsu_invp": KOM_INVP,
@@ -1266,7 +1274,16 @@ def self_test():
     for m, g in zip(ms, map_cases(_growth_of, ms)):
         m._growth_cache = dict(zip([mp.log(1 + as_double(z)) for z in REDSHIFTS], g[0]))
 
-    # -- the constants and the named table, against the spec ---------------------------------
+    # -- the physical constants, against the library's one home for them --------------------
+    if CONSTANTS_PATH.exists():
+        src = CONSTANTS_PATH.read_text()
+        for name, value in LIBRARY_CONSTANTS.items():
+            exact(source_real(src, name), value, "%s in %s" % (name, CONSTANTS_PATH.name))
+    else:
+        bad.append("%s does not exist: the physical constants the model uses are unpinned"
+                   % CONSTANTS_PATH.relative_to(REPO_ROOT))
+
+    # -- the model's coefficients and the named table, against the spec ----------------------
     if SPEC_PATH.exists():
         src = SPEC_PATH.read_text()
         for name, value in SPEC_CONSTANTS.items():

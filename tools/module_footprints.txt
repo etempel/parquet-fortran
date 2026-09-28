@@ -30,7 +30,12 @@ parquet_version.f90
 parquet_wrapper.cpp
 
 [parquet_utils]
+parquet_constants.f90
 parquet_utils.f90
+parquet_wrapper.cpp
+
+[parquet_constants]
+parquet_constants.f90
 parquet_wrapper.cpp
 
 [parquet_temporal]
@@ -43,6 +48,7 @@ parquet_strings.f90
 parquet_wrapper.cpp
 
 [parquet_random]
+parquet_constants.f90
 parquet_expkey.f90
 parquet_random.f90
 parquet_wrapper.cpp
@@ -59,6 +65,7 @@ parquet_wrapper.cpp
 parquet_argsort.f90
 parquet_argsort_engine.f90
 parquet_argsort_kernel.f90
+parquet_constants.f90
 parquet_index.f90
 parquet_index_hash.f90
 parquet_index_map.f90
@@ -75,6 +82,7 @@ parquet_wrapper.cpp
 parquet_argsort.f90
 parquet_argsort_engine.f90
 parquet_argsort_kernel.f90
+parquet_constants.f90
 parquet_expkey.f90
 parquet_random.f90
 parquet_sampling.f90
@@ -86,6 +94,7 @@ parquet_ziggurat.f90
 parquet_argsort.f90
 parquet_argsort_engine.f90
 parquet_argsort_kernel.f90
+parquet_constants.f90
 parquet_healpix.f90
 parquet_healpix_arith.f90
 parquet_healpix_bulk.f90
@@ -101,6 +110,7 @@ parquet_spatial_tune.f90
 parquet_wrapper.cpp
 
 [parquet_healpix]
+parquet_constants.f90
 parquet_healpix.f90
 parquet_healpix_arith.f90
 parquet_healpix_bulk.f90
@@ -111,6 +121,7 @@ parquet_settings_base.f90
 parquet_wrapper.cpp
 
 [parquet_sphere]
+parquet_constants.f90
 parquet_expkey.f90
 parquet_healpix.f90
 parquet_healpix_arith.f90
@@ -129,6 +140,7 @@ parquet_wrapper.cpp
 parquet_ziggurat.f90
 
 [parquet_skycoord]
+parquet_constants.f90
 parquet_skycoord.f90
 parquet_skycoord_geom.f90
 parquet_skycoord_object.f90
@@ -228,6 +240,7 @@ parquet_columns_string.f90
 parquet_columns_structural.f90
 parquet_columns_util.f90
 parquet_columns_validity.f90
+parquet_constants.f90
 parquet_settings_base.f90
 parquet_sorting.f90
 parquet_sorting_argsort.f90
@@ -260,6 +273,7 @@ parquet_columns_string.f90
 parquet_columns_structural.f90
 parquet_columns_util.f90
 parquet_columns_validity.f90
+parquet_constants.f90
 parquet_expkey.f90
 parquet_kde.f90
 parquet_kde_core.f90
@@ -306,6 +320,7 @@ parquet_interpolate_core.f90
 parquet_wrapper.cpp
 
 [parquet_cosmology]
+parquet_constants.f90
 parquet_cosmology.f90
 parquet_cosmology_build.f90
 parquet_cosmology_eval.f90
@@ -320,6 +335,7 @@ parquet_utils.f90
 parquet_wrapper.cpp
 
 [parquet_cosmology_config]
+parquet_constants.f90
 parquet_cosmology.f90
 parquet_cosmology_build.f90
 parquet_cosmology_config.f90
@@ -340,6 +356,7 @@ parquet_wrapper.cpp
 parquet_argsort.f90
 parquet_argsort_engine.f90
 parquet_argsort_kernel.f90
+parquet_constants.f90
 parquet_expkey.f90
 parquet_optimize.f90
 parquet_optimize_de.f90
@@ -357,6 +374,7 @@ parquet_ziggurat.f90
 parquet_argsort.f90
 parquet_argsort_engine.f90
 parquet_argsort_kernel.f90
+parquet_constants.f90
 parquet_expkey.f90
 parquet_optimize.f90
 parquet_optimize_de.f90
@@ -386,6 +404,7 @@ parquet_root_solve.f90
 parquet_wrapper.cpp
 
 [parquet_transform]
+parquet_constants.f90
 parquet_transform.f90
 parquet_transform_core.f90
 parquet_wrapper.cpp
@@ -417,6 +436,7 @@ parquet_columns_string.f90
 parquet_columns_structural.f90
 parquet_columns_util.f90
 parquet_columns_validity.f90
+parquet_constants.f90
 parquet_core.f90
 parquet_expkey.f90
 parquet_index.f90
@@ -483,6 +503,7 @@ parquet_columns_string.f90
 parquet_columns_structural.f90
 parquet_columns_util.f90
 parquet_columns_validity.f90
+parquet_constants.f90
 parquet_core.f90
 parquet_expkey.f90
 parquet_index.f90
@@ -586,6 +607,7 @@ parquet_columns_string.f90
 parquet_columns_structural.f90
 parquet_columns_util.f90
 parquet_columns_validity.f90
+parquet_constants.f90
 parquet_core.f90
 parquet_cosmology.f90
 parquet_cosmology_build.f90

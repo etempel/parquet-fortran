@@ -14,9 +14,9 @@
 !! BSD-3-Clause while `libhealpix` is GPL-2.0.
 !!
 !! **This module is Arrow-free by construction and that is the point of its tier.** It reaches
-!! `iso_fortran_env`, `ieee_arithmetic` and `parquet_settings_base`, and nothing else, so
-!! `use parquet_healpix` in a downstream project compiles seven Fortran files rather than the
-!! sixty-odd the reader/writer stack costs. `check_parquet_healpix_stays_arrow_free`
+!! `iso_fortran_env`, `ieee_arithmetic`, `parquet_settings_base` and `parquet_constants`, and
+!! nothing else, so `use parquet_healpix` in a downstream project compiles eight Fortran files
+!! rather than the sixty-odd the reader/writer stack costs. `check_parquet_healpix_stays_arrow_free`
 !! (tools/check_source_conventions.py) and `tools/module_footprints.txt` are what keep that true --
 !! a `use` line added here can silently multiply what every consumer compiles, and no test can see
 !! it happen.
@@ -44,6 +44,7 @@ module parquet_healpix
         parquet_set_message_stream, parquet_get_message_stream, &
         parquet_clamp_to_affinity, parquet_auto_thread_count, &
         parquet_set_healpix_threads, parquet_get_healpix_threads, cfg_healpix_threads
+    use parquet_constants, only: PF_PI, PF_HALFPI, PF_TWOPI, PF_RAD_PER_DEG, PF_DEG_PER_RAD
     implicit none
     private
 
@@ -157,25 +158,15 @@ module parquet_healpix
 
     ! ---- Mathematical constants ----
 
-    !> pi.
-    real(real64), parameter :: hpx_pi = 3.141592653589793238462643_real64
-    !> pi/2.
-    real(real64), parameter :: hpx_halfpi = 0.5_real64 * hpx_pi
-    !> 2*pi.
-    real(real64), parameter :: hpx_twopi = 2.0_real64 * hpx_pi
-    !> 1 / (2*pi), for turning a division by `hpx_twopi` into a multiplication.
-    real(real64), parameter :: hpx_inv_twopi = 1.0_real64 / hpx_twopi
+    !> 1 / (2*pi), for turning a division by `PF_TWOPI` into a multiplication.
+    real(real64), parameter :: hpx_inv_twopi = 1.0_real64 / PF_TWOPI
     !> The |z| at which the polar caps meet the equatorial belt.
     real(real64), parameter :: hpx_twothird = 2.0_real64 / 3.0_real64
     !> `sqrt(pi/3)`, the constant in `pf_nside2resol`.
     !!
     !! A compile-time constant so that the resolution costs one division and contains no `sqrt` of
     !! a runtime value -- one less thing to reason about for the module's IEEE promise.
-    real(real64), parameter :: hpx_sqrt_pi_third = 1.023326707946488151_real64
-    !> Radians per degree, for `pf_healpix_grid`'s RA/Dec layer.
-    real(real64), parameter :: hpx_deg2rad = hpx_pi / 180.0_real64
-    !> Degrees per radian, the exact reciprocal pairing of `hpx_deg2rad`.
-    real(real64), parameter :: hpx_rad2deg = 180.0_real64 / hpx_pi
+    real(real64), parameter :: hpx_sqrt_pi_third = 1.0233267079464884885_real64
 
     !> What every real-valued `pf_healpix_grid` binding returns for a grid `%init` has never run on.
     !!

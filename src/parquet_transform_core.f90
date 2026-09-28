@@ -54,13 +54,12 @@
 submodule (parquet_transform) parquet_transform_core
 
     use iso_fortran_env, only : int64
+    ! A full turn for the FFT's twiddle factors `exp(-2*pi*i*q/n)`, and a quarter turn: the DCT's
+    ! twiddle angle `pi*k/(2n)` is formed as `(k/n)*PF_HALFPI`.
+    use parquet_constants, only : PF_TWOPI, PF_HALFPI
 
     implicit none
 
-    !> Twice pi: the angle of one full turn, for the FFT's twiddle factors `exp(-2*pi*i*q/n)`.
-    real(real64), parameter :: TWO_PI = 6.283185307179586476925286766559005768_real64
-    !> Half of pi: the DCT's twiddle angle `pi*k/(2n)` is formed as `(k/n)*HALF_PI`.
-    real(real64), parameter :: HALF_PI = 1.570796326794896619231321691639751442_real64
     !> Longest `norm` token that is matched; a longer one folds to blanks and is refused.
     integer, parameter :: NORM_CAP = 8
 
@@ -119,7 +118,7 @@ contains
         ! k = 0 the angle is zero and V[0] = sum(v) = sum(x), so y(1) = 2*sum(x): the convention's
         ! factor of two, in the one place it can be checked by eye.
         do k = 0, n - 1
-            theta = HALF_PI*(real(k, real64)/real(n, real64))
+            theta = PF_HALFPI*(real(k, real64)/real(n, real64))
             y(k + 1) = 2.0_real64*(real(work(k), real64)*cos(theta) + aimag(work(k))*sin(theta))
         end do
 
@@ -169,7 +168,7 @@ contains
         allocate (work(0:n - 1))
         work(0) = cmplx(u0*yc(1), 0.0_real64, kind=real64)
         do k = 1, n - 1
-            theta = HALF_PI*(real(k, real64)/real(n, real64))
+            theta = PF_HALFPI*(real(k, real64)/real(n, real64))
             c = cos(theta)
             s = sin(theta)
             a = uk*yc(k + 1)
@@ -422,7 +421,7 @@ contains
         ! header). q/n is exact, because n is a power of two.
         allocate (tw(0:n/2 - 1))
         do q = 0, n/2 - 1
-            theta = TWO_PI*(real(q, real64)/real(n, real64))
+            theta = PF_TWOPI*(real(q, real64)/real(n, real64))
             tw(q) = cmplx(cos(theta), -sin(theta), kind=real64)
         end do
 

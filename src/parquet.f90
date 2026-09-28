@@ -57,7 +57,14 @@
 !>                          `pf_basename`, `pf_path_ext`, `pf_path_stem`,
 !>                          `pf_split_path`, `pf_path_add_suffix`). A leaf
 !>                          below everything: nothing in it validates, aborts
-!>                          or prints, and it imports only iso_fortran_env.
+!>                          or prints, and it imports only intrinsic modules
+!>                          and parquet_constants.
+!>   * `parquet_constants` -- `PF_PI`, `PF_TWOPI`, `PF_HALFPI` and the angle
+!>                          factors (`PF_RAD_PER_DEG`, ...), and the physical
+!>                          constants the numerical tiers compute with, each
+!>                          named with its unit (`PF_C_KMS`, `PF_MPC_M`, ...).
+!>                          A leaf of parameters that imports only
+!>                          iso_fortran_env.
 !>   * `parquet_integrate` -- `pf_integrate`: adaptive quadrature of a function
 !>                          of one real64 variable over a finite or infinite
 !>                          range, with the integrand as an object carrying its
@@ -148,6 +155,7 @@ module parquet
     use parquet_logging
     use parquet_toml
     use parquet_utils
+    use parquet_constants
     use parquet_integrate
     use parquet_interpolate
     use parquet_cosmology

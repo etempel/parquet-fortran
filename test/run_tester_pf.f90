@@ -28,6 +28,7 @@ program run_tester_pf
     use test_integrate, only : collect_tests_integrate
     use test_integrate_omp, only : collect_tests_integrate_omp
     use test_transform_omp, only : collect_tests_transform_omp
+    use test_constants, only : collect_tests_constants
     use test_cosmology, only : collect_tests_cosmology, collect_tests_cosmology_serial
     use test_cosmology_omp, only : collect_tests_cosmology_omp
     use test_cosmology_config, only : collect_tests_cosmology_config, &
@@ -68,6 +69,7 @@ program run_tester_pf
     !
     testsuites = [ &
         new_testsuite("utils", collect_tests_utils), &
+        new_testsuite("constants", collect_tests_constants), &
         new_testsuite("index", collect_tests_index), &
         new_testsuite("integrate", collect_tests_integrate), &
         new_testsuite("cosmology", collect_tests_cosmology), &

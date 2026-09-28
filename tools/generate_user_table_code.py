@@ -756,7 +756,7 @@ def render(schema, windows):
     w(f"module {schema.dataset}")
     # THE THREE ENTRY MODULES THIS EMITTED CODE NEEDS, rather than the `parquet` facade, so that
     # embedding a table type costs a project 100 of this library's Fortran files rather than all
-    # 159. What it drops is the outer facade, parquet_sampling, parquet_logging, parquet_toml,
+    # 161. What it drops is the outer facade, parquet_sampling, parquet_logging, parquet_toml,
     # parquet_version, the four sky tiers and the eight numerics tiers. What it does NOT drop --
     # because parquet_tables reaches them, and naming them here as savings would be wrong -- is
     # the sorting engine (9 files), the statistics tier (6) and parquet_random (1, which the

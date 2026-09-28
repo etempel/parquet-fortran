@@ -93,20 +93,23 @@ module parquet_random
     use iso_fortran_env, only: int32, int64, real32, real64
     use parquet_expkey, only: exp_key, ek_round => ek_rnd
     use parquet_ziggurat, only: zig_layers, zig_r, zig_w, zig_k, zig_f
+    use parquet_constants, only: PF_PI, PF_TWOPI, PF_RAD_PER_DEG, PF_DEG_PER_RAD
     use ieee_arithmetic, only: ieee_value, ieee_positive_inf, ieee_negative_inf
 
-    ! **This module depends on `iso_fortran_env`, `ieee_arithmetic` and ONE project module, and
-    ! both halves of that matter.** A program that only draws random numbers links no settings, no
-    ! sorting, and so no `parquet_bindings` and no Arrow. Everything that needed more than the bare
-    ! generator (the permutation, the subset/resample forms, the weighted draw) lives in
+    ! **This module depends on `iso_fortran_env`, `ieee_arithmetic` and three project modules,
+    ! and both halves of that matter.** A program that only draws random numbers links no settings,
+    ! no sorting, and so no `parquet_bindings` and no Arrow. Everything that needed more than the
+    ! bare generator (the permutation, the subset/resample forms, the weighted draw) lives in
     ! `parquet_sampling`, which is free to import whatever it needs precisely because this one is not.
     !
-    ! Both imports are admissible because each is itself a leaf -- `iso_fortran_env` and nothing
-    ! else -- so the standalone scripts can compile them alongside this file. The distributions
-    ! need both: `parquet_expkey` because `-log(u)` from libm would make every `_portable` draw a
-    ! per-libm value, which is exactly the property class this module exists to avoid, and
-    ! `parquet_ziggurat` because 771 layer constants belong in a generated data module rather than
-    ! in the middle of this one.
+    ! All three imports are admissible because each is itself a leaf -- `iso_fortran_env` and
+    ! nothing else -- so the standalone scripts can compile them alongside this file. The
+    ! distributions need two: `parquet_expkey` because `-log(u)` from libm would make every
+    ! `_portable` draw a per-libm value, which is exactly the property class this module exists to
+    ! avoid, and `parquet_ziggurat` because 771 layer constants belong in a generated data module
+    ! rather than in the middle of this one. The sphere families take pi and the angle factors from
+    ! `parquet_constants`, the library's one home for them, whose values are folded constants and
+    ! so round alike under every compiler.
     !
     ! **Adding a `use` here is therefore a decision, not a detail.** The leaf property is what lets
     ! `tools/check_random_kernels.sh` and `tools/check_exp_key.sh` compile the kernel standalone,
@@ -333,14 +336,6 @@ module parquet_random
     !> Label of `pf_random_rotation_at`'s third uniform, read at `(key, i, draw)` in `pf_random_at`'s grid.
     integer(int64), parameter :: sphere_rotation_angle_label = 8949935999960278870_int64
 
-    !> `pi` in `real64`, private: this module imports no utility tier for a constant.
-    real(real64), parameter :: sphere_pi = 3.14159265358979323846264338327950288_real64
-    !> `2*pi`, the doubling of `sphere_pi` and so exact.
-    real(real64), parameter :: sphere_two_pi = 2.0_real64 * sphere_pi
-    !> Radians per degree, folded as a constant so every compiler rounds it the same way.
-    real(real64), parameter :: sphere_deg2rad = sphere_pi / 180.0_real64
-    !> Degrees per radian.
-    real(real64), parameter :: sphere_rad2deg = 180.0_real64 / sphere_pi
     !> The exponent of the ball's cube root.
     real(real64), parameter :: sphere_third = 1.0_real64 / 3.0_real64
     !> The component magnitude above which `x*x + y*y` cannot go subnormal, so `hypot` is not needed.
@@ -2825,7 +2820,7 @@ contains
         real(real64) :: z, s, phi, cp, sp
         z = 1.0_real64 - h
         s = sqrt(h * (2.0_real64 - h))
-        phi = sphere_two_pi * u2
+        phi = PF_TWOPI * u2
         cp = cos(phi)
         sp = sin(phi)
         v = z * c + s * (cp * e1 + sp * e2)
@@ -2855,8 +2850,8 @@ contains
         else if (dec0 == -90.0_real64) then
             c = [0.0_real64, 0.0_real64, -1.0_real64]
         else
-            d = dec0 * sphere_deg2rad
-            a = ra0 * sphere_deg2rad
+            d = dec0 * PF_RAD_PER_DEG
+            a = ra0 * PF_RAD_PER_DEG
             cd = cos(d)
             c = [cd * cos(a), cd * sin(a), sin(d)]
         end if
@@ -2875,7 +2870,7 @@ contains
         if (v(1) == 0.0_real64 .and. v(2) == 0.0_real64) then
             ra = 0.0_real64
         else
-            ra = atan2(v(2), v(1)) * sphere_rad2deg
+            ra = atan2(v(2), v(1)) * PF_DEG_PER_RAD
             if (ra < 0.0_real64) ra = ra + 360.0_real64
             if (ra >= 360.0_real64) ra = 0.0_real64
         end if
@@ -2885,9 +2880,9 @@ contains
         ! `hypot` still answers, so no direction gains an `IEEE_UNDERFLOW` it did not raise before.
         ! `v` is a unit vector by contract, so neither component can be NaN here.
         if (abs(v(1)) >= sphere_hypot_safe .or. abs(v(2)) >= sphere_hypot_safe) then
-            dec = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * sphere_rad2deg
+            dec = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * PF_DEG_PER_RAD
         else
-            dec = atan2(v(3), hypot(v(1), v(2))) * sphere_rad2deg
+            dec = atan2(v(3), hypot(v(1), v(2))) * PF_DEG_PER_RAD
         end if
     end subroutine sph_radec
 
@@ -2903,7 +2898,7 @@ contains
         call sph_pair(key, stream, d, u1, u2)
         z = (u1 + u1) - 1.0_real64
         s = sqrt((1.0_real64 - z) * (1.0_real64 + z))
-        phi = sphere_two_pi * u2
+        phi = PF_TWOPI * u2
         v = [s * cos(phi), s * sin(phi), z]
     end function sph_direction_of_key
 
@@ -2965,17 +2960,17 @@ contains
         real(real64) :: rr(2), ro, ri, s
         rr(2) = 0.0_real64
         if (present(r_inner)) rr(2) = r_inner
-        rr = sph_radii(who, "", radius, rr(2), sphere_pi)
+        rr = sph_radii(who, "", radius, rr(2), PF_PI)
         cap%c = sph_unit(who, centre)
         call sph_frame(centre, cap%c, cap%e1, cap%e2)
-        ro = min(rr(1), sphere_pi)
-        ri = min(rr(2), sphere_pi)
+        ro = min(rr(1), PF_PI)
+        ri = min(rr(2), PF_PI)
         s = sin(0.5_real64 * ri)
         cap%h_in = 2.0_real64 * s * s
         cap%dh = 2.0_real64 * sin(0.5_real64 * (ro + ri)) * sin(0.5_real64 * (ro - ri))
         ! Both radii are already clamped to the half turn, so each test is an equality in effect.
-        if (ri >= sphere_pi) cap%h_in = 2.0_real64
-        if (ro >= sphere_pi) cap%dh = 2.0_real64 - cap%h_in
+        if (ri >= PF_PI) cap%h_in = 2.0_real64
+        if (ro >= PF_PI) cap%dh = 2.0_real64 - cap%h_in
         cap%set = .true.
     end subroutine disc_prepare
 
@@ -3049,7 +3044,7 @@ contains
         if (present(r_inner_deg)) rr(2) = r_inner_deg
         rr = sph_radii(who, "_deg", radius_deg, rr(2), 180.0_real64)
         c = sph_centre_radec(who, ra0, dec0)
-        v = disc_draw(who, seed, stream, d, c, rr(1) * sphere_deg2rad, rr(2) * sphere_deg2rad)
+        v = disc_draw(who, seed, stream, d, c, rr(1) * PF_RAD_PER_DEG, rr(2) * PF_RAD_PER_DEG)
         call sph_radec(v, ra, dec)
     end subroutine disc_radec_draw
 
@@ -3157,7 +3152,7 @@ contains
             error stop who // ": sigma_deg must be finite and strictly positive (got " // &
                 trim(sph_real_text(sigma_deg)) // ")"
         end if
-        s = sigma_deg * sphere_deg2rad
+        s = sigma_deg * PF_RAD_PER_DEG
         if (s >= 1.0e150_real64) then
             kappa = 0.0_real64
         else if (s <= 1.0e-150_real64) then
@@ -3200,8 +3195,8 @@ contains
         u3 = to_real64(bits_of(key_from(seed, sphere_rotation_angle_label), stream, d, DOM_REAL64))
         a = sqrt(1.0_real64 - u1)
         b = sqrt(u1)
-        t1 = sphere_two_pi * u2
-        t2 = sphere_two_pi * u3
+        t1 = PF_TWOPI * u2
+        t2 = PF_TWOPI * u3
         qx = a * sin(t1)
         qy = a * cos(t1)
         qz = b * sin(t2)

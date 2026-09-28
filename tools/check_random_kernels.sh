@@ -120,18 +120,20 @@ case "$FC" in
         ;;
 esac
 
-# src/parquet_random.f90 compiles ALONE, and that is the whole reason this check can exist: it
-# imports nothing but iso_fortran_env, so a plain ordered compile with no dependency resolver can
-# build the kernel against several compilers and flag sets without an Arrow install anywhere.
+# src/parquet_random.f90 compiles with its three leaf imports and nothing else -- parquet_constants,
+# parquet_expkey and parquet_ziggurat, each of which imports only iso_fortran_env -- and that is the
+# whole reason this check can exist: a plain ordered compile with no dependency resolver can build
+# the kernel against several compilers and flag sets without an Arrow install anywhere.
 #
 # It has not always been so, and the failure is loud rather than subtle. When the weighted draw
 # briefly lived in that module it brought `parquet_sorting` with it -- hence `parquet_bindings`,
 # hence the whole of parquet_wrapper.cpp and Arrow -- and every configuration here died on a
 # missing parquet_sorting.mod, leaving the script unable to read a kernel out of the driver at
 # all. Everything needing more than the generator now lives in src/parquet_sampling.f90, which is
-# deliberately not compiled here. If a `use` is ever added to parquet_random, adding its module to
-# SRC is the WRONG fix; the right one is to move whatever needed it into parquet_sampling.
-SRC="src/parquet_expkey.f90 src/parquet_ziggurat.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
+# deliberately not compiled here. If parquet_random ever gains a `use` of a module that is not such
+# a leaf, adding that module to SRC is the WRONG fix; the right one is to move whatever needed it
+# into parquet_sampling (`check_parquet_random_stays_leaf` holds both this list and that rule).
+SRC="src/parquet_constants.f90 src/parquet_expkey.f90 src/parquet_ziggurat.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
 REPO="$PWD"
 ABS_SRC=""
 for f in $SRC; do ABS_SRC="$ABS_SRC $REPO/$f"; done

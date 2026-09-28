@@ -32,9 +32,9 @@ submodule (parquet_core) parquet_read
     use parquet_index, only: pf_index_map
     ! The row sample DRAWS ITS OWN MASK HERE, from the library's own counter-based generator, so
     ! that parquet_open_reader(..., sample_fraction=) and a caller's own pf_random_* draws come
-    ! from one specified, tested generator instead of two. parquet_random is a leaf importing only
-    ! iso_fortran_env, so this import is acyclic and costs the graph three files; see
-    ! parquet_sample_algorithm (parquet_core.f90) for the mapping it composes.
+    ! from one specified, tested generator instead of two. parquet_random is a leaf whose three
+    ! imports are leaves of iso_fortran_env alone, so this import is acyclic and costs the graph
+    ! four files; see parquet_sample_algorithm (parquet_core.f90) for the mapping it composes.
     use parquet_random, only: pf_random_key, pf_random_fill_draws, pf_random_seed
     use iso_c_binding
     use iso_fortran_env, only: int8, int32, int64, real64

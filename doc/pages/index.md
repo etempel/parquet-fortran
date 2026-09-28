@@ -21,8 +21,8 @@ data, distances and times in an expanding universe, function minimisation and Po
 derivative-free solvers, root finding in one variable, the discrete cosine and sine transforms,
 random numbers and sampling, spatial neighbour search, key-to-index lookup, sphere pixelisation,
 random points in sky regions, celestial coordinate systems, logging for your own program, TOML
-configuration files, numeric, text and path helpers, and the process-global settings. Every page
-below assumes that single import.
+configuration files, named mathematical and physical constants, numeric, text and path helpers,
+and the process-global settings. Every page below assumes that single import.
 
 The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parquet_list`,
 `parquet_struct`, `parquet_map`, `parquet_strings`, `parquet_temporal`, `parquet_sorting`,
@@ -30,8 +30,8 @@ The individual modules (`parquet_io`, `parquet_tables`, `parquet_columns`, `parq
 `parquet_cosmology`, `parquet_cosmology_config`, `parquet_optimize`, `parquet_prima`,
 `parquet_root`, `parquet_transform`, `parquet_sampling`, `parquet_spatial`, `parquet_healpix`,
 `parquet_sphere`, `parquet_skycoord`, `parquet_random`, `parquet_index`, `parquet_logging`,
-`parquet_toml`, `parquet_utils`, `parquet_settings`, `parquet_version`, `parquet_maml_base`) can be
-named directly when you want a narrower import — see [Choosing a
+`parquet_toml`, `parquet_utils`, `parquet_constants`, `parquet_settings`, `parquet_version`,
+`parquet_maml_base`) can be named directly when you want a narrower import — see [Choosing a
 module](operating/choosing-a-module.html) for what each one costs to compile against and which of
 them are covered by the library's API stability promise. `parquet_core` is the exception in the
 other direction: it is internal and is covered by no promise.
@@ -67,8 +67,9 @@ point in the library.
   solvers, root finding in one variable, the discrete cosine and sine transforms, reproducible
   random numbers and the sampling built on them, spatial neighbour search, sphere pixelisation,
   random points and geometry on the sphere, celestial coordinate systems, key-to-index lookup,
-  logging for your own program, TOML configuration files, numeric, text and path helpers,
-  generated table types, and embedding your own MAML schemas.
+  logging for your own program, TOML configuration files, named mathematical and physical
+  constants, numeric, text and path helpers, generated table types, and embedding your own MAML
+  schemas.
 - [Operating the library](operating/index.html) — the cross-cutting concerns you reach for when
   something is wrong or has to be tuned: which module to import, what an error means, why a build,
   a link or a run fails, what may run concurrently, what memory and speed to expect, and the
@@ -76,7 +77,7 @@ point in the library.
 
 ### Every page at a glance
 
-All 48 pages, in reading order. (This list, each group's own page list and the `ordered_subpage:`
+All 49 pages, in reading order. (This list, each group's own page list and the `ordered_subpage:`
 frontmatter are kept consistent by `tools/check_source_conventions.py`, which fails the CI lint
 stage when they drift.)
 
@@ -133,6 +134,7 @@ stage when they drift.)
 - [Key-to-index lookup with `parquet_index`](utilities/index-maps.html)
 - [Logging with `parquet_logging`](utilities/logging.html)
 - [Configuration files with `parquet_toml`](utilities/configuration-files.html)
+- [Physical and mathematical constants with `parquet_constants`](utilities/constants.html)
 - [Numeric, text and path helpers with `parquet_utils`](utilities/utils.html)
 - [Generated table types: named accessors from a MAML schema](utilities/generated-tables.html)
 - [Embedding your own MAML schemas in your own project](utilities/embedding-maml-schemas.html)

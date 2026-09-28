@@ -80,7 +80,7 @@ module parquet_kde
     use parquet_columns, only : parquet_column, parquet_kind_name, PK_INT32, PK_INT64, PK_FLOAT32, &
         PK_FLOAT64
     ! The ISJ rule: its fixed point is solved by the library's root finder, over the discrete cosine
-    ! transform of the binned sample. Two leaf modules, two files each.
+    ! transform of the binned sample. Two leaf modules, of two files and of three.
     use parquet_root, only : pf_rootfun, pf_find_root, pf_bracket_expansion, pf_root_info, &
         PF_EXPAND_UP, PF_ROOT_OK
     use parquet_transform, only : pf_dct, pf_idct, pf_dst, pf_idst, pf_is_pow2, pf_next_pow2
@@ -92,6 +92,9 @@ module parquet_kde
     ! `%sample`'s draws: the coordinate-addressed generator, so that a draw is a pure function of
     ! its coordinates and a sample splits among threads anywhere.
     use parquet_random, only : pf_random_at, pf_random_int_at, pf_random_normal_at, pf_random_key
+    ! The binned method's coefficient `k` carries the frequency `pi k/(L step)`; nothing else in
+    ! the module needs pi.
+    use parquet_constants, only : PF_PI
     ! `%print` is solicited output; the verbosity and message-stream pair is re-exported because
     ! this module reads it. `parquet_emit_warning` carries the one finding this module makes about
     ! a caller's DATA that leaves nothing to read: R3's over-reaching adaptive bandwidths.
@@ -153,10 +156,6 @@ module parquet_kde
     !> Method codes, resolved once from the `method=` token of `pf_kde_grid%init` and
     !! `pf_kde%curve`. `KDE_METHOD_EXACT` is the deposit every grid makes today and the default.
     integer, parameter :: KDE_METHOD_EXACT = 0, KDE_METHOD_BINNED = 1
-
-    !> `pi`, to 50 digits: the binned method's coefficient `k` carries the frequency
-    !! `pi k/(L step)`, and nothing else in the module needs it.
-    real(real64), parameter :: KDE_PI = 3.1415926535897932384626433832795028841971693993751_real64
 
     !> Below this argument a kernel transform is summed as its series rather than evaluated in
     !! closed form, because the closed form's terms cancel there. One standard deviation of

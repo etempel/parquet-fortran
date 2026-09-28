@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`parquet_constants`**: an Arrow-free entry module of named `real64` constants, each named with
+  its unit: `PF_PI`, `PF_TWOPI`, `PF_HALFPI` and the angle factors `PF_RAD_PER_DEG`,
+  `PF_DEG_PER_RAD`, `PF_RAD_PER_ARCMIN` and `PF_RAD_PER_ARCSEC`; the speed of light, Newton's
+  constant (also in `Mpc (km/s)^2` per solar mass), the Sun's mass parameter and mass, the
+  Stefan-Boltzmann and Boltzmann constants, the megaparsec, the gigayear, the neutrino-to-photon
+  temperature ratio and the AB zero point (`PF_C_KMS`, `PF_M_SUN_KG`, ...). Re-exported by
+  `parquet`. See [Physical and mathematical constants](doc/pages/utilities/constants.md).
+
+### Fixed
+
+- Many other minor fixes and improvements.
+
 ## [v2.5.0] - 2026-09-28
 
 ### Added

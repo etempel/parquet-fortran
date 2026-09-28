@@ -36,8 +36,8 @@ Signatures below are written with optional arguments in **square brackets** —
 `pf_radec2vec(ra, dec, vec, [frame])` means `frame` may be omitted. The brackets are not Fortran, and
 a block containing them is a description rather than a runnable example.
 
-`use parquet_sphere` compiles 15 of this library's Fortran files — `parquet_random`,
-`parquet_healpix`, `parquet_utils` and its own four — and never reaches this library's reader, its
+`use parquet_sphere` compiles 16 of this library's Fortran files — `parquet_random`,
+`parquet_healpix`, `parquet_utils`, `parquet_constants` and its own four — and never reaches this library's reader, its
 writer or its C++ bindings. The module re-exports `pf_healpix_grid`, `pf_random_stream` and the four
 HEALPix selectors (`PF_HP_RING`, `PF_HP_NEST`, `PF_HP_DEC_NORTH`, `PF_HP_DEC_SOUTH`), so one import
 is enough to call everything on this page. It also re-exports `healpix_threads` and the

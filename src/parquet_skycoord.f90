@@ -64,14 +64,15 @@
 !! **`real64` only**, like every sky procedure in the library; a `real32` caller converts at the
 !! call.
 !!
-!! **Arrow-free, settings-free and silent.** It reaches `parquet_utils` only
+!! **Arrow-free, settings-free and silent.** It reaches `parquet_utils` and `parquet_constants` only
 !! (`check_parquet_skycoord_stays_arrow_free`), reads no knob and prints nothing, so it re-exports
 !! no setting. It has no module variable, and every procedure is `pure`: anything here may be
 !! called from any number of threads at once, and a `pf_sky_rotation`, read-only once `%init` has
-!! run, serves a whole team. The only physical constants -- the speed of light and the default
-!! dipole -- are private to `pf_zhel2zcmb`, in `src/parquet_skycoord_rotate.f90`.
+!! run, serves a whole team. The only physical constants are the speed of light, `PF_C_KMS`, and
+!! the default dipole, which is private to `pf_zhel2zcmb`, in `src/parquet_skycoord_rotate.f90`.
 module parquet_skycoord
     use, intrinsic :: iso_fortran_env, only: real64
+    use parquet_constants, only: PF_PI, PF_RAD_PER_DEG, PF_DEG_PER_RAD
     implicit none
     private
 
@@ -121,14 +122,8 @@ module parquet_skycoord
     !! of USNO Circular 179, at most 32 milliarcseconds. **FK5 J2000 only**: no other equinox is provided.
     integer, parameter :: PF_COORD_FK5 = 5
 
-    ! ---- Mathematical constants ----
+    ! ---- Numerical constants ----
 
-    !> pi.
-    real(real64), parameter :: skc_pi = 3.14159265358979323846264338327950288_real64
-    !> Radians per degree.
-    real(real64), parameter :: skc_deg2rad = skc_pi / 180.0_real64
-    !> Degrees per radian.
-    real(real64), parameter :: skc_rad2deg = 180.0_real64 / skc_pi
     !> The component magnitude above which `x*x + y*y` cannot go subnormal, so `hypot` is not needed.
     !!
     !! The squares underflow below about `1.5e-154`; this sits four decades clear of it.
@@ -180,33 +175,33 @@ module parquet_skycoord
     ! never `transpose(M)` at a call: that is an array expression at an explicit-shape dummy.
 
     !> The sines and cosines of the Galactic row's `a`, `b` and `c`.
-    real(real64), parameter :: gal_ca = cos((180.0_real64 - skc_gal_lon0) * skc_deg2rad), &
-                               gal_sa = sin((180.0_real64 - skc_gal_lon0) * skc_deg2rad), &
-                               gal_cb = cos((90.0_real64 - skc_gal_pole_lat) * skc_deg2rad), &
-                               gal_sb = sin((90.0_real64 - skc_gal_pole_lat) * skc_deg2rad), &
-                               gal_cc = cos(skc_gal_pole_lon * skc_deg2rad), &
-                               gal_sc = sin(skc_gal_pole_lon * skc_deg2rad)
+    real(real64), parameter :: gal_ca = cos((180.0_real64 - skc_gal_lon0) * PF_RAD_PER_DEG), &
+                               gal_sa = sin((180.0_real64 - skc_gal_lon0) * PF_RAD_PER_DEG), &
+                               gal_cb = cos((90.0_real64 - skc_gal_pole_lat) * PF_RAD_PER_DEG), &
+                               gal_sb = sin((90.0_real64 - skc_gal_pole_lat) * PF_RAD_PER_DEG), &
+                               gal_cc = cos(skc_gal_pole_lon * PF_RAD_PER_DEG), &
+                               gal_sc = sin(skc_gal_pole_lon * PF_RAD_PER_DEG)
     !> The sines and cosines of the ecliptic row's `a`, `b` and `c`.
-    real(real64), parameter :: ecl_ca = cos((180.0_real64 - skc_ecl_lon0) * skc_deg2rad), &
-                               ecl_sa = sin((180.0_real64 - skc_ecl_lon0) * skc_deg2rad), &
-                               ecl_cb = cos((90.0_real64 - skc_ecl_pole_lat) * skc_deg2rad), &
-                               ecl_sb = sin((90.0_real64 - skc_ecl_pole_lat) * skc_deg2rad), &
-                               ecl_cc = cos(skc_ecl_pole_lon * skc_deg2rad), &
-                               ecl_sc = sin(skc_ecl_pole_lon * skc_deg2rad)
+    real(real64), parameter :: ecl_ca = cos((180.0_real64 - skc_ecl_lon0) * PF_RAD_PER_DEG), &
+                               ecl_sa = sin((180.0_real64 - skc_ecl_lon0) * PF_RAD_PER_DEG), &
+                               ecl_cb = cos((90.0_real64 - skc_ecl_pole_lat) * PF_RAD_PER_DEG), &
+                               ecl_sb = sin((90.0_real64 - skc_ecl_pole_lat) * PF_RAD_PER_DEG), &
+                               ecl_cc = cos(skc_ecl_pole_lon * PF_RAD_PER_DEG), &
+                               ecl_sc = sin(skc_ecl_pole_lon * PF_RAD_PER_DEG)
     !> The sines and cosines of the supergalactic row's `a`, `b` and `c`.
-    real(real64), parameter :: sgal_ca = cos((180.0_real64 - skc_sgal_lon0) * skc_deg2rad), &
-                               sgal_sa = sin((180.0_real64 - skc_sgal_lon0) * skc_deg2rad), &
-                               sgal_cb = cos((90.0_real64 - skc_sgal_pole_lat) * skc_deg2rad), &
-                               sgal_sb = sin((90.0_real64 - skc_sgal_pole_lat) * skc_deg2rad), &
-                               sgal_cc = cos(skc_sgal_pole_lon * skc_deg2rad), &
-                               sgal_sc = sin(skc_sgal_pole_lon * skc_deg2rad)
+    real(real64), parameter :: sgal_ca = cos((180.0_real64 - skc_sgal_lon0) * PF_RAD_PER_DEG), &
+                               sgal_sa = sin((180.0_real64 - skc_sgal_lon0) * PF_RAD_PER_DEG), &
+                               sgal_cb = cos((90.0_real64 - skc_sgal_pole_lat) * PF_RAD_PER_DEG), &
+                               sgal_sb = sin((90.0_real64 - skc_sgal_pole_lat) * PF_RAD_PER_DEG), &
+                               sgal_cc = cos(skc_sgal_pole_lon * PF_RAD_PER_DEG), &
+                               sgal_sc = sin(skc_sgal_pole_lon * PF_RAD_PER_DEG)
     !> The sines and cosines of the FK5 row's `a`, `b` and `c`.
-    real(real64), parameter :: fk5_ca = cos((180.0_real64 - skc_fk5_lon0) * skc_deg2rad), &
-                               fk5_sa = sin((180.0_real64 - skc_fk5_lon0) * skc_deg2rad), &
-                               fk5_cb = cos((90.0_real64 - skc_fk5_pole_lat) * skc_deg2rad), &
-                               fk5_sb = sin((90.0_real64 - skc_fk5_pole_lat) * skc_deg2rad), &
-                               fk5_cc = cos(skc_fk5_pole_lon * skc_deg2rad), &
-                               fk5_sc = sin(skc_fk5_pole_lon * skc_deg2rad)
+    real(real64), parameter :: fk5_ca = cos((180.0_real64 - skc_fk5_lon0) * PF_RAD_PER_DEG), &
+                               fk5_sa = sin((180.0_real64 - skc_fk5_lon0) * PF_RAD_PER_DEG), &
+                               fk5_cb = cos((90.0_real64 - skc_fk5_pole_lat) * PF_RAD_PER_DEG), &
+                               fk5_sb = sin((90.0_real64 - skc_fk5_pole_lat) * PF_RAD_PER_DEG), &
+                               fk5_cc = cos(skc_fk5_pole_lon * PF_RAD_PER_DEG), &
+                               fk5_sc = sin(skc_fk5_pole_lon * PF_RAD_PER_DEG)
 
     !> ICRS to Galactic.
     real(real64), parameter :: skc_m_icrs2gal(3, 3) = reshape([ &

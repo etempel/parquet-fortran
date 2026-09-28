@@ -47,7 +47,7 @@ contains
         ! Only `ra1`/`ra2` reach the fold, and `dl` is NaN whenever either of them is.
         !
         ! **`sin(NaN)` raises under ifx, once the compiler VECTORISES it.** ifx pairs the two
-        ! `sin(dec * skc_deg2rad)` calls below into one `__svml_sin2` call, and that routine is not
+        ! `sin(dec * PF_RAD_PER_DEG)` calls below into one `__svml_sin2` call, and that routine is not
         ! quiet on a NaN element: it raises `IEEE_INVALID` inside its own argument reduction (at a
         ! `vmulpd`, located by single-stepping the released object under gdb). The scalar `sin` on
         ! the same compiler is quiet, which is why this is invisible in a hand-written copy of this
@@ -83,7 +83,7 @@ contains
             if (dec2 /= dec2) dist = dec2
             return
         end if
-        dl = (dl - 360.0_real64 * anint(dl / 360.0_real64)) * skc_deg2rad
+        dl = (dl - 360.0_real64 * anint(dl / 360.0_real64)) * PF_RAD_PER_DEG
         ! **A POSITION IS EXACTLY ZERO DEGREES FROM ITSELF, and that has to be asserted here
         ! rather than left to the arithmetic.** Without this the answer is a few times 1e-15
         ! degrees, and whether it is that or bit-zero depends on the compiler: `y2` below is
@@ -101,7 +101,7 @@ contains
         ! Both ways two positions can coincide are covered. Equal declinations with no surviving
         ! RA difference is the ordinary one; equal declinations at a POLE is the other, where any
         ! two right ascensions name the same point. The pole case is not reachable by the formula
-        ! at all, because `cos(90 * skc_deg2rad)` is 6.1e-17 rather than zero -- an input
+        ! at all, because `cos(90 * PF_RAD_PER_DEG)` is 6.1e-17 rather than zero -- an input
         ! representation limit that no formulation can remove, which is exactly why it is stated
         ! as a rule instead. A separation of NaN falls through, so totality is preserved.
         if (dec1 == dec2 .and. (dl == 0.0_real64 .or. abs(dec1) == 90.0_real64)) then
@@ -110,10 +110,10 @@ contains
         end if
         sdl = sin(dl)
         cdl = cos(dl)
-        sd1 = sin(dec1 * skc_deg2rad)
-        cd1 = cos(dec1 * skc_deg2rad)
-        sd2 = sin(dec2 * skc_deg2rad)
-        cd2 = cos(dec2 * skc_deg2rad)
+        sd1 = sin(dec1 * PF_RAD_PER_DEG)
+        cd1 = cos(dec1 * PF_RAD_PER_DEG)
+        sd2 = sin(dec2 * PF_RAD_PER_DEG)
+        cd2 = cos(dec2 * PF_RAD_PER_DEG)
         ! Vincenty: atan2(|v1 x v2|, v1.v2) written in the frame where only the RA difference
         ! survives. It is the same quantity `pf_angdist` computes from vectors, and 31% cheaper,
         ! because the rotation removes one of the four sine/cosine pairs.
@@ -135,7 +135,7 @@ contains
         ! rather than `hypot`: both components are bounded by 1 so nothing overflows, and the
         ! underflow that squaring costs is reached only below about 1e-154 radians, which no
         ! difference of two degree-valued doubles can express.
-        dist = atan2(sqrt(y1 * y1 + y2 * y2), x) * skc_rad2deg
+        dist = atan2(sqrt(y1 * y1 + y2 * y2), x) * PF_DEG_PER_RAD
     end procedure pf_angdist_deg
 
     module procedure pf_offset_radec
@@ -162,13 +162,13 @@ contains
                 trim(adjustl(t_dec)) // ", sep_deg = " // trim(adjustl(t_sep)) // ")"
         end if
         call skc_dec_sin_cos(dec0, sd0, cd0)
-        a0 = ra0 * skc_deg2rad
+        a0 = ra0 * PF_RAD_PER_DEG
         sa = sin(a0)
         ca = cos(a0)
-        p = pa_deg * skc_deg2rad
+        p = pa_deg * PF_RAD_PER_DEG
         sp = sin(p)
         cp = cos(p)
-        s = sep_deg * skc_deg2rad
+        s = sep_deg * PF_RAD_PER_DEG
         ss = sin(s)
         cs = cos(s)
         ! The centre and its local north and east, built from `ra0` even at a pole, where `north`
@@ -212,8 +212,8 @@ contains
         ! NaN and IEEE_INVALID; the half turn a negative interval needed, the signs now riding on
         ! the components; and the separation `pf_offset_radec` refuses below zero. 3.6e6
         ! milliarcseconds make a degree.
-        u = pm_ra * dt_years / 3.6e6_real64 * skc_deg2rad
-        w = pm_dec * dt_years / 3.6e6_real64 * skc_deg2rad
+        u = pm_ra * dt_years / 3.6e6_real64 * PF_RAD_PER_DEG
+        w = pm_dec * dt_years / 3.6e6_real64 * PF_RAD_PER_DEG
         s = hypot(u, w)
         if (s == 0.0_real64) then
             f = 1.0_real64        ! the limit of sin(s)/s: no motion gives the position back exactly
@@ -224,7 +224,7 @@ contains
         ! still points along the meridian `ra` names -- `pf_offset_radec`'s pole convention, reached
         ! here by the same construction rather than by a second rule.
         call skc_dec_sin_cos(dec, sd, cd)
-        a0 = ra * skc_deg2rad
+        a0 = ra * PF_RAD_PER_DEG
         sa = sin(a0)
         ca = cos(a0)
         c = [cd * ca, cd * sa, sd]
@@ -256,7 +256,7 @@ contains
         end if
         call skc_dec_sin_cos(dec1, sd1, cd1)
         call skc_dec_sin_cos(dec2, sd2, cd2)
-        dl = dl * skc_deg2rad
+        dl = dl * PF_RAD_PER_DEG
         sdl = sin(dl)
         cdl = cos(dl)
         y = sdl * cd2
@@ -264,7 +264,7 @@ contains
         if (y == 0.0_real64 .and. x == 0.0_real64) then
             pa = 0.0_real64
         else
-            pa = atan2(y, x) * skc_rad2deg
+            pa = atan2(y, x) * PF_DEG_PER_RAD
             if (pa < 0.0_real64) pa = pa + 360.0_real64
             if (pa >= 360.0_real64) pa = 0.0_real64
         end if
@@ -367,10 +367,10 @@ contains
         eta = (north(1) * w(1) + north(2) * w(2) + north(3) * w(3)) / denom
         ! The axes turned so `+y` lies along position angle `p`, and radians to degrees. Written
         ! out rather than through a rotation matrix: two products and a subtraction each.
-        sp = sin(p * skc_deg2rad)
-        cp = cos(p * skc_deg2rad)
-        x = (xi * cp - eta * sp) * skc_rad2deg
-        y = (xi * sp + eta * cp) * skc_rad2deg
+        sp = sin(p * PF_RAD_PER_DEG)
+        cp = cos(p * PF_RAD_PER_DEG)
+        x = (xi * cp - eta * sp) * PF_DEG_PER_RAD
+        y = (xi * sp + eta * cp) * PF_DEG_PER_RAD
     end procedure pf_radec2tan
 
     module procedure pf_tan2radec
@@ -394,10 +394,10 @@ contains
         end if
         call skc_tangent_frame(ra0, dec0, c, north, east)
         ! The axes turned back, then degrees to radians.
-        sp = sin(p * skc_deg2rad)
-        cp = cos(p * skc_deg2rad)
-        xi = (x * cp + y * sp) * skc_deg2rad
-        eta = (-(x * sp) + y * cp) * skc_deg2rad
+        sp = sin(p * PF_RAD_PER_DEG)
+        cp = cos(p * PF_RAD_PER_DEG)
+        xi = (x * cp + y * sp) * PF_RAD_PER_DEG
+        eta = (-(x * sp) + y * cp) * PF_RAD_PER_DEG
         ! The inverse is the DIRECTION of the point on the tangent plane, so there is no `asin` and
         ! no special case at the centre: `skc_unit_radec` takes a vector of any length.
         v = c + xi * east + eta * north
@@ -420,7 +420,7 @@ contains
         real(real64) :: sd0, cd0, a0, sa, ca
 
         call skc_dec_sin_cos(dec0, sd0, cd0)
-        a0 = ra0 * skc_deg2rad
+        a0 = ra0 * PF_RAD_PER_DEG
         sa = sin(a0)
         ca = cos(a0)
         c = [cd0 * ca, cd0 * sa, sd0]

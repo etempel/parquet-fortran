@@ -24,10 +24,10 @@ call pf_icrs2gal(ra, dec, l, b)                                   ! the whole co
 sep = pf_angdist_deg(ra, dec, 10.68458_real64, 41.26875_real64)   ! each one's distance from M31
 ```
 
-`use parquet_skycoord` compiles 6 of this library's Fortran files and never reaches this library's
-reader, its writer or its C++ bindings. Five of them are its own; the sixth is `parquet_utils`,
-the small helpers every tier builds on. See [Choosing a module](../operating/choosing-a-module.html)
-for the whole table. Everything here is also available through `use parquet`.
+`use parquet_skycoord` compiles 7 of this library's Fortran files and never reaches this library's
+reader, its writer or its C++ bindings. Five of them are its own; the other two are `parquet_utils`,
+the small helpers every tier builds on, and `parquet_constants`, the named constants. See
+[Choosing a module](../operating/choosing-a-module.html) for the whole table. Everything here is also available through `use parquet`.
 
 ## The systems
 
@@ -210,7 +210,7 @@ These are the same two conversions
 `pf_radec2vec` and `pf_vec2radec` under `PF_HP_DEC_NORTH`, **to the bit**, and the pair here takes
 no frame argument: a declination held in the mirrored convention is negated before it is used, the
 rule this module states for its rotations. Use these when you are already in this module — they
-cost nothing beyond the six files it compiles — and `parquet_sphere`'s when you want to name the
+cost nothing beyond the seven files it compiles — and `parquet_sphere`'s when you want to name the
 declination frame at that interface, or are using the rest of that module anyway.
 
 ### The tangent plane
@@ -393,7 +393,8 @@ defaulting to `PF_COORD_ICRS`, so a catalogue in Galactic coordinates passes the
 published.
 
 **The dipole defaults to Planck 2018 results I** (Aghanim et al. 2020, A&A 641, A1): the apex at
-Galactic `(264.021, 48.253)` and `v = 369.82` km/s, with the speed of light 299 792.458 km/s. A
+Galactic `(264.021, 48.253)` and `v = 369.82` km/s, with the speed of light `PF_C_KMS`,
+299 792.458 km/s, from [`parquet_constants`](constants.html). A
 measured dipole changes between papers, so each of the three may be given, alone or together, in
 degrees and km/s. Both are `pure elemental` in the position and the redshift alike.
 

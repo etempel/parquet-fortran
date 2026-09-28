@@ -253,18 +253,18 @@ contains
 
         this%d%n_massless = count(this%p%m_nu == 0.0_real64)
         this%massive_nu = this%d%n_massless /= this%d%n_nu
-        this%d%tnu0 = pfc_nu_temp_ratio * this%p%tcmb0
-        h0_si = this%p%h0 * 1000.0_real64 / pfc_mpc_m
-        rho_crit0 = 3.0_real64 * h0_si ** 2 / (8.0_real64 * acos(-1.0_real64) * pfc_g_si)
+        this%d%tnu0 = PF_TNU_OVER_TGAMMA * this%p%tcmb0
+        h0_si = this%p%h0 * 1000.0_real64 / PF_MPC_M
+        rho_crit0 = 3.0_real64 * h0_si ** 2 / (8.0_real64 * PF_PI * PF_G_SI)
         ! Kept in M_sun/Mpc^3, which is `%critical_density`'s unit: the solar mass is the IAU 2015
-        ! nominal `GM_sun` over this module's own `G`, which is how astropy derives `M_sun` too.
-        this%d%rho_crit0 = rho_crit0 * pfc_mpc_m ** 3 / (pfc_gm_sun / pfc_g_si)
+        ! nominal `GM_sun` over `G`, which is how astropy derives `M_sun` too.
+        this%d%rho_crit0 = rho_crit0 * PF_MPC_M ** 3 / (PF_GM_SUN_SI / PF_G_SI)
         if (this%p%tcmb0 == 0.0_real64) then
             ! `Tcmb0 = 0` switches radiation AND neutrinos off entirely, as astropy does, so the
             ! radiation term is never formed and no `0 * Infinity` arises from an undefined T_nu0.
             this%d%ogamma0 = 0.0_real64
         else
-            rho_gamma0 = 4.0_real64 * pfc_sigma_sb * this%p%tcmb0 ** 4 / pfc_c_ms ** 3
+            rho_gamma0 = 4.0_real64 * PF_SIGMA_SB_SI * this%p%tcmb0 ** 4 / PF_C_MS ** 3
             this%d%ogamma0 = rho_gamma0 / rho_crit0
         end if
         this%d%nu_rel0 = cosmology_nu_rel(this%p, this%d, 1.0_real64)
@@ -297,8 +297,8 @@ contains
 
         call sound_scales(this)
 
-        this%d%dh = pfc_c_kms / this%p%h0
-        this%d%th = pfc_mpc_km / pfc_gyr_s / this%p%h0
+        this%d%dh = PF_C_KMS / this%p%h0
+        this%d%th = PF_MPC_KM / PF_GYR_S / this%p%h0
 
         call cosmology_tabulate(this, context)
         this%ready = .true.

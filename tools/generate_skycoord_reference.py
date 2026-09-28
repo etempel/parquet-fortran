@@ -22,8 +22,9 @@ Usage:  tools/generate_skycoord_reference.py [--check] [--self-test] [--verify-o
   --check          regenerate into memory and compare with the committed file; exit 1 on any
                    difference.
   --self-test      re-derive the published anchors -- the angle table and the selectors against
-                   src/parquet_skycoord.f90, the dipole and the speed of light against
-                   src/parquet_skycoord_rotate.f90, the ecliptic row's closed form, every row
+                   src/parquet_skycoord.f90, the dipole against src/parquet_skycoord_rotate.f90
+                   and the speed of light against src/parquet_constants.f90, the ecliptic row's
+                   closed form, every row
                    rebuilding its definition, FK5 J2000's pole and its Galactic pair, orthonormality,
                    round trips, the pole rules, the offset's pole convention, the proper motion's
                    closed forms and its reversal, the text's carries, ties and grammar, and the
@@ -121,6 +122,7 @@ REPO_ROOT = TOOLS.parent
 OUT_PATH = REPO_ROOT / "test" / "test_skycoord_vectors.f90"
 SRC_PATH = REPO_ROOT / "src" / "parquet_skycoord.f90"
 ROTATE_PATH = REPO_ROOT / "src" / "parquet_skycoord_rotate.f90"
+CONSTANTS_PATH = REPO_ROOT / "src" / "parquet_constants.f90"
 
 D = decimal.Decimal
 DPI = rgv.DPI
@@ -161,8 +163,9 @@ SGAL_POLE = (D("47.37"), D("6.32"))
 SGAL_LON0 = D(90)
 
 # pf_zhel2zcmb's defaults: Planck 2018 results I (Aghanim et al. 2020, A&A 641, A1), the apex in
-# Galactic coordinates, and the SI speed of light, both speeds in km/s. `self_test` reads all four
-# back from src/parquet_skycoord_rotate.f90.
+# Galactic coordinates, and the SI speed of light, both speeds in km/s. `self_test` reads the
+# three dipole literals back from src/parquet_skycoord_rotate.f90 and the speed of light, `PF_C_KMS`,
+# from src/parquet_constants.f90.
 CMB_APEX_LON = D("264.021")
 CMB_APEX_LAT = D("48.253")
 CMB_APEX_V = D("369.82")
@@ -1244,12 +1247,13 @@ def self_test():
         check(abs(dec2 - 61) + abs(ra2 - 33) > D("1e-4"), "the original components reversed the motion after all")
 
     # pf_zhel2zcmb's dipole and the speed of light, read back from where they are declared.
-    rotate_src = ROTATE_PATH.read_text()
-    for name, value in (("skc_c_kms", C_KMS), ("skc_cmb_apex_lon", CMB_APEX_LON),
-                        ("skc_cmb_apex_lat", CMB_APEX_LAT), ("skc_cmb_apex_v", CMB_APEX_V)):
-        got = source_real(rotate_src, name)
+    for path, name, value in ((CONSTANTS_PATH, "PF_C_KMS", C_KMS),
+                              (ROTATE_PATH, "skc_cmb_apex_lon", CMB_APEX_LON),
+                              (ROTATE_PATH, "skc_cmb_apex_lat", CMB_APEX_LAT),
+                              (ROTATE_PATH, "skc_cmb_apex_v", CMB_APEX_V)):
+        got = source_real(path.read_text(), name)
         check(got is not None and got == float(value),
-              "%s in src/parquet_skycoord_rotate.f90 is %r, not the documented %s" % (name, got, value))
+              "%s in src/%s is %r, not the documented %s" % (name, path.name, got, value))
 
     # The text: the documented examples, the carries into the minute, the degree and 24 hours, the
     # half-unit on either side, the tie, and the sign of a zero.

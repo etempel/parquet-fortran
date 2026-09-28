@@ -54,7 +54,7 @@ contains
             return
         end if
         phi = atan2(y, x)
-        if (phi < 0.0_real64) phi = phi + hpx_twopi
+        if (phi < 0.0_real64) phi = phi + PF_TWOPI
     end procedure hpx_xy2phi
 
     module procedure hpx_vec2ang
@@ -128,13 +128,13 @@ contains
     module procedure hpx_nside2pixarea_i64
         area = -1.0_real64
         if (hpx_nside_ok(nside, hpx_nside_max)) &
-            area = hpx_pi / (3.0_real64 * real(nside, real64) * real(nside, real64))
+            area = PF_PI / (3.0_real64 * real(nside, real64) * real(nside, real64))
     end procedure hpx_nside2pixarea_i64
 
     module procedure hpx_nside2pixarea_i32
         area = -1.0_real64
         if (hpx_nside_ok(int(nside, int64), hpx_nside_max_i32)) &
-            area = hpx_pi / (3.0_real64 * real(nside, real64) * real(nside, real64))
+            area = PF_PI / (3.0_real64 * real(nside, real64) * real(nside, real64))
     end procedure hpx_nside2pixarea_i32
 
     module procedure hpx_nside2resol_i64
@@ -209,14 +209,14 @@ contains
         ! cannot express by itself: `sin` is odd and the square makes it positive again, so the
         ! unguarded form turned `r = -1` into the bound for `r = +1`.
         !
-        ! Written as two comparisons rather than `min(angle, hpx_pi)` so that a NaN angle still
+        ! Written as two comparisons rather than `min(angle, PF_PI)` so that a NaN angle still
         ! yields a NaN: MIN with a NaN operand may return the other one, which would silently turn
         ! an undefined radius into an all-sky one.
         if (angle < 0.0_real64) then
             chord2 = -1.0_real64
             return
         end if
-        if (angle >= hpx_pi) then
+        if (angle >= PF_PI) then
             chord2 = 4.0_real64
             return
         end if

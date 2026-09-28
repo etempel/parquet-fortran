@@ -3,17 +3,19 @@
 !> ASCII case folding, value-to-text rendering, and POSIX path joining and splitting.
 !!
 !! `parquet_utils` is a **leaf**: it imports the two INTRINSIC modules `iso_fortran_env` and
-!! `ieee_arithmetic`, and nothing else -- no module of this library, not even
+!! `ieee_arithmetic` and, of this library, `parquet_constants` alone -- a leaf of parameters that
+!! imports nothing itself (`check_parquet_constants_stays_leaf`) -- and nothing else, not even
 !! `parquet_settings_base`. An intrinsic module is not a compiled file, not a tier edge and not a
-!! footprint entry, so the property that promise protects is untouched: `use parquet_utils`
-!! compiles one Fortran file and never crosses the C++ boundary.
-!! `check_parquet_utils_stays_arrow_free` (tools/check_source_conventions.py) is what keeps that
-!! true.
+!! footprint entry, and `parquet_constants` adds one file with no edge of its own, so the property
+!! that promise protects is untouched: `use parquet_utils` compiles two Fortran files and never
+!! crosses the C++ boundary. `check_parquet_utils_stays_arrow_free`
+!! (tools/check_source_conventions.py) is what keeps that true.
 !!
 !! **That leaf status is load-bearing rather than tidy.** `parquet_settings_base` carried its own
 !! private ASCII fold with a doc-comment explaining that it could not call `parquet_core`'s copy
 !! without creating a circular dependency. A module below everything is what removes that cycle, so
-!! anything added here must not import a sibling -- the cycle returns the moment it does.
+!! anything added here must not import a sibling other than `parquet_constants`, which imports
+!! nothing -- the cycle returns the moment it does.
 !!
 !! **Every procedure in this module is total: nothing validates, nothing aborts, nothing prints.**
 !! `min_width` grows the result rather than refusing it, Python's join rules have no error case,
@@ -83,6 +85,7 @@ module parquet_utils
     use, intrinsic :: iso_fortran_env, only: int32, int64, real32, real64
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, &
         ieee_positive_inf, ieee_negative_inf
+    use parquet_constants, only: PF_PI, PF_TWOPI, PF_RAD_PER_DEG, PF_DEG_PER_RAD
     implicit none
     private
 
@@ -98,23 +101,15 @@ module parquet_utils
     public :: pf_dirname, pf_basename, pf_path_ext, pf_path_stem
     public :: pf_split_path, pf_path_add_suffix
 
-    !> Pi, and a turn of it, in each kind. Private and deliberately so: this module publishes the
-    !! two CONVERSIONS and the four wraps, not a namespace of named constants -- a library that
-    !! writes Parquet files has no business owning the spelling of `pi`, and publishing one invites
-    !! `e`, `c` and `G` next. `parquet_healpix` keeps its own private `hpx_pi` for the same reason
-    !! and is unaffected by these.
-    !!
-    !! The `real32` values are the `real64` ones narrowed, so each is the nearest `real32` to pi
-    !! rather than pi truncated to a shorter decimal literal.
-    real(real64), parameter :: PI_R64 = 3.141592653589793238462643_real64
-    real(real64), parameter :: TWOPI_R64 = 2.0_real64 * PI_R64
-    real(real32), parameter :: PI_R32 = real(PI_R64, real32)
-    real(real32), parameter :: TWOPI_R32 = real(TWOPI_R64, real32)
-    !> The two angle-conversion factors, in each kind, narrowed from `real64` for the same reason.
-    real(real64), parameter :: DEG2RAD_R64 = PI_R64 / 180.0_real64
-    real(real64), parameter :: RAD2DEG_R64 = 180.0_real64 / PI_R64
-    real(real32), parameter :: DEG2RAD_R32 = real(DEG2RAD_R64, real32)
-    real(real32), parameter :: RAD2DEG_R32 = real(RAD2DEG_R64, real32)
+    !> Pi, and a turn of it, in `real32`, for the `real32` wraps. The `real64` specifics use
+    !! `parquet_constants`' own; these are those narrowed, so each is the nearest `real32` to pi
+    !! rather than pi truncated to a shorter decimal literal. Private: the named constants are
+    !! `parquet_constants`' to publish, and there in `real64` only.
+    real(real32), parameter :: PI_R32 = real(PF_PI, real32)
+    real(real32), parameter :: TWOPI_R32 = real(PF_TWOPI, real32)
+    !> The two angle-conversion factors in `real32`, narrowed from `real64` for the same reason.
+    real(real32), parameter :: DEG2RAD_R32 = real(PF_RAD_PER_DEG, real32)
+    real(real32), parameter :: RAD2DEG_R32 = real(PF_DEG_PER_RAD, real32)
 
     !> The constants the normal family needs, in each kind. Written to more digits than either
     !! kind can hold so that the compiler rounds them, and the `real32` ones narrowed from the
@@ -938,8 +933,8 @@ contains
         real(real64), intent(in) :: angle !! an angle in radians, of any magnitude and sign.
         real(real64) :: res !! the same direction, in `[0, 2*pi)`.
 
-        res = modulo(angle, TWOPI_R64)
-        if (res >= TWOPI_R64) res = 0.0_real64
+        res = modulo(angle, PF_TWOPI)
+        if (res >= PF_TWOPI) res = 0.0_real64
     end function pf_wrap_rad_r64
 
     !> An angle in radians reduced to `[-pi, pi)`. See `pf_wrap_pi`.
@@ -956,8 +951,8 @@ contains
         real(real64), intent(in) :: angle !! an angle in radians, of any magnitude and sign.
         real(real64) :: res !! the same direction, in `[-pi, pi)`.
 
-        res = modulo(angle + PI_R64, TWOPI_R64) - PI_R64
-        if (res >= PI_R64) res = -PI_R64
+        res = modulo(angle + PF_PI, PF_TWOPI) - PF_PI
+        if (res >= PF_PI) res = -PF_PI
     end function pf_wrap_pi_r64
 
     !> Degrees to radians. See `pf_deg2rad`.
@@ -973,7 +968,7 @@ contains
         real(real64), intent(in) :: angle !! an angle in degrees.
         real(real64) :: res !! the same angle in radians.
 
-        res = angle * DEG2RAD_R64
+        res = angle * PF_RAD_PER_DEG
     end function pf_deg2rad_r64
 
     !> Radians to degrees. See `pf_rad2deg`.
@@ -989,7 +984,7 @@ contains
         real(real64), intent(in) :: angle !! an angle in radians.
         real(real64) :: res !! the same angle in degrees.
 
-        res = angle * RAD2DEG_R64
+        res = angle * PF_DEG_PER_RAD
     end function pf_rad2deg_r64
 
     ! ================================================================================

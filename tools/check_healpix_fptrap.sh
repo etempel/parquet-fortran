@@ -12,7 +12,7 @@
 #     module's promise is actually about, and only a trapping build reproduces it.
 #   * it runs inside the whole test binary, where anything else in the process may have raised a
 #     flag first. This runs one program that does nothing else.
-#   * it links the whole library. This compiles seven Fortran files with a bare compiler and no
+#   * it links the whole library. This compiles eight Fortran files with a bare compiler and no
 #     Arrow anywhere, so it also demonstrates -- rather than asserting -- that the tier really is
 #     free of the reader/writer stack. That is the same thing tools/check_argsort_standalone.sh
 #     proves one tier over, and for the same reason: nothing in `fpm test` can see it, because the
@@ -307,9 +307,9 @@ program healpix_fptrap
 end program healpix_fptrap
 EOF
 
-SRC="src/parquet_settings_base.f90 src/parquet_healpix.f90 src/parquet_healpix_core.f90 \
-     src/parquet_healpix_arith.f90 src/parquet_healpix_query.f90 src/parquet_healpix_bulk.f90 \
-     src/parquet_healpix_grid.f90"
+SRC="src/parquet_settings_base.f90 src/parquet_constants.f90 src/parquet_healpix.f90 \
+     src/parquet_healpix_core.f90 src/parquet_healpix_arith.f90 src/parquet_healpix_query.f90 \
+     src/parquet_healpix_bulk.f90 src/parquet_healpix_grid.f90"
 
 status=0
 for opt in -O0 -O2; do

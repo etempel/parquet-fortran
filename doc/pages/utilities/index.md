@@ -19,6 +19,7 @@ ordered_subpage: skycoord.md
 ordered_subpage: index-maps.md
 ordered_subpage: logging.md
 ordered_subpage: configuration-files.md
+ordered_subpage: constants.md
 ordered_subpage: utils.md
 ordered_subpage: generated-tables.md
 ordered_subpage: embedding-maml-schemas.md
@@ -34,8 +35,8 @@ built on them — spatial neighbour search over coordinate arrays, the HEALPix s
 random points in sky polygons and HEALPix masks with the RA/Dec geometry they need, celestial
 coordinate systems with the separations and offsets that need none, fast key-to-index lookup and a
 recycling allocator for index values, leveled logging for your own program, TOML configuration
-files, small numeric, text and path helpers, and the two generators meant to be copied into your own
-project.
+files, named mathematical and physical constants, small numeric, text and path helpers, and the two
+generators meant to be copied into your own project.
 
 - [Sorting, ranking and selection](sorting.html) — `pf_argsort` over eleven element types, from
   plain arrays to a `parquet_column`, and `pf_sort` over the nine of them that are not container
@@ -183,6 +184,11 @@ project.
   writes the effective configuration back out. Then `parquet_cosmology_config`, the module that
   joins this one to the cosmology tier: a whole cosmology in a `[cosmology]` section, named or
   spelled out, and a record of which one a run used.
+- [Physical and mathematical constants with `parquet_constants`](constants.html) — pi and the angle
+  factors, the speed of light, Newton's constant, the Sun's mass, the megaparsec, the gigayear and
+  the rest of the constants this library computes with, each a `real64` parameter named with its
+  unit; where each value comes from, the three that follow astropy's doubles rather than the
+  nearest, and what is deliberately left with the procedure that uses it.
 - [Numeric, text and path helpers with `parquet_utils`](utils.html) — division that does not raise a
   flag, the standard normal distribution and its quantile function, angle wrapping and conversion,
   the cross product, ASCII case folding, turning a value into text with a minimum width or a format

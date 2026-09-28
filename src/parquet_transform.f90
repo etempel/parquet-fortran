@@ -3,10 +3,11 @@
 !> `pf_is_pow2` and `pf_next_pow2` for choosing that length.
 !!
 !! `parquet_transform` is an **Arrow-free leaf**: it imports the INTRINSIC module `iso_fortran_env`
-!! and no module of this library. An intrinsic module is not a compiled file, not a tier edge and
-!! not a footprint entry, so `use parquet_transform` compiles two Fortran files and never crosses
-!! the C++ boundary. `check_parquet_transform_stays_arrow_free` (tools/check_source_conventions.py)
-!! keeps that true.
+!! and, of this library, `parquet_constants` alone, a leaf of parameters that imports nothing
+!! itself (`check_parquet_constants_stays_leaf`). An intrinsic module is not a compiled file, not a
+!! tier edge and not a footprint entry, so `use parquet_transform` compiles three Fortran files and
+!! never crosses the C++ boundary. `check_parquet_transform_stays_arrow_free`
+!! (tools/check_source_conventions.py) keeps that true.
 !!
 !! **The convention is scipy's, factor of two included.** For a sequence `x` of length `n`, with
 !! indices from 0 in the formulas (the arrays themselves are 1-based, `x(j+1)` holding `x[j]`):

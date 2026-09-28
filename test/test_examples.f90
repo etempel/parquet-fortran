@@ -278,6 +278,7 @@ contains
     !> parquet_integrate (pf_integrate/pf_integrate_info/PF_INT_OK),
     !> parquet_root (pf_find_root/pf_bracket_expansion/pf_root_info/PF_ROOT_OK),
     !> parquet_transform (pf_dct/pf_is_pow2),
+    !> parquet_constants (PF_PI, beside parquet_utils' pf_deg2rad, whose name no constant may take),
     !> parquet_kde (pf_kde/pf_kde_grid),
     !> parquet_interpolate (pf_interp_1d/pf_interp_2d/pf_interp),
     !> parquet_cosmology (pf_cosmology/pf_z2zeta/pf_zeta2z/pf_z_combine),
@@ -493,6 +494,14 @@ contains
                 "pf_join_path must be reachable from use parquet alone and join POSIX-style")
             if (allocated(error)) return
         end block
+
+        ! parquet_constants: a constant, next to a call of `pf_deg2rad`. Fortran names are
+        ! case-insensitive, so a constant called `PF_DEG2RAD` would make this call reference a
+        ! name two re-exported modules export as different entities -- which ifx rejects at compile
+        ! time and gfortran accepts without a word, so this line is the ifx half of that guard.
+        call check(error, abs(pf_deg2rad(180.0_real64) - PF_PI) <= spacing(PF_PI), &
+            "PF_PI and pf_deg2rad must be reachable from use parquet alone, 180 degrees being pi")
+        if (allocated(error)) return
 
         ! parquet_integrate: the quadrature generic and its record types.
         block

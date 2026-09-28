@@ -11,10 +11,10 @@ Everything here is reachable from `use parquet`.
 
 **Two modules sit behind that, and the split matters only if you import them directly.**
 `parquet_random` is the generator — draws, bits, integers, streams and derived seeds — and it is
-the smallest import in the library: three Fortran files, no settings and no sort.
+one of the smallest imports in the library: four Fortran files, no settings and no sort.
 `parquet_sampling` is everything that draws from a *population*: `pf_random_perm_at`,
 `pf_random_permutation`, `pf_random_subset`, `pf_random_resample`, and the whole weighted family.
-It needs a sort, and takes it from `parquet_argsort`, so it costs eight files rather than three.
+It needs a sort, and takes it from `parquet_argsort`, so it costs nine files rather than four.
 `use parquet` gives you both and the distinction never arises.
 
 Neither reaches this library's C++ bindings, so neither pulls the Arrow/Parquet headers into your

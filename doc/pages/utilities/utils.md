@@ -7,9 +7,10 @@ Fortran does not supply: division that does not raise a flag, the standard norma
 and its quantile function, angle wrapping and conversion, the cross product, ASCII case folding,
 turning a value into text and reading it back, and joining and taking apart POSIX paths.
 
-It is a leaf. `use parquet_utils` compiles **one** of this library's Fortran files and imports
-nothing but the intrinsic modules `iso_fortran_env` and `ieee_arithmetic`, so its Fortran graph
-never reaches the C++ bindings. That is narrower than "no C++": `link` is a package-level key in
+It is a leaf. `use parquet_utils` compiles **two** of this library's Fortran files: it imports
+nothing but the intrinsic modules `iso_fortran_env` and `ieee_arithmetic` and
+[`parquet_constants`](constants.html), which holds constants and imports nothing itself, so its
+Fortran graph never reaches the C++ bindings. That is narrower than "no C++": `link` is a package-level key in
 `fpm.toml`, so the wrapper is still compiled and Arrow still linked whichever module you import —
 see [Choosing a module](../operating/choosing-a-module.html). It is also available through
 `use parquet` like everything else.
@@ -197,9 +198,9 @@ radian forms carry the rounding of the stored `2*pi` when they reduce a large an
 reason `pf_deg2rad` and `pf_rad2deg` do not round-trip bit-for-bit — `pi/180` and `180/pi` are each
 rounded, so the two multiplications compose to a factor a rounding away from one.
 
-There are deliberately **no named constants** here: this module publishes the two conversions, not
-a `pi`. A library that writes parquet files has no business owning the spelling of `pi`, and
-publishing one invites `e`, `c` and `G` next.
+The named constants are not here: this module publishes the two conversions, and the factors they
+multiply by, `PF_RAD_PER_DEG` and `PF_DEG_PER_RAD`, are [`parquet_constants`](constants.html)'s,
+beside `PF_PI` and `PF_TWOPI`.
 
 ## Cross product
 

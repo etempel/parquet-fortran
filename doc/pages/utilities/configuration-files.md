@@ -393,7 +393,7 @@ provenance and quality rules — while a cosmology describes the run that made i
 `parquet_cosmology_config` is the module that joins this one to the cosmology tier, and it is a
 module of its own rather than part of either neighbour. The object it builds, and everything it
 answers, is [Distances and times in an expanding universe](cosmology.html).
-`use parquet_cosmology_config` compiles 14 of this library's Fortran files. Putting the two
+`use parquet_cosmology_config` compiles 15 of this library's Fortran files. Putting the two
 procedures in `parquet_cosmology` would make every consumer of a dependency-free numerical tier
 fetch toml-f, and putting them in `parquet_toml` would make every program that reads a
 configuration file compile the cosmology tier, its integrator and its interpolator; this way

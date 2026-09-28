@@ -30,9 +30,9 @@
 !! `pf_fibonacci_grid` take `frame=`, and the pixel and mask samplers read the frame their
 !! `pf_healpix_grid` was built with.
 !!
-!! **Arrow-free, settings-free and silent.** It reaches `parquet_random`, `parquet_healpix` and
-!! `parquet_utils` only (`check_parquet_sphere_stays_arrow_free`), reads no knob and prints nothing,
-!! so it re-exports no setting. It does re-export the four HEALPix selectors and the two types its
+!! **Arrow-free, settings-free and silent.** It reaches `parquet_random`, `parquet_healpix`,
+!! `parquet_utils` and `parquet_constants` only (`check_parquet_sphere_stays_arrow_free`), reads no
+!! knob and prints nothing, so it re-exports no setting. It does re-export the four HEALPix selectors and the two types its
 !! procedures take, so a program whose only import is `use parquet_sphere` can build a grid and a
 !! stream.
 !!
@@ -49,6 +49,7 @@ module parquet_sphere
         parquet_set_message_stream, parquet_get_message_stream, &
         parquet_set_healpix_threads, parquet_get_healpix_threads
     use parquet_utils, only: pf_wrap_deg
+    use parquet_constants, only: PF_PI, PF_RAD_PER_DEG, PF_DEG_PER_RAD
     implicit none
     private
 
@@ -160,12 +161,6 @@ module parquet_sphere
 
     ! ---- Mathematical constants ----
 
-    !> pi.
-    real(real64), parameter :: sky_pi = 3.14159265358979323846264338327950288_real64
-    !> Radians per degree.
-    real(real64), parameter :: sky_deg2rad = sky_pi / 180.0_real64
-    !> Degrees per radian.
-    real(real64), parameter :: sky_rad2deg = 180.0_real64 / sky_pi
     !> `360/phi` with `phi` the golden ratio: the Fibonacci grid's longitude step, in degrees.
     real(real64), parameter :: sky_golden_step_deg = 222.49223594996214535365126037162972_real64
 

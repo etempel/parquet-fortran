@@ -76,7 +76,7 @@ type(kepler) :: k
 real(real64) :: ecc_anomaly
 k%mean_anomaly = 1.0_real64
 k%eccentricity = 0.3_real64
-call pf_find_root(k, 0.0_real64, 2.0_real64*acos(-1.0_real64), ecc_anomaly)
+call pf_find_root(k, 0.0_real64, PF_TWOPI, ecc_anomaly)   ! PF_TWOPI: parquet_constants
 ```
 
 **The callback must be a module procedure or a type-bound procedure, never an internal one**, and

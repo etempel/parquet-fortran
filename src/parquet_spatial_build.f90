@@ -1025,14 +1025,14 @@ contains
 
         allocate (vx(n), vy(n), vz(n))
         do i = 1_int64, n
-            cd = cos(dec(i) * spatial_deg2rad)
-            vx(i) = cd * cos(ra(i) * spatial_deg2rad)
-            vy(i) = cd * sin(ra(i) * spatial_deg2rad)
-            vz(i) = sin(dec(i) * spatial_deg2rad)
+            cd = cos(dec(i) * PF_RAD_PER_DEG)
+            vx(i) = cd * cos(ra(i) * PF_RAD_PER_DEG)
+            vy(i) = cd * sin(ra(i) * PF_RAD_PER_DEG)
+            vz(i) = sin(dec(i) * PF_RAD_PER_DEG)
         end do
         allocate (chords(size(radii_deg)))
         do k = 1, size(radii_deg)
-            chords(k) = 2.0_real64 * sin(0.5_real64 * radii_deg(k) * spatial_deg2rad)
+            chords(k) = 2.0_real64 * sin(0.5_real64 * radii_deg(k) * PF_RAD_PER_DEG)
         end do
 
         ! From here it is an ordinary 3D Euclidean build -- same tuner, same bucketing, same walk.

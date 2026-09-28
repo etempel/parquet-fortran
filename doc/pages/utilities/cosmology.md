@@ -4,7 +4,7 @@ title: Distances and times in an expanding universe with parquet_cosmology
 
 `parquet_cosmology` turns a redshift into a distance, a time, a volume or an angular scale — and
 back again. Build a cosmology once, then evaluate it over whole columns. It reaches no reader, no
-writer and no setting: `use parquet_cosmology` compiles eleven Fortran files and nothing of the
+writer and no setting: `use parquet_cosmology` compiles twelve Fortran files and nothing of the
 Arrow stack. `use parquet` brings it in too, so nothing here needs a second import. See
 [Choosing a module](../operating/choosing-a-module.html) for what each entry module costs.
 
@@ -19,21 +19,21 @@ of your own is a call away.
 
 ```fortran
 use parquet_cosmology
+use parquet_constants, only : PF_PI
 use iso_fortran_env, only : real64
 
 type(pf_cosmology) :: cosmo
 real(real64), allocatable :: z(:), mag(:), dl(:), mabs(:), vol(:)
-real(real64), parameter :: pi = 3.141592653589793_real64
 real(real64), parameter :: area_sr = 0.1524_real64  ! a survey of 500 square degrees
 integer :: i
 
-z   = [(0.05_real64*i, i = 1, 40)]                  ! your catalogue's columns
+z   = [(0.05_real64*i, i = 1, 40)]                     ! your catalogue's columns
 mag = 19.0_real64 + 0.5_real64*z
 
 call cosmo%init("Planck18")
-dl   = cosmo%luminosity_distance(z)                 ! Mpc, the whole column in one call
-mabs = mag - cosmo%distmod(z)                       ! absolute magnitude, K-correction aside
-vol  = cosmo%comoving_volume(z) * area_sr / (4*pi)  ! V_max for a survey of area_sr steradians
+dl   = cosmo%luminosity_distance(z)                    ! Mpc, the whole column in one call
+mabs = mag - cosmo%distmod(z)                          ! absolute magnitude, K-correction aside
+vol  = cosmo%comoving_volume(z) * area_sr / (4*PF_PI)  ! V_max for a survey of area_sr steradians
 ```
 
 Every binding that takes a redshift is `elemental`: a scalar or an array of any rank goes in and
@@ -197,7 +197,7 @@ formed as `z1 + z2 + z1*z2`, which loses nothing where `(1+z1)(1+z2) - 1` would 
 put a peculiar velocity on a cosmological redshift for a mock catalogue:
 
 ```fortran
-zobs = pf_z_combine(zred, vlos / 299792.458_real64)
+zobs = pf_z_combine(zred, vlos / PF_C_KMS)    ! c in km/s, from parquet_constants
 d    = sim%comoving_distance(zred)            ! Mpc; divide by sim%little_h() for Mpc/h
 zz   = sim%z_at_comoving_distance(d)          ! and back again, to rounding
 ```

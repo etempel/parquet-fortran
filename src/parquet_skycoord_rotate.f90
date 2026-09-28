@@ -17,18 +17,18 @@
 !! rather than `ieee_is_nan`, since these are per-element procedures.
 submodule (parquet_skycoord) parquet_skycoord_rotate
     use parquet_utils, only: pf_to_lower, pf_to_str
+    use parquet_constants, only: PF_C_KMS
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     implicit none
 
     ! ---- pf_zhel2zcmb's constants ----
     !
-    ! The module's only physical constants, kept beside the one procedure that uses them. The dipole
-    ! is Planck 2018 results I (Aghanim et al. 2020, A&A 641, A1), its apex Galactic as every dipole
-    ! is published; tools/generate_skycoord_reference.py --self-test reads the four literals back, so
-    ! never edit one without the generator.
+    ! The default dipole, kept beside the one procedure that uses it, with the speed of light in the
+    ! unit a dipole's speed is published in, `PF_C_KMS`. The dipole is Planck 2018 results I
+    ! (Aghanim et al. 2020, A&A 641, A1), its apex Galactic as every dipole is published;
+    ! tools/generate_skycoord_reference.py --self-test reads the three literals back, and `PF_C_KMS`
+    ! from src/parquet_constants.f90, so never edit one without the generator.
 
-    !> The speed of light, km/s: the SI definition, in the unit a dipole's speed is published in.
-    real(real64), parameter :: skc_c_kms = 299792.458_real64
     !> The CMB dipole apex's Galactic longitude, degrees (Planck 2018).
     real(real64), parameter :: skc_cmb_apex_lon = 264.021_real64
     !> The CMB dipole apex's Galactic latitude, degrees (Planck 2018).
@@ -37,9 +37,9 @@ submodule (parquet_skycoord) parquet_skycoord_rotate
     real(real64), parameter :: skc_cmb_apex_v = 369.82_real64
     !> The default apex as a Galactic unit vector, built at compile time.
     real(real64), parameter :: skc_cmb_apex_gal(3) = [ &
-        cos(skc_cmb_apex_lat * skc_deg2rad) * cos(skc_cmb_apex_lon * skc_deg2rad), &
-        cos(skc_cmb_apex_lat * skc_deg2rad) * sin(skc_cmb_apex_lon * skc_deg2rad), &
-        sin(skc_cmb_apex_lat * skc_deg2rad)]
+        cos(skc_cmb_apex_lat * PF_RAD_PER_DEG) * cos(skc_cmb_apex_lon * PF_RAD_PER_DEG), &
+        cos(skc_cmb_apex_lat * PF_RAD_PER_DEG) * sin(skc_cmb_apex_lon * PF_RAD_PER_DEG), &
+        sin(skc_cmb_apex_lat * PF_RAD_PER_DEG)]
 
 contains
 
@@ -56,7 +56,7 @@ contains
             sl = -1.0_real64
             cl = 0.0_real64
         else
-            d = lat * skc_deg2rad
+            d = lat * PF_RAD_PER_DEG
             sl = sin(d)
             cl = cos(d)
         end if
@@ -72,7 +72,7 @@ contains
             v(2) = 0.0_real64
             v(3) = sl
         else
-            a = lon * skc_deg2rad
+            a = lon * PF_RAD_PER_DEG
             v(1) = cl * cos(a)
             v(2) = cl * sin(a)
             v(3) = sl
@@ -86,7 +86,7 @@ contains
         if (v(1) == 0.0_real64 .and. v(2) == 0.0_real64) then
             lon = 0.0_real64
         else
-            lon = atan2(v(2), v(1)) * skc_rad2deg
+            lon = atan2(v(2), v(1)) * PF_DEG_PER_RAD
             if (lon < 0.0_real64) lon = lon + 360.0_real64
             if (lon >= 360.0_real64) lon = 0.0_real64
         end if
@@ -96,9 +96,9 @@ contains
         ! radians of a pole; above the guard the plain square root is the same value to a rounding
         ! and costs less than half as much.
         if (abs(v(1)) >= skc_hypot_safe .or. abs(v(2)) >= skc_hypot_safe) then
-            lat = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * skc_rad2deg
+            lat = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * PF_DEG_PER_RAD
         else
-            lat = atan2(v(3), hypot(v(1), v(2))) * skc_rad2deg
+            lat = atan2(v(3), hypot(v(1), v(2))) * PF_DEG_PER_RAD
         end if
     end procedure skc_unit_radec
 
@@ -367,11 +367,11 @@ contains
             bad = z
             return
         end if
-        if (abs(av) >= skc_c_kms) then
+        if (abs(av) >= PF_C_KMS) then
             bad = ieee_value(0.0_real64, ieee_quiet_nan)
             return
         end if
-        beta = av / skc_c_kms
+        beta = av / PF_C_KMS
         ! The cosine of the angle to the apex: the position's unit vector taken into Galactic and
         ! dotted with the apex's.
         call skc_radec_unit(lon, lat, v)
@@ -396,7 +396,7 @@ contains
         ! `g` from the speeds, whose `(c - |v|)(c + |v|)` is positive for every speed below light's,
         ! where `1 - beta**2` of a quotient rounded up could reach 0. `D` is bounded away from zero
         ! for every one of them: `g (1 - beta) = sqrt((1 - beta) / (1 + beta))`.
-        g = skc_c_kms / sqrt((skc_c_kms - abs(av)) * (skc_c_kms + abs(av)))
+        g = PF_C_KMS / sqrt((PF_C_KMS - abs(av)) * (PF_C_KMS + abs(av)))
         dd = g * (1.0_real64 - beta * cth)
         ed = g * beta * cth - g * g * beta * beta / (g + 1.0_real64)
         ok = .true.

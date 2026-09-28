@@ -1118,6 +1118,6 @@ which is honoured whatever the knob says.
 `use parquet_kde` compiles the statistics tier it is built on (`parquet_stats`, and beneath it the
 sorting tier), the random-number generator `%sample` draws from (`parquet_random`), the root finder
 and the discrete cosine transform the ISJ rule is built on (`parquet_root`, `parquet_transform`),
-and the module's own four files; no reader, writer or C++ boundary. It re-exports
+the named constants (`parquet_constants`), and the module's own four files; no reader, writer or C++ boundary. It re-exports
 the verbosity and message-stream pair, which `%print` reads, so a program importing it alone can
 silence its output with `parquet_set_verbosity("silent")`.

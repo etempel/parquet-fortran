@@ -206,11 +206,11 @@ contains
     ! ---- The RA/Dec layer ----
 
     module procedure hpx_grid_radec2pix_i32
-        call this%ang2pix(hpx_grid_theta(this%frame_id, dec), ra * hpx_deg2rad, ipix)
+        call this%ang2pix(hpx_grid_theta(this%frame_id, dec), ra * PF_RAD_PER_DEG, ipix)
     end procedure hpx_grid_radec2pix_i32
 
     module procedure hpx_grid_radec2pix_i64
-        call this%ang2pix(hpx_grid_theta(this%frame_id, dec), ra * hpx_deg2rad, ipix)
+        call this%ang2pix(hpx_grid_theta(this%frame_id, dec), ra * PF_RAD_PER_DEG, ipix)
     end procedure hpx_grid_radec2pix_i64
 
     module procedure hpx_grid_pix2radec_i32
@@ -238,7 +238,7 @@ contains
     end procedure hpx_grid_pix2radec_i64
 
     module procedure hpx_grid_radec2vec
-        call pf_ang2vec(hpx_grid_theta(this%frame_id, dec), ra * hpx_deg2rad, vec)
+        call pf_ang2vec(hpx_grid_theta(this%frame_id, dec), ra * PF_RAD_PER_DEG, vec)
     end procedure hpx_grid_radec2vec
 
     module procedure hpx_grid_vec2radec
@@ -291,7 +291,7 @@ contains
 
         call hpx_grid_require_i32(this, "pf_healpix_grid%query_disc_radec")
         call this%radec2vec(ra, dec, centre)
-        call pf_query_disc(int(this%nside_v, int32), centre, radius_deg * hpx_deg2rad, listpix, &
+        call pf_query_disc(int(this%nside_v, int32), centre, radius_deg * PF_RAD_PER_DEG, listpix, &
                            nlist, scheme=this%scheme_id, inclusive=inclusive)
     end procedure hpx_grid_disc_rd_i32
 
@@ -300,7 +300,7 @@ contains
 
         call hpx_grid_require(this, "pf_healpix_grid%query_disc_radec")
         call this%radec2vec(ra, dec, centre)
-        call pf_query_disc(this%nside_v, centre, radius_deg * hpx_deg2rad, listpix, nlist, &
+        call pf_query_disc(this%nside_v, centre, radius_deg * PF_RAD_PER_DEG, listpix, nlist, &
                            scheme=this%scheme_id, inclusive=inclusive)
     end procedure hpx_grid_disc_rd_i64
 
@@ -309,7 +309,7 @@ contains
 
         call hpx_grid_require_i32(this, "pf_healpix_grid%query_disc_radec_count")
         call this%radec2vec(ra, dec, centre)
-        call pf_query_disc_count(int(this%nside_v, int32), centre, radius_deg * hpx_deg2rad, &
+        call pf_query_disc_count(int(this%nside_v, int32), centre, radius_deg * PF_RAD_PER_DEG, &
                                  nlist, scheme=this%scheme_id, inclusive=inclusive)
     end procedure hpx_grid_disc_rd_count_i32
 
@@ -318,7 +318,7 @@ contains
 
         call hpx_grid_require(this, "pf_healpix_grid%query_disc_radec_count")
         call this%radec2vec(ra, dec, centre)
-        call pf_query_disc_count(this%nside_v, centre, radius_deg * hpx_deg2rad, nlist, &
+        call pf_query_disc_count(this%nside_v, centre, radius_deg * PF_RAD_PER_DEG, nlist, &
                                  scheme=this%scheme_id, inclusive=inclusive)
     end procedure hpx_grid_disc_rd_count_i64
 
@@ -327,7 +327,7 @@ contains
 
         call hpx_grid_require_i32(this, "pf_healpix_grid%query_disc_radec_alloc")
         call this%radec2vec(ra, dec, centre)
-        call pf_query_disc_alloc(int(this%nside_v, int32), centre, radius_deg * hpx_deg2rad, &
+        call pf_query_disc_alloc(int(this%nside_v, int32), centre, radius_deg * PF_RAD_PER_DEG, &
                                  listpix, nlist, scheme=this%scheme_id, inclusive=inclusive)
     end procedure hpx_grid_disc_rd_alloc_i32
 
@@ -336,7 +336,7 @@ contains
 
         call hpx_grid_require(this, "pf_healpix_grid%query_disc_radec_alloc")
         call this%radec2vec(ra, dec, centre)
-        call pf_query_disc_alloc(this%nside_v, centre, radius_deg * hpx_deg2rad, listpix, nlist, &
+        call pf_query_disc_alloc(this%nside_v, centre, radius_deg * PF_RAD_PER_DEG, listpix, nlist, &
                                  scheme=this%scheme_id, inclusive=inclusive)
     end procedure hpx_grid_disc_rd_alloc_i64
 
@@ -624,9 +624,9 @@ contains
         real(real64) :: theta !! colatitude, radians.
 
         if (frame == PF_HP_DEC_SOUTH) then
-            theta = (90.0_real64 + dec) * hpx_deg2rad
+            theta = (90.0_real64 + dec) * PF_RAD_PER_DEG
         else
-            theta = (90.0_real64 - dec) * hpx_deg2rad
+            theta = (90.0_real64 - dec) * PF_RAD_PER_DEG
         end if
     end function hpx_grid_theta
 
@@ -637,9 +637,9 @@ contains
         real(real64) :: dec !! declination, degrees.
 
         if (frame == PF_HP_DEC_SOUTH) then
-            dec = theta * hpx_rad2deg - 90.0_real64
+            dec = theta * PF_DEG_PER_RAD - 90.0_real64
         else
-            dec = 90.0_real64 - theta * hpx_rad2deg
+            dec = 90.0_real64 - theta * PF_DEG_PER_RAD
         end if
     end function hpx_grid_dec
 
@@ -655,7 +655,7 @@ contains
         real(real64), intent(out) :: ra !! right ascension, degrees, in `[0, 360)`.
         real(real64), intent(out) :: dec !! declination, degrees.
 
-        ra = phi * hpx_rad2deg
+        ra = phi * PF_DEG_PER_RAD
         if (ra >= 360.0_real64) ra = ra - 360.0_real64
         dec = hpx_grid_dec(frame, theta)
     end subroutine hpx_grid_from_ang

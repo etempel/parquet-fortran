@@ -9,19 +9,19 @@ the two pixel-numbering schemes, and listing the pixels of a disc.
 
 ```fortran
 use parquet_healpix
+use parquet_constants, only : PF_HALFPI, PF_RAD_PER_DEG
 use iso_fortran_env, only : int64, real64
 
 integer(int64) :: nside, ipix, nfound
 integer(int64) :: listpix(4096)
 real(real64) :: theta, phi, vec(3)
 real(real64) :: ra, dec
-real(real64), parameter :: deg2rad = 3.14159265358979_real64 / 180.0_real64
 
 ra = 214.25_real64
 dec = 52.5_real64
 nside = 1024_int64
-theta = 0.5_real64 * 3.14159265358979_real64 - dec * deg2rad   ! colatitude, radians
-phi = ra * deg2rad
+theta = PF_HALFPI - dec * PF_RAD_PER_DEG                       ! colatitude, radians
+phi = ra * PF_RAD_PER_DEG
 
 call pf_ang2pix_nest(nside, theta, phi, ipix)                  ! which pixel is this direction in?
 call pf_pix2vec_nest(nside, ipix, vec)                         ! and where is that pixel's centre?
@@ -33,7 +33,7 @@ Signatures below are written with optional arguments in **square brackets** —
 brackets are not Fortran and a block containing them is a description rather than a runnable
 example.
 
-`use parquet_healpix` compiles seven of this library's Fortran files and never reaches this
+`use parquet_healpix` compiles eight of this library's Fortran files and never reaches this
 library's reader, its writer or its C++ bindings. That is a statement about the *Fortran* graph and
 not about linking: `link` is a package-level key in `fpm.toml`, so every import of this package
 still compiles the C++ wrapper and still links `-larrow`. See

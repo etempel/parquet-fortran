@@ -157,13 +157,13 @@ contains
             if (rule == PF_EDGE_RADEC) then
                 ra_c = this%ra_lo + u1 * (this%ra_hi - this%ra_lo)
                 s = min(max(this%sin_lo + u2 * this%sin_span, -1.0_real64), 1.0_real64)
-                dec_c = asin(s) * sky_rad2deg
+                dec_c = asin(s) * PF_DEG_PER_RAD
                 if (sky_even_odd(this%px, this%py, ra_c, dec_c)) nin = nin + 1_int64
             else
                 h = u1 * 2.0_real64 * sin(0.5_real64 * this%cap_radius)**2
                 zc = 1.0_real64 - h
                 sn = sqrt(h * (2.0_real64 - h))
-                phi = 2.0_real64 * sky_pi * u2
+                phi = 2.0_real64 * PF_PI * u2
                 if (zc > 0.5_real64 * sky_hemisphere_cos) then
                     if (sky_even_odd(this%px, this%py, sn * cos(phi) / zc, sn * sin(phi) / zc)) nin = nin + 1_int64
                 end if
@@ -242,15 +242,15 @@ contains
         integer(int64) :: k, j, n
 
         call sky_dec_sin_cos(dec_lo, sref, cref)
-        ref = dec_lo * sky_deg2rad
+        ref = dec_lo * PF_RAD_PER_DEG
         n = size(ra, kind=int64)
         total = 0.0_real64
         do k = 1_int64, n
             j = k + 1_int64
             if (k == n) j = 1_int64
-            dra = (ra(j) - ra(k)) * sky_deg2rad
-            d1 = dec(k) * sky_deg2rad
-            d2 = dec(j) * sky_deg2rad
+            dra = (ra(j) - ra(k)) * PF_RAD_PER_DEG
+            d1 = dec(k) * PF_RAD_PER_DEG
+            d2 = dec(j) * PF_RAD_PER_DEG
             mid = 0.5_real64 * (d1 + d2)
             h = 0.5_real64 * (d2 - d1)
             total = total + dra * (2.0_real64 * cos(0.5_real64 * (mid + ref)) * sin(0.5_real64 * (mid - ref)) * &
@@ -284,7 +284,7 @@ contains
                 call pf_random_fill_draws(key, i, uv, k + k - 1_int64)
                 ra_c = this%ra_lo + uv(1) * (this%ra_hi - this%ra_lo)
                 s = min(max(this%sin_lo + uv(2) * this%sin_span, -1.0_real64), 1.0_real64)
-                dec_c = asin(s) * sky_rad2deg
+                dec_c = asin(s) * PF_DEG_PER_RAD
                 if (sky_even_odd(this%px, this%py, ra_c, dec_c)) then
                     ra = pf_wrap_deg(ra_c)
                     dec = dec_c
@@ -370,11 +370,11 @@ contains
             this%py = dec
             call sky_dec_sin_cos(this%dec_lo, sc, cc)
             this%sin_lo = sc
-            lo = this%dec_lo * sky_deg2rad
-            hi = this%dec_hi * sky_deg2rad
+            lo = this%dec_lo * PF_RAD_PER_DEG
+            hi = this%dec_hi * PF_RAD_PER_DEG
             this%sin_span = 2.0_real64 * cos(0.5_real64 * (hi + lo)) * sin(0.5_real64 * (hi - lo))
             area = sky_chart_area(ra, dec, this%dec_lo)
-            bound = (this%ra_hi - this%ra_lo) * sky_deg2rad * this%sin_span
+            bound = (this%ra_hi - this%ra_lo) * PF_RAD_PER_DEG * this%sin_span
             what = "box"
         else
             allocate (u(3, n), gx(n), gy(n), gz(n))
@@ -399,7 +399,7 @@ contains
                 if (.not. (gz(k) > sky_hemisphere_cos)) then
                     w = [u(2, k) * c(3) - u(3, k) * c(2), u(3, k) * c(1) - u(1, k) * c(3), &
                          u(1, k) * c(2) - u(2, k) * c(1)]
-                    ang = atan2(sqrt(w(1) * w(1) + w(2) * w(2) + w(3) * w(3)), gz(k)) * sky_rad2deg
+                    ang = atan2(sqrt(w(1) * w(1) + w(2) * w(2) + w(3) * w(3)), gz(k)) * PF_DEG_PER_RAD
                     error stop who // ": vertex " // trim(sky_int_text(k)) // " is " // trim(sky_real_text(ang)) // &
                         " degrees from the vertices' mean direction; every vertex must be within 89.9 degrees " // &
                         "of it (the polygon must fit an open hemisphere) -- split it"
@@ -441,7 +441,7 @@ contains
                     1.0_real64 + gz(k) + gz(j) + (gx(k) * gx(j) + gy(k) * gy(j) + gz(k) * gz(j)))
             end do
             area = abs(total)
-            bound = 4.0_real64 * sky_pi * sin(0.5_real64 * this%cap_radius)**2
+            bound = 4.0_real64 * PF_PI * sin(0.5_real64 * this%cap_radius)**2
             what = "cap"
         end if
 
@@ -526,7 +526,7 @@ contains
 
     module procedure sky_polygon_area_deg2
         if (.not. this%set) error stop "pf_sky_polygon%area_deg2: %init has not run"
-        a = this%area_v * sky_rad2deg * sky_rad2deg
+        a = this%area_v * PF_DEG_PER_RAD * PF_DEG_PER_RAD
     end procedure sky_polygon_area_deg2
 
     module procedure sky_polygon_acceptance

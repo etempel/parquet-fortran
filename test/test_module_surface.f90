@@ -1416,6 +1416,37 @@ contains
 
 end module test_module_surface_utils
 
+!> `parquet_constants` alone: every public constant, with no other library import.
+!!
+!! **One library import, and it must stay that way.** The module reads no setting and prints
+!! nothing, so there is no knob to round-trip; what this asserts is that every constant is
+!! reachable through the single `use`, which is the half that breaks at BUILD time when a name
+!! drops out of a `public ::` list. The values themselves are pinned by `test/test_constants.f90`.
+module test_module_surface_constants
+    use parquet_constants              ! THE ONLY library import.
+    use iso_fortran_env, only : real64
+    implicit none
+    private
+    public :: check_constants_surface
+
+contains
+
+    !> Names every public constant through `use parquet_constants` alone.
+    subroutine check_constants_surface(what)
+        character(len=:), allocatable, intent(out) :: what !! the first thing that failed, or "".
+        real(real64) :: values(20)
+
+        what = ""
+        values = [PF_PI, PF_TWOPI, PF_HALFPI, PF_RAD_PER_DEG, PF_DEG_PER_RAD, PF_RAD_PER_ARCMIN, &
+                  PF_RAD_PER_ARCSEC, PF_C_KMS, PF_C_MS, PF_MPC_M, PF_MPC_KM, PF_GYR_S, PF_G_SI, &
+                  PF_GM_SUN_SI, PF_M_SUN_KG, PF_G_MPC_MSUN_KMS2, PF_SIGMA_SB_SI, PF_K_B_EV_K, &
+                  PF_TNU_OVER_TGAMMA, PF_AB_ZERO_POINT_JY]
+        if (.not. all(values > 0.0_real64)) what = "a constant is not positive"
+        if (what == "" .and. PF_TWOPI /= 2.0_real64 * PF_PI) what = "PF_TWOPI is not 2 PF_PI"
+    end subroutine check_constants_surface
+
+end module test_module_surface_constants
+
 !> `parquet_logging` alone: configure a logger, emit through it, and ask what is enabled.
 !!
 !! **One library import, and it must stay that way.** This module's row in the entry-module table
@@ -2604,6 +2635,7 @@ module test_module_surface
     use test_module_surface_sampling, only : check_sampling_surface
     use test_module_surface_version, only : check_version_surface
     use test_module_surface_utils, only : check_utils_surface
+    use test_module_surface_constants, only : check_constants_surface
     use test_module_surface_integrate, only : check_integrate_surface
     use test_module_surface_interpolate, only : check_interpolate_surface
     use test_module_surface_optimize, only : check_optimize_surface
@@ -2738,6 +2770,8 @@ contains
                          test_skycoord_surface), &
             new_unittest("parquet_utils alone folds text and takes a path apart", &
                          test_utils_surface), &
+            new_unittest("parquet_constants alone reaches every constant", &
+                         test_constants_surface), &
             new_unittest("parquet_integrate alone integrates and hands back its record", &
                          test_integrate_surface), &
             new_unittest("parquet_interpolate alone builds both interpolants and evaluates them", &
@@ -2891,6 +2925,16 @@ contains
         call check_utils_surface(what)
         call check(error, what == "", "the helpers were not usable through `use parquet_utils` alone: " // what)
     end subroutine test_utils_surface
+
+    !> The test-drive wrapper over check_constants_surface.
+    subroutine test_constants_surface(error)
+        type(error_type), allocatable, intent(out) :: error
+        character(len=:), allocatable :: what
+
+        call check_constants_surface(what)
+        call check(error, what == "", &
+            "the constants were not usable through `use parquet_constants` alone: " // what)
+    end subroutine test_constants_surface
 
     !> The test-drive wrapper over check_integrate_surface.
     subroutine test_integrate_surface(error)

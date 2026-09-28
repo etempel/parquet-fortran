@@ -364,6 +364,16 @@ done | sort | uniq -c | sort -rn
   (`mm_get_method`, the `%keys` forms in `src/parquet_index_multi.f90`). Only one ICE is reported
   per compilation, naming the last such call. Workaround: repeat the callee's body over the
   `type`-dummy helpers, with a comment.
+- **gfortran 15.2 compiles, without a diagnostic, a reference to a name that two use-associated
+  modules export as different entities** -- a generic function in one and a `parameter` in the
+  other, reached through one facade; F2018 forbids the reference and ifx rejects it
+  (`error #6405: The same named entity from different modules and/or program units cannot be
+  referenced`). Names are case-insensitive, so a constant `PF_DEG2RAD` IS the function
+  `pf_deg2rad`. A public name added to a module the `parquet` facade re-exports must differ,
+  case-insensitively, from every other public name in `src/`, continuation lines of `public ::`
+  lists included. `check_constants_names_are_unique` enforces it for `parquet_constants`; nothing
+  does for the other modules, where only an ifx build of a program calling the name through
+  `use parquet` fails (`test_facade_covers_every_layer` calls `pf_deg2rad` for that reason).
 
 ## ifx-specific gotchas
 

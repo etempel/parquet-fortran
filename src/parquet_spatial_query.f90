@@ -1365,9 +1365,9 @@ contains
             case (1)
                 cd = 2.0_real64
             case (2)
-                cd = 3.141592653589793_real64
+                cd = PF_PI
             case default
-                cd = 4.1887902047863905_real64
+                cd = spatial_four_thirds_pi
             end select
             r = spatial_shell_safety * (real(kk + 1_int64, kind=real64) / (cd * self%rho)) &
                 ** (1.0_real64 / real(dm, kind=real64))

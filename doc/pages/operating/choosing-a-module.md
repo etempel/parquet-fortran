@@ -3,7 +3,7 @@ title: Choosing a module: what each entry module costs to import
 ---
 
 `use parquet` brings the whole library into scope and is the right answer for most programs. It is
-also the largest: a project that imports it compiles **160** of this library's Fortran files.
+also the largest: a project that imports it compiles **161** of this library's Fortran files.
 
 Every layer underneath is importable on its own, and several of them cost a great deal less. This
 page says what each entry module gives you, what it costs, and — the part that is easy to get wrong
@@ -43,36 +43,37 @@ in every one of them.
 | `parquet_version` | 2 | no | `parquet_get_version`: which parquet-fortran this is |
 | `parquet_temporal` | 1 | no | `parquet_date`, `parquet_time`, `parquet_timestamp` and their unit constants |
 | `parquet_strings` | 2 | no | `parquet_string_column` / `parquet_string`: packed, null-aware string storage |
-| `parquet_random` | 3 | no | counter-based random numbers, the distributions and the points-on-a-sphere family |
+| `parquet_random` | 4 | no | counter-based random numbers, the distributions and the points-on-a-sphere family |
 | `parquet_argsort` | 4 | no | `pf_argsort` over the six intrinsic types, plus `pf_sort_threads` |
-| `parquet_sampling` | 8 | no | permutations, subsets, resampling and weighted draws |
-| `parquet_spatial` | 15 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid or a HEALPix pixelisation, including on the sky |
-| `parquet_healpix` | 7 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
-| `parquet_sphere` | 15 | no | `pf_sky_polygon`, `pf_random_pixel_at` and `pf_random_mask_at`: uniform random points in sky polygons and HEALPix pixels and masks, and RA/Dec conversions in a named declination frame and the Fibonacci grid |
-| `parquet_skycoord` | 6 | no | `pf_icrs2gal`, `pf_sky_convert`, `pf_sky_rotation` and the other rotations: sky positions converted between ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 coordinates; `pf_angdist_deg`, `pf_offset_radec`, `pf_position_angle_deg` and `pf_apply_pm`, the RA/Dec geometry that needs no coordinate system, proper motion included; `pf_radec2str`, `pf_str2radec` and their kin, positions as sexagesimal text and back; and `pf_zhel2zcmb`, a redshift in the CMB rest frame |
-| `parquet_index` | 13 | no | `pf_index_map`: which row holds this key, over a single integer key, a tuple of them or a string, with three storage backends, two chosen from the keys and one opt-in; `pf_index_multimap`: every row holding a key that repeats, as ranges; and `pf_index_pool`, which hands out and recycles unique index values |
+| `parquet_sampling` | 9 | no | permutations, subsets, resampling and weighted draws |
+| `parquet_spatial` | 16 | no | `pf_spatial_index`: neighbour and k-nearest search on a uniform grid or a HEALPix pixelisation, including on the sky |
+| `parquet_healpix` | 8 | no | `pf_query_disc` and friends: the HEALPix sphere pixelisation |
+| `parquet_sphere` | 16 | no | `pf_sky_polygon`, `pf_random_pixel_at` and `pf_random_mask_at`: uniform random points in sky polygons and HEALPix pixels and masks, and RA/Dec conversions in a named declination frame and the Fibonacci grid |
+| `parquet_skycoord` | 7 | no | `pf_icrs2gal`, `pf_sky_convert`, `pf_sky_rotation` and the other rotations: sky positions converted between ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 coordinates; `pf_angdist_deg`, `pf_offset_radec`, `pf_position_angle_deg` and `pf_apply_pm`, the RA/Dec geometry that needs no coordinate system, proper motion included; `pf_radec2str`, `pf_str2radec` and their kin, positions as sexagesimal text and back; and `pf_zhel2zcmb`, a redshift in the CMB rest frame |
+| `parquet_index` | 14 | no | `pf_index_map`: which row holds this key, over a single integer key, a tuple of them or a string, with three storage backends, two chosen from the keys and one opt-in; `pf_index_multimap`: every row holding a key that repeats, as ranges; and `pf_index_pool`, which hands out and recycles unique index values |
 | `parquet_columns` | 10 | no | `parquet_column`: a typed, null-aware column container |
 | `parquet_list` | 11 | no | `parquet_list_column` / `parquet_list_row`: variable-length list storage |
 | `parquet_struct` | 11 | no | `parquet_struct_column` / `parquet_struct_row`: one value per declared field per row |
 | `parquet_map` | 11 | no | `parquet_map_column` / `parquet_map_row`: string-keyed `key -> value` entries per row |
 | `parquet_logging` | 1 | no | `pf_logger` and the `pf_log_*` procedures: leveled logging to several destinations at once, with a layout you choose and correct behaviour inside an OpenMP parallel region |
 | `parquet_toml` | 2 | no | `pf_toml`: reading and writing TOML configuration files on top of `toml-f`, with checked types, a report for every key nobody read, and diagnostics that point at the offending line |
-| `parquet_utils` | 1 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
+| `parquet_utils` | 2 | no | `pf_to_lower`, `pf_to_str`, `pf_join_path` and the path splitters: ASCII case folding, value-to-text, and POSIX path handling |
+| `parquet_constants` | 1 | no | `PF_PI` and the angle factors, and the physical constants and units the numerical tiers compute with — the speed of light, Newton's constant, the Sun's mass, the megaparsec, the gigayear and the rest — each a `real64` parameter named with its unit |
 | `parquet_sorting` | 22 | no | the whole sorting API, every element type, including `pf_sort_keys` |
-| `parquet_stats` | 29 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
-| `parquet_kde` | 40 | no | `pf_kde`: a kernel density estimate of a one-dimensional sample, its density, distribution function and quantiles answered anywhere; `pf_kde_grid`: the same estimate streamed into fixed cells |
+| `parquet_stats` | 30 | no | the `pf_*` array-statistics family: reductions over plain Fortran arrays |
+| `parquet_kde` | 41 | no | `pf_kde`: a kernel density estimate of a one-dimensional sample, its density, distribution function and quantiles answered anywhere; `pf_kde_grid`: the same estimate streamed into fixed cells |
 | `parquet_integrate` | 3 | no | `pf_integrate`: adaptive quadrature of a function of one variable over a finite or infinite range |
 | `parquet_interpolate` | 4 | no | `pf_interp_1d`, `pf_interp_2d` and `pf_interp`: linear, cubic-spline and shape-preserving interpolation of tabulated data, in one dimension and on a rectilinear grid |
-| `parquet_cosmology` | 11 | no | `pf_cosmology`: distances, times and volumes in an expanding universe — the comoving, transverse, luminosity and angular diameter distances, the lookback time and the age, the comoving volume and its element, the distance modulus and the transverse scales, the density parameters, the CMB temperature and the critical density at a redshift, the linear growth of structure and the baryon acoustic scale, for the eight named cosmologies or a model of your own, with the redshift at a given distance, lookback time, age, luminosity distance or distance modulus; and `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` |
-| `parquet_cosmology_config` | 14 | no | `pf_cosmology_from_toml` and `pf_cosmology_to_toml`: building a `pf_cosmology` from the `[cosmology]` section of a TOML configuration file, and writing one back into a document — the cosmology tier joined to `parquet_toml`, so that neither of them has to carry the other |
-| `parquet_optimize` | 14 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |
-| `parquet_prima` | 24 | no | `pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla`: Powell's derivative-free solvers, vendored from PRIMA — a function of several variables with bounds, linear constraints or nonlinear ones |
+| `parquet_cosmology` | 12 | no | `pf_cosmology`: distances, times and volumes in an expanding universe — the comoving, transverse, luminosity and angular diameter distances, the lookback time and the age, the comoving volume and its element, the distance modulus and the transverse scales, the density parameters, the CMB temperature and the critical density at a redshift, the linear growth of structure and the baryon acoustic scale, for the eight named cosmologies or a model of your own, with the redshift at a given distance, lookback time, age, luminosity distance or distance modulus; and `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` |
+| `parquet_cosmology_config` | 15 | no | `pf_cosmology_from_toml` and `pf_cosmology_to_toml`: building a `pf_cosmology` from the `[cosmology]` section of a TOML configuration file, and writing one back into a document — the cosmology tier joined to `parquet_toml`, so that neither of them has to carry the other |
+| `parquet_optimize` | 15 | no | `pf_minimize_scalar`, `pf_minimize_simplex`, `pf_minimize_de` and `pf_minimize_multistart`: minimising a function of one or many variables, on a bracket, from a start point, or globally over a box |
+| `parquet_prima` | 25 | no | `pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla`: Powell's derivative-free solvers, vendored from PRIMA — a function of several variables with bounds, linear constraints or nonlinear ones |
 | `parquet_root` | 2 | no | `pf_find_root`: where a function of one variable crosses zero, by Brent's method on a bracket, widened first under a growth policy you state |
-| `parquet_transform` | 2 | no | `pf_dct`, `pf_idct`, `pf_dst` and `pf_idst`: the discrete cosine and sine transforms of a sequence whose length is a power of two, and their inverses |
+| `parquet_transform` | 3 | no | `pf_dct`, `pf_idct`, `pf_dst` and `pf_idst`: the discrete cosine and sine transforms of a sequence whose length is a power of two, and their inverses |
 | `parquet_settings` | 3 | **yes** | the process-global knobs, and `parquet_get_arrow_version` |
-| `parquet_io` | 63 | **yes** | reading and writing Parquet files, and nothing else |
-| `parquet_tables` | 99 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
-| `parquet` | 160 | **yes** | everything above, through one `use` |
+| `parquet_io` | 64 | **yes** | reading and writing Parquet files, and nothing else |
+| `parquet_tables` | 100 | **yes** | the `parquet_table` container, and the statistics tier its `%agg` runs on |
+| `parquet` | 161 | **yes** | everything above, through one `use` |
 
 Four rows deserve a note.
 
@@ -101,9 +102,10 @@ modules listed just above. Reach for it when your program opens files, moves col
 never builds a `parquet_table`.
 
 It does **not** drop `parquet_random`: `parquet_open_reader(..., sample_fraction=)` picks its rows
-with this library's own generator, so the reader genuinely depends on it. Those three files are a
-closed set — `parquet_random` and the two leaves it reads, `parquet_expkey` and `parquet_ziggurat`,
-which import nothing but `iso_fortran_env` — so the graph cannot grow further through them.
+with this library's own generator, so the reader genuinely depends on it. Those four files are a
+closed set — `parquet_random` and the three leaves it reads, `parquet_expkey`, `parquet_ziggurat`
+and `parquet_constants`, which import nothing but `iso_fortran_env` — so the graph cannot grow
+further through them.
 
 **`parquet_settings` is the cheapest import that reaches Arrow**, at three files, and that is the
 point of listing it: what naming it costs you is not compile time, it is the C++ boundary. Those
@@ -123,7 +125,7 @@ That is also why the argsort tier exists at all. `parquet_sampling` needs exactl
 specific — `pf_argsort` over a `real64` array, for `pf_weighted_permutation` — and taking it from
 `parquet_sorting` would cost that import the whole 22-file sorting graph for one procedure. The
 intrinsic-type `pf_argsort` and its engine live in `parquet_argsort` instead, which is what keeps
-`use parquet_sampling` at 8 files.
+`use parquet_sampling` at 9 files.
 
 The practical consequence for your own code: **one added `use` line can multiply what a consumer
 compiles.** If you contribute to this library, `tools/check_module_footprints.sh` is what notices.
@@ -141,6 +143,7 @@ anything else.
 | `parquet_version` | `verbosity` and `message_stream` — it can print, see below |
 | `parquet_temporal` | none — it reads none |
 | `parquet_utils` | none — it reads none, and must not: it sits below `parquet_settings_base` |
+| `parquet_constants` | none — it reads none, and prints nothing at all |
 | `parquet_random` | none — it reads none; the thread rule lives in `parquet_sampling` |
 | `parquet_columns` | `verbosity` and `message_stream` — it reads no knob of its own, but `parquet_column%gather(..., threads=)` resolves a thread count and can warn from a thread clamp |
 | `parquet_list` | `verbosity` and `message_stream` — the same, through the `parquet_column` it re-exports |

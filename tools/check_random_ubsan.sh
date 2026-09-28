@@ -91,9 +91,10 @@ case "$FC" in
         ;;
 esac
 
-# parquet_settings_base first: parquet_random uses it and this is a plain ordered compile. It is the
-# leaf settings module, which is what keeps this standalone compile possible at all.
-SRC="src/parquet_expkey.f90 src/parquet_ziggurat.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
+# parquet_random's three imports first, since this is a plain ordered compile: parquet_constants,
+# parquet_expkey and parquet_ziggurat, each a leaf importing only iso_fortran_env, which is what keeps
+# this standalone compile possible at all.
+SRC="src/parquet_constants.f90 src/parquet_expkey.f90 src/parquet_ziggurat.f90 src/parquet_random.f90 test/test_random_reference.f90 test/test_random_vectors.f90 tools/check_random_kernels.f90"
 ABS_SRC=""
 for f in $SRC; do ABS_SRC="$ABS_SRC $REPO/$f"; done
 

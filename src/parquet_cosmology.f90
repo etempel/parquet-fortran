@@ -107,8 +107,9 @@
 !!
 !! **`real64` only**, like every numerical tier here; a `real32` caller converts at the call.
 !!
-!! **Arrow-free, settings-free and silent.** It reaches `parquet_integrate`, `parquet_interpolate`
-!! and `parquet_utils` only (`check_parquet_cosmology_stays_arrow_free`), reads no knob and prints
+!! **Arrow-free, settings-free and silent.** It reaches `parquet_integrate`, `parquet_interpolate`,
+!! `parquet_utils` and `parquet_constants` only (`check_parquet_cosmology_stays_arrow_free`), reads
+!! no knob and prints
 !! nothing, so it re-exports no setting. `%init` and `%clear` are the only bindings that write an
 !! object; every other one is `pure`, so a built cosmology may be evaluated from any number of
 !! threads at once and two objects share nothing. The one hazard is the general one: a thread
@@ -122,6 +123,8 @@ module parquet_cosmology
                                   PF_INT_ROUNDOFF, PF_INT_NO_CONVERGENCE
     use parquet_interpolate, only : pf_interp_1d
     use parquet_utils, only : pf_to_lower, pf_to_str
+    use parquet_constants, only : PF_PI, PF_C_KMS, PF_C_MS, PF_G_SI, PF_GM_SUN_SI, PF_SIGMA_SB_SI, &
+                                  PF_K_B_EV_K, PF_MPC_KM, PF_MPC_M, PF_GYR_S, PF_TNU_OVER_TGAMMA
 
     implicit none
     private
@@ -133,39 +136,21 @@ module parquet_cosmology
 
     ! ---- The constants -----------------------------------------------------------------------
     !
-    ! Private, and pinned by `tools/generate_cosmology_reference.py --self-test`, which holds each
-    ! to the double nearest its own value. `c` appears once already as `skc_c_kms` in
-    ! `parquet_skycoord_rotate.f90`; the two modules do not import each other and should not, so
-    ! the value is repeated and each copy is pinned by its own generator.
+    ! The physical constants are `parquet_constants`', imported above: `c` in km/s for
+    ! `D_H = c / H0` and in m/s for `rho_gamma0`, `G` and the megaparsec in m for `rho_crit0`, the
+    ! Stefan-Boltzmann constant for `rho_gamma0`, Boltzmann's constant in eV/K for the neutrino
+    ! `y_i`, the megaparsec in km and the gigayear for `t_H`, the temperature ratio for `T_nu0`,
+    ! and `GM_sun`, whose quotient by `G` is the solar mass `%critical_density` reports in -- how
+    ! astropy derives its own `M_sun`, named in that binding's doc-comment because a critical
+    ! density is quoted in three different units in the wild. `test/test_constants.f90` pins each
+    ! to its bits, and `tools/generate_cosmology_reference.py --self-test` holds each to the value
+    ! its model uses. The coefficients below belong to this module's model, not to physics, and
+    ! the same `--self-test` pins them against the papers they come from.
     !
     ! THE RADIATION CHAIN IS ONLY RIGHT IN SI. `rho_gamma0 = 4 sigma_SB Tcmb0^4 / c^3` needs `c` in
     ! m/s and `rho_crit0 = 3 H0^2/(8 pi G)` needs `H0` in 1/s; substituting the km/s value of `c`
     ! is wrong by 1e27 and still produces a plausible small number, which is why the generator
-    ! checks the derived `Ogamma0` and not only the literals below.
-
-    real(real64), parameter :: pfc_c_kms = 299792.458_real64
-        !! Speed of light in km/s, exact by definition. For `D_H = c / H0`.
-    real(real64), parameter :: pfc_c_ms = 2.99792458e8_real64
-        !! The same constant in m/s. For `rho_gamma0` and nothing else.
-    real(real64), parameter :: pfc_g_si = 6.6743e-11_real64
-        !! Newton's constant, CODATA 2022, m^3 kg^-1 s^-2. For `rho_crit0`.
-    real(real64), parameter :: pfc_sigma_sb = 5.6703744191844314e-8_real64
-        !! Stefan-Boltzmann constant, W m^-2 K^-4. For `rho_gamma0`.
-    real(real64), parameter :: pfc_k_b_ev = 8.617333262145179e-5_real64
-        !! Boltzmann's constant in eV/K. For the neutrino `y_i`.
-    real(real64), parameter :: pfc_mpc_km = 3.0856775814913673e19_real64
-        !! A megaparsec in km, IAU 2015. For `t_H` in Gyr.
-    real(real64), parameter :: pfc_mpc_m = 3.0856775814913673e22_real64
-        !! A megaparsec in m. For `H0` in 1/s, hence `rho_crit0`.
-    real(real64), parameter :: pfc_gyr_s = 3.15576e16_real64
-        !! A gigayear in seconds, on the Julian year. For `t_H`.
-    real(real64), parameter :: pfc_nu_temp_ratio = 0.7137658555036082_real64
-        !! `(4/11)^(1/3)`, the neutrino-to-photon temperature ratio. For `T_nu0`.
-    real(real64), parameter :: pfc_gm_sun = 1.3271244e20_real64
-        !! The IAU 2015 nominal solar mass parameter `GM_sun` in m^3 s^-2, exact as resolution B3
-        !! writes it. The solar mass `%critical_density` reports in is this over `pfc_g_si`, which
-        !! is how astropy derives its own `M_sun`; the choice is named in that binding's
-        !! doc-comment because a critical density is quoted in three different units in the wild.
+    ! checks the derived `Ogamma0` and not only the literals.
 
     real(real64), parameter :: pfc_komatsu_a = 0.22710731766_real64
         !! astropy's per-species relativistic neutrino density in units of the photon density.

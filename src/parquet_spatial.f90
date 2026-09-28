@@ -14,11 +14,12 @@
 !! exact for the reason `spatial_shell_search` sets out.
 !!
 !! **This module is Arrow-free by construction and that is the point of its tier.** It reaches
-!! `parquet_argsort`, `parquet_healpix` and `parquet_settings_base` and nothing else, so
-!! `use parquet_spatial` in a downstream project compiles fifteen Fortran files rather than the
-!! fifty-odd `use parquet_io` costs. `check_parquet_spatial_stays_arrow_free` (tools/check_source_conventions.py) and
-!! `tools/module_footprints.txt` are what keep that true -- a `use` line added here can silently
-!! multiply what every consumer compiles, and no test can see it happen.
+!! `parquet_argsort`, `parquet_healpix`, `parquet_settings_base` and `parquet_constants` and nothing
+!! else, so `use parquet_spatial` in a downstream project compiles sixteen Fortran files rather
+!! than the sixty-odd `use parquet_io` costs. `check_parquet_spatial_stays_arrow_free`
+!! (tools/check_source_conventions.py) and `tools/module_footprints.txt` are what keep that true
+!! -- a `use` line added here can silently multiply what every consumer compiles, and no test can
+!! see it happen.
 !!
 !! **The cell size is MEASURED at build time, not fitted.** A cost model
 !! (`spatial_model_cell`) supplies a bracket and a deterministic work-count probe
@@ -44,7 +45,7 @@ module parquet_spatial
         parquet_clamp_to_affinity, parquet_emit_warning, parquet_emit_advice, &
         parquet_output_is_suppressed
     ! **The HEALPix sky backend's whole dependency, and the one import that grows what a
-    ! `use parquet_spatial` consumer compiles** -- from 9 Fortran files to 15. That was weighed
+    ! `use parquet_spatial` consumer compiles** -- from 10 Fortran files to 16. That was weighed
     ! and accepted: both modules are Arrow-free, so no C++ or Arrow boundary moves and the cost is
     ! compile time for six small leaf files, and the alternative was a second index type with a
     ! duplicated walk, annulus, ranking and `sorted=` contract. `tools/module_footprints.txt`
@@ -54,6 +55,7 @@ module parquet_spatial
     ! in `src/parquet.f90`, so it does not reach a `use parquet` program -- see
     ! `check_facade_hides_healpix_run_query`.
     use parquet_healpix, only: pf_vec2pix_ring, pf_query_disc_runs, pf_nside2resol, pf_max_pixrad
+    use parquet_constants, only: PF_PI, PF_RAD_PER_DEG, PF_DEG_PER_RAD
     implicit none
     private
 
@@ -108,8 +110,8 @@ module parquet_spatial
     !!
     !! **A module procedure rather than a type-bound one, and it lives here despite having no
     !! spatial content at all.** A union-find over an edge list is pure graph work; it is in this
-    !! module because `use parquet_spatial` costs fifteen Fortran files against `parquet_sorting`'s
-    !! twenty-one, so a caller who wants only connected components pays less here than anywhere
+    !! module because `use parquet_spatial` costs sixteen Fortran files against `parquet_sorting`'s
+    !! twenty-two, so a caller who wants only connected components pays less here than anywhere
     !! else it could sensibly go -- and because a group finder then needs one `use` rather than two.
     interface pf_connected_components
         module procedure components_n32
@@ -191,10 +193,6 @@ module parquet_spatial
     !! `spatial_set_nside` rather than to express a policy.
     integer(int64), parameter :: spatial_max_nside = 2_int64 ** 29
 
-    !> Degrees to radians, for the sky metric's conversions.
-    real(real64), parameter :: spatial_deg2rad = 0.017453292519943295_real64
-    !> Radians to degrees, the inverse of `spatial_deg2rad`.
-    real(real64), parameter :: spatial_rad2deg = 57.29577951308232_real64
     !> The largest angular radius a sky query will accept, in degrees.
     !!
     !! **Not a correctness limit -- the chord mapping is exact all the way to 180 degrees.** It is
@@ -213,6 +211,13 @@ module parquet_spatial
     !! the implied value ranged 1.68 to 4.51 -- which is precisely why a fitted constant is only the
     !! centre of a bracket here and never the answer.
     real(real64), parameter :: spatial_kappa = 2.9_real64
+    !> `4 pi / 3`, the volume of the unit ball, as the double nearest it.
+    !!
+    !! Read by the cost model's cell size (`spatial_model_cell`), at every dimension, and by the
+    !! first radius of the expanding-ball search in three dimensions (`spatial_shell_search`).
+    !! Held once so that the two cannot drift apart. It is a literal rather than an expression on
+    !! pi: `4 * pi / 3`, in any order of operations, folds to the double one ulp below the nearest.
+    real(real64), parameter :: spatial_four_thirds_pi = 4.18879020478639098_real64
     !> Candidate cell sizes are `h/2, h, 2h`; this is the ratio.
     real(real64), parameter :: spatial_probe_step = 2.0_real64
     !> How many extra candidates the probe may step out when the bracket's winner is an endpoint.
@@ -1691,7 +1696,7 @@ contains
         ! degrees, so it answers in degrees. `%cell_size()` deliberately does NOT convert: it pairs
         ! with `cell=`, and both are in unit-vector space.
         if (self%metric_id == PF_METRIC_SKY) &
-            r = 2.0_real64 * asin(min(0.5_real64 * r, 1.0_real64)) * spatial_rad2deg
+            r = 2.0_real64 * asin(min(0.5_real64 * r, 1.0_real64)) * PF_DEG_PER_RAD
     end function bind_effective_radius
 
     ! ---- Single queries ----
@@ -1930,7 +1935,7 @@ contains
         nfill = min(nfill, size(dist_deg, kind=int64))
         do k = 1_int64, nfill
             half = min(0.5_real64 * dist_deg(k), 1.0_real64)
-            dist_deg(k) = 2.0_real64 * asin(half) * spatial_rad2deg
+            dist_deg(k) = 2.0_real64 * asin(half) * PF_DEG_PER_RAD
         end do
     end subroutine sky_scan
 
@@ -3001,7 +3006,7 @@ contains
         nfill = min(nfill, size(dist_deg, kind=int64))
         do t = 1_int64, nfill
             half = min(0.5_real64 * dist_deg(t), 1.0_real64)
-            dist_deg(t) = 2.0_real64 * asin(half) * spatial_rad2deg
+            dist_deg(t) = 2.0_real64 * asin(half) * PF_DEG_PER_RAD
         end do
     end subroutine near_sky_scan
 
@@ -3071,7 +3076,7 @@ contains
         call spatial_kth_worker(self, k, dist_deg, PF_METRIC_SKY, threads)
         do t = 1_int64, size(dist_deg, kind=int64)
             half = min(0.5_real64 * dist_deg(t), 1.0_real64)
-            dist_deg(t) = 2.0_real64 * asin(half) * spatial_rad2deg
+            dist_deg(t) = 2.0_real64 * asin(half) * PF_DEG_PER_RAD
         end do
     end subroutine kth_sky
 
@@ -3211,10 +3216,10 @@ contains
         real(real64) :: v(3) !! the corresponding unit vector.
         real(real64) :: cd
 
-        cd = cos(dec * spatial_deg2rad)
-        v(1) = cd * cos(ra * spatial_deg2rad)
-        v(2) = cd * sin(ra * spatial_deg2rad)
-        v(3) = sin(dec * spatial_deg2rad)
+        cd = cos(dec * PF_RAD_PER_DEG)
+        v(1) = cd * cos(ra * PF_RAD_PER_DEG)
+        v(2) = cd * sin(ra * PF_RAD_PER_DEG)
+        v(3) = sin(dec * PF_RAD_PER_DEG)
     end function sky_vector
 
     !> The chord across the unit sphere subtended by an angle given in degrees.
@@ -3224,7 +3229,7 @@ contains
     real(real64) function sky_chord(deg) result(c)
         real(real64), intent(in) :: deg !! the angle, in degrees.
 
-        c = 2.0_real64 * sin(0.5_real64 * deg * spatial_deg2rad)
+        c = 2.0_real64 * sin(0.5_real64 * deg * PF_RAD_PER_DEG)
     end function sky_chord
 
     !> A whole radius list from degrees to chords, validated on the way.

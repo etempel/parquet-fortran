@@ -102,8 +102,8 @@ contains
             self%warned = .true.
             ! A sky index accumulates chords; the caller asked in degrees and must read degrees.
             if (self%metric_id == PF_METRIC_SKY) then
-                r_cur = 2.0_real64 * asin(min(0.5_real64 * r_cur, 1.0_real64)) * spatial_rad2deg
-                r_new = 2.0_real64 * asin(min(0.5_real64 * r_new, 1.0_real64)) * spatial_rad2deg
+                r_cur = 2.0_real64 * asin(min(0.5_real64 * r_cur, 1.0_real64)) * PF_DEG_PER_RAD
+                r_new = 2.0_real64 * asin(min(0.5_real64 * r_new, 1.0_real64)) * PF_DEG_PER_RAD
             end if
             call num_text(r_cur, t1)
             call num_text(r_new, t2)

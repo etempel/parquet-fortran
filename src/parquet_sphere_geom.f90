@@ -58,7 +58,7 @@ contains
             sd = -1.0_real64
             cd = 0.0_real64
         else
-            d = dec * sky_deg2rad
+            d = dec * PF_RAD_PER_DEG
             sd = sin(d)
             cd = cos(d)
         end if
@@ -74,7 +74,7 @@ contains
         else
             ! `parquet_random`'s private twin (`sph_centre_radec`) forms these same products in this
             ! same order, and `test_radec_agrees_with_stage_one` holds the two together.
-            a = ra * sky_deg2rad
+            a = ra * PF_RAD_PER_DEG
             v = [cd * cos(a), cd * sin(a), sd]
         end if
     end procedure sky_radec_unit
@@ -86,7 +86,7 @@ contains
         if (v(1) == 0.0_real64 .and. v(2) == 0.0_real64) then
             ra = 0.0_real64
         else
-            ra = atan2(v(2), v(1)) * sky_rad2deg
+            ra = atan2(v(2), v(1)) * PF_DEG_PER_RAD
             if (ra < 0.0_real64) ra = ra + 360.0_real64
             if (ra >= 360.0_real64) ra = 0.0_real64
         end if
@@ -96,9 +96,9 @@ contains
         ! it `hypot` still answers, so no direction gains an `IEEE_UNDERFLOW` it did not raise
         ! before. `v` is a unit vector by contract, so neither component can be NaN here.
         if (abs(v(1)) >= sky_hypot_safe .or. abs(v(2)) >= sky_hypot_safe) then
-            dec = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * sky_rad2deg
+            dec = atan2(v(3), sqrt(v(1) * v(1) + v(2) * v(2))) * PF_DEG_PER_RAD
         else
-            dec = atan2(v(3), hypot(v(1), v(2))) * sky_rad2deg
+            dec = atan2(v(3), hypot(v(1), v(2))) * PF_DEG_PER_RAD
         end if
     end procedure sky_unit_radec
 
@@ -230,7 +230,7 @@ contains
         do k = 1_int64, n
             t = real(k, real64) - 0.5_real64
             call sky_fibonacci_point(t, rn, ra, z, s)
-            lon = ra * sky_deg2rad
+            lon = ra * PF_RAD_PER_DEG
             vec(1, k) = s * cos(lon)
             vec(2, k) = s * sin(lon)
             vec(3, k) = sgn * z
@@ -254,7 +254,7 @@ contains
         do k = 1_int64, n
             t = real(k, real64) - 0.5_real64
             call sky_fibonacci_point(t, rn, ra(k), z, s)
-            dec(k) = atan2(z, s) * sky_rad2deg
+            dec(k) = atan2(z, s) * PF_DEG_PER_RAD
         end do
     end procedure sky_fibonacci_radec_i64
 

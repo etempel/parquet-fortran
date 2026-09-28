@@ -2885,8 +2885,9 @@ def check_parquet_spatial_stays_arrow_free():
     """`use parquet_spatial` must not drag the Arrow/Parquet C++ stack into a consumer's build.
 
     The spatial index is a grid over plain Fortran coordinate arrays and reaches nothing but
-    `parquet_argsort` and `parquet_settings_base`, so a consumer wanting neighbour search compiles
-    five files rather than the sixty-odd the reader/writer stack costs. That is a property of the
+    `parquet_argsort`, `parquet_healpix`, `parquet_settings_base` and `parquet_constants`, so a
+    consumer wanting neighbour search compiles sixteen Fortran files rather than the sixty-odd the
+    reader/writer stack costs. That is a property of the
     `use` graph and nothing in `fpm test` can see it -- the library obviously has Arrow, so a stray
     import compiles and tests perfectly well here and inflates every downstream build.
 
@@ -2895,19 +2896,20 @@ def check_parquet_spatial_stays_arrow_free():
     """
     return _check_stays_arrow_free(
         "parquet_spatial",
-        "The spatial tier exists so that neighbour search costs a consumer five files; an import "
-        "reaching the reader/writer stack would make it sixty.")
+        "The spatial tier exists so that neighbour search costs a consumer sixteen files; an "
+        "import reaching the reader/writer stack would add that stack's sixty-odd.")
 
 
 def check_parquet_healpix_stays_arrow_free():
     """`use parquet_healpix` must not drag the Arrow/Parquet C++ stack into a consumer's build.
 
     The pixelisation is arithmetic over plain reals and integers and reaches nothing but
-    `parquet_settings_base`, so a consumer wanting sphere pixels compiles six files rather than
-    the sixty-odd the reader/writer stack costs. That is the whole reason this module exists here
-    rather than as a dependency on `libhealpix`, and it is a property of the `use` graph that
-    nothing in `fpm test` can see -- the library obviously has Arrow, so a stray import compiles
-    and tests perfectly well here and inflates every downstream build.
+    `parquet_settings_base` and `parquet_constants`, so a consumer wanting sphere pixels compiles
+    eight Fortran files rather than the sixty-odd the reader/writer stack costs. That is the whole
+    reason this module exists here rather than as a dependency on `libhealpix`, and it is a
+    property of the `use` graph that nothing in `fpm test` can see -- the library obviously has
+    Arrow, so a stray import compiles and tests perfectly well here and inflates every downstream
+    build.
 
     One check per tier rather than a few for the group is deliberate: a tier covered only
     transitively loses its coverage silently the day the import it was riding on moves.
@@ -2922,10 +2924,10 @@ def check_parquet_healpix_stays_arrow_free():
 def check_parquet_sphere_stays_arrow_free():
     """`use parquet_sphere` must not drag the Arrow/Parquet C++ stack into a consumer's build.
 
-    The region samplers and the RA/Dec geometry sit on `parquet_random`, `parquet_healpix` and
-    `parquet_utils` and nothing else, so a program drawing a mock catalogue in a sky footprint
-    compiles a handful of files. It reaches two other Arrow-free tiers, and this check is its own
-    rather than theirs: a stray import added here would pass both of theirs.
+    The region samplers and the RA/Dec geometry sit on `parquet_random`, `parquet_healpix`,
+    `parquet_utils` and `parquet_constants` and nothing else, so a program drawing a mock catalogue
+    in a sky footprint compiles a handful of files. It reaches other Arrow-free tiers, and this
+    check is its own rather than theirs: a stray import added here would pass all of theirs.
     """
     return _check_stays_arrow_free(
         "parquet_sphere",
@@ -2937,10 +2939,10 @@ def check_parquet_skycoord_stays_arrow_free():
     """`use parquet_skycoord` must not drag the Arrow/Parquet C++ stack into a consumer's build.
 
     Converting a position between coordinate systems is arithmetic over plain reals: the module
-    reaches `parquet_utils` and nothing else, so a program turning an RA/Dec column into Galactic
-    coordinates compiles a handful of files. It sits below `parquet_sphere` and `parquet_healpix`
-    and imports neither, and this check is its own rather than theirs: a stray import added here
-    would pass both of theirs.
+    reaches `parquet_utils` and `parquet_constants` and nothing else, so a program turning an
+    RA/Dec column into Galactic coordinates compiles a handful of files. It sits below
+    `parquet_sphere` and `parquet_healpix` and imports neither, and this check is its own rather
+    than theirs: a stray import added here would pass both of theirs.
 
     One check per tier rather than one for the group, per the established pattern.
     """
@@ -2953,10 +2955,11 @@ def check_parquet_cosmology_stays_arrow_free():
     """`use parquet_cosmology` must not drag the Arrow/Parquet C++ stack into a consumer's build.
 
     Turning a redshift column into comoving distances is quadrature and interpolation over plain
-    reals: the module reaches `parquet_integrate`, `parquet_interpolate` and `parquet_utils`, and
-    nothing else. `parquet_sphere` is deliberately NOT imported -- the comoving Cartesian
-    coordinates a survey wants are three multiplications the guide shows, against the 15-file
-    graph, `parquet_random` included, that importing it would add to every consumer.
+    reals: the module reaches `parquet_integrate`, `parquet_interpolate`, `parquet_utils` and
+    `parquet_constants`, and nothing else. `parquet_sphere` is deliberately NOT imported -- the
+    comoving Cartesian coordinates a survey wants are three multiplications the guide shows,
+    against the 16-file graph, `parquet_random` included, that importing it would add to every
+    consumer.
 
     One check per tier rather than one for the group, per the established pattern.
     """
@@ -3483,10 +3486,11 @@ def check_parquet_utils_stays_arrow_free():
     """`use parquet_utils` must not reach parquet_bindings.
 
     Stricter than a tier rule: this module imports the INTRINSIC modules `iso_fortran_env` and
-    `ieee_arithmetic` and NOTHING else -- no module of this library, not even
-    `parquet_settings_base` -- and that is load-bearing rather than tidy. An intrinsic module is
-    not a compiled file, a tier edge or a footprint entry, so it does not weaken the property;
-    a library module would. `parquet_settings_base`
+    `ieee_arithmetic` and, of this library, the leaf of parameters `parquet_constants` alone --
+    not even `parquet_settings_base` -- and that is load-bearing rather than tidy. An intrinsic
+    module is not a compiled file, a tier edge or a footprint entry, and `parquet_constants` is one
+    file that imports nothing itself (`check_parquet_constants_stays_leaf`), so neither weakens the
+    property; any other library module would. `parquet_settings_base`
     used to carry a private ASCII fold with a doc-comment explaining that it could not call
     `parquet_core`'s copy without creating a circular dependency; a module strictly below
     everything is what removes that cycle. The obvious import to add here is `parquet_settings`,
@@ -3536,10 +3540,10 @@ def check_parquet_transform_stays_arrow_free():
     """`use parquet_transform` must not reach parquet_bindings.
 
     The cosine and sine transforms reach no reader, no writer and no setting: the module imports
-    the INTRINSIC module `iso_fortran_env` and nothing else, which is what makes
-    `use parquet_transform` cost two Fortran files. It has nothing to print -- its only output path
-    is `error stop` -- so the obvious import to add, `parquet_settings` for a verbosity knob, has
-    nothing to govern.
+    the INTRINSIC module `iso_fortran_env` and, of this library, the leaf `parquet_constants`
+    alone, which is what makes `use parquet_transform` cost three Fortran files. It has nothing to
+    print -- its only output path is `error stop` -- so the obvious import to add,
+    `parquet_settings` for a verbosity knob, has nothing to govern.
 
     One check per tier rather than one for the group, per the established pattern.
     """
@@ -5206,6 +5210,353 @@ def check_get_version_has_one_home():
             "promise that, and a tier re-exporting it grows that tier's compile footprint for a "
             "compile-time constant none of its callers read. Use a second `use parquet_version` "
             "line in the consumer instead." % ", ".join(homes)]
+
+
+#: The named-constants module, a leaf of `parameter`s, and the suite pinning each of its values.
+CONSTANTS_MODULE = SRC / "parquet_constants.f90"
+CONSTANTS_TEST = TEST / "test_constants.f90"
+
+#: Fewer public names than this across the rest of src/ means the harvest in `_public_names` has
+#: gone blind (it found 1265 when the constants module was added), not that the library shrank.
+PUBLIC_NAME_FLOOR = 800
+
+
+def _split_top_level(text):
+    """`text` split at the commas that are outside parentheses, brackets and quotes."""
+    parts, depth, quote, start = [], 0, None, 0
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return parts
+
+
+@functools.lru_cache(maxsize=None)
+def _public_names(path):
+    """Every module-level name `path` makes public, lower-cased, as (name, line) pairs.
+
+    Two spellings make a name public: a `public ::` statement, and the `public` attribute on a
+    declaration (`integer, parameter, public :: PF_LEVEL_INFO = 20`, `type, public :: t`). Both are
+    read from `_logical_lines`, with continuations folded, because a long `public ::` list is split
+    across lines and a scan of physical lines misses every name after the first `&`. A derived
+    type's body is skipped -- its components and bindings are not module-level names -- and so is
+    an interface block, whose declarations are dummy arguments. Cached, and frozen as a tuple so
+    that no caller can change what the next one reads.
+    """
+    names = {}
+    in_type = in_interface = 0
+    for lineno, code in _logical_lines(path):
+        low = code.lower().strip()
+        if re.match(r"^(abstract\s+)?interface\b", low):
+            in_interface += 1
+            continue
+        if re.match(r"^end\s*interface\b", low):
+            in_interface -= 1
+            continue
+        type_def = re.match(r"^type\s*(,[^:]*)?::\s*([a-z_]\w*)", low) or \
+            re.match(r"^type\s+([a-z_]\w*)\s*$", low)
+        if type_def and not re.match(r"^type\s*\(", low):
+            if type_def.lastindex == 2 and type_def.group(1) and \
+                    re.search(r"\bpublic\b", type_def.group(1)):
+                names.setdefault(type_def.group(2), lineno)
+            in_type += 1
+            continue
+        if re.match(r"^end\s*type\b", low):
+            in_type -= 1
+            continue
+        if in_type or in_interface:
+            continue
+        m = re.match(r"^public\s*::(.*)$", low)
+        if m:
+            for item in _split_top_level(m.group(1)):
+                item = item.strip()
+                if re.fullmatch(r"[a-z_]\w*", item):
+                    names.setdefault(item, lineno)
+            continue
+        if "::" not in low:
+            continue
+        # Split at the first `::`, not at the first colon: an attribute such as `dimension(2:3)`
+        # carries one of its own.
+        attrs, entities = low.split("::", 1)
+        if re.match(r"^(integer|real|double\s+precision|complex|logical|character|type\s*\("
+                    r"|class\s*\(|procedure\s*\()", attrs) and re.search(r",\s*public\b", attrs):
+            for item in _split_top_level(entities):
+                ident = re.match(r"\s*([a-z_]\w*)", item)
+                if ident:
+                    names.setdefault(ident.group(1), lineno)
+    return tuple(sorted(names.items()))
+
+
+def check_parquet_constants_stays_leaf():
+    """`src/parquet_constants.f90` imports only `iso_fortran_env` and declares only parameters.
+
+    The module is a leaf of values: `use parquet_constants` compiles one Fortran file, reads no
+    setting, prints nothing and holds no state for threads to share. That is what lets the three
+    tiers whose headers promise to import nothing of this library -- `parquet_utils`,
+    `parquet_random` and `parquet_transform` -- import it and keep the promise's reasons intact:
+    no tier edge, no setting, no cycle back through `parquet_settings_base`, and nothing the
+    standalone compiles of `parquet_random` cannot satisfy. It is imported by those three and by
+    most of the numerical tiers, so an edge added here is added to every one of their footprints
+    at once, and a module variable added here would be process-global state in all of them.
+
+    Checked by allowing, rather than by forbidding: every statement of the file must be one of a
+    closed set of shapes -- the module and end-module lines, `implicit none`, `private`, a
+    `public ::` list, a `use` of `iso_fortran_env` (intrinsic or not), and a declaration carrying
+    the `parameter` attribute. So a variable, a derived type, an interface, a `contains`, a
+    preprocessor line or a `use` of anything else fails by the same rule, with no list of
+    forbidden things to keep up to date.
+    """
+    path = CONSTANTS_MODULE
+    if not path.is_file():
+        return ["src/parquet_constants.f90 is missing, so the leaf check has nothing to read -- "
+                "this check must never pass by finding nothing"]
+    allowed = (
+        r"module\s+parquet_constants",
+        r"end\s*module(\s+parquet_constants)?",
+        r"implicit\s+none",
+        r"private",
+        r"public\s*::.*",
+        r"use\s*,\s*intrinsic\s*::\s*iso_fortran_env\s*(,.*)?",
+        r"use\s+(::\s*)?iso_fortran_env\s*(,.*)?",
+        r"(integer|real|logical|complex|character)\b[^:]*,\s*parameter\b[^:]*::.*",
+    )
+    problems, parameters, opened = [], 0, False
+    for lineno, code in _logical_lines(path):
+        low = code.lower().strip()
+        if re.fullmatch(r"module\s+parquet_constants", low):
+            opened = True
+        if re.fullmatch(allowed[-1], low):
+            parameters += 1
+        if any(re.fullmatch(shape, low) for shape in allowed):
+            continue
+        problems.append(
+            "src/parquet_constants.f90:%d: `%s` -- this module imports nothing but the intrinsic "
+            "iso_fortran_env and declares nothing but parameters. A `use` of another module adds "
+            "an edge to the footprint of every tier importing it, including the three leaf tiers "
+            "whose headers promise to import nothing else; a variable is process-global state; a "
+            "procedure belongs in the tier that needs it." % (lineno, code.strip()))
+    if not opened or parameters == 0:
+        problems.append(
+            "src/parquet_constants.f90: found %s -- the scan never reached the module's "
+            "declarations, so this check has gone blind"
+            % ("no `module parquet_constants` line" if not opened else "no parameter"))
+    return problems
+
+
+def check_constants_are_pinned():
+    """Every public constant of `parquet_constants` is pinned to its bit pattern in the test.
+
+    A moved or mistyped value shifts every answer that uses it by an amount most tolerances cannot
+    see: one ulp of the speed of light or of pi is invisible to every suite that computes with it.
+    `test/test_constants.f90`'s `test_bit_patterns` holds each constant to the hexadecimal pattern
+    of its double, and this check is what makes that complete: a constant added to the module is
+    not finished until the test pins it, in the shape
+    `transfer(PF_X, 0_int64) == int(z'<sixteen hex digits>', int64)`, statement continuations
+    folded. The public list is read from the module's `public ::` statements, so it cannot go
+    stale; an empty list is a failure, not a pass.
+    """
+    if not CONSTANTS_MODULE.is_file() or not CONSTANTS_TEST.is_file():
+        return ["src/parquet_constants.f90 or test/test_constants.f90 is missing, so there is "
+                "nothing to pin -- this check must never pass by finding nothing"]
+    public = sorted(name for name, _ in _public_names(CONSTANTS_MODULE))
+    if not public:
+        return ["src/parquet_constants.f90: no public name found, so no pin can be checked -- "
+                "this check has gone blind"]
+    test_code = "\n".join(code for _, code in _logical_lines(CONSTANTS_TEST)).lower()
+    problems = []
+    for name in public:
+        pin = (r"transfer\s*\(\s*%s\s*,\s*0_int64\s*\)\s*==\s*int\s*\(\s*z'[0-9a-f]{16}'\s*,"
+               r"\s*int64\s*\)" % re.escape(name))
+        if not re.search(pin, test_code):
+            problems.append(
+                "src/parquet_constants.f90: `%s` is public and test/test_constants.f90 does not "
+                "pin it. Add `transfer(%s, 0_int64) == int(z'<its sixteen hex digits>', int64)` "
+                "to test_bit_patterns, with a comment saying which double the pattern is."
+                % (name.upper(), name.upper()))
+    return problems
+
+
+def check_constants_names_are_unique():
+    """`parquet_constants` shares no public name, case-insensitively, with another file of src/.
+
+    Fortran names are case-insensitive, so `PF_DEG2RAD` IS `pf_deg2rad`. The facade `parquet`
+    re-exports every sibling with a bare `use`, so a constant whose name another module also makes
+    public is a name two use-associated modules export as different entities, and a program
+    referencing it through `use parquet` is non-conforming. **Only some compilers say so**: ifx
+    rejects the reference (`error #6405: The same named entity from different modules and/or
+    program units cannot be referenced`), while gfortran 15 compiles it without a diagnostic
+    (`fortran-gotchas.md`, gfortran). So a gfortran build and test run can never see the clash;
+    it surfaces as a failed ifx build of somebody's program. The first names proposed for the
+    angle factors, `PF_DEG2RAD` and `PF_RAD2DEG`, were exactly this clash with `parquet_utils`'
+    released conversion functions.
+
+    Both sides are harvested by `_public_names` from every `src/*.f90` -- `public ::` lists and
+    `public` attributes alike -- and a harvest that comes back smaller than PUBLIC_NAME_FLOOR is
+    reported as blindness rather than trusted.
+    """
+    if not CONSTANTS_MODULE.is_file():
+        return ["src/parquet_constants.f90 is missing, so there are no names to compare -- this "
+                "check must never pass by finding nothing"]
+    ours = dict(_public_names(CONSTANTS_MODULE))
+    others = {}
+    for path in sorted(SRC.glob("*.f90")):
+        if path == CONSTANTS_MODULE:
+            continue
+        for name, lineno in _public_names(path):
+            others.setdefault(name, []).append("src/%s:%d" % (path.name, lineno))
+    if not ours or len(others) < PUBLIC_NAME_FLOOR:
+        return ["tools/check_source_conventions.py: found %d public constants and %d other public "
+                "names in src/ (floor %d) -- the harvest has gone blind"
+                % (len(ours), len(others), PUBLIC_NAME_FLOOR)]
+    problems = []
+    for name in sorted(ours):
+        for where in others.get(name, ()):
+            problems.append(
+                "src/parquet_constants.f90:%d: `%s` is also a public name at %s. Fortran names are "
+                "case-insensitive, so a program reaching both modules through `use parquet` cannot "
+                "reference it: ifx rejects the reference and gfortran compiles it without a word. "
+                "Rename the constant; or, if that module re-exports this one, drop the re-export "
+                "(the facade is the one module that re-exports parquet_constants)."
+                % (ours[name], name.upper(), where))
+    return problems
+
+
+#: A real literal: a decimal point or an exponent, with any kind suffix. The look-behind keeps an
+#: edit descriptor inside a format (`f0.6`, `es23.16`) and a name's digits (`x2.5`) out of it.
+REAL_LITERAL = re.compile(r"(?<![\w.])((?:\d+\.\d*|\.\d+)(?:[eEdD][+-]?\d+)?|\d+[eEdD][+-]?\d+)"
+                          r"(_\w+)?")
+
+#: A pi computed at run time, `acos(-1)` or `atan(1)` in any kind.
+RUNTIME_PI = re.compile(r"\b(acos\s*\(\s*-\s*1(\.0*)?(_\w+)?\s*\)|atan\s*\(\s*1(\.0*)?(_\w+)?\s*\))",
+                        re.I)
+
+#: The header line of a file vendored from PRIMA, whose constants are PRIMA's own.
+PRIMA_PROVENANCE = re.compile(r"\*\*Provenance\.\*\*\s+Derived from PRIMA")
+
+#: How close a literal may come to a constant before it counts as a second home for it.
+CONSTANT_HOME_RTOL = 1.0e-6
+
+#: Fewer real literals than this across src/ means the literal scan has gone blind (it saw 3910
+#: when the check was written), not that the library shrank.
+REAL_LITERAL_FLOOR = 2000
+
+
+def _constant_values():
+    """{NAME: value} for every `real(real64)` parameter of `parquet_constants`, as IEEE doubles.
+
+    A literal is read as Python reads it, which is the double nearest it, as a compiler reads it. An
+    expression over literals and earlier constants is folded in Python's `float` arithmetic, which
+    rounds once per operation and associates `+`, `-`, `*` and `/` left to right, as Fortran's
+    rules of evaluation do, so the value is the one every compiler's front end folds. Anything
+    else in an expression -- an intrinsic, a power, an unknown name -- leaves that constant
+    unevaluated, which the caller reports as blindness.
+    """
+    import ast
+    import operator
+    ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+           ast.Div: operator.truediv}
+    values = {}
+
+    def fold(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, float):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in values:
+            return values[node.id]
+        if isinstance(node, ast.BinOp) and type(node.op) in ops:
+            return ops[type(node.op)](fold(node.left), fold(node.right))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            v = fold(node.operand)
+            return -v if isinstance(node.op, ast.USub) else v
+        raise ValueError("cannot fold")
+
+    decl = re.compile(r"^real\s*\(\s*(kind\s*=\s*)?real64\s*\)\s*,\s*parameter\s*::"
+                      r"\s*(\w+)\s*=\s*(.+)$", re.I)
+    for _, code in _logical_lines(CONSTANTS_MODULE):
+        m = decl.match(code.strip())
+        if not m:
+            continue
+        expr = REAL_LITERAL.sub(
+            lambda t: repr(float(t.group(1).replace("d", "e").replace("D", "e"))),
+            m.group(3)).upper()
+        try:
+            values[m.group(2).upper()] = fold(ast.parse(expr, mode="eval").body)
+        except (SyntaxError, ValueError):
+            continue
+    return values
+
+
+def check_constants_have_one_home():
+    """No source file outside `parquet_constants` carries a copy of one of its values.
+
+    `parquet_constants` exists because the library had eleven homes for pi and two for the speed of
+    light, spelled to different numbers of digits: they all happened to round to the same doubles,
+    and nothing would have said so the day one of them did not. A private copy added later drifts
+    silently -- a transcription slip of one ulp moves every answer that uses it by an amount no
+    tolerance in the suite can see, and `test/test_constants.f90` pins only the module's own copy.
+
+    So every constant's value is evaluated from the module's text (`_constant_values`), and every
+    real literal in the CODE of every other `src/*.f90` -- comments and character strings removed
+    -- within CONSTANT_HOME_RTOL of one of them is reported, as is a pi computed at run time
+    (`acos(-1)`, `atan(1)`). The tolerance is loose on purpose: it catches a copy written to fewer
+    digits (`3.14159265358979`) as well as an exact one, and no tuning value, threshold or fit
+    coefficient in the library lies that close to a physical or mathematical constant.
+
+    **The files vendored from PRIMA are exempt**, recognised by their `**Provenance.** Derived from
+    PRIMA` header rather than by name: the vendored code keeps upstream's own named constants, its
+    `PI` among them, as its list of deviations from upstream governs, and editing it to import this
+    library's would be a deviation nobody chose. The library's own PRIMA front ends carry no such
+    header and are checked like every other file.
+
+    Blind if the module's constants cannot all be evaluated, or if the scan finds fewer than
+    REAL_LITERAL_FLOOR real literals across src/.
+    """
+    if not CONSTANTS_MODULE.is_file():
+        return ["src/parquet_constants.f90 is missing, so there are no values to find copies of "
+                "-- this check must never pass by finding nothing"]
+    public = [name.upper() for name, _ in _public_names(CONSTANTS_MODULE)]
+    values = _constant_values()
+    missing = sorted(set(public) - set(values))
+    if not public or missing:
+        return ["tools/check_source_conventions.py: could not evaluate %s from "
+                "src/parquet_constants.f90 -- an expression the evaluator cannot fold, or a changed "
+                "declaration shape; this check has gone blind"
+                % (", ".join(missing) if missing else "any public constant")]
+    strings = re.compile(r"'[^']*'|\"[^\"]*\"")
+    problems, literals = [], 0
+    for path in sorted(SRC.glob("*.f90")):
+        if path == CONSTANTS_MODULE or PRIMA_PROVENANCE.search(source_text(path)):
+            continue
+        for lineno, code in enumerate(stripped_lines(path), start=1):
+            code = strings.sub('""', code)
+            if RUNTIME_PI.search(code):
+                problems.append(
+                    "src/%s:%d: computes pi at run time (`%s`) -- use `PF_PI` from "
+                    "parquet_constants, the library's one home for it."
+                    % (path.name, lineno, RUNTIME_PI.search(code).group(0)))
+            for m in REAL_LITERAL.finditer(code):
+                literals += 1
+                v = float(m.group(1).replace("d", "e").replace("D", "e"))
+                for name, c in values.items():
+                    if abs(v - c) <= CONSTANT_HOME_RTOL * abs(c):
+                        problems.append(
+                            "src/%s:%d: `%s` is within %g of %s (%r) -- a second home for a "
+                            "constant parquet_constants holds. Import it (`use parquet_constants, "
+                            "only: %s`) rather than restating it."
+                            % (path.name, lineno, m.group(0), CONSTANT_HOME_RTOL, name, c, name))
+    if literals < REAL_LITERAL_FLOOR:
+        return ["tools/check_source_conventions.py: found %d real literals across src/ (floor %d) "
+                "-- the literal scan has gone blind" % (literals, REAL_LITERAL_FLOOR)]
+    return problems
 
 
 def check_no_submodule_oracle_pointer_call():
@@ -11449,6 +11800,12 @@ CHECKS = (
     ("the facade inventory names every re-exported module",
      check_facade_inventory_matches_its_use_lines),
     ("parquet_get_version has exactly one home", check_get_version_has_one_home),
+    ("parquet_constants imports nothing and declares only parameters",
+     check_parquet_constants_stays_leaf),
+    ("every public constant is pinned to its bit pattern", check_constants_are_pinned),
+    ("no public constant shares its name with another public name",
+     check_constants_names_are_unique),
+    ("no source file carries a second copy of a constant", check_constants_have_one_home),
     ("parquet_random imports nothing from src/", check_parquet_random_stays_leaf),
     ("no submodule calls a sort-oracle procedure pointer",
      check_no_submodule_oracle_pointer_call),

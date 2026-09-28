@@ -8,7 +8,7 @@ its search region can reach. Building is roughly one pass over the data, and a q
 something close to the number of points it actually returns rather than the size of the catalogue.
 
 Everything here is reachable from `use parquet`. The narrow import is `use parquet_spatial`, which
-compiles fifteen Fortran files and never reaches this library's C++ bindings. That is a statement
+compiles sixteen Fortran files and never reaches this library's C++ bindings. That is a statement
 about the *Fortran* graph and not about linking: `link` is a package-level key in `fpm.toml`, so
 every import of this package still compiles the C++ wrapper and still links `-larrow`. See
 [Choosing a module](../operating/choosing-a-module.html) for the per-module file counts and what the
@@ -433,6 +433,7 @@ one `los=` array:
 
 ```fortran
 use parquet_spatial, only: pf_spatial_index, PF_LINK_MEAN
+use parquet_constants, only: PF_C_KMS
 real(real64), allocatable :: x(:), y(:), z(:), zred(:), b_perp(:), b_par(:), dperp(:), dpar(:)
 integer(int64), allocatable :: i(:), j(:)
 type(pf_spatial_index) :: sx
@@ -444,7 +445,7 @@ do k = 1, n
     z(k) = d * sin(dec(k))
 end do
 b_perp = 0.3_real64                                  ! Mpc/h: the coordinates' units
-b_par = 1000.0_real64 / 299792.458_real64            ! 1000 km/s as a redshift interval
+b_par = 1000.0_real64 / PF_C_KMS                     ! 1000 km/s as a redshift interval
 
 call sx%build(x, y, z, radius=b_perp, los=zred)      ! observer at the origin
 call sx%pairs_within_los(b_perp, b_par, i, j, combine=PF_LINK_MEAN, dperp=dperp, dpar=dpar)

@@ -185,7 +185,7 @@ them, import that instead — the answers are identical either way, because ther
 
 **Why it exists**: fpm prunes at module granularity, so without the split a library wanting one
 `pf_argsort` specific would compile the whole sorting graph and link the Parquet C++ stack with it.
-Keeping the intrinsic-type argsort in its own tier is what holds `use parquet_sampling` to 8
+Keeping the intrinsic-type argsort in its own tier is what holds `use parquet_sampling` to 9
 Fortran files. See
 [Choosing a module](../operating/choosing-a-module.html) for the full picture, including the caveat
 that no import makes the *package* Arrow-free.

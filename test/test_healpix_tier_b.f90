@@ -62,6 +62,8 @@ contains
                          test_grid_arithmetic_sentinels), &
             new_unittest("pixel areas sum to the whole sphere", &
                          test_pixarea_sums_to_sphere), &
+            new_unittest("nside2resol is sqrt(pi/3)/nside to the last bit", &
+                         test_nside2resol_to_the_last_bit), &
             new_unittest("pix2ring and ring2z agree with the pixel's own centre", &
                          test_rings_agree_with_centres), &
             new_unittest("ud_pix_nest is a resolution change on the sphere", &
@@ -545,6 +547,49 @@ contains
         call check(error, nbad, 0, "the pixel area is not exactly a twelfth of a quarter sphere: " &
                    // trim(detail))
     end subroutine test_pixarea_sums_to_sphere
+
+    !> The resolution is the double nearest `sqrt(pi/3)`, divided by `nside`, to the last bit.
+    !>
+    !> `sqrt(pi/3)` is `1.0233267079464884885...`, whose nearest double has the pattern
+    !> `3FF05F8BD37C0E62`. A constant mistranscribed in its sixteenth significant digit,
+    !> `1.023326707946488151`, is `...0E60`, 2 ulp lower, and the identity `resol**2 == pixarea`
+    !> above holds it to 1e-15 relative, which is wider than the error. So the pattern is asserted
+    !> itself, through both kinds. A division by a power of two is exact, so at every other power
+    !> of two the resolution is that double scaled, bit for bit; the loops run to each kind's own
+    !> ceiling, order 29 for `int64` and order 13 for `int32`.
+    subroutine test_nside2resol_to_the_last_bit(error)
+        type(error_type), allocatable, intent(out) :: error !! set on the first disagreement.
+        !> The bits of the double nearest `sqrt(pi/3)`.
+        integer(int64), parameter :: sqrt_pi_third_bits = int(z'3FF05F8BD37C0E62', int64)
+        integer :: k, nbad
+        real(real64) :: resol1
+        character(len=160) :: detail
+
+        resol1 = pf_nside2resol(1_int64)
+        call check(error, transfer(resol1, 0_int64) == sqrt_pi_third_bits, &
+                   "nside2resol(1) is not the double nearest sqrt(pi/3)")
+        if (allocated(error)) return
+        call check(error, transfer(pf_nside2resol(1_int32), 0_int64) == sqrt_pi_third_bits, &
+                   "the int32 nside2resol(1) is not the double nearest sqrt(pi/3)")
+        if (allocated(error)) return
+
+        nbad = 0
+        detail = ""
+        do k = 0, 29
+            if (pf_nside2resol(ishft(1_int64, k)) /= scale(resol1, -k)) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0)') "int64 nside = 2**", k
+            end if
+        end do
+        do k = 0, 13
+            if (pf_nside2resol(ishft(1_int32, k)) /= scale(resol1, -k)) then
+                nbad = nbad + 1
+                if (detail == "") write (detail, '(a,i0)') "int32 nside = 2**", k
+            end if
+        end do
+        call check(error, nbad, 0, "nside2resol(2**k) is not nside2resol(1) scaled by 2**-k: " &
+                   // trim(detail))
+    end subroutine test_nside2resol_to_the_last_bit
 
     ! ---- B.6: rings ----
 

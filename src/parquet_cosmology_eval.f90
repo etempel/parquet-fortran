@@ -9,6 +9,7 @@
 submodule (parquet_cosmology) parquet_cosmology_eval
 
     use ieee_arithmetic, only : ieee_value, ieee_quiet_nan, ieee_positive_inf, ieee_negative_inf
+    use iso_fortran_env, only : int64
 
     implicit none
 
@@ -705,15 +706,25 @@ contains
     end function zeta_of_z
 
     !> A `zeta` given directly, screened against the same domain.
+    !!
+    !! **The range test reads the magnitude's bits, so that no NaN is ever compared.** The NaN
+    !! screen does not keep one away from a real comparison here: for a NaN both arms answer
+    !! `zeta`, so flang's `-O3` dropped the screen as redundant and compiled `|zeta| > ceiling` as
+    !! `cmpltsd`, a signalling compare, which raised IEEE_INVALID on every NaN argument
+    !! (`fortran-gotchas.md`, general group). A non-NaN magnitude orders as its bit pattern does
+    !! as an `int64`, infinity included, and an integer comparison raises nothing; the screen stays
+    !! so that a NaN argument comes back as itself.
     pure function zeta_in_domain(zeta) result(out)
         real(real64), intent(in) :: zeta !! `ln(1 + z)`
         real(real64)             :: out  !! `zeta`, or NaN outside the domain
+        integer(int64), parameter :: MAGNITUDE = huge(0_int64) !! every bit but the sign
+        integer(int64), parameter :: CEILING_BITS = transfer(PFC_ZETA_CEILING, 0_int64) !! the ceiling's bits
 
         if (zeta /= zeta) then
             out = zeta
             return
         end if
-        if (zeta > PFC_ZETA_CEILING .or. zeta < -PFC_ZETA_CEILING) then
+        if (iand(transfer(zeta, 0_int64), MAGNITUDE) > CEILING_BITS) then
             out = ieee_value(out, ieee_quiet_nan)
         else
             out = zeta

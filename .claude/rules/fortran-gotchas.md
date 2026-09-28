@@ -219,8 +219,9 @@ done | sort | uniq -c | sort -rn
   arithmetic is reachable (`spatial_scan_axis`, `src/parquet_spatial_query.f90`), is FORBIDDEN in a
   `pure` procedure (F2018 C1589; gfortran: "VOLATILE attribute ... cannot be specified in a PURE
   procedure"), and `noinline` has a different spelling per compiler. So a bit-for-bit identity is
-  promised only between a procedure and ITSELF -- a second call of the same procedure, or an
-  argument copy such as `from == to` returning its input. Two call sites of one kernel are
+  promised only between a procedure and ITSELF -- a second call of the same procedure on arguments
+  of the same layout (flang section), or an argument copy such as `from == to` returning its
+  input. Two call sites of one kernel are
   documented, and asserted, to a few ulp (`test_convert_dispatches_to_named`,
   `test_rotation_object_matches_the_free_procedure`).
 - **One target contracts to an FMA and another cannot, so ONE compiler at ONE version walks a
@@ -595,6 +596,13 @@ flang builds here are serial only and `--profile release` does not link (`build.
   under gfortran, nagfor and flang (`vc_of_dm`, `src/parquet_cosmology_eval.f90`). A fourth power
   has no such form: flang's `-O2` rounds `x**4` as `((x*x)*x)*x` and every other build here as
   `(x*x)*(x*x)`. The no-flag sweeps of `test/test_cosmology.f90` are what see it.
+- **At `-O3` one procedure answers differently for a strided and a contiguous actual of the same
+  values** (flang 22.1.8): arithmetic reading an assumed-shape dummy in place is compiled per
+  layout, and the two differ in the last bits -- up to 64 ulp once an FFT has spread them. The
+  difference vanishes at `-O2`, with `-ffp-contract=off` and with the vectorisers off. A promised
+  bit-identity across layouts reads the input into a contiguous local before any arithmetic touches
+  it (`idct_r64`, `src/parquet_transform_core.f90`); only `fpm test --profile flangopt` sees it
+  (`test_dct_accepts_strided_sections`).
 
 ## nagfor-specific gotchas
 

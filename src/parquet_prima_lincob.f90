@@ -38,6 +38,14 @@
 !! 5. Upstream's driver `lincoa.f90` is NOT vendored: its argument defaults, its `get_lincon` and
 !!    its `preproc` adjustments become the validation and the driver in `parquet_prima_lincoa`,
 !!    where an adjustment upstream makes with a warning is either refused or reported.
+!! 6. `trstep` hands `getact` an active constraint's residual as `abs(rescon)`, where upstream
+!!    hands it `rescon`. A negative `rescon` is `updateres`'s marker for a residual of at least
+!!    `|rescon|`; read as the residual itself it is below every threshold at which `getact` releases
+!!    a constraint, so a constraint the centre had moved away from stayed active. The steps then
+!!    stayed tangent to a line the centre had left, `geostep` -- which reads the same marker as a
+!!    residual -- rejected as infeasible the steps that improved on the best point, and the run
+!!    stopped short of the minimiser reporting success. Pinned by
+!!    `test_lincoa_releases_a_constraint_it_left` (`test/test_prima.f90`).
 module parquet_prima_lincob
 
     use, intrinsic :: iso_fortran_env, only : real64, int64
@@ -1065,7 +1073,10 @@ contains
         ! gradients (i.e., null space of the "active" constraints). Therefore, RESACT remains unchanged.
         ! RESACT is changed right after GETACT is called if the first search direction D is not PSD
         ! but PSD + GAMMA * DPROJ.
-        resact(1:nact) = rescon(iact(1:nact))
+        ! N.B.: A negative RESCON is UPDATERES's marker for a residual of AT LEAST |RESCON|, so it
+        ! enters RESACT as its magnitude; upstream passes the marker itself, which sits below every
+        ! threshold at which GETACT releases a constraint (deviation 6 in the module header).
+        resact(1:nact) = abs(rescon(iact(1:nact)))
 
         g = gopt
         delsq = delta * delta

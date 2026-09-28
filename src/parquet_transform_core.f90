@@ -138,6 +138,7 @@ contains
     module procedure idct_r64
 
         complex(real64), allocatable :: work(:) !! the spectrum rebuilt from y, then its inverse FFT
+        real(real64), allocatable :: yc(:)      !! y, contiguous, whatever the caller's layout
         real(real64)   :: theta, c, s           !! the twiddle angle pi*k/(2n), its cosine and sine
         real(real64)   :: a, b                  !! the unnormalised y[k] and y[n-k]
         real(real64)   :: u0, uk                !! what undoes the orthonormal scaling, k = 0 and k > 0
@@ -155,16 +156,24 @@ contains
             uk = sqrt(2.0_real64*real(n, real64))
         end if
 
+        ! y is read into a contiguous copy before any arithmetic touches it, so that a strided
+        ! section and the same values contiguous run ONE loop below. Read in place, y's layout
+        ! chooses the code: at flang's -O3 a strided section answered up to 64 ulp away from the
+        ! contiguous call, a difference that vanishes with vectorisation or FMA contraction off
+        ! (`test_dct_accepts_strided_sections`). pf_idst always passes a reversed section, and
+        ! pf_dct needs no copy: it copies x into `work` before its arithmetic.
+        yc = y
+
         ! The spectrum, twice over: V[k] = exp(i*theta)*(y[k] - i*y[n-k])/2, the /2 left to the
         ! final scaling. At k = 0 the angle is zero and y[n] reads as zero.
         allocate (work(0:n - 1))
-        work(0) = cmplx(u0*y(1), 0.0_real64, kind=real64)
+        work(0) = cmplx(u0*yc(1), 0.0_real64, kind=real64)
         do k = 1, n - 1
             theta = HALF_PI*(real(k, real64)/real(n, real64))
             c = cos(theta)
             s = sin(theta)
-            a = uk*y(k + 1)
-            b = uk*y(n - k + 1)
+            a = uk*yc(k + 1)
+            b = uk*yc(n - k + 1)
             work(k) = cmplx(a*c + b*s, a*s - b*c, kind=real64)
         end do
 

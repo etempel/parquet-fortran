@@ -479,4 +479,7 @@ naming the upstream files it came from, points at that list, and adds what chang
 `pf_minimize_bobyqa`, `pf_minimize_lincoa` and `pf_minimize_cobyla` have no such block: their
 three files replace PRIMA's own drivers rather than vendoring them, and each says where its
 defaults part from upstream's. The numerical content is upstream's, and a difference from upstream
-is a defect here unless the tier's list says otherwise.
+is a defect here unless one of those lists says otherwise. One entry changes answers: LINCOA
+releases a constraint from its active set once the trust-region centre has moved away from it,
+where upstream keeps it and can stop short of the minimiser on that constraint while reporting
+success (item 6 of `src/parquet_prima_lincob.f90`'s list).

@@ -123,6 +123,8 @@ contains
                          test_cobyla_honours_every_budget), &
             new_unittest("LINCOA minimises a strongly non-quadratic objective under a constraint", &
                          test_lincoa_non_quadratic), &
+            new_unittest("LINCOA releases a constraint once its trust-region centre has left it", &
+                         test_lincoa_releases_a_constraint_it_left), &
             new_unittest("the guide's overshoot bound holds for all three engines, and binds", &
                          test_guide_budget_overshoot_bounds), &
             new_unittest("a narrow box pulls BOBYQA's default radii down together", &
@@ -1955,6 +1957,50 @@ contains
         call check(error, info%neval > 0, "the run must have evaluated the objective")
 
     end subroutine test_lincoa_non_quadratic
+
+    !> LINCOA on Rosenbrock from five starts, each under a constraint `x1 + x2 <= c` that the
+    !! minimiser `(1, 1)` lies beyond, so every answer is on that line.
+    !!
+    !! On these five the trust-region centre moves ALONG the constraint while it is in the active
+    !! set, and then away from it: the path deviation 6 of `parquet_prima_lincob` is about. Read as
+    !! a residual, the negated marker `updateres` stores for a distant constraint never released it,
+    !! and each run stopped on a line parallel to the true one, between 3e-3 and 0.16 inside it,
+    !! reporting `PF_OPT_OK`. Which starts take that path turns on the compiler's rounding, so there
+    !! are five: each stopped short under gfortran, nagfor and flang at every optimisation level
+    !! tried, and each lands on the line with the deviation in place.
+    subroutine test_lincoa_releases_a_constraint_it_left(error)
+        type(error_type), allocatable, intent(out) :: error !! Set on the first failed check.
+
+        ! The five runs: the constraint's bound, `rhobeg`, and the start.
+        real(real64), parameter :: C(5) = [1.0_real64, 1.25_real64, 1.25_real64, 1.5_real64, 1.9_real64]
+        real(real64), parameter :: RB(5) = [0.5_real64, 0.25_real64, 1.0_real64, 0.25_real64, 0.25_real64]
+        real(real64), parameter :: X0(2, 5) = reshape([ &
+            -2.0_real64/3.0_real64, -2.0_real64, 2.0_real64, -4.0_real64/3.0_real64, &
+            0.0_real64, 0.0_real64, 4.0_real64/3.0_real64, -2.0_real64/3.0_real64, &
+            0.0_real64, -2.0_real64], [2, 5])
+        real(real64) :: x(2), fmin, a_ineq(1, 2), b_ineq(1)
+        type(pf_optimize_info) :: info
+        character(len=64) :: which
+        integer :: k
+
+        a_ineq(1, :) = [1.0_real64, 1.0_real64]
+        do k = 1, size(C)
+            write (which, '(a, i0)') "run ", k
+            b_ineq = C(k)
+            x = X0(:, k)
+            call pf_minimize_lincoa(rosenbrock, x, fmin, a_ineq=a_ineq, b_ineq=b_ineq, &
+                                    rhobeg=RB(k), rhoend=1.0e-8_real64, max_neval=2000, info=info)
+            call check(error, info%status == PF_OPT_OK, trim(which)//": the run must converge")
+            if (allocated(error)) return
+            call check(error, x(1) + x(2) <= C(k) + 1.0e-6_real64, &
+                       trim(which)//": the constraint must hold at the point returned, to about rhoend")
+            if (allocated(error)) return
+            call check(error, abs(x(1) + x(2) - C(k)) < 1.0e-5_real64, &
+                       trim(which)//": and it must be ACTIVE -- the answer is on the line, not short of it")
+            if (allocated(error)) return
+        end do
+
+    end subroutine test_lincoa_releases_a_constraint_it_left
 
     !> The `BOBYQA, LINCOA, COBYLA` row of the overshoot column in
     !! doc/pages/utilities/solvers.md, "The budget: max_neval": the page says NEVER, for all three.

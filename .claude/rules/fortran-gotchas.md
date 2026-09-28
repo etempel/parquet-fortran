@@ -142,7 +142,12 @@ in `code-style.md`.
   `IEEE_INVALID` on a quiet NaN** (so does an ordered comparison, `<`, `>`, `<=` or `>=`, under
   gfortran at `-O0` and `-O2` alike, which compiles it to `comisd`; `==` and `/=` never raise it,
   and ifx raises it on no comparison), and the answer is wrong even where it does not trap. Screen
-  the NaN first, as its own statement; refuse a NaN input at a validating entry point.
+  the NaN first, as its own statement; refuse a NaN input at a validating entry point. **A screen
+  whose arm answers what the comparison's arm answers for the NaN is dropped as redundant**:
+  flang's `-O3` on x86-64 merged `zeta_in_domain`'s `out = zeta` screen into its range test's
+  `out = zeta` arm and compiled the test as `cmpltsd`, a signalling compare. Compare such a range
+  as the magnitude's bits in an `int64` (`zeta_in_domain`, `src/parquet_cosmology_eval.f90`);
+  only `fpm test --profile flangopt` on an x86-64 machine shows it.
   `any(x <= 0)` does NOT reject a NaN; `.not. all(x > 0)` does. Census of the instruction per
   procedure (the audit; a source grep cannot see an if-converted clamp):
 

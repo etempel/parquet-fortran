@@ -4,409 +4,125 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v2.5.0] - 2026-09-28
 
 ### Added
 
-- **Numerical integration: `parquet_integrate` and `pf_integrate`.** Adaptive quadrature of a
-  function of one `real64` variable over a finite or infinite range, by the 21-point Gauss-Kronrod
-  rule with adaptive bisection and Wynn-epsilon extrapolation, which is on unless
-  `extrapolate=.false.` turns it off and which keeps the cost of an integrable endpoint
-  singularity from growing with the tolerance. The integrand is an object extending `pf_integrand`,
-  with its parameters as components and an `eval` that may update them, or a plain function;
-  tolerances are `rtol` and, optionally, `atol`; `max_neval` bounds the integrand evaluations and
-  is never exceeded;
-  `log_base=` integrates a range spanning many decades in `log x`. Either bound may be
-  `pf_infinity()` or its negative, spelling `[a, +inf)`, `(-inf, b]` and `(-inf, +inf)`; an
-  infinite range is integrated by an outward walk that searches for a first panel the integrand is
-  not negligible on and then steps outward a factor of e at a time, so a feature far along the
-  range is found rather than stepped over, and `max_panels=` caps the panels one walk may use.
-  `breakpoints=` cuts the range at named interior points and integrates each piece on its own,
-  which is how a feature the first rule application would not sample is named rather than hunted
-  for; the pieces share the evaluation budget and `atol`. `converged=` and `info=`
-  (`pf_integrate_info`: status, error estimate, evaluation count, panels) report the outcome and
-  nothing is printed; an integrand that returns a NaN or an infinity ends the integration rather
-  than the process, reporting `PF_INT_NONFINITE` with the offending point in `info%nonfinite_at`.
-  `points=` (`pf_integrate_points`) records every abscissa, weight and value
-  of the final partition, whose weighted sum reproduces `info%partition_integral`, and the returned
-  result too whenever `info%extrapolated` is false. Reentrant: integrate from as
-  many threads as you like, one integrand object per thread. An Arrow-free entry module.
-  `bench/benchmark_integrate.sh` measures it. See
+- **`parquet_integrate`**: an Arrow-free entry module for numerical integration. `pf_integrate`
+  integrates a `real64` function, given as an object extending `pf_integrand` or as a plain
+  function, over a finite or infinite range by adaptive 21-point Gauss-Kronrod quadrature with
+  Wynn-epsilon extrapolation, with `rtol`/`atol`, an evaluation budget, `breakpoints=` and
+  `log_base=`; `info=` and `points=` report the outcome and the final partition. See
   [Numerical integration with pf_integrate](doc/pages/utilities/integration.md).
-- **Root finding: `parquet_root` and `pf_find_root`.** Solves `f(x) = 0` for one `real64` variable
-  on a bracket by Brent's method, the function given as an object extending `pf_rootfun` or as a
-  plain function. `expand=` (`pf_bracket_expansion`) widens a bracket whose ends have the same sign
-  under a policy the caller states — the upper end, the lower end or both, by a factor, within
-  limits and a number of tries — and stops at the first sign change. `rtol` and `atol` set the
-  tolerances, full precision at any magnitude by default; `max_neval` bounds the evaluations,
-  expansion included; an infinite function value is used as a sign, and a NaN is an `error stop`.
-  `converged=` and `info=` (`pf_root_info`: status, counts, `f` at the root, the bracket) report
-  the outcome, a missing sign change or a spent budget as a status rather than an abort, and
-  nothing is printed; `history=` (`pf_root_history`) records every evaluation. An Arrow-free entry
-  module. See [Root finding](doc/pages/utilities/root-finding.md).
-- **Discrete cosine and sine transforms: `parquet_transform`, `pf_dct`, `pf_idct`, `pf_dst` and
-  `pf_idst`.** The type-II discrete cosine and sine transforms of a `real64` sequence whose length
-  is a power of two, and their exact inverses, in scipy's convention (`scipy.fft.dct`, `idct`,
-  `dst` and `idst`, factor of two included), unnormalised or orthonormal (`norm="ortho"`, whose
-  exceptional coefficient is the first for the cosine pair and the last for the sine pair);
-  `pf_is_pow2` and `pf_next_pow2` choose the length. Nothing is printed. An Arrow-free entry
-  module. See [Transforms: the discrete cosine and sine
-  transforms](doc/pages/utilities/transforms.md).
-- **Linear binning: `pf_bin_linear`.** Deposits a sample onto a grid of points by linear
-  (cloud-in-cell) assignment, splitting each value's weight between the two grid points around it
-  into shares that sum to it exactly. In `parquet_stats` beside `pf_histogram`, with its
-  population arguments (`is_valid`, `weights`, `skipnan` and the three exclusion counts); `mass`
-  holds one entry per grid point. See
-  [Array statistics](doc/pages/utilities/statistics.md#pf_bin_linear--linear-cloud-in-cell-binning-onto-a-grid).
-- **Optimisation: `parquet_optimize`.** `pf_minimize_scalar` minimises a function of one variable
-  on a bracket by Brent's method; `pf_minimize_simplex` minimises a function of one or many
-  variables by the Nelder-Mead simplex, from a start point and a per-coordinate step, with
-  relative and absolute tolerances (`rtol`, `atol`) on the value spread. `pf_minimize_de` searches
-  a whole box by
-  differential evolution from a seed rather than a start point, with a Latin-hypercube initial
-  population, `ftarget=`, an optional final simplex inside the box (`polish=`) and the final
-  population on
-  request; `pf_minimize_multistart` runs a local solver (`pf_simplex_solver`, or one a caller
-  supplies) from a Latin hypercube of starts and counts the distinct minima. Both take `threads=`,
-  evaluate through one clone of the objective per thread, and give the same answer at every thread
-  count. The objective is an object extending `pf_objective`, with its parameters as components and
-  an `eval` that may update them, or a plain function. `max_neval` bounds the evaluations and is
-  soft by one engine step; `converged=` and `info=` (`pf_optimize_info`: status, convergence,
-  counts, the final spread, the non-finite count, the distinct-minimum count) report the outcome
-  and nothing is printed, while a caller mistake and a non-finite objective value in a local engine are
-  `error stop`; the population engines treat a non-finite value as a point outside the domain.
-  `history=` (`pf_optimize_history`) records every evaluation, every generation's best, or every
-  start's minimum, trimmed to the records in use. `pf_constrained_objective` is declared here so
-  that every engine which does not honour nonlinear constraints refuses one. An Arrow-free entry
-  module. See [Optimisation](doc/pages/utilities/optimization.md).
-- **Powell's derivative-free solvers: `parquet_prima`.** `pf_minimize_bobyqa` (bounds),
-  `pf_minimize_lincoa` (linear equality and inequality constraints as arrays) and
-  `pf_minimize_cobyla` (nonlinear constraints from an objective extending
-  `pf_constrained_objective`) minimise a function of several variables without derivatives.
-  BOBYQA and LINCOA fit a quadratic model to `npt` interpolation points and minimise it in a trust
-  region whose radius falls from `rhobeg` to `rhoend`; COBYLA fits linear models of the objective
-  and of every constraint over a simplex. The engines are vendored from
-  [PRIMA](https://github.com/libprima/prima) (Zaikun Zhang, BSD-3-Clause) at commit `43863c69`,
-  reworked to this library's rules: fixed kinds, no printing layer, `pf_objective` in place of the
-  procedure interface, `ieee_arithmetic` in place of the hand-rolled predicates, and a refusal in
-  place of upstream's moderated extreme barrier. BOBYQA's bounds are honoured at every evaluation,
-  not only at the end, and its start point is never moved — where PRIMA would move it, `rhobeg`
-  shrinks instead and the radius reached comes back in `info%rho`. Constraint values follow
-  PRIMA's convention, `c(x) <= 0` where feasible; `info%cstrv` is the violation at the returned
-  point, measured in the caller's units, and `info%status` is `PF_OPT_INFEASIBLE` exactly when it
-  exceeds `ctol`. `scale=` gives each coordinate its characteristic magnitude, so one pair of
-  trust-region radii serves a problem whose variables differ by orders of magnitude, and the
-  bounds and constraint matrices are transformed with it. `pf_bobyqa_solver` drives
-  `pf_minimize_multistart` with BOBYQA from each start. Where PRIMA adjusts an invalid argument
-  and warns, this refuses with a message. Shares `pf_objective`, `pf_constrained_objective`,
-  `pf_optimize_info`, `pf_optimize_history`, `pf_local_solver` and the `PF_OPT_*` status codes
-  with `parquet_optimize` and re-exports them all. An Arrow-free entry module. See
+- **`parquet_root`**: an Arrow-free entry module for root finding. `pf_find_root` solves
+  `f(x) = 0` on a bracket by Brent's method, widening a bracket without a sign change under an
+  `expand=` policy (`pf_bracket_expansion`); a missing sign change or a spent budget is reported
+  through `converged=` and `info=` rather than aborting. See
+  [Root finding](doc/pages/utilities/root-finding.md).
+- **`parquet_optimize` and `parquet_prima`**: Arrow-free entry modules for minimisation by Brent's
+  method in one variable (`pf_minimize_scalar`), the Nelder-Mead simplex (`pf_minimize_simplex`),
+  differential evolution over a box (`pf_minimize_de`) and multistart local search
+  (`pf_minimize_multistart`), the last two threaded with the same answer at every thread count,
+  and by Powell's derivative-free solvers under bounds (`pf_minimize_bobyqa`), linear constraints
+  (`pf_minimize_lincoa`) and nonlinear constraints (`pf_minimize_cobyla`), vendored from
+  [PRIMA](https://github.com/libprima/prima) (Zaikun Zhang, BSD-3-Clause). The objective is an
+  object extending `pf_objective` or a plain function. See
+  [Optimisation](doc/pages/utilities/optimization.md) and
   [Powell's derivative-free solvers](doc/pages/utilities/prima.md).
-- **Kernel density estimation: `parquet_kde`.** `pf_kde` fits a one-dimensional density to an
-  array it retains, `real64` or `real32`, or to a numeric `parquet_column`, and answers `%pdf`,
-  `%cdf` and `%quantile` exactly anywhere, `%curve` on equally spaced points and `%sample` from
-  the estimate; `pf_kde_grid` streams points into a fixed grid and forgets them, with `%merge` for
-  per-thread accumulation and `%density`, `%pdf`, `%cdf`, `%quantile` and `%sample` read from the
-  grid. Four kernels (`bspline` the default, `gaussian`, `epanechnikov`, `box`), with the bandwidth the
-  kernel's standard deviation; the Improved Sheather-Jones rule (the default), least-squares
-  cross-validation (`rule="lscv"`, which scores whichever estimator is in force and so can measure
-  the adaptive kernel's own bandwidth, and which for a fixed bandwidth reads its criterion off one
-  binning of the sample and a filtered transform per candidate rather than off every pair),
-  Silverman's and
-  Scott's rules, a number, and `adjust=`; `pf_kde_bandwidth` answers a rule's bandwidth on its own,
-  without building an estimate, over the same sample forms; per-element weights and nulls under the
-  `pf_*` family's rules, with `n_eff` in the rules; `lower=`/`upper=` for a bounded support, corrected by
-  `boundary=` `"reflect"` (the default), `"renormalise"` or `"linear"` -- the last two the
-  degree-zero and degree-one members of the local-polynomial boundary kernel, each dividing the
-  summed kernels by the mass a kernel centred at the QUERY point keeps inside the support and then
-  by the estimate's own integral, `"linear"` additionally setting negative values to zero.
-  Under a corrected boundary the fit's scan for the stretches the clip removes reads a binned grid
-  of the same estimate wherever that grid is safely away from zero and the exact sum elsewhere,
-  with every crossing still bisected on the exact estimate. The fit says when such a boundary's
-  zones cover the whole support, naming the bandwidth -- and the spread -- they stay inside it at.
-  `adaptive=.true.` selects the sample-point adaptive kernel (each
-  point's bandwidth from a pilot density, sensitivity `alpha=`, capped by `bandwidth_max=` in the
-  data's units and by `spread_max=` as a multiple of the narrowest bandwidth the rule can give --
-  the latter always in force, at 100, the tighter of the two binding and the fit saying when the
-  default one does -- read
-  back through `%bandwidths`, `%bandwidth_at` and `%pilot`), given a rule rather than a number it
-  widens that rule's bandwidth to the one the adaptive estimator itself calls for, and both forms
-  take a smoothing measured on another sample from a `pilot=` grid, whose range need not cover
-  theirs. `%add` counts the points whose adaptive reach exceeds a grid's range in `n_overreach=`
-  and `%n_overreach()`, and says so. A grid's lifecycle is `%init` -> `%add`* -> `%finish` -> query, with
-  `%is_finished`, `finish=.true.` on `%add` and `%merge` as the one-line form, and `%clear` to
-  reopen it. `method="binned"` on `pf_kde_grid%init`, on `pf_kde%fit` and on `pf_kde%curve` fills
-  the cells by
-  linear binning and one cosine transform instead of by depositing each kernel -- with the
-  bandwidths bucketed into geometrically spaced classes under the adaptive kernel, a second
-  transform against the odd kernel under `boundary="linear"`, and `%method(name)` reading the token
-  back on both types; the exact deposit stays the grid's default, while a `%curve` given no
-  `method=` picks the
-  binned transform only where it is as accurate as the exact sum and the exact sum otherwise. On
-  `%fit` the token chooses how every later query is answered: `"binned"` lays one grid over the
-  estimate's whole extent and serves `%pdf`, `%cdf`, `%quantile`, `%curve` and `%sample` from it,
-  building no boundary scan at all, and `%curve` then refuses a `method=` of its own. `threads=` on the bulk forms of both; draws addressed
-  by `(seed, stream)`. An Arrow-free entry module. `bench/benchmark_kde.sh` measures it. See
-  [Kernel density estimation](doc/pages/utilities/kernel-density.md).
-- **A direction inside a HEALPix pixel, not just at its centre**:
-  `pf_healpix_grid%pix2vec_offset(ipix, dx, dy, vec)` is `%pix2vec` generalised to any position in the
-  pixel's square in the equal-area projection, so a `(dx, dy)` uniform over the unit square is a
-  direction uniform over the pixel.
-- **HEALPix neighbours**: `pf_neighbours_nest(nside, ipix, nb)` and `pf_neighbours_ring` return a
-  pixel's eight neighbours (`-1` at a missing corner). See
-  [HEALPix](doc/pages/utilities/healpix.md).
-- **Interpolation of tabulated data: `parquet_interpolate`.** `pf_interp_1d` builds an interpolant
-  over a table of `real64` abscissae and ordinates, ascending or descending, with `method=`
-  `"linear"`, `"cubic"` (a C2 spline with `bc=` `"natural"`, `"not_a_knot"` or `"clamped"` with
-  `slopes=`) or `"pchip"` (a shape-preserving cubic that keeps monotone data monotone), and answers
-  `%eval`, `%derivative` and `%integral` anywhere; `outside=` says whether a point beyond the table
-  is clamped to the end value, extrapolated or answered as NaN, and `is_valid=` drops points before
-  building. `pf_interp_2d` is the same over values on a rectilinear grid, bilinear or bicubic.
-  `pf_interp` is the one-shot form of both. Every binding that reads an object is pure, so one
-  object may be shared read-only by any number of threads. Nothing is printed. An Arrow-free entry
-  module. `bench/benchmark_interpolate.sh` measures it. See
+- **`parquet_interpolate`**: an Arrow-free entry module for tabulated data. `pf_interp_1d`
+  interpolates a table linearly, by a cubic spline (natural, not-a-knot or clamped) or by the
+  shape-preserving PCHIP cubic, and answers `%eval`, `%derivative` and `%integral`, with `outside=`
+  choosing clamping, extrapolation or NaN beyond the table; `pf_interp_2d` interpolates on a
+  rectilinear grid, bilinearly or bicubically; `pf_interp` is the one-shot form of both. A built
+  object may be shared read-only between threads. See
   [Interpolation of tabulated data](doc/pages/utilities/interpolation.md).
-- **Distances and times in an expanding universe: `parquet_cosmology`.** `pf_cosmology` is built
-  once from one of eight named cosmologies (`Planck18`, `Planck15`, `Planck13`, `WMAP9`, `WMAP7`,
-  `WMAP5`, `WMAP3`, `WMAP1`, matched without regard to case) or from parameters of your own —
-  `h0`, `om0`, and optionally `ode0` (absent means flat, with `Ok0` exactly zero), `tcmb0`, `neff`,
-  `m_nu`, `ob0`, `w0` and `wa` — on astropy's `w0waCDM` definition with astropy 8.0.1's own
-  constants and Komatsu fit, so a `"Planck18"` agrees with astropy's to about `1e-11`. Every
-  binding that takes a redshift is `pure elemental`, so a whole column converts in one call:
-  `%comoving_distance`, `%comoving_transverse_distance`, `%luminosity_distance`,
-  `%angular_diameter_distance`, `%angular_diameter_distance_z1z2`, `%lookback_time`, `%age`,
-  `%efunc`, `%inv_efunc`, `%hubble`, `%distmod`, `%comoving_volume`,
-  `%differential_comoving_volume`, `%kpc_proper_per_arcmin`, `%kpc_comoving_per_arcmin`,
-  `%arcsec_per_kpc_proper`, `%arcsec_per_kpc_comoving`, `%lookback_distance`,
-  `%absorption_distance`, `%comoving_distance_z1z2`, `%scale_factor`, the contents of the
-  universe at a redshift — `%om`, `%ode`, `%ok`, `%ogamma`, `%onu`, which sum to one, with
-  `%otot`, `%ob`, `%odm`, `%nu_relative_density`, `%onu_species`, `%tcmb`, `%tnu`, `%w`,
-  `%de_density_scale` and `%critical_density` in M_sun/Mpc^3 — the linear growth of structure,
-  `%growth_factor` normalised to `D(0) = 1` and `%growth_rate` `f = dlnD/dlna`, the baryon
-  acoustic scale — `%sound_horizon` exact for the model, `%r_drag` from the Aubourg et al. (2015)
-  fit, `%z_drag` the redshift where the two meet, and `%z_eq` exact from the parameters — and the inverses
-  `%z_at_comoving_distance`, `%z_at_lookback_time`, `%z_at_age`, `%z_at_luminosity_distance` and
-  `%z_at_distmod`; plus the model's own parameters and derived values, `%is_flat`,
-  `%has_massive_nu`, `%get_name`, `%describe`, `%m_nu`, `%clone` and `%clear`.
-  `%init` tabulates four integrals over a uniform grid in `zeta = ln(1+z)` running from `zmin=`
-  (default `-0.9`) to `zmax=` (default 1100) with a node at `zeta = 0`, read back by a quintic
-  Hermite over a value and an analytic slope at every node; a query beyond either end is
-  answered by a fixed 20-point Gauss-Legendre rule from that end, so **no redshift is refused and
-  `zmax=` and `zmin=` decide only how fast**. The growth pair is integrated instead of tabulated,
-  downward from the top of the domain with a fourth-order Runge-Kutta at half a grid interval, so
-  `zmax=` does not move it at all; the source term is `om0`, which excludes massive neutrinos, and
-  a model with no matter answers NaN from both bindings. The sound horizon tabulates nothing and
-  costs microseconds a call, laying panels of the same 20-point rule over `asinh` of the scale
-  factor's square root so that one fixed rule holds `1e-14` for every admitted `Tcmb0` and
-  baryon fraction; a cosmology built without an `ob0` answers NaN from all three baryon bindings
-  and a `Tcmb0` of zero makes the sound horizon exactly zero and `%z_eq` `+Infinity`. The age has its own table rather than being `age(0)`
-  minus the lookback time, which would keep no correct digit at high redshift. The domain runs
-  from just above `z = -1` to `z = 1e10`; outside it, and for a NaN, every binding answers NaN
-  quietly without raising an IEEE flag, so a catalogue's `-99` sentinels pass through an elemental
-  call. A model whose `E(z)^2` reaches zero at a finite blueshift is built rather than refused,
-  answers NaN below that point, reports it through `%zeta_floor()`, and has inverses that refuse
-  an argument it never reaches.
-  `%distmod(0)` is `-Infinity`, `%arcsec_per_kpc_*(0)` is `+Infinity`, and a model whose age
-  integral diverges answers `+Infinity` at every redshift. `%z_at_age` solves on `ln(age)` rather
-  than on `age(0)` minus a lookback time, and `%z_at_luminosity_distance` and `%z_at_distmod`
-  answer a redshift at or above zero, the smallest one where `D_L` takes the value given. `%init` and `%clear` are the only
-  bindings that write an object, so one built cosmology may be evaluated from any number of
-  threads at once. The free functions `pf_z2zeta`, `pf_zeta2z` and `pf_z_combine` need no
-  cosmology and keep their digits where the obvious forms lose them. Arrow-free, settings-free and
-  silent. See
-  [Distances and times in an expanding universe](doc/pages/utilities/cosmology.md).
-- **A cosmology from a configuration file: `parquet_cosmology_config`.**
-  `pf_cosmology_from_toml` builds a `pf_cosmology` from the `[cosmology]` section of a TOML
-  configuration file and `pf_cosmology_to_toml` writes one back into a document, so a run's
-  cosmology is a run parameter beside `nproc` and `output_dir` rather than something compiled into
-  the program. The section takes either form `%init` takes — `name` naming one of the eight, or the
-  parameters, whose keys are `%init`'s own argument names in lower case — with `ode0`, `ob0` and
-  `m_nu` absent meaning flat, unknown and massless, and every other key defaulting to what `%init`
-  defaults to. `found=` makes an absent section an answer rather than an error, `section=` names a
-  different table, and `conf` may be a section handle, so a nested `[run.cosmology]` needs no extra
-  argument. Every validation stays `%init`'s, with the file and the section named in the message;
-  a misspelt key is caught by your own `pf_toml_check_all`, because the reader marks only what it
-  reads. The writer creates the section or reuses it and deletes each key before setting it, so it
-  is idempotent, leaves no stale key and touches nothing outside its own table; it records the
-  parameters rather than the realization. A new entry module over `parquet_cosmology` and
-  `parquet_toml`, so neither of them grows: Arrow-free, settings-free, and taking no lock of its
-  own, and reachable from `use parquet` as well as by name. See
+- **`parquet_transform`**: an Arrow-free entry module with the type-II discrete cosine and sine
+  transforms of a `real64` sequence of power-of-two length, `pf_dct` and `pf_dst`, and their exact
+  inverses `pf_idct` and `pf_idst`, in scipy's convention, unnormalised or orthonormal
+  (`norm="ortho"`); `pf_is_pow2` and `pf_next_pow2` choose the length. See
+  [Transforms](doc/pages/utilities/transforms.md).
+- **`parquet_kde`**: an Arrow-free entry module for kernel density estimation. `pf_kde` fits a
+  one-dimensional density to an array or a numeric `parquet_column` and answers `%pdf`, `%cdf`,
+  `%quantile`, `%curve` and `%sample`; `pf_kde_grid` streams points into a fixed grid, with
+  `%merge` for per-thread accumulation. It offers four kernels, bandwidths from the Improved
+  Sheather-Jones rule (the default), least-squares cross-validation, Silverman's or Scott's rule or
+  a number (`pf_kde_bandwidth` answers a rule alone), weights and nulls, bounded supports with
+  three boundary corrections, a sample-point adaptive kernel (`adaptive=.true.`) and a binned
+  evaluation (`method="binned"`). See
+  [Kernel density estimation](doc/pages/utilities/kernel-density.md).
+- **`parquet_cosmology` and `parquet_cosmology_config`**: Arrow-free entry modules for distances
+  and times in an expanding universe. `pf_cosmology`, astropy's `w0waCDM` model, is built from one
+  of eight named cosmologies such as `Planck18` or from parameters of your own; its
+  `pure elemental` bindings answer distances, times, volumes, densities, the growth of structure,
+  the baryon acoustic scale and the inverses `%z_at_*`, quietly answering NaN for a NaN or a
+  redshift outside the domain. `pf_cosmology_from_toml` and `pf_cosmology_to_toml` read and write a
+  `[cosmology]` section of a TOML configuration file. See
+  [Distances and times in an expanding universe](doc/pages/utilities/cosmology.md) and
   [A cosmology in a configuration file](doc/pages/utilities/configuration-files.md#a-cosmology-in-a-configuration-file).
-- **Random points on a sphere, in `parquet_random`.** `pf_random_direction_at` draws a uniform unit
-  vector and `pf_random_radec_at` the same point as `(ra, dec)` in degrees; `pf_random_disc_at` and
-  `pf_random_disc_radec_at` draw uniformly within an angular radius of a direction or a sky
-  position, with `r_inner=` for a ring; `pf_random_ball_at` draws uniformly in a ball or a shell;
-  `pf_random_vmf_at` and `pf_random_vmf_radec_at` draw a von Mises–Fisher direction about a centre,
-  by `kappa` or by `sigma_deg`; `pf_random_rotation_at` draws a uniform rotation matrix. Each is
-  addressed by seed, stream and draw like every other draw and has a `pf_random_stream` producer
-  costing one block; the direction and RA/Dec forms have draw-axis fills, and `%address` returns a
-  stream's seed and stream index. `pf_random_disc_cap` prepares one disc or ring once, so a loop
-  over it pays the radius validation, the centre's normalisation and the frame once instead of per
-  draw; `%at` is `pf_random_disc_at` to the bit. An `r_inner` above `pi` is refused rather than
-  clamped. `pf_random_pair_spare_at` returns two uniforms of one enciphering plus an exactly uniform
-  integer drawn from the 22 bits their conversions discard, so a composite draw need not encipher
-  twice. `pf_sphere_algorithm` freezes the family's values. See
-  [Random numbers](doc/pages/utilities/random.md).
-- **Random points in sky regions, and sky geometry: `parquet_sphere`.** `pf_sky_polygon` holds a
-  polygon given by `(ra, dec)` vertices, with straight edges in the RA/Dec chart or great-circle
-  edges, answers `%contains`, `%area`, `%acceptance` and `%is_simple`, and draws points uniform per
-  solid angle inside it by coordinate (`%random_at`, `%random_fill`) or along a `pf_random_stream`
-  (`%random_next`). A self-intersecting polygon's `%area` and `%acceptance` are the even-odd
-  quantities the sampler actually uses, measured on a fixed lattice, rather than a signed sum, and
-  the acceptance floor `%init` applies is that same quantity. `%init(..., strict=.true.)` refuses a
-  chart polygon that looks like an RA band written the short way across `ra = 0`.
-  `pf_random_pixel_at` and `pf_random_mask_at` draw uniformly inside one HEALPix pixel or over a
-  list of them on a `pf_healpix_grid`, with `_radec`, fill and stream forms; a point in a pixel
-  costs one block and rejects nothing, read through `%pix2vec_offset`, and a mask draw costs the
-  same one block by taking its choice of a listed pixel from the bits the point leaves spare.
-  `pf_radec2vec` and `pf_vec2radec` convert between degrees and unit vectors in a named declination
-  frame, and `pf_fibonacci_grid` places `n` quasi-uniform directions. `pf_sky_region_algorithm`
-  freezes the samplers' values. An Arrow-free entry module, re-exporting `healpix_threads` and the
-  `verbosity`/`message_stream` pair, since the `pf_healpix_grid` it re-exports carries `_bulk`
-  bindings that resolve a thread count and can warn from a thread clamp. See
-  [Random points and geometry on the sphere](doc/pages/utilities/sphere.md).
-- **Celestial coordinate systems: `parquet_skycoord`.** `pf_icrs2gal`, `pf_gal2icrs`,
-  `pf_icrs2ecl`, `pf_ecl2icrs`, `pf_gal2sgal`, `pf_sgal2gal`, `pf_icrs2sgal`, `pf_sgal2icrs`,
-  `pf_icrs2fk5` and `pf_fk52icrs` convert sky positions between the ICRS, Galactic, ecliptic,
-  supergalactic and FK5 J2000 systems as astropy defines them, in degrees, `pure elemental` so a
-  whole column converts in one call; `pf_sky_convert` does the same with the systems named by
-  `PF_COORD_*` selectors rather than by the procedure, `pf_sky_rotation` prepares such a conversion
-  once and applies it elementally (`%init`, `%apply`, `%is_init`), and `pf_coord_system_name` and
-  `pf_coord_system_from_name` turn a selector into a token and back for a system read out of a
-  configuration file. Each rotation is built from the three angles that define it — the target
-  system's north pole and the target longitude of the source's north pole — so it is orthonormal by
-  construction, and the inverse is the transpose rather than a second matrix. The module also holds
-  the RA/Dec geometry that needs no coordinate system: `pf_angdist_deg`, `pf_offset_radec` and
-  `pf_position_angle_deg`, which offset a position by a separation at a position angle and recover
-  the angle, `pf_apply_pm`, which moves a position by its proper motion along a great circle,
-  `pm_ra` being Gaia's `pmra`, the rate in right ascension times `cos(dec)`, `pf_radec2unit` and
-  `pf_unit2radec` between a position and its unit vector, and `pf_radec2tan` and `pf_tan2radec`,
-  the gnomonic (FITS `TAN`) projection onto the plane tangent at a field centre and its inverse,
-  with an optional position angle for the `+y` axis and NaN coordinates for a position in the far
-  hemisphere. `pf_ra2str`, `pf_dec2str` and `pf_radec2str` write positions as sexagesimal text,
-  `10:21:30.550 +41:16:09.00`
-  or blank- or letter-separated, and `pf_str2ra`, `pf_str2dec` and `pf_str2radec` read three-field
-  text back strictly, reporting what they cannot read through an `ok` flag and taking hours of at
-  most 24 and degrees of at most 90, each reached only with zero minutes and seconds; `pf_deg2hms`,
-  `pf_deg2dms`, `pf_hms2deg` and `pf_dms2deg` split an angle into its fields and join them, a
-  declination's sign apart from its degrees. `pf_zhel2zcmb` takes a heliocentric redshift into the
-  rest frame of the cosmic microwave background and `pf_zcmb2zhel` brings one back, with Planck
-  2018's dipole unless another is given, the angle to the apex being the observed one.
-  Total, like the rest of the sky tier: a NaN argument comes back as a NaN, or as the text `nan`,
-  raising no floating-point flag, and a declination outside `[-90, 90]` is read as the direction it
-  names, except as `pf_offset_radec`'s centre or `pf_apply_pm`'s starting position, where it stops
-  the program. The declination frame of `parquet_healpix` is a different thing and does not enter
-  here. An Arrow-free entry module. See
+- **`parquet_skycoord`**: an Arrow-free entry module for celestial coordinate systems.
+  `pf_icrs2gal` and its siblings, `pf_sky_convert` and a prepared `pf_sky_rotation` convert
+  positions elementally between the ICRS, Galactic, ecliptic, supergalactic and FK5 J2000 systems
+  as astropy defines them. The module also holds the RA/Dec geometry that needs no coordinate
+  system (angular distance, offsets and position angles, proper motion, the gnomonic projection),
+  sexagesimal text in both directions, and heliocentric-to-CMB redshifts (`pf_zhel2zcmb`); a NaN
+  argument comes back as a NaN, raising no floating-point flag. See
   [Celestial coordinate systems](doc/pages/utilities/skycoord.md).
+- **Random points on the sphere**: `parquet_random` draws uniform directions, points in a disc,
+  ring, ball or shell, von Mises–Fisher directions and uniform rotations (`pf_random_direction_at`,
+  `pf_random_disc_at`, `pf_random_ball_at`, `pf_random_vmf_at` and `pf_random_rotation_at`, with
+  RA/Dec and stream forms). The new Arrow-free entry module `parquet_sphere` draws uniformly inside
+  a sky polygon (`pf_sky_polygon`, which also answers `%contains` and `%area`), a HEALPix pixel or
+  a list of pixels, converts between RA/Dec and unit vectors, and places a Fibonacci grid. See
+  [Random numbers](doc/pages/utilities/random.md) and
+  [Random points and geometry on the sphere](doc/pages/utilities/sphere.md).
+- **Smaller additions**: `pf_bin_linear` (linear, cloud-in-cell binning onto a grid of points, in
+  `parquet_stats`), `pf_healpix_grid%pix2vec_offset` (a direction anywhere inside a HEALPix pixel)
+  and `pf_neighbours_nest`/`pf_neighbours_ring` (a pixel's eight neighbours).
 
 ### Changed
 
-- **`weight_type=` is matched without regard to case** throughout the `pf_*` statistics family, as
-  every other token in the library already was. `weight_type="Frequency"` and `"FREQUENCY"` now
-  mean `"frequency"`; every spelling accepted before is accepted still, and an unrecognised token
-  aborts as before. See
-  [Array statistics](doc/pages/utilities/statistics.md#what-values-may-be).
-- **`%pairs_within_los` sweeps in one pass** and returns the same pairs in the same order, several
-  times faster. **A 3D index whose points fill part of their bounding box gets a finer grid**: the
-  cells-per-point ceiling counts occupied cells (0.3 per point), with 4 cells of the bounding box
-  per point as the bound.
-- **The index tier's automatic thread count stops at 64** (`pf_index_map`, `pf_index_multimap`,
-  and a table's `%build_index`, `%find_many` and hash join), and `parquet_set_index_threads(n)`
-  replaces that ceiling, raising the automatic answer as well as lowering it.
-  `parquet_set_healpix_threads(n)` likewise replaces the bulk HEALPix forms' ceiling of 64 rather
-  than only lowering it.
-- **String keys in `pf_index_map` and `pf_index_multimap` hash each 8-byte word whole, with the
-  hash's two chains cross-fed**, so keys differing only in bytes 5-8, 13-16, ... no longer share
-  hashes. `%probe_stats` reports the longest run of string keys sharing one hash
-  (`max_hash_chain=`), and a map warns once when 32 of its keys share one.
-- **`pf_angdist_deg` moved from `parquet_healpix` to `parquet_skycoord`.** Its arguments, result
-  and totality are unchanged and `use parquet` sees no difference; a program that imported
-  `parquet_healpix` alone for it now imports `parquet_skycoord`. `pf_angdist`, the vector form,
-  stays in `parquet_healpix`.
-- **Both consumer-facing generators emit narrow imports instead of `use parquet`.** The
-  embedded-schema module `tools/generate_parquet_maml.sh` writes now imports its four names from
-  `parquet_io`, and the table type `tools/generate_user_table_code.py` writes imports
-  `parquet_io`, `parquet_tables` and `parquet_columns` — so neither brings the whole library
-  surface into a project that only reads, writes and holds tables. `tools/generate_parquet_maml.sh`
-  is also the consumer-facing generator alone now: its `base` mode has moved to
-  `tools/generate_parquet_maml_base.sh`, which is internal to this library. Regenerate and commit
-  your own generated modules to pick this up; code you have written in a generated table type's
-  `USER SECTION` windows may need a `use` line of its own in the `uses` window.
-- **A generated table type has a seventh user window, `parameters`, and its `uses` window has
-  moved above `implicit none`.** Fortran orders the specification part USE, then IMPLICIT, then
-  declarations, so one window could never hold both a `use` statement and a module parameter: the
-  `uses` window sat below `implicit none`, where a `use` does not compile. Now `uses` takes `use`
-  statements above `implicit none` and `parameters` takes module parameters below it. Your next
-  regeneration migrates an older file for you — whatever its `uses` window held comes back in
-  `parameters`, at the same place in the file, and the new `uses` window arrives empty.
+- **`pf_angdist_deg` moved from `parquet_healpix` to `parquet_skycoord`.** `use parquet` sees no
+  difference; a program importing `parquet_healpix` alone for it now imports `parquet_skycoord`.
+- **The consumer-facing generators import narrowly**: the module `tools/generate_parquet_maml.sh`
+  writes imports `parquet_io`, and a table type from `tools/generate_user_table_code.py` imports
+  `parquet_io`, `parquet_tables` and `parquet_columns`, instead of `use parquet`. A generated table
+  type gains a `parameters` user window, and its `uses` window moves above `implicit none`.
+  Regenerate to pick this up (an older file is migrated); code in a `USER SECTION` window may need
+  a `use` line of its own.
+- **Thread ceilings**: the index tier's automatic thread count (`pf_index_map`,
+  `pf_index_multimap`, and a table's `%build_index`, `%find_many` and hash join) stops at 64, and
+  `parquet_set_index_threads(n)` and `parquet_set_healpix_threads(n)` replace their area's ceiling
+  of 64 rather than only lowering it.
+- **Faster**: `%pairs_within_los` sweeps in one pass, a 3D `pf_spatial_index` over points filling
+  part of their bounding box gets a finer grid, and string keys in `pf_index_map` and
+  `pf_index_multimap` no longer share hashes when they differ only in bytes 5-8, 13-16, ...;
+  answers are unchanged. `%probe_stats` gains `max_hash_chain=`, and a map warns once when 32 of
+  its keys share one hash.
+- `weight_type=` is matched without regard to case throughout the `pf_*` statistics family.
 
 ### Fixed
 
-- Both MAML generators refuse a schema holding a non-ASCII character, naming the file, the line
-  and the code point. `tools/generate_parquet_maml.sh` and `tools/generate_parquet_maml_base.sh`
-  embed every MAML line as a Fortran character literal and write the module as ASCII, so a byte
-  above 127 ended the run in a `UnicodeEncodeError` traceback — after the output file had already
-  been truncated to zero bytes, leaving an empty `src/parquet_maml.f90` behind and naming no
-  schema.
-
-- `pf_integrate` finds a narrow feature sitting just above a lower bound of zero. The outward
-  walk's search for a first panel retries a much NARROWER panel before it starts widening, which
-  is what finds an integrand that falls off far faster than the first guess assumed; that retry
-  existed only for a POSITIVE lower bound, which has a scale of its own to narrow against. From a
-  bound at or below zero the search worked in linear `x` from a fixed first panel and only ever
-  coarsened, so a feature below that panel's 21-point spacing could never be reached however many
-  times the panel was widened -- and the call answered zero with `converged` true, on
-  `[0, +infinity)` and on `(-infinity, +infinity)`, whose two halves are both walked from zero.
-  Measured over 104 compactly supported spikes, the retry doubles the number found and loses none.
-  It costs an ordinary integrand nothing, since only a panel across which the integrand is exactly
-  zero reaches it. The budget floors on the guide page move with it: a walk whose first probe finds
-  nothing now costs three rule applications before the budget is consulted rather than two.
-  [Numerical integration with pf_integrate](doc/pages/utilities/integration.md#budget-and-outcome).
-- `pf_corr(x, x)` is exactly `1`, and `pf_corr(x, -x)` exactly `-1`, at every scale. Both identities
-  are documented without qualification and were lost on a sample scaled to the end of the
-  representable range: the centred sums overflow to `Inf` and their re-centring correction leaves
-  `Inf - Inf`, so all three came back NaN together and the correlation answered a NaN with
-  `ok = .false.` A diagonal or anti-diagonal pair is now answered from the pairing itself, as
-  `pf_cov` already answered a diagonal pair by running the variance. A constant sample, and one
-  holding an infinity, still answer a NaN with `ok = .false.`, which is what this page's non-finite
-  rules say; nothing else about `pf_corr` changes, to the last bit.
-  [Array statistics](doc/pages/utilities/statistics.md#pf_cov-and-pf_corr--two-samples).
-- `pf_stddev`, `pf_variance`, `pf_sem` and `pf_moments` answer a sample scaled to either end of the
-  representable range. The sum of squared deviations overflows above a magnitude of about `1e150`
-  and underflows to zero below about `1e-170`, so a standard deviation an ordinary `real64` holds
-  was answered as `+Infinity` or, worse, as `0` for a population that has spread; where the plain
-  accumulation returns something that is not finite and positive, the deviations are now scaled by
-  the largest of them and the sum retaken. Every other answer is unchanged, to the last bit. The
-  recomputation is reached under a trapping build as well: the overflow and invalid traps are held
-  off across the accumulation that provokes them, so such a sample no longer ends the process under
-  nagfor's default `-ieee=stop`. `pf_cov` and `pf_corr` answer such a sample too, with a NaN and
-  `ok = .false.` where a centred sum is not representable, instead of ending the process there.
-- `pf_spatial_index%within_segment`, `%within_cylinder` and `%within_cone` find the points lying
-  exactly on their axis when the radius is zero, and refuse an axis whose squared length overflows
-  rather than answering as a ball about its first endpoint. The zero-radius answer holds under a
-  value-unsafe floating-point model too: ifx's default `-fp-model=fast`, which a FLAGLESS
-  `fpm build` selects, rewrote the projection's division into a multiply by the reciprocal and
-  dropped the on-axis points whose parameter is not representable (19 of 21 on a lattice row), and
-  on a target whose baseline has a fused multiply-add, such as arm64, contracting the perpendicular
-  offset dropped the same points (5 of 21).
-- Writing from or reading into a large non-contiguous array, such as a component section
-  `data(:)%x`, no longer crashes under ifx: `parquet_write_column`, `parquet_write_column_chunk`,
-  `parquet_read_column`, `parquet_read_column_chunk`, `parquet_read_array_row_mode`,
-  `parquet_read_array_element_mode`, and the character-array `%set_all`, `%append_values` and
-  `%build_from` of `parquet_column` and `parquet_string_column`.
-- `pf_index_pool%compact` releases the pool's list of freed indexes: a compacted pool holds one bit
-  per index below its watermark instead of 8 bytes per free index.
-- A row-group-scoped read that descends through a `MAP` no longer crashes:
-  `parquet_read_column_chunk` of a map column whose value is itself a container, and of a `{key}` or
-  `{value}` descent path, return the same values their whole-column forms do.
-- A bulk random draw given an explicit `threads=` is bounded by the process's CPU affinity, as
-  every other thread count in this library already was: `pf_random_permutation`,
-  `pf_random_subset` and `pf_random_resample` no longer open a team larger than the mask allows,
-  and say so once per process when they lower one. The values drawn are unchanged.
-- `use parquet_columns`, `use parquet_list` and `use parquet_sampling` each re-export
-  `parquet_set_verbosity`, `parquet_get_verbosity`, `parquet_set_message_stream` and
-  `parquet_get_message_stream`, so a program importing one of them alone can silence the
-  thread-clamp notice its own calls can raise.
+- `pf_stddev`, `pf_variance`, `pf_sem` and `pf_moments` answered `+Infinity` or `0` for a sample
+  scaled near either end of the representable range, and `pf_corr(x, x)` and `pf_corr(x, -x)` a
+  NaN instead of `1` and `-1` near overflow; such a sample could also end the process under
+  nagfor's default `-ieee=stop`, in `pf_cov` and `pf_corr` too.
+- `pf_spatial_index%within_segment`, `%within_cylinder` and `%within_cone` at zero radius could miss
+  points lying exactly on the axis, under ifx's default `-fp-model=fast` or with fused multiply-add
+  contraction, and answered an axis whose squared length overflows as a ball about its first
+  endpoint instead of refusing it.
+- Writing from or reading into a large non-contiguous array, such as `data(:)%x`, crashed under
+  ifx: the column and chunk reads and writes, the row- and element-mode reads, and the
+  character-array `%set_all`, `%append_values` and `%build_from` of both column types.
+- `parquet_read_column_chunk` crashed on a `MAP` column whose value is itself a container, and on a
+  `{key}` or `{value}` descent path.
+- An explicit `threads=` on `pf_random_permutation`, `pf_random_subset` and `pf_random_resample`
+  was not bounded by the CPU affinity mask, and `parquet_columns`, `parquet_list` and
+  `parquet_sampling` did not re-export `parquet_set_verbosity`, `parquet_set_message_stream` and
+  their getters, so a program importing one of them alone could not silence a thread-clamp notice.
+- `pf_index_pool%compact` did not release the pool's list of freed indexes.
+- `tools/generate_parquet_maml.sh` stopped with a traceback on a schema holding a non-ASCII
+  character, leaving an empty output module behind; it now refuses the schema, naming the file,
+  line and code point.
 - Many other minor fixes and improvements.
 
 ## [v2.4.0] - 2026-09-14
